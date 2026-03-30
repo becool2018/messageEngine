@@ -19,7 +19,12 @@
  *                    component-level recovery by the caller.
  *
  * The condition expression is ALWAYS evaluated regardless of build type.
+ *
+ * NSC-infrastructure: no REQ-x.x requirement applies — this file implements
+ * the CLAUDE.md §10 coding standard requirement (NEVER_COMPILED_OUT_ASSERT),
+ * not an application-level REQ. Excluded from per-file Implements check.
  */
+// NSC-infrastructure: CLAUDE.md §10 assertion policy; no REQ-x.x applies
 
 #ifndef CORE_ASSERT_HPP
 #define CORE_ASSERT_HPP

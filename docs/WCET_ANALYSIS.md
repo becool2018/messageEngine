@@ -135,6 +135,13 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 |----------|----------------------|-------|-------|
 | `impairment_config_load()` | fopen + MAX_CONFIG_LINES × fgets + parse_config_line + fclose | O(MAX_CONFIG_LINES) = O(64) | **Init-phase only.** Each `fgets` reads at most `MAX_CONFIG_LINE_LEN` = 128 bytes; each `parse_config_line` runs two `sscanf` calls (O(1)) and one `strcmp` chain (O(12) keys × O(key_len)). No heap allocation; fixed 128-byte stack buffer per line. |
 
+### src/platform/TlsTcpBackend.hpp
+
+| Function | Worst-case operations | Bound | Notes |
+|----------|----------------------|-------|-------|
+| `send_message()` | serialize (O(P)) + process_outbound + collect_deliverable (O(I)) + TLS write to C clients (O(P × C)) | O(P × C + I × P) = O(163 840) | Identical bound to `TcpBackend::send_message()`; TLS record framing is O(P) per frame (mbedTLS adds ≤ 29-byte overhead per record). TLS handshake cost is init-phase only and not included here. |
+| `receive_message()` | poll_count × (net_poll + accept + C TLS recv + deserialize) | O(poll_count × C × P) = O(1 638 400) | poll_count ≤ 50; `mbedtls_net_poll()` is O(1) (select on 1 fd). TLS decryption is O(P) per record. Bound equals `TcpBackend::receive_message()`. |
+
 ### src/platform/PrngEngine.hpp
 
 | Function | Worst-case operations | Bound | Notes |

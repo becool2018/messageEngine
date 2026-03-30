@@ -18,6 +18,8 @@
  *   2. Runs a bounded main loop (MAX_LOOP_ITERS = 100000) receiving and echoing messages
  *   3. Calls pump_retries() and sweep_ack_timeouts() each iteration
  *   4. On SIGINT, sets stop flag and exits cleanly
+ *
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-7.1.1
  */
 
 #include <cstdio>

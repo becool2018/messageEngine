@@ -8,7 +8,7 @@
  *   - Power of 10 rule 3: all limits are compile-time constants.
  *   - F-Prime style: plain struct, no STL.
  *
- * Implements: REQ-4.2.1, REQ-4.2.2
+ * Implements: REQ-3.3.5, REQ-4.2.1, REQ-4.2.2, REQ-6.3.4
  */
 
 #ifndef CORE_CHANNEL_CONFIG_HPP
@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include "Types.hpp"
+#include "TlsConfig.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ChannelConfig
@@ -47,6 +48,7 @@ struct TransportConfig {
     ChannelConfig   channels[MAX_CHANNELS];
     NodeId          local_node_id;
     bool            is_server;
+    TlsConfig       tls;   ///< TLS configuration (REQ-6.3.4); tls_enabled=false → plaintext
 };
 
 /// Default-fill a ChannelConfig with safe values.
@@ -94,6 +96,7 @@ inline void transport_config_default(TransportConfig& cfg)
     cfg.peer_ip[i] = '\0';
 
     channel_config_default(cfg.channels[0], 0U);
+    tls_config_default(cfg.tls);
 }
 
 #endif // CORE_CHANNEL_CONFIG_HPP

@@ -10,9 +10,9 @@ CXXFLAGS  := -std=c++17 -fno-exceptions -fno-rtti \
              -Wshadow -Wconversion -Wsign-conversion \
              -Wcast-align -Wformat=2 -Wnull-dereference \
              -Wdouble-promotion -Wno-unknown-pragmas \
-             -Isrc -g
+             -Isrc -I/opt/homebrew/include -g
 
-LDFLAGS   := -lpthread
+LDFLAGS   := -lpthread -L/opt/homebrew/lib -lmbedtls -lmbedx509 -lmbedcrypto
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Source groups
@@ -32,6 +32,7 @@ PLATFORM_SRC := \
     src/platform/ImpairmentConfigLoader.cpp \
     src/platform/SocketUtils.cpp \
     src/platform/TcpBackend.cpp \
+    src/platform/TlsTcpBackend.cpp \
     src/platform/UdpBackend.cpp \
     src/platform/LocalSimHarness.cpp
 
@@ -69,7 +70,8 @@ tests: \
     build/test_AckTracker \
     build/test_RetryManager \
     build/test_DeliveryEngine \
-    build/test_ImpairmentConfigLoader
+    build/test_ImpairmentConfigLoader \
+    build/test_TlsTcpBackend
 
 build/test_%: $(ALL_LIB_OBJS) build/objs/tests/test_%.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
@@ -196,7 +198,7 @@ COV_CXXFLAGS  := $(filter-out -Werror,$(CXXFLAGS)) \
                  -fprofile-instr-generate -fcoverage-mapping -O0
 COV_LDFLAGS   := -fprofile-instr-generate $(LDFLAGS)
 COV_LIB_OBJS  := $(patsubst src/%.cpp,$(COV_OBJ_DIR)/%.o,$(ALL_LIB_SRC))
-TEST_NAMES    := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader
+TEST_NAMES    := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader TlsTcpBackend
 COV_TESTS     := $(patsubst %,build/cov_test_%,$(TEST_NAMES))
 
 $(COV_OBJ_DIR)/core/%.o: src/core/%.cpp
@@ -226,6 +228,7 @@ coverage: $(COV_TESTS)
 	@LLVM_PROFILE_FILE="build/cov/RetryManager.profraw"  build/cov_test_RetryManager  >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/DeliveryEngine.profraw" build/cov_test_DeliveryEngine >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/ImpairmentConfigLoader.profraw" build/cov_test_ImpairmentConfigLoader >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/TlsTcpBackend.profraw" build/cov_test_TlsTcpBackend >/dev/null 2>&1
 	@$(LLVM_PROFDATA) merge -sparse \
 	    build/cov/MessageEnvelope.profraw \
 	    build/cov/Serializer.profraw \
@@ -236,6 +239,7 @@ coverage: $(COV_TESTS)
 	    build/cov/RetryManager.profraw \
 	    build/cov/DeliveryEngine.profraw \
 	    build/cov/ImpairmentConfigLoader.profraw \
+	    build/cov/TlsTcpBackend.profraw \
 	    -o build/cov/merged.profdata
 	@echo "=== Coverage Report (src/ only) ==="
 	@$(LLVM_COV) report \
@@ -249,6 +253,7 @@ coverage: $(COV_TESTS)
 	    -object build/cov_test_RetryManager \
 	    -object build/cov_test_DeliveryEngine \
 	    -object build/cov_test_ImpairmentConfigLoader \
+	    -object build/cov_test_TlsTcpBackend \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "Policy (CLAUDE.md §12): SC functions require >= branch coverage."
@@ -268,6 +273,7 @@ coverage_show:
 	    -object build/cov_test_RetryManager \
 	    -object build/cov_test_DeliveryEngine \
 	    -object build/cov_test_ImpairmentConfigLoader \
+	    -object build/cov_test_TlsTcpBackend \
 	    -format=text \
 	    -show-branches=count \
 	    $(CORE_SRC) $(PLATFORM_SRC)
@@ -285,4 +291,5 @@ run_tests: tests
 	@echo "=== test_RetryManager ===";  build/test_RetryManager
 	@echo "=== test_DeliveryEngine ==="; build/test_DeliveryEngine
 	@echo "=== test_ImpairmentConfigLoader ==="; build/test_ImpairmentConfigLoader
+	@echo "=== test_TlsTcpBackend ==="; build/test_TlsTcpBackend
 	@echo "=== ALL TESTS PASSED ==="

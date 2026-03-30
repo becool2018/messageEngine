@@ -20,6 +20,8 @@
  *   3. Waits up to 2 seconds for each echo reply
  *   4. Runs pump_retries() and sweep_ack_timeouts() each iteration
  *   5. Prints results and exits
+ *
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3
  */
 
 #include <cstdio>

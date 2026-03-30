@@ -23,13 +23,13 @@ echo ""
 
 # ── 2. Extract all Implements: tags from src/ ────────────────────────────────
 echo "=== Implements tags in src/ ==="
-implemented_ids=$(grep -rh "// Implements:" "$SRC_DIR" | grep -oE 'REQ-[0-9]+\.[0-9.]+' | sort -u)
+implemented_ids=$(grep -rh "Implements:" "$SRC_DIR" | grep -oE 'REQ-[0-9]+\.[0-9.]+' | sort -u || true)
 echo "$implemented_ids"
 echo ""
 
 # ── 3. Extract all Verifies: tags from tests/ ───────────────────────────────
 echo "=== Verifies tags in tests/ ==="
-verified_ids=$(grep -rh "// Verifies:" "$TESTS_DIR" | grep -oE 'REQ-[0-9]+\.[0-9.]+' | sort -u)
+verified_ids=$(grep -rh "Verifies:" "$TESTS_DIR" | grep -oE 'REQ-[0-9]+\.[0-9.]+' | sort -u || true)
 echo "$verified_ids"
 echo ""
 
@@ -74,7 +74,11 @@ echo ""
 echo "=== src/ files missing Implements tag ==="
 missing=0
 while IFS= read -r f; do
-    if ! grep -q "// Implements:" "$f" && ! grep -q "Implements:" "$f"; then
+    # Skip files marked as NSC-infrastructure (no REQ-x.x applies)
+    if grep -q "NSC-infrastructure:" "$f"; then
+        continue
+    fi
+    if ! grep -q "Implements:" "$f"; then
         echo "  MISSING: ${f#$REPO_ROOT/}"
         missing=$((missing + 1))
         FAIL=$((FAIL + 1))

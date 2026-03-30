@@ -75,6 +75,15 @@
 | `send_message()` called with no connected client | Message silently discarded | Cat III HAZ-006 | `m_client_count == 0` check; `WARNING_LO` logged | Logged; upper layer should verify connectivity before sending |
 | `receive_message()` returns `ERR_TIMEOUT` spuriously | Upper layer delays message processing | Cat IV | Bounded `poll_count` loop | Caller retries; `RECV_TIMEOUT_MS` tunable per channel |
 
+### TlsTcpBackend
+
+| Failure Mode | System Effect | Severity | Detection | Mitigation |
+|---|---|---|---|---|
+| TLS handshake failure (bad cert/key) | Connection not established; no messages exchanged | Cat III | `mbedtls_ssl_handshake()` returns non-zero; logged at `WARNING_HI`; `init()` returns `ERR_IO` | Certificate and key loaded and validated in `setup_tls_config()` before bind/connect; `ERR_IO` forces caller to abort |
+| TLS cert/key files missing or corrupt | `init()` fails; transport not opened | Cat III | `mbedtls_x509_crt_parse_file()` / `mbedtls_pk_parse_keyfile()` return non-zero; `ERR_IO` returned | `is_open()` returns `false`; upper layer must check `init()` result |
+| Plaintext mode used when TLS expected | Unencrypted traffic on secured link | Cat II | `tls_enabled` flag controls code path | Configuration-level control; operator responsibility to set `tls_enabled=true` when security is required |
+| Partial TLS record delivered | Corrupt fields reconstructed silently | Cat I HAZ-005 | `mbedtls_ssl_read()` returns exact byte count; 4-byte length prefix checked | `tls_recv_frame()` validates payload length against header; rejects oversized frames |
+
 ### ImpairmentEngine
 
 | Failure Mode | System Effect | Severity | Detection | Mitigation |
@@ -272,6 +281,24 @@ All `SocketUtils` functions are **NSC** — raw POSIX I/O primitives with no mes
 | `close()` | `LocalSimHarness` | NSC | — |
 
 Note: `LocalSimHarness` implements `TransportInterface` and is used as the transport backend in integration tests that exercise the full SC send/receive path. Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `TcpBackend`. The previous all-NSC classification was incorrect.
+
+### src/core/TlsConfig.hpp
+
+| Function | Class | SC/NSC | HAZ IDs |
+|---|---|---|---|
+| `tls_config_default()` | — | NSC | — |
+
+### src/platform/TlsTcpBackend.hpp
+
+| Function | Class | SC/NSC | HAZ IDs |
+|---|---|---|---|
+| `init()` | `TlsTcpBackend` | NSC | — |
+| `send_message()` | `TlsTcpBackend` | SC | HAZ-005, HAZ-006 |
+| `receive_message()` | `TlsTcpBackend` | SC | HAZ-004, HAZ-005 |
+| `close()` | `TlsTcpBackend` | NSC | — |
+| `is_open()` | `TlsTcpBackend` | NSC | — |
+
+`TlsTcpBackend` is a drop-in replacement for `TcpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `TcpBackend`. The TLS layer (when enabled) is an init-phase concern (cert/key loading, handshake) and does not alter the SC classification of the send/receive path.
 
 ---
 

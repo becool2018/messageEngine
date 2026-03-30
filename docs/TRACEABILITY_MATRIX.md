@@ -52,7 +52,7 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-6.3.1 | Configurable IP/port binding with SO_REUSEADDR     | src/platform/SocketUtils.cpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp | — |
 | REQ-6.3.2 | Explicit error handling recoverable / fatal        | src/platform/SocketUtils.cpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp | — |
 | REQ-6.3.3 | Read / write timeouts                              | src/platform/SocketUtils.cpp                                | test_LocalSim.cpp :: receive timeout                 |
-| REQ-6.3.4 | TLS / DTLS extension point                         | src/platform/TcpBackend.hpp, src/platform/UdpBackend.hpp    | — (not yet implemented)                              |
+| REQ-6.3.4 | TLS / DTLS extension point                         | src/core/TlsConfig.hpp, src/core/ChannelConfig.hpp, src/platform/TlsTcpBackend.hpp, src/platform/TlsTcpBackend.cpp | tests/test_TlsTcpBackend.cpp (7 tests: plaintext bind, TLS bind, bad cert, plaintext loopback, TLS loopback, config defaults) |
 | REQ-6.3.5 | Bounded explicit buffer sizes                      | src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp    | — (no dedicated unit test)                           |
 | REQ-7.1.1 | Log connection establishment and teardown          | src/core/Logger.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp | — (observable in output) |
 | REQ-7.1.2 | Log major state changes                            | src/core/Logger.hpp                                         | — (observable in output)                             |
@@ -71,7 +71,7 @@ REQ-3.3.5,
 REQ-4.1.1, REQ-4.2.1, REQ-4.2.2,
 REQ-5.1.2, REQ-5.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.2.3, REQ-5.2.5,
 REQ-6.1.1 through REQ-6.1.7, REQ-6.2.1 through REQ-6.2.4,
-REQ-6.3.1, REQ-6.3.2, REQ-6.3.4, REQ-6.3.5,
+REQ-6.3.1, REQ-6.3.2, REQ-6.3.5,
 REQ-7.1.1 through REQ-7.2.4
 
 Resolved since last generation (tests added):
@@ -82,3 +82,4 @@ Resolved since last generation (tests added):
 - REQ-3.3.3 — now covered by test_RetryManager.cpp + test_DeliveryEngine.cpp
 - REQ-3.3.4 — now covered by test_DeliveryEngine.cpp :: test_receive_expired
 - REQ-5.2.1 — now also covered by test_ImpairmentConfigLoader.cpp (12 tests); ImpairmentConfigLoader.hpp/.cpp added as Implements entries
+- REQ-6.3.4 — now implemented by TlsConfig.hpp, ChannelConfig.hpp, TlsTcpBackend.hpp/.cpp; verified by test_TlsTcpBackend.cpp (7 tests)
