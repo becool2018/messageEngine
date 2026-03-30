@@ -18,10 +18,11 @@ All production code complies with **JPL Power of 10**, **MISRA C++:2023**, and a
 8. [Running the Demo (Server / Client)](#running-the-demo-server--client)
 9. [Using the Library](#using-the-library)
 10. [Use Cases](#use-cases)
-11. [Coding Standards](#coding-standards)
-12. [Project Standards Files](#project-standards-files)
-13. [Claude Skills](#claude-skills)
-14. [Code Statistics](#code-statistics)
+11. [Safety & Assurance Documents](#safety--assurance-documents)
+12. [Coding Standards](#coding-standards)
+13. [Project Standards Files](#project-standards-files)
+14. [Claude Skills](#claude-skills)
+15. [Code Statistics](#code-statistics)
 
 ---
 
@@ -519,6 +520,20 @@ The [`docs/use_cases/`](docs/use_cases/) directory contains detailed use case do
 - **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 35 use cases, grouped by high-level capability (HL-1 through HL-17), Application Workflow patterns, and System Internal sub-functions.
 
 Each individual `UC_*.md` document follows a 15-section flow-of-control format covering: entry points, end-to-end control flow, call tree, branching logic, concurrency behavior, memory ownership, error handling, external interactions, state changes, and known risks.
+
+---
+
+## Safety & Assurance Documents
+
+NASA-STD-8719.13C / NASA-STD-8739.8A compliance artifacts maintained in [`docs/`](docs/):
+
+| Document | Description |
+|---|---|
+| [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md) | Software Safety Hazard Analysis (HAZ-001–HAZ-007), Failure Mode and Effects Analysis (FMEA) for every major component, and Safety-Critical (SC) vs Non-Safety-Critical (NSC) classification for every public function in `src/`. |
+| [STATE_MACHINES.md](docs/STATE_MACHINES.md) | Formal state-transition tables and invariants for the three safety-critical state machines: `AckTracker`, `RetryManager`, and `ImpairmentEngine` (including the partition sub-state). |
+| [TRACEABILITY_MATRIX.md](docs/TRACEABILITY_MATRIX.md) | Bidirectional requirements traceability matrix mapping every `[REQ-x.x]` ID from `CLAUDE.md` to the `src/` file that implements it and the `tests/` file that verifies it. |
+| [STACK_ANALYSIS.md](docs/STACK_ANALYSIS.md) | Worst-case stack depth analysis across four call chains; worst-case frame depth is 10 frames (retry pump), worst-case stack size is ~748 bytes (outbound send). |
+| [WCET_ANALYSIS.md](docs/WCET_ANALYSIS.md) | Worst-case execution time analysis expressed as closed-form operation counts for every SC function, derived from the compile-time capacity constants in `src/core/Types.hpp`. |
 
 ---
 
