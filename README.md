@@ -17,9 +17,11 @@ All production code complies with **JPL Power of 10**, **MISRA C++:2023**, and a
 7. [Static Analysis](#static-analysis)
 8. [Running the Demo (Server / Client)](#running-the-demo-server--client)
 9. [Using the Library](#using-the-library)
-10. [Coding Standards](#coding-standards)
-11. [Project Standards Files](#project-standards-files)
-12. [Code Statistics](#code-statistics)
+10. [Use Cases](#use-cases)
+11. [Coding Standards](#coding-standards)
+12. [Project Standards Files](#project-standards-files)
+13. [Claude Skills](#claude-skills)
+14. [Code Statistics](#code-statistics)
 
 ---
 
@@ -510,6 +512,16 @@ All functions return a `Result` enum. Never ignore a return value.
 
 ---
 
+## Use Cases
+
+The [`docs/use_cases/`](docs/use_cases/) directory contains detailed use case documents that trace every user-facing capability and system-internal sub-function through the live source code.
+
+- **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 35 use cases, grouped by high-level capability (HL-1 through HL-17), Application Workflow patterns, and System Internal sub-functions.
+
+Each individual `UC_*.md` document follows a 15-section flow-of-control format covering: entry points, end-to-end control flow, call tree, branching logic, concurrency behavior, memory ownership, error handling, external interactions, state changes, and known risks.
+
+---
+
 ## Coding Standards
 
 All production code (`src/`) is written to the following standards. Deviations require an in-code comment with justification.
@@ -535,6 +547,49 @@ Two CLAUDE.md files govern all code in this repository and divide responsibility
 | `CLAUDE.md` | **Project-specific spec.** Contains everything tied to this repository: numbered application requirements (`[REQ-x.x]`), references to `docs/` artifacts, the per-directory rule compliance table, named static analysis toolchain, `NEVER_COMPILED_OUT_ASSERT` policy, traceability rules, formal inspection process, and safety/coverage/WCET/formal-methods obligations. |
 
 **How they divide responsibility:** `.claude/CLAUDE.md` is the portable coding standard (no project-file references); `CLAUDE.md` is the project-specific spec (requirement IDs, file paths, process rules, safety artifacts). Anything that references a specific file in this repo lives in `CLAUDE.md`.
+
+---
+
+## Claude Skills
+
+This project ships a set of reusable Claude Code skills in `.claude/skills/`. Skills are invoked with a `/` prefix from within a Claude Code session.
+
+| Skill | Invocation | Description |
+|---|---|---|
+| **read-standards** | `/read-standards` | Reads and internalizes both `CLAUDE.md` and `.claude/CLAUDE.md` in full, then confirms understanding of Power of 10, MISRA C++:2023, layering rules, safety annotations, and traceability policy. Run this at the start of any session that involves writing or reviewing C/C++ code. |
+| **generate_use_case_list** | `/generate_use_case_list` | Reads the live source code in `src/` (headers, implementations, and app entry points) and all test files in `tests/` to regenerate `docs/use_cases/HIGH_LEVEL_USE_CASES.md` from scratch. Automatically picks up new files and ignores deleted ones. Classifies each capability as a user-facing HL group, an Application Workflow pattern, or a System Internal sub-function using a concrete decision algorithm anchored to what `src/app/` code actually calls. |
+| **generate_use_cases** | `/generate_use_cases` | Reads `HIGH_LEVEL_USE_CASES.md` and all source files, then regenerates every individual `UC_*.md` document in `docs/use_cases/` using the 15-section flow-of-control format defined in `docs/use_cases/use_case_format.txt`. Overwrites existing UC files; creates new ones for any UC number that has no matching file. |
+| **find_missing_use_cases** | `/find_missing_use_cases` | Compares the live source code against existing `UC_*.md` files and `HIGH_LEVEL_USE_CASES.md` to identify undocumented capabilities. Writes a new `UC_*.md` for each gap (using the same 15-section format) and inserts the new entries into `HIGH_LEVEL_USE_CASES.md`. Never modifies existing UC files. |
+
+### Directory layout
+
+```
+.claude/
+└── skills/
+    ├── read-standards/
+    │   └── SKILL.md
+    ├── generate_use_case_list/
+    │   └── SKILL.md
+    ├── generate_use_cases/
+    │   └── SKILL.md
+    └── find_missing_use_cases/
+        └── SKILL.md
+```
+
+### Adding a new skill
+
+1. Create a subdirectory under `.claude/skills/<skill-name>/`.
+2. Add a `SKILL.md` file with the required YAML front matter:
+   ```yaml
+   ---
+   name: <skill-name>
+   description: <one-line description shown in Claude's skill list>
+   user-invocable: true
+   allowed-tools: <comma-separated list, e.g. Read, Bash, Edit>
+   ---
+   ```
+3. Write the skill prompt body below the front matter — this is what Claude executes when the skill is invoked.
+4. Reference the new skill in this table.
 
 ---
 

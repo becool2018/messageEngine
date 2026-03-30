@@ -1,535 +1,574 @@
+# UC_04 — Expired Message Dropped on Send Path
+
+**HL Group:** HL-4 — User sends a message with a deadline
+**Actor:** User
+**Requirement traceability:** REQ-3.3.4, REQ-3.2.2, REQ-3.2.7, REQ-4.1.2
+
+---
+
 ## 1. Use Case Overview
 
-Use Case: UC_04 -- Expired Message Drop
+### Clear description of what triggers this flow
 
-A message's expiry_time_us is set at send time via timestamp_deadline_us().
-Two distinct expiry paths exist in this codebase:
+A client application has constructed a `MessageEnvelope` with a non-zero
+`expiry_time_us` that has already elapsed before the call to
+`DeliveryEngine::send()`. Alternatively, the expiry elapses while the message
+sits in a retry slot and the next `pump_retries()` cycle is called.
 
-Path A (Receiver-side): DeliveryEngine::receive() calls timestamp_expired()
-on the received envelope's expiry_time_us field. If expired, the message is
-discarded and ERR_EXPIRED is returned to the caller before any dedup or
-application-level processing occurs.
+Two distinct expiry-drop paths exist in the codebase:
 
-Path B (RetryManager-side): RetryManager::collect_due() checks the stored
-retry slot's expiry_us against now_us at every pump_retries() cycle. If the
-message has expired, the slot is deactivated and no retransmission occurs;
-the message is silently removed from the retry table.
+**Path A — Send-path guard (DeliveryEngine::send(), NOT in current code):**
+Notably, the current implementation of `DeliveryEngine::send()` does **not**
+check `expiry_time_us` before sending. The envelope is transmitted regardless
+of its expiry. This means an already-expired message will be sent over the wire
+and only dropped on the receive side (Path B of UC_09) or in the
+`RetryManager` retry table (Path C below).
 
-Both paths are purely time-based (no external signal), using the monotonic
-clock. expiry_time_us = 0 is treated as "never expires" by timestamp_expired().
+**Path B — Receive-side expiry (DeliveryEngine::receive()):**
+Documented in UC_09. After the transport delivers an envelope, `receive()`
+checks `timestamp_expired(env.expiry_time_us, now_us)`. If expired, `receive()`
+returns `ERR_EXPIRED` without delivering to the application.
 
-Requirement coverage: CLAUDE.md §3.2 (Expiry handling), §3.3 (Expiring
-messages), application_requirements §3.2 (expiry_time), §5.1.
+**Path C — RetryManager expiry (RetryManager::collect_due()):**
+On each `pump_retries()` call, `collect_due()` checks `slot_has_expired()` for
+every active retry slot. If the slot's `expiry_us` has passed, the slot is
+deactivated (`active = false`) and no retransmission occurs. This is the primary
+send-path expiry enforcement.
 
+This use case documents Path C in detail (the expiry mechanism on the send and
+retry side) and clarifies that there is no pre-transmission expiry check in
+`DeliveryEngine::send()`.
+
+### Expected outcome (single goal)
+
+For Path C: when `pump_retries()` is called and `now_us >= m_slots[i].expiry_us`
+for an active retry slot, `collect_due()` deactivates the slot, logs
+`WARNING_LO "Expired retry entry"`, does not add it to the output buffer, and
+returns a count that excludes the expired entry. No retransmission occurs.
+The application's `pump_retries()` call returns 0 for that slot.
+
+For Path A (no check): the message is always sent, regardless of `expiry_time_us`.
+
+---
 
 ## 2. Entry Points
 
-Path A -- receive-side expiry:
-    Client.cpp :: wait_for_echo() (line 125)
-      └─ engine.receive(reply, 100, now_us)  (line 138)
-           └─ DeliveryEngine::receive()  (DeliveryEngine.cpp line 147)
-                └─ timestamp_expired(env.expiry_time_us, now_us)  (Timestamp.hpp line 47)
+### Exact functions, threads, or events where execution begins
 
-Path B -- retry-side expiry:
-    Client.cpp :: wait_for_echo() (line 151)  [or Server.cpp loop line 243]
-      └─ engine.pump_retries(now_us)
-           └─ DeliveryEngine::pump_retries()  (DeliveryEngine.cpp line 225)
-                └─ RetryManager::collect_due(now_us, ...)  (RetryManager.cpp line 136)
-                     [expiry check at line 156]
+**Path C — retry-side expiry:**
+- `DeliveryEngine::pump_retries(uint64_t now_us)` — `DeliveryEngine.cpp:227`.
+  → `RetryManager::collect_due(now_us, retry_buf, MSG_RING_CAPACITY)`
+  → `slot_has_expired(m_slots[i].expiry_us, now_us)` — `RetryManager.cpp:19`.
 
-Expiry time computation:
-    Client.cpp :: send_test_message() (line 109)
-      └─ timestamp_deadline_us(now_us, 5000)  (Timestamp.hpp line 60)
+**Path B — receive-side expiry (reference only, see UC_09):**
+- `DeliveryEngine::receive(MessageEnvelope& env, uint32_t timeout_ms, uint64_t now_us)`
+  — `DeliveryEngine.cpp:149`.
+  → `timestamp_expired(env.expiry_time_us, now_us)` — `Timestamp.hpp:51`.
 
+**Expiry time computation (at send time):**
+- `timestamp_deadline_us(now_us, ttl_ms)` — `Timestamp.hpp:65`.
+  Returns `now_us + ttl_ms * 1000ULL`.
+- Called by the application when building the envelope; stored in
+  `env.expiry_time_us`.
+
+---
 
 ## 3. End-to-End Control Flow (Step-by-Step)
 
---- Setup: How expiry_time_us is set ---
+**--- Setup: How expiry_time_us is established ---**
 
-S1. In send_test_message() (Client.cpp line 109):
-      env.expiry_time_us = timestamp_deadline_us(now_us, 5000U)
+S1. Application calls `timestamp_deadline_us(now_us, ttl_ms)` when building the
+    envelope (e.g., `ttl_ms = 5000U`). `timestamp_deadline_us()` (`Timestamp.hpp:65`):
+    - Fires assertions: `now_us <= 0xFFFFFFFFFFFFFFFFULL`,
+      `duration_ms <= 0xFFFFFFFFUL`.
+    - Returns `now_us + 5000U * 1000ULL = now_us + 5 000 000 µs`.
+    - `env.expiry_time_us = now_us + 5 000 000`.
 
-    timestamp_deadline_us() (Timestamp.hpp line 60):
-      assert(now_us <= 0xFFFFFFFFFFFFFFFFULL)
-      assert(duration_ms <= 0xFFFFFFFFUL)
-      duration_us = (uint64_t)5000 * 1000ULL  = 5 000 000 us
-      return now_us + 5 000 000
-    Result: expiry_time_us = send_time + 5 seconds
+S2. `RetryManager::schedule()` at line 94 copies `env.expiry_time_us` into
+    `m_slots[i].expiry_us` as a scalar field. Also preserved in
+    `m_slots[i].env.expiry_time_us` via `envelope_copy()`. Both are initialized
+    to the same value and cannot diverge after `schedule()`.
 
-S2. envelope_copy() in RetryManager::schedule() (RetryManager.cpp line 59) and
-    AckTracker::track() (AckTracker.cpp line 56) both copy the full envelope via
-    memcpy, so m_slots[i].expiry_us inherits env.expiry_time_us.
-    RetryManager::schedule() line 68: m_slots[i].expiry_us = env.expiry_time_us
+**--- Observation: No pre-transmission expiry check ---**
 
-S3. Server.cpp send_echo_reply() (line 107) sets its own expiry:
-      reply.expiry_time_us = timestamp_deadline_us(now_us, 10000U) = +10 seconds
-    This is the expiry of the echo reply as seen on the RECEIVER side (the client).
+O1. `DeliveryEngine::send()` does NOT call `timestamp_expired()` before calling
+    `send_via_transport()`. An envelope with `expiry_time_us` already in the
+    past will be serialized and transmitted over TCP exactly as a non-expired
+    envelope. The expiry field is preserved verbatim in the wire format by
+    `Serializer::serialize()` as an 8-byte big-endian value. The remote
+    receiver's `DeliveryEngine::receive()` will then drop it via Path B (UC_09).
 
---- Path A: DeliveryEngine::receive() expiry check ---
+**--- Path C: RetryManager::collect_due() expiry check ---**
 
-A1. Client receives a data frame from TcpBackend (after ACK or echo arrives late).
-    TcpBackend::receive_message() returns OK, envelope populated.
+C1. Application calls `engine.pump_retries(now_us)` (e.g., from a periodic
+    maintenance loop or after a `receive()` attempt).
 
-A2. DeliveryEngine::receive() (line 147):
-      assert(m_initialized); assert(now_us > 0)
-      res = m_transport->receive_message(env, timeout_ms)
-        returns Result::OK, env filled
+C2. **`DeliveryEngine::pump_retries()`** (`DeliveryEngine.cpp:227`):
+    - Fires assertions: `m_initialized`, `now_us > 0`.
+    - Allocates `MessageEnvelope retry_buf[MSG_RING_CAPACITY=64]` on the stack
+      (~264 KB).
+    - Calls `m_retry_manager.collect_due(now_us, retry_buf, MSG_RING_CAPACITY)`.
 
-A3. assert(envelope_valid(env))  -- checks message_type != INVALID,
-    payload_length <= MSG_MAX_PAYLOAD_BYTES, source_id != NODE_ID_INVALID
+C3. **`RetryManager::collect_due()`** (`RetryManager.cpp:160`):
+    - Fires assertions: `m_initialized`, `out_buf != nullptr`,
+      `buf_cap <= MSG_RING_CAPACITY`.
+    - Iterates `m_slots[0..ACK_TRACKER_CAPACITY-1]` (fixed bound, 32 slots).
+    - For each active slot `i`:
 
-A4. Expiry check (line 169):
-      if (timestamp_expired(env.expiry_time_us, now_us)):
+      **Expiry check (line 177):**
+      ```
+      if (slot_has_expired(m_slots[i].expiry_us, now_us))
+      ```
 
-    timestamp_expired(expiry_us, now_us) (Timestamp.hpp line 47):
-      assert(expiry_us <= 0xFFFFFFFFFFFFFFFFULL)
-      assert(now_us    <= 0xFFFFFFFFFFFFFFFFULL)
-      return (expiry_us != 0ULL) && (now_us >= expiry_us)
+C4. **`slot_has_expired()`** (`RetryManager.cpp:19`):
+    - Fires assertions: `now_us > 0ULL`, `expiry_us != ~0ULL`.
+    - Returns `(expiry_us != 0ULL) && (now_us >= expiry_us)`.
+    - For a message with `expiry_us = T_send + 5 000 000`:
+      - If `now_us < expiry_us`: returns false → slot not expired.
+      - If `now_us >= expiry_us`: returns true → slot expired.
 
-    Case 1: expiry_time_us = 0 -> timestamp_expired returns false -> message passes
-    Case 2: now_us < expiry_time_us -> false -> message passes
-    Case 3: now_us >= expiry_time_us -> true -> message is EXPIRED
+C5. **If `slot_has_expired()` returns true (Path C fires):**
+    - `m_slots[i].active = false`.
+    - `--m_count`.
+    - `Logger::log(WARNING_LO, "RetryManager", "Expired retry entry for message_id=%llu",
+      m_slots[i].env.message_id)`.
+    - `continue` — slot is NOT added to `out_buf`. `collected` is not incremented.
 
-A5. If expired (Case 3):
-      Logger::log(WARNING_LO, "DeliveryEngine",
-                  "Dropping expired message_id=%llu from src=%u", msg_id, src)
-      return Result::ERR_EXPIRED
+C6. **Back in `collect_due()`:**
+    - Loop continues to next slot. Exhaustion and due checks are not reached for
+      the expired slot (expiry check is first at line 177).
+    - After full loop: fires postcondition assertions
+      `collected <= buf_cap`, `m_count <= ACK_TRACKER_CAPACITY`.
+    - Returns `collected` (which is 0 for the expired slot).
 
-A6. Control returns to wait_for_echo() (Client.cpp line 138):
-      res = engine.receive(reply, 100, now_us)
-      res == ERR_EXPIRED -> result_ok(res) is false
-      [no echo counted; loop continues to next attempt]
+C7. **Back in `DeliveryEngine::pump_retries()`:**
+    - `collected = 0` for the expired slot.
+    - `NEVER_COMPILED_OUT_ASSERT(collected <= MSG_RING_CAPACITY)` passes.
+    - The retry loop `for i = 0..collected-1` does not execute (collected = 0).
+    - Returns `0`.
 
-A7. If all MAX_RECV_RETRIES (20) attempts produce ERR_EXPIRED or ERR_TIMEOUT:
-      logs "Timeout waiting for echo reply"
-      return ERR_TIMEOUT
+**--- Path A edge case: expiry_time_us = 0 (never expires) ---**
 
---- Path B: RetryManager::collect_due() expiry check ---
+E1. `slot_has_expired(0, now_us)`: `(0 != 0ULL) = false`. Returns false always.
+    Slot is never expired by `collect_due()`. Only exhaustion or ACK can stop
+    retries. (Due to the source_id matching bug, only exhaustion applies in
+    practice — see UC_03 section 14.)
 
-B1. Each call to engine.pump_retries(now_us) (after ~5 seconds have elapsed):
+**--- Timeline for a 5-second expiry (initial backoff_ms=100, max_retries=3) ---**
 
-B2. DeliveryEngine::pump_retries() (line 225):
-      MessageEnvelope retry_buf[MSG_RING_CAPACITY]
-      collected = m_retry_manager.collect_due(now_us, retry_buf, MSG_RING_CAPACITY)
+T=0:      `send()`: `expiry_time_us = T + 5 000 000`, `next_retry_us = T`.
+T≈0 ms:   `pump_retries()`: expiry? NO. due? YES → retransmit #1.
+          Backoff: 100→200 ms, `next_retry_us = T + 200 000`.
+T≈200 ms: `pump_retries()`: expiry? NO. due? YES → retransmit #2.
+          Backoff: 200→400 ms, `next_retry_us = T + 400 000`.
+T≈400 ms: `pump_retries()`: `retry_count = 2`. due? YES → retransmit #3.
+          `retry_count = 3 >= max_retries = 3` → exhausted at next collect_due().
+T≈400ms+: `pump_retries()`: exhaustion check fires → deactivate, `WARNING_HI`.
+          [Expiry at T+5s never reached; exhaustion wins with these defaults.]
 
-B3. RetryManager::collect_due() (line 136):
-      for i = 0..ACK_TRACKER_CAPACITY-1:
-        if !m_slots[i].active -> continue
+**--- Timeline where expiry fires before exhaustion ---**
 
-        -- EXPIRY CHECK (line 156) --
-        if (m_slots[i].expiry_us != 0ULL && now_us >= m_slots[i].expiry_us):
-          m_slots[i].active = false
-          --m_count
-          Logger::log(WARNING_LO, "RetryManager",
-                      "Expired retry entry for message_id=%llu", msg_id)
-          continue   <-- slot cleared, message NOT added to out_buf
+Example: `max_retries = 10`, `retry_backoff_ms = 2000 ms`, `expiry_time_us = T + 5s`:
+T=0:    retransmit #1, backoff: 2000→4000 ms, `next_retry_us = T + 4 000 000`.
+T=4s:   retransmit #2, backoff: 4000→8000 ms, `next_retry_us = T + 8 000 000`.
+T=5s:   `pump_retries()`: `slot_has_expired(T+5s, T+5s) = true` → deactivate,
+        `WARNING_LO "Expired retry entry"`.
+        `retry_count = 2 < 10` but expiry check fires first (line 177 before 187).
+        No retransmit.
 
-        -- exhaustion check (line 166) --
-        if (m_slots[i].retry_count >= m_slots[i].max_retries): ...
-
-        -- due check (line 177) --
-        if (m_slots[i].next_retry_us <= now_us): ... collect for retransmit
-
-B4. Because the expiry check fires before the due check, an expired message
-    is NEVER retransmitted even if next_retry_us <= now_us.
-
-B5. collected returns 0 for the expired slot (it was skipped).
-    No retransmit occurs. pump_retries() returns 0.
-
---- Timeline for a 5-second expiry ---
-
-T=0:         send_test_message(): expiry_time_us = T + 5 000 000 us
-T=0:         RetryManager::schedule(): next_retry_us = T (immediate)
-T=0.001s:    pump_retries(): expiry? NO. due? YES -> retransmit #1
-             backoff_ms: 1000->2000, next_retry_us = T + 2 000 000 us
-T=2.001s:    pump_retries(): expiry? NO (now=2.001 < 5). due? YES -> retransmit #2
-             backoff_ms: 2000->4000, next_retry_us = T + 6 000 000 us
-T=5.0s:      pump_retries(): expiry? YES (now=5.0 >= 5.0) -> deactivate, NO retransmit
-             [Even though retry_count=2 < max_retries=3, expiry wins]
-
-Note: The expiry check fires before the due check, so even if a retry was
-scheduled for T+6s but the message expired at T+5s, it is dropped at T+5s.
-
---- Edge Case: expiry_time_us = 0 ---
-
-If a caller sets env.expiry_time_us = 0:
-  timestamp_expired(0, now_us) -> (0 != 0) is false -> returns false
-  -> message never expires in receive()
-  RetryManager: m_slots[i].expiry_us = 0 -> condition
-    (0 != 0ULL && ...) is false -> expiry check skipped entirely
-  -> only exhaustion or ACK can stop retries
-
+---
 
 ## 4. Call Tree (Hierarchical)
 
---- Path A: receive-side ---
-DeliveryEngine::receive(env, timeout_ms, now_us)
-  m_transport->receive_message(env, timeout_ms)
-    TcpBackend::receive_message(env, timeout_ms)
-      m_recv_queue.pop(env)                    [queue check first]
-      TcpBackend::accept_clients()             [server mode only]
-      [poll loop]:
-        recv_from_client(fd, 100)
-          tcp_recv_frame()                     [blocking read, 100ms]
-          Serializer::deserialize()
-          m_recv_queue.push(env)
-        m_recv_queue.pop(env)                  [check after each recv]
-        timestamp_now_us()                     [for impairment delayed msgs]
-        m_impairment.collect_deliverable()
-        m_recv_queue.push(delayed[i])
-        m_recv_queue.pop(env)
-  envelope_valid(env)                          [assertion]
-  timestamp_expired(env.expiry_time_us, now_us)
-    [if true]:
-      Logger::log(WARNING_LO, "Dropping expired message_id=...")
-      return ERR_EXPIRED
-  envelope_is_control(env)                    [ACK/NAK/HEARTBEAT branch]
-  envelope_is_data(env)                       [data branch -> dedup]
-  return OK
+```
+--- Path C: retry-side expiry ---
 
---- Path B: retry-side ---
-DeliveryEngine::pump_retries(now_us)
-  RetryManager::collect_due(now_us, retry_buf, MSG_RING_CAPACITY)
-    [for each active slot]:
-      expiry check: now_us >= m_slots[i].expiry_us
-        [if true]:
-          m_slots[i].active = false
-          --m_count
-          Logger::log(WARNING_LO, "Expired retry entry for message_id=...")
-          continue                             [slot NOT added to out_buf]
-      exhaustion check
-      due check + backoff doubling
-  [for each collected, non-expired envelope]:
-    send_via_transport(retry_buf[i])
-  return collected
+DeliveryEngine::pump_retries(now_us)               [DeliveryEngine.cpp:227]
+    NEVER_COMPILED_OUT_ASSERT(m_initialized)
+    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL)
+    MessageEnvelope retry_buf[64] on stack
+    RetryManager::collect_due(now_us, retry_buf, 64) [RetryManager.cpp:160]
+        NEVER_COMPILED_OUT_ASSERT(m_initialized)
+        NEVER_COMPILED_OUT_ASSERT(out_buf != nullptr)
+        [loop i=0..31]:
+            [slot active: true]
+            slot_has_expired(expiry_us, now_us)     [RetryManager.cpp:19]
+                NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL)
+                NEVER_COMPILED_OUT_ASSERT(expiry_us != ~0ULL)
+                return (expiry_us != 0ULL) && (now_us >= expiry_us)  [true]
+            m_slots[i].active = false
+            --m_count
+            Logger::log(WARNING_LO, "Expired retry entry for message_id=...")
+            continue  [NOT in out_buf]
+        NEVER_COMPILED_OUT_ASSERT(collected <= buf_cap)
+        NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY)
+        return collected=0
+    NEVER_COMPILED_OUT_ASSERT(collected <= MSG_RING_CAPACITY)
+    [retry loop: not entered, collected=0]
+    return 0
 
---- Expiry setup ---
-send_test_message()
-  timestamp_deadline_us(now_us, 5000U)         [Timestamp.hpp]
-    return now_us + 5_000_000 us
-  env.expiry_time_us = result
+--- Path A observation: no check in send() ---
 
-RetryManager::schedule()
-  m_slots[i].expiry_us = env.expiry_time_us    [copied from envelope]
+DeliveryEngine::send(env, now_us)                  [DeliveryEngine.cpp:77]
+    [NO timestamp_expired() call before send_via_transport()]
+    send_via_transport(env)                        [transmits even if expired]
+        TcpBackend::send_message(env)              [serializes, sends]
+    ...
 
-AckTracker::track()
-  envelope_copy() -> m_slots[j].env.expiry_time_us inherited
+--- Expiry time setup ---
 
+Application
+    timestamp_deadline_us(now_us, ttl_ms)          [Timestamp.hpp:65]
+        return now_us + ttl_ms * 1000ULL
+    env.expiry_time_us = result
+
+RetryManager::schedule()                           [RetryManager.cpp:94]
+    m_slots[i].expiry_us = env.expiry_time_us      [scalar copy]
+    envelope_copy(m_slots[i].env, env)             [also copies expiry_time_us]
+```
+
+---
 
 ## 5. Key Components Involved
 
-Component                     File                       Role in UC_04
-----------------------------  -------------------------  ----------------------------
-timestamp_deadline_us()       src/core/Timestamp.hpp     Computes expiry_time_us at
-                              (line 60)                  send time; converts ms -> us
-timestamp_expired()           src/core/Timestamp.hpp     Tests now_us >= expiry_us;
-                              (line 47)                  handles zero = never-expire
-DeliveryEngine::receive()     src/core/DeliveryEngine.cpp Calls timestamp_expired();
-                              (line 147)                 returns ERR_EXPIRED on drop;
-                                                         logs WARNING_LO
-RetryManager::collect_due()   src/core/RetryManager.cpp  Checks expiry_us before due;
-                              (line 156)                 deactivates slot on expiry;
-                                                         logs WARNING_LO
-send_test_message()           src/app/Client.cpp         Sets expiry_time_us = +5s
-                              (line 109)
-send_echo_reply()             src/app/Server.cpp         Sets expiry_time_us = +10s
-                              (line 107)                 on echo reply envelope
-TcpBackend::receive_message() src/platform/TcpBackend.cpp Delivers envelope to
-                                                         DeliveryEngine; expiry
-                                                         checked AFTER transport
-                                                         returns
-envelope_valid()              src/core/MessageEnvelope.hpp Validates before expiry
-                                                         check (asserted)
-AckTracker::sweep_expired()   src/core/AckTracker.cpp    Separately sweeps ACK
-                                                         deadline (recv_timeout_ms,
-                                                         100ms); NOT the same as
-                                                         message expiry
+### timestamp_deadline_us() (Timestamp.hpp:65)
+- **Responsibility:** Computes `expiry_time_us = now_us + ttl_ms * 1000ULL`.
+  Called by the application at message creation time. Deterministic, no state.
+- **Why in this flow:** Establishes the expiry timestamp that both the
+  `RetryManager` and `DeliveryEngine::receive()` use for expiry decisions.
 
+### timestamp_expired() (Timestamp.hpp:51)
+- **Responsibility:** Inline function. Returns
+  `(expiry_us != 0ULL) && (now_us >= expiry_us)`. The `!= 0ULL` guard means
+  `expiry_time_us = 0` is treated as "never expires". Used in
+  `DeliveryEngine::receive()` (UC_09 / Path B).
+- **Why in this flow:** Referenced for the receive-side path; not called by the
+  send path in the current implementation.
+
+### slot_has_expired() (RetryManager.cpp:19)
+- **Responsibility:** File-static helper. Same semantics as `timestamp_expired()`:
+  `(expiry_us != 0ULL) && (now_us >= expiry_us)`. Has two
+  `NEVER_COMPILED_OUT_ASSERT` calls.
+- **Why in this flow:** Called by `collect_due()` for each active retry slot.
+  The primary expiry enforcement on the send/retry path.
+
+### RetryManager::collect_due() (RetryManager.cpp:160)
+- **Responsibility:** Iterates all 32 retry slots. For each active slot, checks
+  expiry (line 177), exhaustion (line 187), and due-time (line 198) in that
+  order. Expiry check fires before exhaustion and due checks — an expired entry
+  is never retransmitted even if its due time has also passed.
+- **Why in this flow:** The only place in the codebase where a scheduled retry
+  is cancelled due to message expiry on the sender side.
+
+### DeliveryEngine::pump_retries() (DeliveryEngine.cpp:227)
+- **Responsibility:** Calls `collect_due()`, then re-sends each collected
+  envelope. Returns the count of retried messages (0 if all were expired or
+  not yet due).
+- **Why in this flow:** The application-facing API for the retry pump. Its
+  return value signals how many messages were actually retransmitted.
+
+### AckTracker (not directly involved in expiry)
+- **Responsibility:** Holds a separate deadline (`deadline_us`, derived from
+  `recv_timeout_ms`) for each tracked message. This deadline is semantically
+  different from `expiry_time_us`. `sweep_ack_timeouts()` uses it independently.
+- **Why mentioned:** When a retry slot expires via Path C, the corresponding
+  `AckTracker` slot is NOT notified. It remains `PENDING` until its own
+  deadline triggers `sweep_ack_timeouts()` → `WARNING_HI`.
+
+---
 
 ## 6. Branching Logic / Decision Points
 
-Decision                      Location                   Outcomes
-----------------------------  -------------------------  ----------------------------
-expiry_us == 0                timestamp_expired()        Returns false immediately;
-                              Timestamp.hpp line 54      message never expires
-now_us < expiry_us            timestamp_expired()        Returns false; message valid
-now_us >= expiry_us           timestamp_expired()        Returns true; message expired
-Expired in receive()          DeliveryEngine.cpp         Log WARNING_LO + return
-                              line 169-174               ERR_EXPIRED; application
-                                                         never sees the message
-Expired in collect_due()      RetryManager.cpp           active=false; --m_count;
-                              line 156-163               log WARNING_LO; NOT added
-                                                         to out_buf; no retransmit
-Expiry fires before due       RetryManager.cpp           Order of checks: expiry
-                              lines 156, 166, 177        checked FIRST; a message
-                                                         due for retry but expired
-                                                         is dropped, NOT retransmitted
-receive() result check        Client.cpp line 140        result_ok(ERR_EXPIRED) ->
-                              wait_for_echo()            false; loop continues; no
-                                                         echo counted
-expiry_us != 0 guard in       RetryManager.cpp line 156  Prevents incorrect expiry
-RetryManager                                             when expiry_us=0 (permanent)
+**Branch 1: `slot_has_expired()` — expiry_us == 0 guard**
+- Condition: `expiry_us == 0ULL`
+- If true: returns `false` (never expires).
+- If false: proceeds to time comparison.
 
+**Branch 2: `slot_has_expired()` — time comparison**
+- Condition: `now_us >= expiry_us`
+- If true: returns `true` → slot expired, deactivated, `WARNING_LO`, `continue`.
+- If false: returns `false` → expiry check passes, proceed to exhaustion check.
+
+**Branch 3: `collect_due()` — check ordering**
+- Expiry check (line 177) fires before exhaustion (line 187) before due (line 198).
+- An expired message is never added to `out_buf`, even if `next_retry_us <= now_us`.
+
+**Branch 4: No expiry check in `DeliveryEngine::send()`**
+- Observation: the send path has no `timestamp_expired()` call.
+- An already-expired envelope is transmitted unconditionally. The receiver drops
+  it via `DeliveryEngine::receive()`.
+
+**Branch 5: `ERR_EXPIRED` in `receive()` (Path B, documented in UC_09)**
+- Condition: `timestamp_expired(env.expiry_time_us, now_us)` in
+  `DeliveryEngine::receive()` at line 171.
+- If true: logs `WARNING_LO "Dropping expired message_id=..."`, returns
+  `ERR_EXPIRED`.
+- Application receives `ERR_EXPIRED`, must not process `env`.
+
+---
 
 ## 7. Concurrency / Threading Behavior
 
-Single-threaded. No synchronization required.
+### Threads created
+None. All calls execute synchronously on the caller's thread.
 
-timestamp_now_us() and timestamp_expired() are pure functions (no shared state).
-clock_gettime(CLOCK_MONOTONIC) is POSIX-async-signal-safe and thread-safe, but
-is not called from a signal handler in this codebase (the SIGINT handler only
-sets g_stop_flag).
+### Where context switches occur
+None in the expiry check itself. `slot_has_expired()` and `timestamp_expired()`
+are pure inline functions with no I/O or blocking.
 
-The now_us value passed to pump_retries() is captured once at the top of the
-loop iteration and reused for all three calls (receive, pump_retries,
-sweep_ack_timeouts). This means a message could expire between the timestamp
-capture and the actual check -- but since now_us only monotonically increases,
-the worst case is a false "not yet expired" result (the check runs slightly
-early), which errs on the safe side by NOT dropping the message prematurely.
+### Synchronization primitives
+None. `RetryManager::m_slots[]` and `m_count` are unprotected. If
+`pump_retries()` and `receive()` are called from different threads, there is a
+data race. All calls are assumed to originate from the same thread.
 
-[ASSUMPTION]: If multiple messages are in-flight simultaneously, the expiry
-check in collect_due() iterates all ACK_TRACKER_CAPACITY slots, so all
-expired entries are cleaned up in a single collect_due() pass.
+### Timing observation
+The `now_us` value is captured by the application before calling `pump_retries()`
+or `receive()`. If the application captures `now_us` once per loop iteration,
+the same timestamp is used for all calls within that iteration. A message that
+expires between the capture and the actual expiry check will be treated as
+non-expired for that iteration — this errs safely toward delivery rather than
+premature drop.
 
+---
 
 ## 8. Memory & Ownership Semantics (C/C++ Specific)
 
-The expiry_time_us field is a uint64_t scalar member of MessageEnvelope.
-It is:
-  - Set by value in send_test_message() (Client.cpp line 109)
-  - Bitwise copied into RetryManager::m_slots[i].env and AckTracker::m_slots[j].env
-    via envelope_copy() (memcpy of sizeof(MessageEnvelope))
-  - Separately stored in RetryManager::m_slots[i].expiry_us (line 68 of RetryManager.cpp)
-    as a scalar copy -- this is the field checked in collect_due()
+### Key data
+`expiry_time_us` is a `uint64_t` scalar field in `MessageEnvelope`. It is:
+- Set by value in the application via `timestamp_deadline_us()`.
+- Bitwise copied into `RetryManager::m_slots[i].env` via `envelope_copy()`
+  (memcpy of `sizeof(MessageEnvelope)`).
+- Separately copied to `RetryManager::m_slots[i].expiry_us` (dedicated scalar)
+  at `RetryManager.cpp:94`. This is the field checked by `slot_has_expired()`.
 
-Note: RetryManager stores expiry_us in TWO places:
-  1. m_slots[i].env.expiry_time_us  (inside the copied envelope, used if retransmitting)
-  2. m_slots[i].expiry_us           (dedicated scalar, checked in collect_due() line 156)
+### Two copies in RetryManager
+`RetryManager` stores `expiry_us` in two places:
+1. `m_slots[i].expiry_us` — checked by `slot_has_expired()` in `collect_due()`.
+2. `m_slots[i].env.expiry_time_us` — the envelope copy used for retransmission.
+Both are set identically from `env.expiry_time_us` in `schedule()`. No
+divergence is possible after initialization.
 
-Both are set from env.expiry_time_us in schedule() (line 68), so they are
-always equal at schedule time. No divergence can occur after initialization.
+### Slot lifecycle after expiry deactivation
+When a slot is deactivated due to expiry (`active = false`), the envelope data
+remains in `m_slots[i].env` until the slot is reused by the next `schedule()`
+call. The slot is considered logically free immediately (the `!m_slots[i].active`
+check in `collect_due()` and `schedule()` gates on the `active` flag).
 
-When a slot is deactivated due to expiry (active = false), the envelope data
-remains in m_slots[i].env but is ignored (active check gates all access).
-The slot is available for reuse by the next schedule() call.
+### No heap allocation
+`slot_has_expired()` allocates nothing. `pump_retries()` stack-allocates
+`retry_buf[64]` (~264 KB); this is the largest stack risk in the path.
 
-No heap allocation. All expiry state is in fixed-size value members.
-
+---
 
 ## 9. Error Handling Flow
 
-Error/Condition           Detection                    Response
-------------------------  ---------------------------  ------------------------------
-Message expired on        timestamp_expired() in       Log WARNING_LO; return
-receive path              DeliveryEngine::receive()    ERR_EXPIRED to caller;
-                          line 169                     envelope contents unchanged
-                                                       but caller must not use them
-Caller receives           wait_for_echo() line 140     result_ok(ERR_EXPIRED) = false;
-ERR_EXPIRED               Client.cpp                   loop iteration continues;
-                                                       pump_retries() still called;
-                                                       no echo counted
-Message expired in        RetryManager::collect_due()  Slot deactivated silently;
-retry table               line 156-163                 WARNING_LO logged; no retransmit;
-                                                       no notification to AckTracker
-AckTracker not notified   [no cross-call]              AckTracker slot remains PENDING
-of retry expiry                                        until sweep_expired() fires on
-                                                       its own deadline (100ms);
-                                                       WARNING_HI logged by
-                                                       sweep_ack_timeouts()
-Expiry = 0 (permanent)    timestamp_expired()          Returns false always; message
-                          RetryManager line 156        will only stop via exhaustion
-                                                       or ACK
-expiry_us set in past     [possible if clock skew      timestamp_expired() fires
-                          or very long processing]     immediately on first receive;
-                                                       message dropped
+### How errors propagate
+- **Path C expiry:** `collect_due()` returns 0 for the expired slot (entry not
+  in `out_buf`). `pump_retries()` returns 0. The application knows no retries
+  fired, but does not receive a direct "expired" error code from `pump_retries()`.
+  The only signal is the `WARNING_LO` log. There is no callback or status API.
 
+- **Path B expiry (UC_09):** `receive()` returns `ERR_EXPIRED` directly to the
+  application. The envelope content is populated but must not be used.
+
+### Retry logic
+Path C expiry terminates the retry loop for that message permanently.
+The slot is freed immediately for reuse. No further transmission occurs.
+
+### Fallback paths
+- If `expiry_time_us = 0`, neither `slot_has_expired()` nor
+  `timestamp_expired()` triggers. The message is retried until exhaustion or
+  ACK.
+
+---
 
 ## 10. External Interactions
 
-Interaction           API Used                       Direction   Notes
---------------------  -----------------------------  ----------  --------------------
-Monotonic clock       clock_gettime(CLOCK_MONOTONIC  Inbound     Used in
-                      )                                          timestamp_now_us();
-                                                                 called at loop start
-                                                                 in main loops,
-                                                                 and in TcpBackend
-                                                                 during send
-Logger output         Logger::log(WARNING_LO, ...)   Outbound    On every expired
-                                                                 message in both paths
-TCP socket read       tcp_recv_frame()               Inbound     Delivers potentially
-                                                                 expired message;
-                                                                 expiry not checked
-                                                                 in TcpBackend itself
+### Network calls
+None during the expiry check itself. `pump_retries()` will call
+`send_via_transport()` for non-expired due entries, which results in `poll()`
+and `send()` syscalls as documented in UC_01.
 
+### File I/O
+None.
+
+### Hardware interaction
+None. `timestamp_now_us()` calls `clock_gettime(CLOCK_MONOTONIC)` — kernel
+syscall, not direct hardware.
+
+### IPC
+None.
+
+---
 
 ## 11. State Changes / Side Effects
 
-Path A (receive-side expiry):
-  - No state changes in AckTracker or RetryManager.
-  - The RetryManager slot for the expired message_id remains ACTIVE and will
-    continue attempting retries until Path B catches it.
-  - DeliveryEngine::receive() returns ERR_EXPIRED; no dedup record is written
-    (DuplicateFilter::check_and_record is never reached for expired messages).
+### Path C (retry-side expiry)
 
-Path B (retry-side expiry):
-  - RetryManager::m_slots[i].active = false
-  - RetryManager::m_count decremented by 1
-  - The slot becomes FREE for reuse on the next schedule() call.
-  - AckTracker slot is NOT modified; it will eventually be cleaned up by
-    sweep_ack_timeouts() -> sweep_expired() independently.
+**`RetryManager::m_slots[i]`:**
+- `m_slots[i].active`: `true` → `false`.
+- `m_count`: decremented by 1.
+- All other fields unchanged (slot data persists until overwritten by next
+  `schedule()`).
 
-Combined effect for a 5-second message:
-  At T+5s: RetryManager entry deactivated (Path B).
-  The AckTracker entry (with deadline = now + 100ms from send time)
-  will have been swept much earlier by sweep_ack_timeouts() -- at T+0.1s
-  -- and logged as an ACK timeout (WARNING_HI).
+**`AckTracker` (not modified by Path C):**
+- The corresponding `AckTracker` slot remains `PENDING` with its own `deadline_us`
+  (typically 100 ms from `recv_timeout_ms`). It will be swept by
+  `sweep_ack_timeouts()` → `sweep_expired()` on its own timeline, generating a
+  `WARNING_HI "ACK timeout"` — this fires even though the message expired in
+  `RetryManager` and was never re-sent.
 
+**Logger:**
+- `WARNING_LO "Expired retry entry for message_id=N"` emitted once per expired
+  slot per `collect_due()` call.
 
-## 12. Sequence Diagram (ASCII)
+### Persistent changes (DB, disk, device state)
+None.
 
---- Path A: Receive-side expiry ---
+---
 
-Client::main  wait_for_echo  DeliveryEngine  Timestamp     TcpBackend    Logger
-    |              |               |              |              |            |
-    |--pump loop-->|               |              |              |            |
-    |              |--receive(100ms,now_us)------>|              |            |
-    |              |               |--recv_message(env,100)----->|            |
-    |              |               |              |        [reads stale       |
-    |              |               |              |         envelope from     |
-    |              |               |              |         wire/queue]       |
-    |              |               |<--OK (env)-----------------+            |
-    |              |               |--envelope_valid(env)? YES  |            |
-    |              |               |--timestamp_expired(expiry, now_us)      |
-    |              |               |              |<--true-------+            |
-    |              |               |              |              |--WARNING_LO|
-    |              |               |<--ERR_EXPIRED+              |            |
-    |              |<--ERR_EXPIRED-+              |              |            |
-    |              | result_ok? NO                |              |            |
-    |              | loop continues               |              |            |
+## 12. Sequence Diagram using mermaid
 
---- Path B: Retry-side expiry (in pump_retries) ---
+```text
+--- Path C: Retry-side expiry ---
 
-Client::main  pump_retries  DeliveryEngine  RetryManager  Logger
-    |              |               |              |            |
-    |--T>=5s------>|               |              |            |
-    |              |--pump_retries(now_us)-------->|           |
-    |              |               |--collect_due(now_us, buf, cap)
-    |              |               |              |            |
-    |              |               |  [slot 0: active=true]    |
-    |              |               |  expiry_us=T+5s           |
-    |              |               |  now_us >= expiry_us: YES |
-    |              |               |  active=false; --m_count  |
-    |              |               |              |--WARNING_LO|
-    |              |               |              | "Expired   |
-    |              |               |              |  retry     |
-    |              |               |              |  entry"    |
-    |              |               |  continue (NOT in out_buf)|
-    |              |               |<--collected=0+            |
-    |              |               | [no retransmit loop runs] |
-    |              |<--0-----------+              |            |
-    |<--0----------+               |              |            |
+Application  DeliveryEngine  RetryManager  Logger
 
---- Expiry setup at send time ---
+App --pump_retries(now_us>=expiry_us)--> DeliveryEngine
+  retry_buf[64] on stack
+  --> RetryManager::collect_due(now_us, retry_buf, 64)
+    [slot 0: active=true, expiry_us=T+5s]
+    --> slot_has_expired(T+5s, now_us)
+        (expiry_us != 0) && (now_us >= expiry_us) --> true
+    <-- true
+    m_slots[0].active = false
+    m_count--
+    --> Logger::log(WARNING_LO "Expired retry entry for message_id=N")
+    continue (NOT in out_buf)
+    [remaining slots: all inactive, skipped]
+    ASSERT(collected <= buf_cap)
+    ASSERT(m_count <= 32)
+    return collected=0
+  ASSERT(collected <= 64)
+  [retry loop: not entered]
+  return 0
+App <-- 0
 
-send_test_message()  timestamp_deadline_us()
-    |                       |
-    |--now_us=T0----------->|
-    |  duration_ms=5000     |
-    |                       | duration_us = 5000 * 1000 = 5_000_000
-    |                       | return T0 + 5_000_000
-    |<--expiry = T0+5s------+
-    | env.expiry_time_us = T0+5s
+--- Expiry setup (at send time) ---
 
+Application --> timestamp_deadline_us(now_us, 5000)
+               returns now_us + 5 000 000
+env.expiry_time_us = now_us + 5 000 000
+engine.send(env, now_us) --> RetryManager::schedule()
+    m_slots[i].expiry_us     = env.expiry_time_us
+    m_slots[i].env.expiry_time_us = env.expiry_time_us
+    [both set identically, no divergence]
+```
+
+---
 
 ## 13. Initialization vs Runtime Flow
 
-Initialization:
-  - No expiry-specific initialization required.
-  - timestamp_now_us() and timestamp_expired() are stateless inline functions;
-    they require only that clock_gettime(CLOCK_MONOTONIC) is available.
-  - RetryManager::init() zero-fills all expiry_us fields to 0.
-  - AckTracker::init() zero-fills all deadline_us fields to 0.
+### What happens during startup (init phase)
 
-Runtime:
-  - expiry_time_us set once at envelope creation time.
-  - Checked on every receive call (Path A) and every pump_retries call (Path B).
-  - Expiry is a monotonic, write-once, read-many field per message.
-  - No update or refresh of expiry_time_us occurs after initial set.
-  - RetryManager::schedule() copies it at schedule time; thereafter it is
-    immutable in the slot (no reset on retry).
+`RetryManager::init()` zeroes all `m_slots[i].expiry_us` to 0 and sets
+`m_slots[i].active = false`. `slot_has_expired(0, now_us)` would return false
+(zero expiry = never expires) — these slots can never be accidentally expired
+before a `schedule()` call populates them.
 
+`timestamp_deadline_us()` and `slot_has_expired()` are stateless inline/static
+functions; no initialization required.
+
+### What happens during steady-state execution
+
+- `expiry_time_us` is set once at envelope construction time and never modified.
+- `m_slots[i].expiry_us` is set once at `schedule()` time and never modified
+  afterward.
+- `slot_has_expired()` is called on every active slot on every `collect_due()`
+  call. It performs a simple `uint64_t` comparison — O(1) per slot.
+- The expiry path (Path C) fires for a given slot at most once: after it fires,
+  the slot is `active = false` and is skipped on all subsequent `collect_due()`
+  iterations.
+
+---
 
 ## 14. Known Risks / Observations
 
-R1. Receive-side expiry does not cancel the retry entry.
-    When a received message is dropped via Path A (ERR_EXPIRED in receive()),
-    the corresponding RetryManager slot (if this is a locally-sent message
-    whose own expiry elapsed) is not notified. The two paths are completely
-    independent. A message can be expired on the wire AND still queued for
-    retry on the sender -- it will just keep sending until Path B catches it.
+### No pre-transmission expiry check in send()
 
-R2. AckTracker and RetryManager use different expiry intervals.
-    AckTracker deadline = now + recv_timeout_ms (100 ms) -- very short.
-    RetryManager expiry = env.expiry_time_us (5 seconds from send_test_message).
-    These are semantically different: AckTracker tracks ACK receipt latency;
-    RetryManager tracks message lifetime. They are not synchronized.
-    The AckTracker entry expires (WARNING_HI "ACK timeout") 100 ms after send,
-    while the RetryManager continues retrying for up to 5 seconds.
+`DeliveryEngine::send()` does not call `timestamp_expired()` before invoking
+`send_via_transport()`. A message whose `expiry_time_us` has already passed
+will be serialized, transmitted over TCP, and received by the remote peer, which
+will then drop it via `receive()` → `ERR_EXPIRED`. This wastes network bandwidth
+and processing time for messages that the receiver will never deliver to its
+application. [OBSERVATION - potential improvement]
 
-R3. No notification to application on expiry.
-    Both Path A and Path B drop messages silently (only log messages). The
-    application layer (Client main loop) receives ERR_EXPIRED from receive()
-    but has no API to query which outbound retry entries have expired in
-    RetryManager. There is no callback or status API.
+### AckTracker not notified of retry expiry
 
-R4. Clock discontinuity risk.
-    CLOCK_MONOTONIC is used, which is immune to NTP wall-clock adjustments.
-    However, if the process is suspended (e.g. VM pause, container stop),
-    CLOCK_MONOTONIC may or may not advance (platform-dependent). A large gap
-    would cause all messages to appear simultaneously expired.
-    [ASSUMPTION: Platform is not subject to long suspensions in normal use.]
+When Path C fires and deactivates a retry slot, the corresponding `AckTracker`
+slot is not notified. It remains `PENDING` with its own `deadline_us` (typically
+set to `recv_timeout_ms`, e.g., 100 ms) and will be swept by
+`sweep_ack_timeouts()` on its own timeline, generating a spurious `WARNING_HI
+"ACK timeout"` even for a message that the sender intentionally stopped retrying
+due to TTL expiry. [OBSERVATION]
 
-R5. expiry_time_us set at envelope BUILD time, not SEND time.
-    In send_test_message(), timestamp_now_us() is called at the top of the
-    loop iteration (Client.cpp line 241), then passed to send_test_message()
-    as now_us. The expiry is based on this now_us. If snprintf or memcpy
-    incur measurable latency, the actual transmission time may be slightly
-    after the expiry baseline. In practice with small payloads this is
-    negligible.
+### Two independent expiry subsystems
 
+`AckTracker` uses `deadline_us = recv_timeout_ms` (100 ms to 1 s).
+`RetryManager` uses `expiry_us = env.expiry_time_us` (application-set, e.g., 5
+s). These are semantically different. The `AckTracker` entry typically expires
+4.9 seconds before the `RetryManager` entry for a 5-second TTL message. Both
+generate independent log warnings. [OBSERVATION]
+
+### No application API for retry expiry notification
+
+Path C drops the message silently (only logs `WARNING_LO`). The application
+receives `ERR_EXPIRED` from `receive()` (Path B) but has no API to query which
+outbound retry entries have expired in `RetryManager`. No callback, status poll,
+or metrics hook is present. [OBSERVATION]
+
+### Clock discontinuity risk
+
+`CLOCK_MONOTONIC` does not advance during system suspension on all platforms. A
+process suspended after sending a message with a 5-second TTL may resume 30
+seconds later and process `pump_retries()`. The `now_us` value will be 30
+seconds ahead of the send time, so `slot_has_expired()` will return true
+immediately. This is correct behavior — the message is expired — but the
+application may be surprised by mass expiry events after a system resume.
+[OBSERVATION]
+
+---
 
 ## 15. Unknowns / Assumptions
 
-U1. [ASSUMPTION] MSG_MAX_PAYLOAD_BYTES and MSG_RING_CAPACITY values not visible
-    without Types.hpp. Assumed to be small (e.g. 256 and 16 respectively).
+- [CONFIRMED] `slot_has_expired(0, now_us)` returns false. Zero `expiry_us`
+  means "never expires". Confirmed from `RetryManager.cpp:23`.
 
-U2. [ASSUMPTION] The impairment engine can add latency to messages, potentially
-    causing a message to be in the delay buffer past its expiry. When
-    collect_deliverable() releases the delayed message into m_recv_queue,
-    it will be picked up by receive_message() and passed to DeliveryEngine,
-    which will then catch the expiry via timestamp_expired(). The impairment
-    engine does not check expiry before releasing. [ASSUMPTION: this is the
-    intended behavior -- expiry is enforced at the DeliveryEngine layer.]
+- [CONFIRMED] The expiry check in `collect_due()` fires at line 177, before
+  the exhaustion check (line 187) and the due check (line 198). An expired entry
+  is never retransmitted. Confirmed from `RetryManager.cpp:177-198`.
 
-U3. [ASSUMPTION] The Server's echo reply uses expiry = +10 seconds. If the
-    round-trip time plus any impairment delay exceeds 10 seconds, the client
-    will receive ERR_EXPIRED for the echo reply. Under normal LAN conditions
-    this will not occur.
+- [CONFIRMED] `RetryManager` stores `expiry_us` in two places: as a scalar
+  member `m_slots[i].expiry_us` and inside `m_slots[i].env.expiry_time_us`.
+  Both set from `env.expiry_time_us` at `schedule()` time. No divergence.
+  Confirmed from `RetryManager.cpp:85,94`.
 
-U4. The condition in RetryManager::collect_due() line 156 checks
-    m_slots[i].expiry_us != 0ULL before comparing with now_us. This is correct
-    for the "never expire" case. However, it means a message with expiry_us
-    set to exactly 1 (or any tiny non-zero value) will expire instantly. There
-    is no minimum expiry validation at the API boundary. [ASSUMPTION: callers
-    always set expiry to a meaningful future time or 0.]
+- [CONFIRMED] `DeliveryEngine::send()` does not check `expiry_time_us` before
+  calling `send_via_transport()`. Confirmed by reading `DeliveryEngine.cpp:77-143`.
 
-U5. [ASSUMPTION] AckTracker::sweep_expired() is the mechanism that clears
-    AckTracker entries after expiry; it is called via
-    engine.sweep_ack_timeouts() in each loop iteration. The AckTracker expiry
-    (recv_timeout_ms = 100 ms) is completely separate from the RetryManager
-    expiry (5 seconds). This is by design but creates the risk described in R2.
+- [CONFIRMED] `timestamp_deadline_us(now_us, duration_ms)` returns
+  `now_us + duration_ms * 1000ULL`. Confirmed from `Timestamp.hpp:65-75`.
 
-U6. No source for ImpairmentConfig or ImpairmentEngine internals was read.
-    [ASSUMPTION]: imp_cfg.enabled = false by default, so no impairment delay
-    is applied in standard runs, and messages are not held in the delay buffer
-    past their expiry.
+- [CONFIRMED] `timestamp_expired(expiry_us, now_us)` returns
+  `(expiry_us != 0ULL) && (now_us >= expiry_us)`. Confirmed from
+  `Timestamp.hpp:51-59`.
+
+- [ASSUMPTION] With default `max_retries = 3` and `retry_backoff_ms = 100 ms`,
+  exhaustion fires at approximately T+400 ms (well before a 5-second expiry).
+  The Path C expiry path only fires in practice when `max_retries` is large
+  enough that the retry window extends past `expiry_time_us`.
+
+- [ASSUMPTION] The application calls `pump_retries()` with the current monotonic
+  time obtained via `timestamp_now_us()`. If `now_us` is stale (e.g., captured
+  significantly before the `pump_retries()` call), `slot_has_expired()` may
+  return false for a message that is actually expired by wall-clock time.

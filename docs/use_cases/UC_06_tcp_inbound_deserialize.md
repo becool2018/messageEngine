@@ -1,526 +1,460 @@
+# UC_06 — TCP Inbound Deserialization
+
+**HL Group:** System Internal — sub-function of HL-5 (receive); invoked inside `TcpBackend::recv_from_client()`
+**Actor:** System (internal sub-function) — the User never calls this directly
+**Requirement traceability:** REQ-3.2.3, REQ-4.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.3.2
+
+---
+
 ## 1. Use Case Overview
 
-Use Case: Receiver deserializes an inbound TCP-framed wire message into a MessageEnvelope.
+UC_06 is a **System Internal** sub-function. The User never calls it directly; it is invisible at the User → System boundary.
 
-A remote sender has serialized a MessageEnvelope into a big-endian wire format, prefixed it with a 4-byte big-endian length header, and pushed it over an established TCP connection. On the receiving side, TcpBackend::receive_message() is called by the application (or by DeliveryEngine). The goal is to trace the complete path from raw bytes arriving on the OS socket through tcp_recv_frame(), Serializer::deserialize(), RingBuffer::push(), and back out through TcpBackend::receive_message() returning a fully-populated MessageEnvelope to the caller.
+**Invoked by:** UC_21 (TCP poll and receive) → `TcpBackend::recv_from_client()` (TcpBackend.cpp:224). That function calls `tcp_recv_frame()` to read raw bytes from the kernel socket buffer, then immediately calls `Serializer::deserialize()` to reconstruct a `MessageEnvelope`. UC_06 documents the deserialization step and its surrounding context within `recv_from_client()`.
 
-Scope: platform layer (TcpBackend, SocketUtils) and core layer (Serializer, RingBuffer). The DeliveryEngine is the typical caller but is not the focus here; it is noted where it interacts.
+**Why it is factored out:** `Serializer::deserialize()` is a reusable static method shared by both the TCP receive path (here) and the UDP receive path (`UdpBackend::recv_one_datagram()`). The deserializer has no knowledge of transport type; it operates only on a byte buffer and a length. Documenting it as a distinct mechanism makes its contract, failure modes, and safety risks (particularly the `NEVER_COMPILED_OUT_ASSERT` postcondition) visible without re-stating them in every transport that uses it.
+
+**Trigger:** `recv_from_client()` has just successfully returned from `tcp_recv_frame()` with `out_len` bytes written into `TcpBackend::m_wire_buf`. Control passes to `Serializer::deserialize(m_wire_buf, out_len, env)`.
+
+**Expected outcome:** `m_wire_buf[0..out_len-1]` is interpreted as a 44-byte big-endian wire header followed by opaque payload bytes. A fully-populated `MessageEnvelope` is produced and pushed to `m_recv_queue` (RingBuffer). The transport layer returns `OK` from `recv_from_client()`.
+
+**Scope:** `TcpBackend::recv_from_client()` (platform layer), `tcp_recv_frame()` / `socket_recv_exact()` (SocketUtils), `Serializer::deserialize()` (core layer), `RingBuffer::push()` (core layer).
+
+---
 
 ## 2. Entry Points
 
-Primary external entry point:
-    TcpBackend::receive_message(MessageEnvelope& envelope, uint32_t timeout_ms)
-    File: src/platform/TcpBackend.cpp, lines 325-380
+| Entry point | File | Line |
+|-------------|------|------|
+| `TcpBackend::recv_from_client(int, uint32_t)` | `src/platform/TcpBackend.cpp` | 224 |
 
-This is the sole public receive API exposed by TcpBackend (implementing TransportInterface). It is called by DeliveryEngine::receive() at line 159 of DeliveryEngine.cpp, which itself is called by application code.
+Called from `TcpBackend::poll_clients_once()` (TcpBackend.cpp:338), which is called from `TcpBackend::receive_message()` (TcpBackend.cpp:404).
 
-Secondary internal entry points (called from receive_message):
-    TcpBackend::accept_clients()                  — TcpBackend.cpp lines 161-187
-    TcpBackend::recv_from_client(int, uint32_t)   — TcpBackend.cpp lines 193-243
-    tcp_recv_frame(int, uint8_t*, uint32_t, uint32_t, uint32_t*)  — SocketUtils.cpp lines 429-476
-    Serializer::deserialize(const uint8_t*, uint32_t, MessageEnvelope&) — Serializer.cpp lines 173-257
-    RingBuffer::push(const MessageEnvelope&)       — RingBuffer.hpp lines 127-146
-    RingBuffer::pop(MessageEnvelope&)              — RingBuffer.hpp lines 159-178
+Internal sub-entries invoked in sequence within `recv_from_client()`:
+
+| Function | File | Line |
+|----------|------|------|
+| `tcp_recv_frame()` | `src/platform/SocketUtils.cpp` | 431 |
+| `socket_recv_exact()` (×2) | `src/platform/SocketUtils.cpp` | 339 |
+| `Serializer::deserialize()` | `src/core/Serializer.cpp` | 175 |
+| `envelope_init()` | `src/core/MessageEnvelope.hpp` | 47 |
+| `read_u8()` / `read_u32()` / `read_u64()` | `src/core/Serializer.cpp` | 69 / 78 / 94 |
+| `envelope_valid()` | `src/core/MessageEnvelope.hpp` | 63 |
+| `RingBuffer::push()` | `src/core/RingBuffer.hpp` | 98 |
+
+---
 
 ## 3. End-to-End Control Flow (Step-by-Step)
 
-Step 1 — Caller invokes receive_message
-    DeliveryEngine::receive() (DeliveryEngine.cpp:159) calls:
-        m_transport->receive_message(env, timeout_ms)
-    This dispatches to TcpBackend::receive_message(envelope, timeout_ms).
+### Phase A: Entry into recv_from_client()
 
-Step 2 — Precondition check (TcpBackend.cpp:327-328)
-    assert(m_open) fires first. If m_open is false, execution aborts in debug builds.
+A1. `recv_from_client(client_fd, timeout_ms)` (TcpBackend.cpp:224) is called by `poll_clients_once()` with `timeout_ms = 100U`.
+A2. Precondition assertions: `NEVER_COMPILED_OUT_ASSERT(client_fd >= 0)` (line 226); `NEVER_COMPILED_OUT_ASSERT(m_open)` (line 227).
+A3. `uint32_t out_len = 0U` initialized.
 
-Step 3 — Fast-path: check RingBuffer for already-queued messages (TcpBackend.cpp:330-333)
-    Result res = m_recv_queue.pop(envelope);
-    RingBuffer::pop() (RingBuffer.hpp:159-178):
-        Loads m_head (relaxed), m_tail (acquire).
-        Computes cnt = t - h.
-        If cnt == 0: returns ERR_EMPTY immediately. Control continues to Step 4.
-        If cnt > 0: copies m_buf[h & RING_MASK] into envelope via envelope_copy() (memcpy of sizeof(MessageEnvelope)), advances m_head (release store), returns OK.
-    If OK: receive_message returns OK immediately. Skip to Step 15.
+### Phase B: tcp_recv_frame() — read raw bytes from socket
 
-Step 4 — Server mode: attempt to accept new clients (TcpBackend.cpp:336-338)
-    If m_is_server == true:
-        accept_clients() is called (result ignored with (void)).
-        accept_clients() (TcpBackend.cpp:161-187):
-            Calls socket_accept(m_listen_fd) — wraps POSIX accept(fd, NULL, NULL).
-            If a new fd is returned and m_client_count < MAX_TCP_CONNECTIONS:
-                m_client_fds[m_client_count] = client_fd; ++m_client_count.
+B1. `tcp_recv_frame(client_fd, m_wire_buf, SOCKET_RECV_BUF_BYTES, timeout_ms, &out_len)` (SocketUtils.cpp:431) is called:
+    - Assertions: `fd >= 0` (line 435), `buf != nullptr` (line 436), `buf_cap > 0U` (line 437), `out_len != nullptr` (line 438).
 
-Step 5 — Compute polling iteration count (TcpBackend.cpp:341-344)
-    poll_count = (timeout_ms + 99U) / 100U; capped at 50.
-    Each iteration represents a 100 ms polling window.
+B2. **Read 4-byte length header.** `socket_recv_exact(fd, header, 4U, 100U)` (SocketUtils.cpp:339):
+    - Initializes `received = 0`.
+    - Loop while `received < 4`:
+      - `poll({fd, POLLIN}, 1, 100)` — blocks up to 100ms.
+      - If `poll_result <= 0`: log WARNING_HI "recv poll timeout"; return false.
+      - `recv(fd, &header[received], remaining, 0)`.
+      - If `recv_result < 0`: log WARNING_HI "recv() failed"; return false.
+      - If `recv_result == 0`: log WARNING_HI "recv() returned 0 (socket closed)"; return false.
+      - `received += recv_result`.
+    - Assert `received == 4` (line 385). Returns true.
+    - If `socket_recv_exact` returns false: `tcp_recv_frame` logs WARNING_HI "failed to receive header" (line 443); returns false.
 
-Step 6 — Outer polling loop begins (TcpBackend.cpp:346)
-    for (uint32_t attempt = 0U; attempt < poll_count; ++attempt)
+B3. **Parse frame_len** (SocketUtils.cpp:449–452): big-endian decode from `header[0..3]` into `frame_len` (uint32_t):
+    ```
+    frame_len = (header[0]<<24) | (header[1]<<16) | (header[2]<<8) | header[3]
+    ```
 
-Step 7 — Inner loop: receive from all connected clients (TcpBackend.cpp:347-352)
-    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i)
-        Skip if m_client_fds[i] < 0 (slot unused).
-        Call: recv_from_client(m_client_fds[i], 100U)
-            [result is discarded with (void)]
+B4. **Validate frame_len** (SocketUtils.cpp:454–461):
+    - `max_frame_size = WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES = 44 + 4096 = 4140`.
+    - If `frame_len > 4140` or `frame_len > buf_cap (8192)`: log WARNING_HI "frame size N exceeds limit 4140"; return false.
 
-Step 8 — Inside recv_from_client (TcpBackend.cpp:193-243)
-    Preconditions: assert(client_fd >= 0), assert(m_open).
-    Calls: tcp_recv_frame(client_fd, m_wire_buf, SOCKET_RECV_BUF_BYTES, timeout_ms, &out_len)
-        SOCKET_RECV_BUF_BYTES = 8192, timeout_ms = 100.
+B5. **Read payload bytes.** If `frame_len > 0U`: `socket_recv_exact(fd, buf, frame_len, 100U)` — same poll+recv loop until `received == frame_len`. On failure: log WARNING_HI "failed to receive payload (N bytes)"; return false.
 
-Step 9 — Inside tcp_recv_frame (SocketUtils.cpp:429-476)
-    Preconditions: assert fd>=0, buf!=NULL, buf_cap>0, out_len!=NULL.
-    9a. Read 4-byte length header:
-        Calls socket_recv_exact(fd, header, 4U, timeout_ms)
-        socket_recv_exact (SocketUtils.cpp:337-385):
-            Loop while received < 4:
-                poll(fd, POLLIN, timeout_ms) — blocks up to 100 ms.
-                recv(fd, &buf[received], remaining, 0).
-                If recv returns 0: socket closed, return false.
-                If recv < 0: error, return false.
-                received += recv_result.
-        If socket_recv_exact returns false: tcp_recv_frame logs WARNING_HI, returns false.
-    9b. Parse frame_len from header[0..3] (big-endian shifts).
-    9c. Validate frame_len:
-        max_frame_size = Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES = 44 + 4096 = 4140.
-        If frame_len > 4140 or frame_len > buf_cap(8192): log WARNING_HI, return false.
-    9d. Read payload bytes:
-        Calls socket_recv_exact(fd, buf, frame_len, timeout_ms).
-        Same poll-recv loop, now for frame_len bytes.
-    9e. *out_len = frame_len.
-    9f. Postconditions: assert *out_len <= buf_cap, *out_len <= max_frame_size.
-    Returns true.
+B6. `*out_len = frame_len` (line 472). Assert `*out_len <= buf_cap` (line 475) and `*out_len <= max_frame_size` (line 476). Returns true.
 
-Step 10 — Back in recv_from_client: check tcp_recv_frame result (TcpBackend.cpp:200-222)
-    If tcp_recv_frame returned false:
-        Logs WARNING_LO "recv_frame failed; closing connection".
-        Finds this fd in m_client_fds[], calls socket_close(), shifts remaining entries,
-        decrements m_client_count.
-        Returns ERR_IO.
-    If true: proceeds to deserialization.
+B7. If `tcp_recv_frame` returned false (TcpBackend.cpp:230): log WARNING_LO "recv_frame failed; closing connection". Call `remove_client_fd(client_fd)`:
+    - Assert `client_fd >= 0` and `m_client_count > 0U`.
+    - Find `client_fd` in `m_client_fds[0..7]`; `socket_close(fd)`; set slot to -1; left-shift remaining entries; `--m_client_count`.
+    - Assert `m_client_count < MAX_TCP_CONNECTIONS`.
+    - `recv_from_client` returns `ERR_IO`.
 
-Step 11 — Deserialization (TcpBackend.cpp:226-232, Serializer.cpp:173-257)
-    MessageEnvelope env declared on stack (local to recv_from_client).
-    Calls: Serializer::deserialize(m_wire_buf, out_len, env)
-    Inside Serializer::deserialize:
-        Preconditions: assert(buf != nullptr), assert(buf_len <= 0xFFFFFFFFUL).
-        If buf_len < WIRE_HEADER_SIZE(44): return ERR_INVALID.
-        Calls envelope_init(env) — memset env to 0, sets message_type = INVALID.
-        offset = 0.
-        Reads fields in strict big-endian order using read_u8 / read_u32 / read_u64:
-            env.message_type    = read_u8(buf, 0)  → offset 1
-            env.reliability_class = read_u8(buf, 1) → offset 2
-            env.priority        = read_u8(buf, 2)  → offset 3
-            padding1            = read_u8(buf, 3)  → offset 4; validated == 0
-            env.message_id      = read_u64(buf, 4) → offset 12
-            env.timestamp_us    = read_u64(buf,12) → offset 20
-            env.source_id       = read_u32(buf,20) → offset 24
-            env.destination_id  = read_u32(buf,24) → offset 28
-            env.expiry_time_us  = read_u64(buf,28) → offset 36
-            env.payload_length  = read_u32(buf,36) → offset 40
-            padding2            = read_u32(buf,40) → offset 44; validated == 0
-        assert(offset == 44) — WIRE_HEADER_SIZE.
-        Validates env.payload_length <= MSG_MAX_PAYLOAD_BYTES(4096).
-        Validates buf_len >= 44 + env.payload_length.
-        If env.payload_length > 0: memcpy(env.payload, &buf[44], env.payload_length).
-        Postcondition: assert(envelope_valid(env)).
-        Returns OK.
-    If deserialize returns non-OK (TcpBackend.cpp:228-232):
-        Logs WARNING_LO "Deserialize failed".
-        Returns the error result from recv_from_client.
+### Phase C: Serializer::deserialize() — reconstruct envelope
 
-Step 12 — Push into RingBuffer (TcpBackend.cpp:235-239)
-    res = m_recv_queue.push(env)
-    Inside RingBuffer::push (RingBuffer.hpp:127-146):
-        Loads m_tail (relaxed), m_head (acquire).
-        cnt = t - h.
-        assert(cnt <= MSG_RING_CAPACITY).
-        If cnt >= MSG_RING_CAPACITY: returns ERR_FULL.
-        envelope_copy(m_buf[t & RING_MASK], env) — memcpy of full MessageEnvelope.
-        m_tail.store(t + 1U, release).
-        Returns OK.
-    If ERR_FULL: TcpBackend logs WARNING_HI "Recv queue full; dropping message".
-    Postcondition: assert(out_len <= SOCKET_RECV_BUF_BYTES).
-    recv_from_client returns OK (regardless of push result, because the frame was valid).
+C1. If `tcp_recv_frame` returned true: `Serializer::deserialize(m_wire_buf, out_len, env)` (Serializer.cpp:175) is called with `env` declared as a stack-local `MessageEnvelope` (TcpBackend.cpp:237).
 
-Step 13 — Back in outer polling loop (TcpBackend.cpp:355-358)
-    res = m_recv_queue.pop(envelope);
-    If OK (message now in queue): receive_message returns OK. Proceed to Step 15.
+C2. **Precondition assertions** (Serializer.cpp:180–181): `NEVER_COMPILED_OUT_ASSERT(buf != nullptr)` and `NEVER_COMPILED_OUT_ASSERT(buf_len <= 0xFFFFFFFFUL)`.
 
-Step 14 — Check impairment-delayed messages (TcpBackend.cpp:361-375)
-    uint64_t now_us = timestamp_now_us() — clock_gettime(CLOCK_MONOTONIC).
-    m_impairment.collect_deliverable(now_us, delayed, IMPAIR_DELAY_BUF_SIZE).
-    Any deliverable delayed envelopes are pushed into m_recv_queue.
-    Final m_recv_queue.pop(envelope) attempted.
-    If OK: receive_message returns OK.
-    If still empty: loop continues or falls through to Step 15.
+C3. **Minimum length guard** (Serializer.cpp:184): if `buf_len < 44U` → return `ERR_INVALID`. At this point `envelope_init()` has NOT been called; `env` is in its uninitialized stack state.
 
-Step 15 — Return path
-    If timeout exhausted with no message: receive_message returns ERR_TIMEOUT.
-    If a message was successfully popped: returns OK with envelope populated.
-    Caller (DeliveryEngine::receive) checks the return value at line 160.
+C4. **Zero-fill** (Serializer.cpp:189): `envelope_init(env)` — `memset(&env, 0, sizeof(MessageEnvelope))`; `env.message_type = MessageType::INVALID (255U)`.
+
+C5. **Header field reads** (Serializer.cpp:195–233), sequentially:
+    - `env.message_type = static_cast<MessageType>(read_u8(buf, 0))` → offset 1
+    - `env.reliability_class = static_cast<ReliabilityClass>(read_u8(buf, 1))` → offset 2
+    - `env.priority = read_u8(buf, 2)` → offset 3
+    - `padding1 = read_u8(buf, 3)` → offset 4; if `padding1 != 0U` → return `ERR_INVALID`
+    - `env.message_id = read_u64(buf, 4)` → offset 12
+    - `env.timestamp_us = read_u64(buf, 12)` → offset 20
+    - `env.source_id = read_u32(buf, 20)` → offset 24
+    - `env.destination_id = read_u32(buf, 24)` → offset 28
+    - `env.expiry_time_us = read_u64(buf, 28)` → offset 36
+    - `env.payload_length = read_u32(buf, 36)` → offset 40
+    - `padding2 = read_u32(buf, 40)` → offset 44; if `padding2 != 0U` → return `ERR_INVALID`
+    - `NEVER_COMPILED_OUT_ASSERT(offset == 44U)` — always-active invariant.
+
+C6. **Payload length bounds check** (Serializer.cpp:240): if `env.payload_length > MSG_MAX_PAYLOAD_BYTES (4096U)` → return `ERR_INVALID`.
+
+C7. **Total size check** (Serializer.cpp:246): `total_size = 44U + env.payload_length`. If `buf_len < total_size` → return `ERR_INVALID`.
+
+C8. **Payload copy** (Serializer.cpp:251–253): if `env.payload_length > 0U`: `(void)memcpy(env.payload, &buf[44], env.payload_length)`.
+
+C9. **Post-condition assertion** (Serializer.cpp:256): `NEVER_COMPILED_OUT_ASSERT(envelope_valid(env))`. This is always-active; fires unconditionally if `env.message_type == INVALID` or `env.source_id == 0` or `env.payload_length > 4096`. A wire message with `source_id == 0` passes all structural checks but terminates the process here (see Risk 3).
+
+C10. Returns `Result::OK`.
+
+### Phase D: Error handling from deserialize()
+
+D1. If `Serializer::deserialize()` returns non-OK (TcpBackend.cpp:239): log WARNING_LO "Deserialize failed: N"; `recv_from_client` returns the error result. The return value is discarded by `poll_clients_once()` (via `(void)` cast at line 338). The TCP bytes have already been consumed from the kernel socket buffer. The frame is permanently lost; the fd remains open.
+
+### Phase E: RingBuffer::push()
+
+E1. If deserialization succeeds: `m_recv_queue.push(env)` (RingBuffer.hpp:98):
+    - Load `m_tail` (relaxed), load `m_head` (acquire). Compute `cnt = t - h`.
+    - Assert `cnt <= MSG_RING_CAPACITY (64)`.
+    - If `cnt >= 64` → return `ERR_FULL`.
+    - `envelope_copy(m_buf[t & RING_MASK], env)` — full `memcpy` of `sizeof(MessageEnvelope)`.
+    - Release store `m_tail = t + 1`.
+    - Returns `OK`.
+
+E2. If `push()` returns `ERR_FULL` (TcpBackend.cpp:246): log WARNING_HI "Recv queue full; dropping message". `recv_from_client` still returns `OK` — the frame was read successfully; the overflow is a policy decision, not an I/O error.
+
+E3. Assert `out_len <= SOCKET_RECV_BUF_BYTES` (TcpBackend.cpp:250). `recv_from_client` returns `OK`.
+
+---
 
 ## 4. Call Tree (Hierarchical)
 
-TcpBackend::receive_message(envelope, timeout_ms)
-    RingBuffer::pop(envelope)                           [fast path check]
-        m_head.load(relaxed), m_tail.load(acquire)
-        envelope_copy() [memcpy]
-        m_head.store(h+1, release)
-    TcpBackend::accept_clients()                        [server mode only]
-        socket_accept(m_listen_fd)
-            accept(fd, NULL, NULL)                      [POSIX]
-    [polling loop, up to 50 iterations]
-        TcpBackend::recv_from_client(client_fd, 100ms)
-            tcp_recv_frame(fd, m_wire_buf, 8192, 100, &out_len)
-                socket_recv_exact(fd, header, 4, 100)
-                    poll(fd, POLLIN, 100)               [POSIX]
-                    recv(fd, buf, remaining, 0)         [POSIX]
-                [parse frame_len from 4-byte BE header]
-                [validate frame_len vs 4140 and 8192]
-                socket_recv_exact(fd, buf, frame_len, 100)
-                    poll(fd, POLLIN, 100)               [POSIX]
-                    recv(fd, buf+received, remaining, 0)[POSIX]
-            Serializer::deserialize(m_wire_buf, out_len, env)
-                envelope_init(env)                      [memset]
-                read_u8(buf, offset) x4
-                read_u64(buf, offset) x3
-                read_u32(buf, offset) x3
-                read_u8(buf, offset) [padding validate]
-                read_u32(buf, offset) [padding validate]
-                memcpy(env.payload, &buf[44], payload_length)
-                envelope_valid(env)                     [inline predicate]
-            RingBuffer::push(env)
-                m_tail.load(relaxed), m_head.load(acquire)
-                envelope_copy(m_buf[slot], env)         [memcpy]
-                m_tail.store(t+1, release)
-        RingBuffer::pop(envelope)                       [check after each client poll]
-        timestamp_now_us()                              [clock_gettime]
-        ImpairmentEngine::collect_deliverable(...)
-        RingBuffer::push(delayed[i])                    [0..n delayed envelopes]
-        RingBuffer::pop(envelope)                       [final check per iteration]
-    return ERR_TIMEOUT                                  [if loop exhausted]
+```
+TcpBackend::recv_from_client(client_fd, 100U)        [TcpBackend.cpp:224]
+ ├── tcp_recv_frame(fd, m_wire_buf, 8192, 100, &len)  [SocketUtils.cpp:431]
+ │    ├── socket_recv_exact(fd, header, 4U, 100U)     [SocketUtils.cpp:339]
+ │    │    └── poll(POLLIN, 100ms) + recv() loop       [POSIX, bounded by 4 bytes]
+ │    ├── [parse frame_len from header[0..3] BE]
+ │    ├── [validate frame_len <= 4140 and <= 8192]
+ │    └── socket_recv_exact(fd, buf, frame_len, 100U) [SocketUtils.cpp:339]
+ │         └── poll(POLLIN, 100ms) + recv() loop       [POSIX, bounded by frame_len]
+ ├── (on failure): remove_client_fd(client_fd)        [TcpBackend.cpp:199]
+ │    └── socket_close(fd)                            [SocketUtils.cpp:274]
+ │         └── close(fd)                              [POSIX]
+ ├── Serializer::deserialize(m_wire_buf, len, env)    [Serializer.cpp:175]
+ │    ├── envelope_init(env)                          [MessageEnvelope.hpp:47]
+ │    │    └── memset(&env, 0, sizeof(MessageEnvelope))
+ │    ├── read_u8(buf, 0)   → env.message_type        [Serializer.cpp:69]
+ │    ├── read_u8(buf, 1)   → env.reliability_class   [Serializer.cpp:69]
+ │    ├── read_u8(buf, 2)   → env.priority            [Serializer.cpp:69]
+ │    ├── read_u8(buf, 3)   → padding1 [validate == 0] [Serializer.cpp:69]
+ │    ├── read_u64(buf, 4)  → env.message_id          [Serializer.cpp:94]
+ │    ├── read_u64(buf, 12) → env.timestamp_us        [Serializer.cpp:94]
+ │    ├── read_u32(buf, 20) → env.source_id           [Serializer.cpp:78]
+ │    ├── read_u32(buf, 24) → env.destination_id      [Serializer.cpp:78]
+ │    ├── read_u64(buf, 28) → env.expiry_time_us      [Serializer.cpp:94]
+ │    ├── read_u32(buf, 36) → env.payload_length      [Serializer.cpp:78]
+ │    ├── read_u32(buf, 40) → padding2 [validate == 0] [Serializer.cpp:78]
+ │    ├── NEVER_COMPILED_OUT_ASSERT(offset == 44U)
+ │    ├── [env.payload_length > 4096U] → ERR_INVALID
+ │    ├── [buf_len < 44 + payload_length] → ERR_INVALID
+ │    ├── memcpy(env.payload, buf+44, payload_length) [if > 0]
+ │    └── NEVER_COMPILED_OUT_ASSERT(envelope_valid(env))
+ └── RingBuffer::push(env)                            [RingBuffer.hpp:98]
+      ├── m_tail.load(relaxed), m_head.load(acquire)
+      ├── envelope_copy(m_buf[t & RING_MASK], env)    [MessageEnvelope.hpp:56]
+      │    └── memcpy(&dst, &src, sizeof(MessageEnvelope))
+      └── m_tail.store(t+1, release)
+```
+
+---
 
 ## 5. Key Components Involved
 
-TcpBackend (src/platform/TcpBackend.cpp/.hpp)
-    Owns m_recv_queue (RingBuffer), m_impairment (ImpairmentEngine), m_wire_buf (uint8_t[8192]),
-    m_client_fds[MAX_TCP_CONNECTIONS], m_client_count. Orchestrates all receive logic.
+### `TcpBackend::recv_from_client()` (TcpBackend.cpp:224)
+Orchestrates the inbound deserialization pipeline for a single client fd. Handles the connection-loss path (`remove_client_fd`) and the queue-full path (logs but returns OK). Owns `m_wire_buf`, which is the shared receive buffer for all clients.
 
-SocketUtils (src/platform/SocketUtils.cpp/.hpp)
-    tcp_recv_frame: framing protocol (4-byte BE length prefix + payload).
-    socket_recv_exact: guaranteed full-read loop with poll-based timeout.
-    Both are stateless free functions — no object state.
+### `tcp_recv_frame()` (SocketUtils.cpp:431)
+Implements TCP framing: reads 4 bytes of big-endian length prefix, validates the frame length against `max_frame_size = 4140`, then reads exactly `frame_len` payload bytes. Uses `socket_recv_exact()` twice — once for the 4-byte header and once for the variable-length payload.
 
-Serializer (src/core/Serializer.cpp/.hpp)
-    Stateless class (static methods only). Performs big-endian deserialization of the 44-byte
-    wire header plus opaque payload bytes into MessageEnvelope fields.
+### `socket_recv_exact()` (SocketUtils.cpp:339)
+Lowest-level receive primitive. Calls `poll(POLLIN)` before each `recv()` to enforce the per-call timeout (100ms). Loops until `received == len` or an error/timeout/close occurs. Loop bound is `len` bytes (Power of 10 Rule 2).
 
-RingBuffer (src/core/RingBuffer.hpp)
-    SPSC lock-free queue using std::atomic<uint32_t>. Stores up to 64 MessageEnvelope objects.
-    push() is the producer path; pop() is the consumer path.
+### `Serializer::deserialize()` (Serializer.cpp:175)
+Stateless static method. Reconstructs a `MessageEnvelope` from a big-endian byte buffer using 11 sequential read-helper calls (`read_u8`, `read_u32`, `read_u64`). Validates two padding fields and both length bounds. Post-condition assertion always active: `envelope_valid(env)` must be true.
 
-MessageEnvelope (src/core/MessageEnvelope.hpp)
-    Plain struct: 8 fields + payload[4096]. Total sizeof ~4128+ bytes.
-    Copied by value throughout (envelope_copy = memcpy).
+### `envelope_init()` (MessageEnvelope.hpp:47)
+Inline helper. `memset(&env, 0, sizeof(MessageEnvelope))` followed by `env.message_type = INVALID`. Called immediately after the first length guard passes, so all intermediate error returns leave `env` in a known zero-filled state (except for the `buf_len < 44` path where it is not called).
 
-Timestamp (src/core/Timestamp.hpp)
-    timestamp_now_us(): inline, calls clock_gettime(CLOCK_MONOTONIC).
+### `RingBuffer::push()` (RingBuffer.hpp:98)
+SPSC ring buffer producer path. Uses acquire/release atomics on `m_tail` and `m_head`. Stores a deep copy of `env` via `envelope_copy()`. Returns `ERR_FULL` if the 64-slot queue is exhausted.
 
-Types.hpp
-    Defines all constants: SOCKET_RECV_BUF_BYTES=8192, MSG_RING_CAPACITY=64,
-    Serializer::WIRE_HEADER_SIZE=44, MSG_MAX_PAYLOAD_BYTES=4096.
+### `remove_client_fd()` (TcpBackend.cpp:199)
+Closes the socket, nulls the `m_client_fds` slot, left-shifts remaining entries to compact the array, and decrements `m_client_count`. Called only when `tcp_recv_frame()` fails.
+
+---
 
 ## 6. Branching Logic / Decision Points
 
-Decision 1 (TcpBackend.cpp:330-333): Is there already a message in m_recv_queue?
-    YES → pop and return OK immediately (fast path, no socket I/O).
-    NO  → continue to accept/poll loop.
+| Condition | Location | Outcome |
+|-----------|----------|---------|
+| `poll()` returns `<= 0` in `socket_recv_exact()` | SocketUtils.cpp:357 | Log WARNING_HI "recv poll timeout"; `socket_recv_exact` returns false |
+| `recv()` returns `< 0` | SocketUtils.cpp:368 | Log WARNING_HI "recv() failed"; return false |
+| `recv()` returns `0` (peer closed) | SocketUtils.cpp:374 | Log WARNING_HI "socket closed"; return false |
+| `frame_len > 4140` or `frame_len > 8192` | SocketUtils.cpp:456 | Log WARNING_HI "frame size exceeds limit"; return false |
+| `tcp_recv_frame()` returns false | TcpBackend.cpp:230 | Log WARNING_LO; `remove_client_fd()`; return `ERR_IO` |
+| `buf_len < 44U` in `deserialize()` | Serializer.cpp:184 | Return `ERR_INVALID`; `env` NOT initialized (see Risk 1) |
+| `padding1 != 0U` | Serializer.cpp:207 | Return `ERR_INVALID`; `env` partial (message_type/class/priority written) |
+| `padding2 != 0U` | Serializer.cpp:232 | Return `ERR_INVALID`; all header fields written; payload not copied |
+| `env.payload_length > 4096U` | Serializer.cpp:240 | Return `ERR_INVALID`; header fully written |
+| `buf_len < 44U + env.payload_length` | Serializer.cpp:246 | Return `ERR_INVALID`; header fully written; payload not copied |
+| `env.payload_length == 0U` | Serializer.cpp:251 | Skip `memcpy`; zero-payload message is valid |
+| `!envelope_valid(env)` post-condition | Serializer.cpp:256 | `NEVER_COMPILED_OUT_ASSERT` fires; process terminates unconditionally |
+| `deserialize()` returns non-OK | TcpBackend.cpp:239 | Log WARNING_LO; frame consumed; return error (discarded by caller) |
+| `push()` returns `ERR_FULL` | TcpBackend.cpp:246 | Log WARNING_HI; deserialized `env` dropped; `recv_from_client` returns OK |
 
-Decision 2 (TcpBackend.cpp:336-338): Is this a server?
-    YES → call accept_clients() to accept any new pending connections.
-    NO  → skip.
-
-Decision 3 (TcpBackend.cpp:341-344): Compute poll_count.
-    timeout_ms=0 → poll_count=0, loop never executes, return ERR_TIMEOUT.
-    timeout_ms=100 → poll_count=1.
-    timeout_ms > 5000 → poll_count capped at 50.
-
-Decision 4 (TcpBackend.cpp:348-349): Is m_client_fds[i] valid?
-    fd < 0 → skip that slot.
-    fd >= 0 → call recv_from_client.
-
-Decision 5 (SocketUtils.cpp:440, 463): Did socket_recv_exact succeed?
-    Poll returned <= 0 (timeout/error) → return false from tcp_recv_frame.
-    recv() returned 0 (graceful close) → return false.
-    recv() returned < 0 (error) → return false.
-    All bytes received → continue.
-
-Decision 6 (SocketUtils.cpp:453-458): Is frame_len within bounds?
-    frame_len > 4140 or > 8192 → reject, return false.
-    Otherwise: proceed to read payload.
-
-Decision 7 (TcpBackend.cpp:200-222): Did tcp_recv_frame fail?
-    YES → close and remove the fd from m_client_fds[], return ERR_IO.
-    NO  → proceed to deserialization.
-
-Decision 8 (Serializer.cpp:205-207): Is padding1 == 0?
-    NO → return ERR_INVALID (malformed wire frame).
-
-Decision 9 (Serializer.cpp:228-232): Is padding2 == 0?
-    NO → return ERR_INVALID.
-
-Decision 10 (Serializer.cpp:238-240): Is payload_length <= MSG_MAX_PAYLOAD_BYTES?
-    NO → return ERR_INVALID.
-
-Decision 11 (Serializer.cpp:243-246): Does buf_len >= WIRE_HEADER_SIZE + payload_length?
-    NO → return ERR_INVALID (truncated buffer).
-
-Decision 12 (TcpBackend.cpp:228-232): Did Serializer::deserialize fail?
-    YES → log and return error from recv_from_client.
-
-Decision 13 (RingBuffer.hpp:135-137): Is the ring buffer full?
-    YES → push returns ERR_FULL; TcpBackend logs WARNING_HI; message is dropped.
-    NO  → message enqueued.
-
-Decision 14 (TcpBackend.cpp:355-358): Did pop succeed after recv_from_client?
-    YES → return OK from receive_message.
-    NO  → check impairment engine, try once more, continue loop.
+---
 
 ## 7. Concurrency / Threading Behavior
 
-RingBuffer contract: Exactly one producer thread (calling push) and one consumer thread (calling pop). In TcpBackend's design, recv_from_client is the producer (calls push) and receive_message is the consumer (calls pop). Both are called from the same thread in TcpBackend (receive_message calls recv_from_client which calls push, then receive_message calls pop). This is single-threaded at the TcpBackend level, satisfying the SPSC contract.
+`TcpBackend` has no internal threads. The entire `recv_from_client()` call executes on the calling thread.
 
-Memory ordering: push uses m_head.load(acquire) to observe freed slots, then m_tail.store(release) to publish data. pop uses m_tail.load(acquire) to observe new data, then m_head.store(release) to free slots. The acquire/release pair forms a synchronizes-with relationship.
+`RingBuffer` is SPSC. In this flow, the producer (`push()`) and consumer (`pop()` in `receive_message()`) both execute on the same thread in sequential order: `push()` is called inside `recv_from_client()`, and `pop()` is called in the outer `receive_message()` loop body after `poll_clients_once()` returns. The acquire/release ordering on `m_tail` and `m_head` is semantically correct.
 
-socket_recv_exact uses poll() as a blocking wait before each recv(). The poll timeout of 100 ms per attempt caps the maximum blocking time per client per outer loop iteration.
+`m_wire_buf` is a plain `uint8_t[8192]` member — not atomic, not mutex-protected. The inner loop in `poll_clients_once()` processes clients sequentially; `m_wire_buf` is overwritten for each client before `deserialize()` reads it. This is safe in single-threaded use. Concurrent calls to `recv_from_client()` from different threads would race on `m_wire_buf`.
 
-No mutexes or condition variables are used. No locking around m_client_fds manipulation. [ASSUMPTION: TcpBackend is single-threaded; concurrent calls to receive_message would cause data races on m_client_fds and m_wire_buf.]
+`socket_recv_exact()` blocks the calling thread for up to 100ms per `poll()` call. For `MAX_TCP_CONNECTIONS = 8` clients all idle, the per-attempt blocking is `8 × 100ms = 800ms`.
 
-timestamp_now_us uses CLOCK_MONOTONIC, which is per-thread safe on POSIX.
+`Serializer::deserialize()` is a fully re-entrant static method with no shared state. Multiple threads can call it concurrently with distinct `(buf, env)` pairs without synchronization.
+
+---
 
 ## 8. Memory & Ownership Semantics (C/C++ Specific)
 
-m_wire_buf (TcpBackend member, uint8_t[8192]):
-    Stack-like semantics; member variable allocated with TcpBackend object.
-    Written by tcp_recv_frame into TcpBackend::recv_from_client.
-    Passed by pointer to Serializer::deserialize. NOT thread-safe if two threads call
-    recv_from_client simultaneously (single shared buffer for all clients).
+| Object | Location | Ownership / Lifetime |
+|--------|----------|----------------------|
+| `m_wire_buf[8192]` | Member of `TcpBackend` | Owned by `TcpBackend`; valid for object lifetime. Overwritten by `tcp_recv_frame()` per client per call. Contents are the last received frame after `recv_from_client` returns. |
+| `out_len` | Stack local in `recv_from_client()` | Holds byte count written by `tcp_recv_frame()`. Discarded on return. |
+| `header[4U]` | Stack local in `tcp_recv_frame()` | 4-byte ephemeral array for the length prefix. |
+| `env` | Stack local in `recv_from_client()` | Populated by `deserialize()`; passed by const-ref to `push()`. Destroyed when `recv_from_client()` returns. Its content is immortalized in `m_buf[slot]` before destruction. |
+| `m_recv_queue.m_buf[64]` | Inline member of `RingBuffer` | Owns 64 deep-copied `MessageEnvelope` objects. Written by `push()` (release store), read by `pop()` (acquire load). |
+| Client fd in `m_client_fds[i]` | Owned by `TcpBackend` | Closed in `remove_client_fd()` on failure or in `TcpBackend::close()` on teardown. |
 
-MessageEnvelope env (local to recv_from_client, TcpBackend.cpp:226):
-    Declared on the stack of recv_from_client. Populated by Serializer::deserialize.
-    Passed by const reference to RingBuffer::push, which internally copies it via envelope_copy
-    (memcpy of sizeof(MessageEnvelope) bytes) into m_buf[slot] in the ring buffer.
+**Copy chain per received message:**
+1. `socket_recv_exact()` writes raw bytes into `TcpBackend::m_wire_buf`.
+2. `Serializer::deserialize()` reads `m_wire_buf` and writes fields into `env` (stack local in `recv_from_client()`).
+3. `RingBuffer::push()` calls `envelope_copy()` to deep-copy `env` into `m_buf[slot]` — `sizeof(MessageEnvelope)` ≈ 4140 bytes.
+4. Later, `RingBuffer::pop()` calls `envelope_copy()` to deep-copy `m_buf[slot]` into the caller's envelope — a third `sizeof(MessageEnvelope)` copy.
 
-m_buf[MSG_RING_CAPACITY] (RingBuffer member, inline static allocation):
-    64 MessageEnvelope objects embedded in the RingBuffer object.
-    Written by push (producer), read by pop (consumer) with acquire/release ordering.
+No heap allocation (`new`, `malloc`) occurs anywhere in this path. All buffers are statically sized.
 
-envelope_copy: always a full memcpy of sizeof(MessageEnvelope). For a 4096-byte payload array
-plus header fields, this is approximately 4128+ bytes per copy. Two copies occur:
-    1. Serializer writes env on recv_from_client's stack.
-    2. RingBuffer::push copies that env into m_buf[slot].
-    3. RingBuffer::pop copies m_buf[slot] into the caller's envelope (a third copy).
-
-No dynamic allocation anywhere on this path. All buffers are statically sized.
-
-envelope_init uses memset (SocketUtils calls indirectly through Serializer).
-Padding bytes are validated on read, enforcing wire format correctness.
+---
 
 ## 9. Error Handling Flow
 
-ERR_TIMEOUT (Result::ERR_TIMEOUT = 1):
-    Returned by receive_message when the outer polling loop exhausts all poll_count attempts
-    without a message arriving. Propagates to DeliveryEngine::receive which returns it to
-    the application.
+```
+recv_from_client()
+  tcp_recv_frame() fails:
+    poll() timeout (100ms)           → WARNING_HI in socket_recv_exact; return false
+    recv() error                     → WARNING_HI in socket_recv_exact; return false
+    recv() == 0 (peer closed)        → WARNING_HI in socket_recv_exact; return false
+    frame_len oversized              → WARNING_HI in tcp_recv_frame; return false
+  → TcpBackend: WARNING_LO; remove_client_fd(); return ERR_IO (discarded by caller)
 
-ERR_IO (Result::ERR_IO = 5):
-    Returned by recv_from_client when tcp_recv_frame fails (socket closed, poll timeout, recv error).
-    TcpBackend closes and removes the offending fd from m_client_fds[].
-    The outer receive_message loop continues to other clients.
+  deserialize() fails:
+    buf_len < 44                     → ERR_INVALID; env NOT initialized (Risk 1)
+    padding1 != 0                    → ERR_INVALID; env partial
+    padding2 != 0                    → ERR_INVALID; env partial
+    payload_length > 4096            → ERR_INVALID; header populated; payload not copied
+    buf_len < 44 + payload_length    → ERR_INVALID; header populated; payload not copied
+  → TcpBackend: WARNING_LO; return error (discarded by poll_clients_once)
+  Note: TCP bytes consumed from kernel; frame permanently lost; fd remains open.
 
-ERR_INVALID (Result::ERR_INVALID = 4):
-    Returned by Serializer::deserialize if:
-        - Buffer too short (< 44 bytes).
-        - Padding bytes non-zero.
-        - payload_length > 4096.
-        - Total buffer insufficient for header + payload.
-    Logged at WARNING_LO, returned from recv_from_client, result discarded in receive_message
-    polling loop (with (void) cast at line 351). The bad frame is silently dropped.
+  NEVER_COMPILED_OUT_ASSERT at Serializer.cpp:256:
+    source_id == 0 or message_type == INVALID in wire data → process terminates (Risk 3)
 
-ERR_FULL (Result::ERR_FULL = 2):
-    Returned by RingBuffer::push if the 64-slot queue is exhausted.
-    Logged at WARNING_HI. The deserialized envelope is discarded. recv_from_client still
-    returns OK (the frame was received; overflow is a policy decision, not an I/O error).
+  push() ERR_FULL                    → WARNING_HI; deserialized env dropped; OK returned
+```
 
-Assertion failures (debug builds only):
-    assert(m_open) in receive_message: fires if called before init or after close.
-    assert(fd >= 0) in tcp_recv_frame and socket_recv_exact.
-    assert(offset == WIRE_HEADER_SIZE) in Serializer::deserialize: fires if read logic drifts.
-    assert(envelope_valid(env)) at end of deserialize: fires if deserialization produced
-    an invalid envelope despite passing all earlier checks.
+Key observation: `poll_clients_once()` at TcpBackend.cpp:338 discards `recv_from_client()` return values via `(void)` cast. Errors from deserialization and `ERR_IO` from connection loss are both swallowed. The only externally visible signal is the log entry.
+
+---
 
 ## 10. External Interactions
 
-POSIX kernel (socket I/O):
-    poll(fd, POLLIN, timeout_ms) — called once per partial-read iteration.
-    recv(fd, buf, len, 0) — called one or more times per logical read (partial read handling).
-    Both in socket_recv_exact (SocketUtils.cpp:337-385).
-    accept(m_listen_fd, NULL, NULL) — called in socket_accept for server mode.
+### POSIX socket I/O
+- `poll({fd, POLLIN}, 1, 100)` (SocketUtils.cpp:357): called before each `recv()` in `socket_recv_exact()`. Blocks up to 100ms if no data is available.
+- `recv(fd, buf, len, 0)` (SocketUtils.cpp:366): called after each successful `poll()`. May return fewer bytes than requested.
+- `close(fd)` (SocketUtils.cpp:280): called via `remove_client_fd()` on connection loss.
 
-CLOCK_MONOTONIC:
-    clock_gettime(CLOCK_MONOTONIC, &ts) — called in timestamp_now_us() once per outer loop
-    iteration (TcpBackend.cpp:361), and also whenever delayed messages are collected.
+### memcpy (standard library)
+- In `envelope_init()`: `memset(&env, 0, sizeof(MessageEnvelope))`.
+- In `Serializer::deserialize()`: `memcpy(env.payload, &buf[44], env.payload_length)` for the opaque payload bytes.
+- In `envelope_copy()` inside `RingBuffer::push()`: `memcpy(&dst, &src, sizeof(MessageEnvelope))`.
 
-Logger:
-    Logger::log() called at WARNING_LO, WARNING_HI, and INFO severity at various points.
-    Logging is the only externally visible side effect on non-error paths.
-    [ASSUMPTION: Logger is thread-safe or single-threaded; implementation not shown.]
+### Logger
+`Logger::log()` called at WARNING_LO and WARNING_HI severity for various error conditions. No logging occurs on the happy path inside `Serializer::deserialize()` itself.
 
-ImpairmentEngine:
-    collect_deliverable() is called once per outer loop iteration to drain latency-buffered
-    messages. Its internal state is not traced here (out of scope for this use case).
+---
 
 ## 11. State Changes / Side Effects
 
-TcpBackend state changes:
-    m_client_fds[i] set to -1 and m_client_count decremented if tcp_recv_frame fails
-    (connection loss cleanup in recv_from_client, TcpBackend.cpp:206-218).
-    m_client_fds[m_client_count] and ++m_client_count if accept_clients accepts a new connection.
+| State | Modified by | Effect |
+|-------|-------------|--------|
+| `m_wire_buf[0..frame_len-1]` | `socket_recv_exact()` via `tcp_recv_frame()` | Overwritten with the received frame bytes |
+| `m_client_fds[i]`, `m_client_count` | `remove_client_fd()` | Slot nulled; array compacted; count decremented on connection loss |
+| `m_recv_queue.m_buf[slot]` | `RingBuffer::push()` (via `envelope_copy`) | Deep copy of deserialized `env` stored |
+| `m_recv_queue.m_tail` | `RingBuffer::push()` (release store) | Tail advances by 1 on successful enqueue |
+| Kernel TCP receive buffer | `recv()` in `socket_recv_exact()` | `frame_len + 4` bytes consumed from kernel |
+| OS file descriptor table | `close()` via `remove_client_fd()` | fd released on connection loss |
 
-RingBuffer state changes:
-    m_tail incremented (release store) by push when a message is enqueued.
-    m_head incremented (release store) by pop when a message is consumed.
+`Serializer::deserialize()` has no class-level state. `SocketUtils` functions are stateless free functions. No persistent disk, database, or hardware state is modified.
 
-Serializer: no state (static methods only). No side effects beyond writing the output envelope.
+---
 
-SocketUtils: no object state. Side effects are kernel-level (bytes consumed from TCP socket
-receive buffer; fd state potentially changed to closed).
+## 12. Sequence Diagram
 
-MessageEnvelope env (local to recv_from_client): created on stack, destroyed on return.
-    Its content is immortalized inside m_buf[slot] before destruction.
+```mermaid
+sequenceDiagram
+    participant PollOnce as poll_clients_once
+    participant RecvClient as recv_from_client
+    participant SockUtils as SocketUtils
+    participant OS as POSIX kernel
+    participant Deser as Serializer::deserialize
+    participant Ring as RingBuffer
 
-## 12. Sequence Diagram (ASCII)
+    PollOnce->>RecvClient: recv_from_client(client_fd, 100U)
+    Note over RecvClient: assert fd>=0, m_open
 
-Caller          DeliveryEngine    TcpBackend          SocketUtils           Serializer    RingBuffer
-  |                   |               |                     |                    |              |
-  |---receive()------>|               |                     |                    |              |
-  |                   |---recv_msg()->|                     |                    |              |
-  |                   |               |---pop(env)--------->|                    |              |
-  |                   |               |   [empty]           |                    |              |
-  |                   |               |<--ERR_EMPTY---------|                    |              |
-  |                   |               |                     |                    |              |
-  |                   |               |---accept_clients()  |                    |              |
-  |                   |               |  (server mode)      |                    |              |
-  |                   |               |                     |                    |              |
-  |                   |               |== polling loop ==   |                    |              |
-  |                   |               |                     |                    |              |
-  |                   |               |---recv_from_client(fd, 100ms)           |              |
-  |                   |               |     |---tcp_recv_frame(fd,...,&out_len)->|              |
-  |                   |               |     |       |---socket_recv_exact(4)-->[kernel:poll]   |
-  |                   |               |     |       |                          [kernel:recv]   |
-  |                   |               |     |       |   [parse 4-byte BE len = frame_len]      |
-  |                   |               |     |       |---socket_recv_exact(frame_len)->[kernel] |
-  |                   |               |     |<------true, *out_len=frame_len                   |
-  |                   |               |     |---deserialize(m_wire_buf, out_len, env)---------->|
-  |                   |               |     |       envelope_init(env) [memset]                |
-  |                   |               |     |       read_u8/u32/u64 fields...                  |
-  |                   |               |     |       memcpy(payload)                            |
-  |                   |               |     |<------OK, env populated ----------------------->|
-  |                   |               |     |---push(env)--------------------------------->    |
-  |                   |               |     |                                           [m_tail++]
-  |                   |               |     |<--OK---------------------------------------      |
-  |                   |               |                                                         |
-  |                   |               |---pop(envelope)------------------------------------>    |
-  |                   |               |<--OK, envelope filled------------------------------    |
-  |                   |<--OK----------|                     |                    |              |
-  |<--OK--------------|               |                     |                    |              |
+    RecvClient->>SockUtils: tcp_recv_frame(fd, m_wire_buf, 8192, 100, &out_len)
+    SockUtils->>OS: poll(POLLIN, 100ms) + recv() — 4 bytes
+    OS-->>SockUtils: header[0..3]
+    Note over SockUtils: frame_len = BE decode(header); validate <= 4140
+    SockUtils->>OS: poll(POLLIN, 100ms) + recv() — frame_len bytes
+    OS-->>SockUtils: frame_len bytes into m_wire_buf
+    SockUtils-->>RecvClient: true / false
+
+    alt tcp_recv_frame fails
+        RecvClient->>SockUtils: socket_close(fd) via remove_client_fd()
+        SockUtils->>OS: close(fd)
+        RecvClient-->>PollOnce: ERR_IO (discarded via void cast)
+    else tcp_recv_frame succeeds
+        RecvClient->>Deser: deserialize(m_wire_buf, out_len, env)
+        Note over Deser: assert buf!=nullptr; buf_len >= 44
+        Deser->>Deser: envelope_init(env) — memset + INVALID
+        Deser->>Deser: read_u8 × 3 (type, class, priority)
+        Deser->>Deser: read_u8 → padding1; validate == 0
+        Deser->>Deser: read_u64 × 3 (msg_id, timestamp, expiry)
+        Deser->>Deser: read_u32 × 3 (src_id, dst_id, payload_len)
+        Deser->>Deser: read_u32 → padding2; validate == 0
+        Deser->>Deser: assert offset == 44
+        Deser->>Deser: validate payload_length <= 4096
+        Deser->>Deser: validate buf_len >= 44+payload_length
+        Deser->>Deser: memcpy(env.payload, buf+44, payload_length)
+        Deser->>Deser: NEVER_COMPILED_OUT_ASSERT(envelope_valid(env))
+        Deser-->>RecvClient: OK / ERR_INVALID
+
+        alt deserialize fails
+            RecvClient-->>PollOnce: error (discarded via void cast)
+        else deserialize OK
+            RecvClient->>Ring: push(env)
+            Note over Ring: envelope_copy into m_buf[slot]; release store m_tail
+            Ring-->>RecvClient: OK / ERR_FULL
+            alt ERR_FULL
+                Note over RecvClient: WARNING_HI; env dropped
+            end
+            RecvClient-->>PollOnce: OK (void cast)
+        end
+    end
+```
+
+---
 
 ## 13. Initialization vs Runtime Flow
 
-Initialization phase (TcpBackend::init, TcpBackend.cpp:48-112):
-    m_recv_queue.init() — zeroes m_head and m_tail (relaxed stores); safe before concurrent access.
-    m_impairment.init(imp_cfg) — sets up impairment engine state.
-    For server mode: socket_create_tcp, socket_set_reuseaddr, socket_bind, socket_listen.
-    For client mode: socket_create_tcp, socket_set_reuseaddr, socket_connect_with_timeout.
-    m_open set to true. All heap-equivalent state is in-object (no malloc/new).
-    m_wire_buf is uninitialized at construction; first written by recv_from_client.
+### Initialization (one-time, during `TcpBackend::init()`)
+- `m_recv_queue.init()` (RingBuffer.hpp:78): relaxed stores of 0 to `m_head` and `m_tail`. Asserts `MSG_RING_CAPACITY == 64` and `(64 & 63) == 0` (power-of-two check).
+- `m_client_fds[0..7]` set to -1 in constructor (TcpBackend.cpp:34–36).
+- `m_wire_buf` value-initialized to zero (`m_wire_buf{}`, TcpBackend.cpp:29).
+- `m_open` set to true on successful `init()`.
 
-Runtime phase (receive_message called repeatedly):
-    Every call is self-contained: pop first, then accept, then recv loop, then return.
-    No persistent state is mutated between calls except:
-        m_recv_queue (producer=recv_from_client, consumer=receive_message).
-        m_client_fds / m_client_count (updated by accept_clients, recv_from_client).
-        m_impairment internal state (not traced here).
+### Runtime (each call to `recv_from_client()`)
+- `m_wire_buf` is overwritten by `tcp_recv_frame()` on every successful call.
+- `env` (stack local) is freshly initialized by `envelope_init()` each call.
+- `m_recv_queue.m_tail` advances by 1 per successful `push()`.
+- `m_client_fds` and `m_client_count` are modified only on connection loss.
 
-Teardown (TcpBackend::close):
-    All fds closed, m_client_count = 0, m_open = false.
-    Destructor calls close() if m_open is still true.
+---
 
 ## 14. Known Risks / Observations
 
-Risk 1 — Single shared m_wire_buf:
-    TcpBackend has one m_wire_buf[8192] shared across all client connections. The inner loop
-    processes clients sequentially but each call to recv_from_client overwrites the same buffer.
-    This is safe as-is (single thread), but is a latent hazard if concurrency is ever introduced.
+### Risk 1 — `env` uninitialized on the earliest `deserialize()` error path
+If `buf_len < 44U` (Serializer.cpp:184), `envelope_init()` has not been called. The `env` local variable in `recv_from_client()` is returned in its uninitialized stack state. `recv_from_client()` then checks `result_ok(res)` (line 239) and returns the error without touching `env`. The `push()` is not called. The caller (`poll_clients_once`) discards the return value. In practice no code reads the invalid `env` in this path, but it is an implicit contract: callers of `deserialize()` must not access `env` when `ERR_INVALID` is returned from the first guard.
 
-Risk 2 — Message silently dropped on RingBuffer full:
-    If the consumer is slow, push() returns ERR_FULL and the deserialized frame is discarded
-    permanently. WARNING_HI is logged but there is no flow-control feedback to the sender.
-    Under sustained load this could cause silent data loss.
+### Risk 2 — Deserialize failure silently consumes the TCP frame
+If any `ERR_INVALID` condition fires in `deserialize()`, the TCP bytes have already been consumed from the kernel socket buffer by `tcp_recv_frame()`. There is no mechanism to "unread" them. The frame is permanently lost; the connection remains open. Only a WARNING_LO log entry indicates this. No flow-control signal is sent to the peer.
 
-Risk 3 — recv_from_client result discarded:
-    At TcpBackend.cpp:351, recv_from_client is called with (void), so ERR_IO (connection closed)
-    is silently ignored in the outer loop. The fd cleanup still happens inside recv_from_client,
-    but the caller never observes the loss of a connection except indirectly.
+### Risk 3 — Post-condition assertion terminates the process for `source_id == 0`
+`NEVER_COMPILED_OUT_ASSERT(envelope_valid(env))` at Serializer.cpp:256 fires unconditionally if `env.source_id == 0` (= `NODE_ID_INVALID`) or `env.message_type == INVALID (255U)`. A remotely-sent TCP frame with a zero source_id passes all structural validation but causes process termination rather than returning `ERR_INVALID`. This is a safety-vs-availability trade-off: the design prioritizes detecting malformed frames at the assert level rather than tolerating them.
 
-Risk 4 — Three full MessageEnvelope copies per message:
-    Each message is copied: once from m_wire_buf into recv_from_client's local env; once from env
-    into m_buf[slot] by push; once from m_buf[slot] to the caller's envelope by pop. Each copy
-    is sizeof(MessageEnvelope) which is 4096 + ~32 bytes ≈ 4128 bytes.
+### Risk 4 — Shared `m_wire_buf` across all clients
+`TcpBackend` has one `m_wire_buf[8192]` shared across all client connections. The inner loop in `poll_clients_once()` processes clients sequentially; each call to `recv_from_client()` overwrites the same buffer before moving to the next client. This is safe in single-threaded use but would become a data race if the loop were parallelized.
 
-Risk 5 — No integrity check on wire payload:
-    There is no CRC, hash, or sequence number checked after deserialization. Bit errors in
-    transit (e.g., under impairment simulation or non-TLS paths) produce silently corrupt
-    envelopes if they do not violate the padding or length constraints.
+### Risk 5 — `poll_clients_once()` discards `recv_from_client()` return values
+At TcpBackend.cpp:338, `recv_from_client()` is called with `(void)`. Both `ERR_IO` (connection loss) and deserialization errors are swallowed. The outer `receive_message()` loop has no visibility into whether a frame was received and dropped vs. no frame arrived at all. Both cases look identical: the `m_recv_queue.pop()` after `poll_clients_once()` returns `ERR_EMPTY`.
 
-Risk 6 — poll_count = 0 if timeout_ms = 0:
-    A timeout_ms of 0 causes poll_count = 0. The inner recv loop never executes. Only
-    the initial fast-path pop is attempted. This may be intentional for non-blocking checks,
-    but should be documented in the API contract.
+### Risk 6 — `RingBuffer::push()` `ERR_FULL` drops deserialized message silently (from caller's view)
+WARNING_HI is logged, but the return value from `push()` is checked and `recv_from_client()` returns `OK` regardless. The outer loop continues without knowing a message was dropped. A sustained ring-full condition produces repeated WARNING_HI entries with no backpressure mechanism.
+
+### Risk 7 — Three full `MessageEnvelope` copies per received message
+Each received message is copied three times: (1) wire bytes → `deserialize()` builds `env` on stack; (2) `push()` copies `env` into `m_buf[slot]`; (3) `pop()` copies `m_buf[slot]` into the caller's envelope. Each copy is `sizeof(MessageEnvelope)` ≈ 4140 bytes.
+
+### Risk 8 — Unchecked enum cast in `deserialize()`
+`static_cast<MessageType>(read_u8(buf, 0))` produces an out-of-range `MessageType` value if the wire byte is not in `{0, 1, 2, 3, 255}`. The post-condition assertion catches `MessageType::INVALID (255)` but not other out-of-range values. An unrecognized byte produces implementation-defined behavior (C++17 scoped enum with out-of-range value). No range guard exists between the `read_u8` call and the `static_cast`.
+
+---
 
 ## 15. Unknowns / Assumptions
 
-[ASSUMPTION 1] DeliveryEngine is the sole caller of receive_message in production.
-    No other component calls TcpBackend::receive_message directly based on code read.
+All facts below are sourced directly from the code at the stated file paths and line numbers.
 
-[ASSUMPTION 2] TcpBackend is operated single-threaded.
-    No mutex protects m_wire_buf, m_client_fds, or m_client_count. The design requires
-    that only one thread calls receive_message/send_message at a time.
+**[CONFIRMED]** `WIRE_HEADER_SIZE = 44U` (Serializer.hpp:47). Derivation: 1+1+1+1+8+8+4+4+8+4+4 = 44 bytes.
 
-[ASSUMPTION 3] Logger::log() is thread-safe or called from a single thread.
-    The Logger implementation was not read; assumed safe based on usage pattern.
+**[CONFIRMED]** `SOCKET_RECV_BUF_BYTES = 8192U` (Types.hpp): `m_wire_buf` capacity.
 
-[ASSUMPTION 4] ImpairmentEngine::collect_deliverable() is side-effect free with respect to
-    the TCP socket and does not call any socket APIs.
+**[CONFIRMED]** `MSG_MAX_PAYLOAD_BYTES = 4096U` (Types.hpp): max payload bytes; `max_frame_size = 44 + 4096 = 4140`.
 
-[ASSUMPTION 5] envelope_valid() postcondition after deserialize:
-    The assertion assert(envelope_valid(env)) at Serializer.cpp:254 will not fire for any
-    buffer that passes all prior checks, because message_type, payload_length, and source_id
-    are already validated. However, if message_type maps to MessageType::INVALID (0xFF) via
-    static_cast, or source_id == NODE_ID_INVALID (0), the assertion would fire.
-    [The wire format allows any byte value for message_type; only INVALID = 255 is rejected.]
+**[CONFIRMED]** `MSG_RING_CAPACITY = 64U` (Types.hpp): RingBuffer slot count.
 
-[ASSUMPTION 6] MSG_RING_CAPACITY (64) is a power of two.
-    Asserted in RingBuffer::init(). RING_MASK = 63. The push/pop slot calculation
-    (t & RING_MASK, h & RING_MASK) depends on this invariant.
+**[CONFIRMED]** `MAX_TCP_CONNECTIONS = 8U` (Types.hpp): `m_client_fds` array bound.
 
-[UNKNOWN 1] Whether m_recv_queue is the same object accessed by send_message's impairment
-    delayed-message path. Review of send_message shows it uses m_recv_queue.push() for
-    inbound delayed envelopes in receive_message's polling loop; it appears both paths
-    share the same queue, which could cause contention if threading is introduced.
+**[CONFIRMED]** `NODE_ID_INVALID = 0U` (Types.hpp): `envelope_valid()` rejects `source_id == 0`.
 
-[UNKNOWN 2] Whether Serializer::deserialize validates message_type against the known enum values.
-    The code does static_cast<MessageType>(read_u8(...)) without checking if the byte value
-    is a valid MessageType enumerator. An unrecognized byte would produce an out-of-range enum,
-    which is undefined behavior under C++17 for a scoped enum. envelope_valid() would catch
-    MessageType::INVALID (255) but not all invalid values.
+**[CONFIRMED]** `envelope_init()` at MessageEnvelope.hpp:47: `memset` + `env.message_type = INVALID`.
+
+**[CONFIRMED]** `envelope_valid()` at MessageEnvelope.hpp:63: checks `message_type != INVALID`, `payload_length <= 4096`, `source_id != 0`.
+
+**[CONFIRMED]** `NEVER_COMPILED_OUT_ASSERT` is always active, independent of `NDEBUG`. Defined in `src/core/Assert.hpp`.
+
+**[CONFIRMED]** `poll_clients_once()` discards `recv_from_client()` return value via `(void)` cast at TcpBackend.cpp:338.
+
+**[CONFIRMED]** `recv_from_client()` returns `OK` even when `push()` returns `ERR_FULL` (TcpBackend.cpp:251).
+
+**[ASSUMPTION]** `Logger::log()` is called from a single thread (no concurrent access to the Logger sink from `TcpBackend`). Logger implementation was not read.
+
+**[ASSUMPTION]** The `recv_from_client()` timeout parameter (100ms) is always the value passed by `poll_clients_once()`; the `ChannelConfig::recv_timeout_ms` field is not consulted here.

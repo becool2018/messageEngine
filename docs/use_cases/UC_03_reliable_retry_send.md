@@ -1,636 +1,630 @@
+# UC_03 — Reliable-with-Retry Send
+
+**HL Group:** HL-3 — User sends a message requiring guaranteed delivery
+**Actor:** User
+**Requirement traceability:** REQ-3.3.3, REQ-3.2.4, REQ-3.2.5, REQ-3.2.6, REQ-3.2.1, REQ-3.2.3, REQ-4.1.2, REQ-6.1.5, REQ-6.1.6
+
+---
+
 ## 1. Use Case Overview
 
-Use Case: UC_03 — Reliable-with-Retry Send with Exponential Backoff
+### Clear description of what triggers this flow
 
-A Client process sends a DATA message carrying reliability_class = RELIABLE_RETRY.
-The message is transmitted immediately, registered in both the AckTracker and
-RetryManager, and then retransmitted by pump_retries() on each main-loop pass
-until either an ACK is received (cancelling the retry entry) or the message
-expires / exhausts its retry budget.
+A client application populates a `MessageEnvelope` with `message_type = DATA`,
+`reliability_class = RELIABLE_RETRY`, fills in `destination_id`, `priority`,
+`expiry_time_us`, `payload`, and `payload_length`, then calls
+`DeliveryEngine::send(env, now_us)`. The engine is initialized with a
+`TcpBackend` instance and a `ChannelConfig` that supplies `recv_timeout_ms`,
+`max_retries`, and `retry_backoff_ms`. The TCP connection to the server peer
+was established during `TcpBackend::init()`.
 
-Exponential backoff: the initial backoff interval (cfg.channels[0].retry_backoff_ms,
-read from ChannelConfig) is doubled on every collect_due() pass, capped hard at
-60 000 ms (60 seconds). All time values are in microseconds internally.
+This use case covers the send phase, initial transport transmission, ACK
+tracking registration, retry scheduling, and the retry pump loop. The ACK
+cancellation path is documented in UC_12. The deduplication path on the
+receiver side is part of UC_09 / UC_07.
 
-Requirement coverage: CLAUDE.md §3.2 (Retry logic), §3.3 (Reliable with retry
-and dedupe), application_requirements §5 (Impairment engine), §3.2 (Messaging
-utilities).
+### Expected outcome (single goal)
 
+The envelope is stamped, sent over TCP, registered in both `AckTracker` (as
+`PENDING`) and `RetryManager` (as `active = true` with `next_retry_us = now_us`
+for immediate first retry). On each subsequent `pump_retries(now_us)` call, the
+`RetryManager::collect_due()` checks expiry, exhaustion, and due-time for each
+active slot. Due slots are copied to an output buffer, their `retry_count` is
+incremented, and the backoff is doubled via `advance_backoff()` (capped at 60
+seconds). Each collected envelope is retransmitted via `send_via_transport()`.
+This continues until an ACK arrives (cancels the retry slot via
+`RetryManager::on_ack()`), the retry count reaches `max_retries` (exhaustion),
+or `expiry_time_us` passes (expiry).
+
+---
 
 ## 2. Entry Points
 
-Primary entry point:
-    Client.cpp :: main()  (line 162)
-      └─ send_test_message()  (line 74)
-           └─ DeliveryEngine::send()  (DeliveryEngine.cpp line 75)
+### Exact functions, threads, or events where execution begins
 
-Secondary / recurring entry point (retry pump):
-    Client.cpp :: wait_for_echo()  (line 125)
-      └─ engine.pump_retries()  (line 151)
-           └─ DeliveryEngine::pump_retries()  (DeliveryEngine.cpp line 225)
+- **Primary entry point (initial send):** `DeliveryEngine::send(MessageEnvelope& env,
+  uint64_t now_us)` — `DeliveryEngine.cpp` line 77.
+- **Secondary entry point (retry pump):** `DeliveryEngine::pump_retries(uint64_t now_us)`
+  — `DeliveryEngine.cpp` line 227. Called periodically by the application loop.
+- **Tertiary entry point (ACK cancels retry):** `DeliveryEngine::receive(MessageEnvelope&
+  env, uint32_t timeout_ms, uint64_t now_us)` — `DeliveryEngine.cpp` line 149.
+  When the received envelope is an ACK, calls `RetryManager::on_ack()`.
+- **Pre-condition for send:** `DeliveryEngine::init()` completed, `m_initialized = true`.
+  `AckTracker` and `RetryManager` both initialized (all slots `FREE` / `inactive`).
 
-Tertiary entry point (ACK receipt cancels retry):
-    Client.cpp :: wait_for_echo()
-      └─ engine.receive()  (line 138)
-           └─ DeliveryEngine::receive()  (DeliveryEngine.cpp line 147)
-                └─ RetryManager::on_ack()  (RetryManager.cpp line 97)
+### Example: main(), ISR, callback, RPC handler, etc.
 
+Application calls `DeliveryEngine::send()` from its main loop, then enters a
+receive/pump loop. No ISR or RPC mechanism is present in the codebase.
+
+---
 
 ## 3. End-to-End Control Flow (Step-by-Step)
 
---- Phase A: Initialization (runs once before send/receive loop) ---
+**--- Phase A: Transport send (identical to UC_01 steps 1–7) ---**
 
-A1. Client.cpp main() parses argv; sets peer_ip="127.0.0.1", peer_port=9000.
-A2. transport_config_default(cfg) zero-fills TransportConfig.
-A3. cfg.channels[0] configured: reliability=RELIABLE_RETRY, max_retries=3,
-    recv_timeout_ms=100. retry_backoff_ms is set by channel_config_default()
-    [ASSUMPTION: channel_config_default sets retry_backoff_ms to a non-zero value,
-    e.g. 1000 ms; exact value not visible without ChannelConfig.cpp].
-A4. TcpBackend transport; transport.init(cfg):
-      socket_create_tcp() -> fd
-      socket_set_reuseaddr(fd)
-      socket_connect_with_timeout(fd, "127.0.0.1", 9000, 5000ms)
-      m_client_fds[0] = fd, m_client_count=1, m_open=true
-A5. DeliveryEngine engine; engine.init(&transport, cfg.channels[0], node_id=2):
-      m_ack_tracker.init()    -- zeroes ACK_TRACKER_CAPACITY slots
-      m_retry_manager.init()  -- zeroes ACK_TRACKER_CAPACITY RetryEntry slots
-      m_dedup.init()          -- zeroes DEDUP_WINDOW_SIZE window entries
-      m_id_gen.init(seed=2)
-      m_initialized = true
+1. **Application** constructs `MessageEnvelope` with
+   `reliability_class = RELIABLE_RETRY`, sets `expiry_time_us` (e.g.,
+   `timestamp_deadline_us(now_us, 5000U) = now_us + 5 000 000 µs`), and calls
+   `DeliveryEngine::send(env, now_us)`.
 
---- Phase B: First Send (msg_idx=1 of 5) ---
+2. **`DeliveryEngine::send()`** fires precondition assertions. Stamps
+   `env.source_id = m_local_id`, `env.message_id = m_id_gen.next()`,
+   `env.timestamp_us = now_us`.
 
-B1. now_us = timestamp_now_us()  [clock_gettime(CLOCK_MONOTONIC)]
-B2. send_test_message(engine, peer_id=1, msg_num=1, now_us):
-      envelope_init(env)       -- memset to 0, message_type=INVALID
-      snprintf(payload_buf, "Hello from client #1")
-      memcpy(env.payload, payload_buf, len)
-      env.payload_length = len
-      env.message_type   = DATA
-      env.destination_id = 1
-      env.priority       = 0
-      env.reliability_class = RELIABLE_RETRY
-      env.timestamp_us   = now_us
-      env.expiry_time_us = timestamp_deadline_us(now_us, 5000)
-                         = now_us + 5 000 000 us   (5-second window)
+3. Calls `send_via_transport(env)`. This dispatches to
+   `TcpBackend::send_message()`, which serializes the envelope, runs impairment
+   evaluation (default: passthrough with immediate delay), sends via
+   `send_to_all_clients()` + `flush_delayed_to_clients()`, and returns
+   `Result::OK`. (Full detail in UC_01 steps 4–23.)
 
-B3. engine.send(env, now_us):  [DeliveryEngine.cpp line 75]
-      assert(m_initialized); assert(now_us > 0)
-      env.source_id  = 2               (m_local_id)
-      env.message_id = m_id_gen.next() (e.g. 1)
-      env.timestamp_us = now_us
+4. **`DeliveryEngine::send()`** checks `res != Result::OK` (line 94, passes).
 
-      -- B3a: Immediate transport send --
-      send_via_transport(env):
-        assert(m_initialized); assert(m_transport != nullptr); assert(envelope_valid(env))
-        res = m_transport->send_message(env)
-          --> TcpBackend::send_message(env):
-                Serializer::serialize(env, m_wire_buf, SOCKET_RECV_BUF_BYTES, wire_len)
-                now_us2 = timestamp_now_us()
-                m_impairment.process_outbound(env, now_us2)
-                  [if impairments disabled -> returns OK; no drop]
-                m_impairment.collect_deliverable(now_us2, ...) -> delayed_count=0
-                tcp_send_frame(m_client_fds[0], m_wire_buf, wire_len, send_timeout_ms)
-                returns Result::OK
-        returns Result::OK
+**--- Phase B: ACK tracking registration ---**
 
-      -- B3b: ACK tracking --
-      env.reliability_class == RELIABLE_RETRY -> enters if block (line 100-101)
-      ack_deadline = timestamp_deadline_us(now_us, recv_timeout_ms=100)
-                   = now_us + 100 000 us
-      m_ack_tracker.track(env, ack_deadline):
-        finds first FREE slot (slot 0 after init)
-        envelope_copy(m_slots[0].env, env)
-        m_slots[0].deadline_us = ack_deadline
-        m_slots[0].state = PENDING
-        m_count = 1
-        returns Result::OK
+5. Reliability class conditional at line 102: `RELIABLE_RETRY` satisfies
+   `(RELIABLE_ACK || RELIABLE_RETRY)`. **Branch taken.**
 
-      -- B3c: Retry scheduling --
-      env.reliability_class == RELIABLE_RETRY -> enters if block (line 118)
-      m_retry_manager.schedule(env, max_retries=3, backoff_ms=cfg.retry_backoff_ms,
-                                now_us):
-        finds first inactive slot (slot 0 after init)
-        m_slots[0].active       = true
-        envelope_copy(m_slots[0].env, env)
-        m_slots[0].retry_count  = 0
-        m_slots[0].max_retries  = 3
-        m_slots[0].backoff_ms   = cfg.retry_backoff_ms  [ASSUMPTION: 1000 ms]
-        m_slots[0].next_retry_us = now_us   (immediate -- first retry due right away)
-        m_slots[0].expiry_us    = env.expiry_time_us (now_us + 5 000 000 us)
-        m_count = 1
-        logs "Scheduled message_id=1 for retry (max_retries=3, backoff_ms=1000)"
-        returns Result::OK
+6. Computes `ack_deadline = timestamp_deadline_us(now_us, m_cfg.recv_timeout_ms)`
+   (e.g., `now_us + 100 000 µs` if `recv_timeout_ms = 100`).
 
-      assert(env.source_id == 2); assert(env.message_id != 0)
-      logs "Sent message_id=1, reliability=2"
-      returns Result::OK
+7. Calls `m_ack_tracker.track(env, ack_deadline)` at line 110.
 
---- Phase C: wait_for_echo() -- retry pump loop ---
+8. **`AckTracker::track()`** (`AckTracker.cpp:44`): scans `m_slots[0..31]` for
+   first `FREE` slot. Calls `envelope_copy(m_slots[i].env, env)` (memcpy of
+   `sizeof(MessageEnvelope)` bytes). Sets `m_slots[i].deadline_us = ack_deadline`,
+   `m_slots[i].state = PENDING`, increments `m_count`. Returns `OK`.
 
-C1. for attempt=0..MAX_RECV_RETRIES-1 (0..19):
-      now_us = timestamp_now_us()
-      engine.receive(reply, timeout_ms=100, now_us):
-        [see UC_05 for ACK processing; if server sends ACK, RetryManager::on_ack cancels]
-        [if no message or timeout -> returns ERR_TIMEOUT]
+9. **`DeliveryEngine::send()`** checks `track_res` at line 111. `ERR_FULL` is
+   logged at `WARNING_HI` but does not fail the send.
 
-      if receive returns OK and reply is DATA -> success path (skip retries)
+**--- Phase C: Retry scheduling ---**
 
-      engine.pump_retries(now_us):  [DeliveryEngine.cpp line 225]
-        assert(m_initialized); assert(now_us > 0)
-        MessageEnvelope retry_buf[MSG_RING_CAPACITY]  (stack allocation)
-        collected = m_retry_manager.collect_due(now_us, retry_buf, MSG_RING_CAPACITY)
+10. Retry class conditional at line 120: `RELIABLE_RETRY` is true. **Branch taken.**
 
---- Phase D: RetryManager::collect_due() -- core backoff logic ---
+11. Calls `m_retry_manager.schedule(env, m_cfg.max_retries, m_cfg.retry_backoff_ms,
+    now_us)` at line 122.
 
-D1. RetryManager::collect_due(now_us, out_buf, buf_cap):
-      assert(m_initialized); assert(out_buf != nullptr); assert(buf_cap <= MSG_RING_CAPACITY)
-      collected = 0
+12. **`RetryManager::schedule()`** (`RetryManager.cpp:72`): asserts `m_initialized`,
+    `envelope_valid(env)`. Scans `m_slots[0..ACK_TRACKER_CAPACITY-1]` (0..31)
+    for first inactive slot (`!m_slots[i].active`). On finding slot `i`:
+    - `m_slots[i].active = true`.
+    - `envelope_copy(m_slots[i].env, env)` (memcpy ~4136 bytes).
+    - `m_slots[i].retry_count = 0U`.
+    - `m_slots[i].max_retries = max_retries` (e.g., 3 or 5).
+    - `m_slots[i].backoff_ms = backoff_ms` (e.g., 100 ms).
+    - `m_slots[i].next_retry_us = now_us` (immediate — first retry due right away).
+    - `m_slots[i].expiry_us = env.expiry_time_us` (e.g., `now_us + 5 000 000`).
+    - Increments `m_count`. Fires postcondition assertions.
+    - Logs `INFO "Scheduled message_id=%llu for retry (max_retries=N, backoff_ms=M)"`.
+    - Returns `Result::OK`.
 
-      Loop i=0..ACK_TRACKER_CAPACITY-1:
-        if !m_slots[i].active -> continue
+13. **`DeliveryEngine::send()`** checks `sched_res` at line 126. `ERR_FULL`
+    logged at `WARNING_HI` but does not fail the send.
 
-        -- Expiry check --
-        if m_slots[i].expiry_us != 0 AND now_us >= m_slots[i].expiry_us:
-          m_slots[i].active = false; --m_count
-          logs "Expired retry entry for message_id=1"
-          continue  (entry removed, no retransmit)
+**--- Phase D: Send completion ---**
 
-        -- Exhaustion check --
-        if m_slots[i].retry_count >= m_slots[i].max_retries:
-          m_slots[i].active = false; --m_count
-          logs "Exhausted retries for message_id=1"
-          continue
+14. **`DeliveryEngine::send()`** fires postcondition assertions. Logs
+    `INFO "Sent message_id=%llu, reliability=2"`. Returns `Result::OK`.
 
-        -- Due check --
-        if m_slots[i].next_retry_us <= now_us:
-          envelope_copy(out_buf[collected], m_slots[i].env)
-          ++collected
-          ++m_slots[i].retry_count   (e.g. becomes 1 after first retry)
+**--- Phase E: Retry pump loop ---**
 
-          -- Exponential backoff doubling --
-          next_backoff_ms = (uint64_t)m_slots[i].backoff_ms * 2
-          if next_backoff_ms > 60000 -> next_backoff_ms = 60000   (cap)
-          m_slots[i].backoff_ms = (uint32_t)next_backoff_ms
+15. Application calls `DeliveryEngine::pump_retries(now_us)` periodically
+    (e.g., after each `receive()` attempt).
 
-          backoff_us = next_backoff_ms * 1000
-          m_slots[i].next_retry_us = now_us + backoff_us
+16. **`DeliveryEngine::pump_retries()`** (`DeliveryEngine.cpp:227`): asserts
+    `m_initialized`, `now_us > 0`. Allocates
+    `MessageEnvelope retry_buf[MSG_RING_CAPACITY]` on the stack (64 slots,
+    ~264 KB). Calls `m_retry_manager.collect_due(now_us, retry_buf,
+    MSG_RING_CAPACITY)`.
 
-          logs "Due for retry: message_id=1, attempt=1, next_backoff_ms=2000"
+17. **`RetryManager::collect_due()`** (`RetryManager.cpp:160`): asserts
+    `m_initialized`, `out_buf != nullptr`, `buf_cap <= MSG_RING_CAPACITY`. For
+    each active slot `i` (loop bound `ACK_TRACKER_CAPACITY = 32`):
 
-      assert(collected <= buf_cap); assert(m_count <= ACK_TRACKER_CAPACITY)
-      return collected
+    a. **Expiry check (line 177):** `slot_has_expired(m_slots[i].expiry_us,
+       now_us)` — returns `(expiry_us != 0ULL) && (now_us >= expiry_us)`. If
+       true: `m_slots[i].active = false`, `--m_count`, logs `WARNING_LO
+       "Expired retry entry"`, `continue`. Entry not added to `out_buf`.
 
-Backoff progression (assuming initial backoff_ms = 1000):
-  Attempt 0 -> retry_count=1, new backoff_ms=2000,  next_retry at now+2 000 000 us
-  Attempt 1 -> retry_count=2, new backoff_ms=4000,  next_retry at now+4 000 000 us
-  Attempt 2 -> retry_count=3, new backoff_ms=8000   [but max_retries=3, so exhausted]
+    b. **Exhaustion check (line 187):** if `m_slots[i].retry_count >=
+       m_slots[i].max_retries`: `m_slots[i].active = false`, `--m_count`, logs
+       `WARNING_HI "Exhausted retries (count=N, max=M)"`, `continue`.
 
-After attempt 2 the exhaustion check fires: retry_count(3) >= max_retries(3) -> slot deactivated.
+    c. **Due check (line 198):** if `m_slots[i].next_retry_us <= now_us`:
+       - `envelope_copy(out_buf[collected], m_slots[i].env)`.
+       - `++collected`, `++m_slots[i].retry_count`.
+       - **Exponential backoff via `advance_backoff()`** (`RetryManager.cpp:30`):
+         `doubled = current_ms * 2U`. If `doubled > 60000U`, returns `60000U`
+         (cap). Otherwise returns `(uint32_t)doubled`.
+         `m_slots[i].backoff_ms = advance_backoff(m_slots[i].backoff_ms)`.
+         `backoff_us = (uint64_t)m_slots[i].backoff_ms * 1000ULL`.
+         `m_slots[i].next_retry_us = now_us + backoff_us`.
+       - Logs `INFO "Due for retry: message_id=%llu, attempt=%u, next_backoff_ms=%u"`.
 
-Cap behaviour (if initial backoff were 32 000 ms):
-  Attempt N: 32000*2=64000 > 60000 -> capped to 60000 ms, indefinitely thereafter.
+    Returns `collected` (number of envelopes in `out_buf`).
 
---- Phase E: Retry retransmit ---
+18. **`DeliveryEngine::pump_retries()`** asserts `collected <= MSG_RING_CAPACITY`.
+    For `i = 0..collected-1` (fixed-bound loop): calls
+    `send_via_transport(retry_buf[i])` — dispatches to `TcpBackend::send_message()`
+    (full send path as in UC_01 steps 4–23). Logs success (`INFO "Retried
+    message_id=%llu"`) or failure (`WARNING_LO "Retry send failed"`). Returns
+    `collected`.
 
-E1. Back in DeliveryEngine::pump_retries() (line 241):
-      for i=0..collected-1:
-        send_res = send_via_transport(retry_buf[i])
-          --> TcpBackend::send_message() again (same path as B3a)
-        if send_res != OK -> logs WARNING_LO "Retry send failed for message_id=1"
-        else              -> logs INFO "Retried message_id=1"
-      return collected
+**--- Phase F: Backoff progression (example: initial backoff_ms = 100) ---**
 
---- Phase F: ACK received -- cancels retry ---
+- Schedule time: `next_retry_us = now_us` (immediate).
+- Attempt 0 fires: `retry_count = 1`, `backoff_ms: 100→200`, `next_retry_us = now + 200 000`.
+- Attempt 1 fires: `retry_count = 2`, `backoff_ms: 200→400`, `next_retry_us = now + 400 000`.
+- Attempt 2 fires: `retry_count = 3 >= max_retries = 3` → exhausted at next `collect_due()`.
 
-F1. If server responds with an ACK envelope (message_type=ACK):
-      DeliveryEngine::receive() calls (line 181-185):
-        m_ack_tracker.on_ack(src=server_node, msg_id=1)
-          finds slot 0: state=PENDING, source_id matches, message_id matches
-          m_slots[0].state = ACKED
-          returns OK
-        m_retry_manager.on_ack(src=server_node, msg_id=1)
-          finds slot 0: active=true, env.source_id matches, env.message_id matches
-          m_slots[0].active = false; --m_count
-          logs "Cancelled retry for message_id=1 from node=1"
-          returns OK
+Note: The first retry fires immediately because `next_retry_us = now_us` at
+schedule time. Combined with the double-send from `flush_delayed_to_clients()`,
+the receiver sees potentially 3 transmissions before any ACK.
 
-F2. Next call to collect_due() finds slot 0 inactive -> skips it.
-    No further retransmissions occur for message_id=1.
-
+---
 
 ## 4. Call Tree (Hierarchical)
 
-Client::main()
-  transport.init(cfg)
-    TcpBackend::connect_to_server()
-      socket_create_tcp()
-      socket_set_reuseaddr()
-      socket_connect_with_timeout()
-  engine.init(&transport, cfg.channels[0], 2)
-    AckTracker::init()
-    RetryManager::init()
-    DuplicateFilter::init()
-    MessageIdGen::init()
+```
+DeliveryEngine::send()                             [DeliveryEngine.cpp:77]
+|
++-- m_id_gen.next()                                [MessageId.hpp - inline]
+|
++-- DeliveryEngine::send_via_transport()           [DeliveryEngine.cpp:56]
+|   \-- TcpBackend::send_message()                 [TcpBackend.cpp:347]
+|       +-- Serializer::serialize()
+|       +-- timestamp_now_us()
+|       +-- ImpairmentEngine::process_outbound()
+|       +-- send_to_all_clients()
+|       |   \-- tcp_send_frame() -> socket_send_all() [poll+send x2]
+|       \-- flush_delayed_to_clients()
+|           +-- ImpairmentEngine::collect_deliverable()
+|           +-- Serializer::serialize()
+|           \-- send_to_all_clients() [second send]
+|
++-- timestamp_deadline_us()                        [Timestamp.hpp:65]
+|
++-- AckTracker::track(env, deadline_us)            [AckTracker.cpp:44]
+|   \-- envelope_copy() -> memcpy()
+|
+\-- RetryManager::schedule(env,retries,backoff,now) [RetryManager.cpp:72]
+    \-- envelope_copy() -> memcpy()
 
-  [loop msg_idx=1..5]
-    timestamp_now_us()
-    send_test_message(engine, peer_id=1, msg_num, now_us)
-      envelope_init(env)
-      snprintf / memcpy
-      timestamp_deadline_us(now_us, 5000)
-      engine.send(env, now_us)
-        DeliveryEngine::send_via_transport(env)
-          TcpBackend::send_message(env)
-            Serializer::serialize()
-            timestamp_now_us()
-            ImpairmentEngine::process_outbound()
-            ImpairmentEngine::collect_deliverable()
-            tcp_send_frame()
-        timestamp_deadline_us(now_us, recv_timeout_ms)
-        AckTracker::track(env, ack_deadline)
-          envelope_copy()
-        RetryManager::schedule(env, max_retries, backoff_ms, now_us)
-          envelope_copy()
+DeliveryEngine::pump_retries()                     [DeliveryEngine.cpp:227]
+|
+\-- RetryManager::collect_due(now_us, retry_buf, 64) [RetryManager.cpp:160]
+    +-- slot_has_expired()                         [RetryManager.cpp:19]
+    +-- [exhaustion check]
+    +-- [due check]
+    +-- envelope_copy() per due entry
+    \-- advance_backoff()                          [RetryManager.cpp:30]
 
-    wait_for_echo(engine, now_us)
-      [loop attempt=0..19]
-        timestamp_now_us()
-        engine.receive(reply, 100, now_us)
-          TcpBackend::receive_message(reply, 100)
-            m_recv_queue.pop()
-            TcpBackend::accept_clients()     [server side only; client skips]
-            recv_from_client(fd, 100)
-              tcp_recv_frame()
-              Serializer::deserialize()
-              m_recv_queue.push()
-            m_recv_queue.pop()
-          [if ACK]:
-            AckTracker::on_ack()
-            RetryManager::on_ack()
-        engine.pump_retries(now_us)
-          RetryManager::collect_due(now_us, retry_buf, MSG_RING_CAPACITY)
-            [per active slot]:
-              expiry check
-              exhaustion check
-              due check -> envelope_copy(), backoff doubling, next_retry_us update
-          [for each collected envelope]:
-            DeliveryEngine::send_via_transport()
-              TcpBackend::send_message()
-                Serializer::serialize()
-                tcp_send_frame()
-        engine.sweep_ack_timeouts(now_us)
-          AckTracker::sweep_expired(now_us, timeout_buf, ACK_TRACKER_CAPACITY)
+    [for each collected entry]:
+    \-- DeliveryEngine::send_via_transport()
+        \-- TcpBackend::send_message() [full send path as above]
+```
 
-  engine.pump_retries(final_now_us)    [final sweep]
-  engine.sweep_ack_timeouts(final_now_us)
-  transport.close()
-
+---
 
 ## 5. Key Components Involved
 
-Component               File                      Role in UC_03
-----------------------  ------------------------  ------------------------------------
-Client::main()          src/app/Client.cpp        Orchestrates init, send, receive loop
-send_test_message()     src/app/Client.cpp        Builds RELIABLE_RETRY envelope
-wait_for_echo()         src/app/Client.cpp        Drives pump_retries() each attempt
-DeliveryEngine::send()  src/core/DeliveryEngine.cpp  Assigns IDs, calls transport, tracks
-DeliveryEngine::        src/core/DeliveryEngine.cpp  Collects due entries, resends
-  pump_retries()
-DeliveryEngine::        src/core/DeliveryEngine.cpp  Handles ACK, cancels retry
-  receive()
-RetryManager::          src/core/RetryManager.cpp Stores message, sets next_retry_us=now
-  schedule()
-RetryManager::          src/core/RetryManager.cpp Expiry/exhaustion/due checks; backoff
-  collect_due()           doubling, caps at 60 000 ms
-RetryManager::on_ack()  src/core/RetryManager.cpp Deactivates slot on ACK receipt
-AckTracker::track()     src/core/AckTracker.cpp   Records PENDING entry with deadline
-AckTracker::on_ack()    src/core/AckTracker.cpp   Transitions slot PENDING->ACKED
-AckTracker::            src/core/AckTracker.cpp   Sweeps PENDING past deadline -> FREE
-  sweep_expired()
-MessageIdGen::next()    src/core/MessageId.hpp    [ASSUMPTION] Returns monotonic uint64
-timestamp_deadline_us() src/core/Timestamp.hpp    Computes absolute deadline in us
-timestamp_now_us()      src/core/Timestamp.hpp    CLOCK_MONOTONIC via clock_gettime()
-TcpBackend::            src/platform/TcpBackend.cpp  Serializes, impairs, frames, sends
-  send_message()
-Serializer::serialize() src/core/Serializer.hpp   Encodes envelope to wire bytes
-ImpairmentEngine        src/platform/ [ASSUMPTION]  Optionally drops/delays messages
-tcp_send_frame()        src/platform/SocketUtils  Framed write with length prefix
+### DeliveryEngine
+- **Responsibility:** Orchestrates stamp, send, ACK registration, and retry
+  scheduling. For `RELIABLE_RETRY`, engages both `AckTracker` and `RetryManager`.
+  `pump_retries()` is the periodic re-send pump.
+- **Why in this flow:** It is the sole external-facing send and pump API. The
+  conditional at lines 102–103 and line 120 selects `RELIABLE_RETRY` behavior.
 
+### AckTracker
+- **Responsibility:** Tracks that the message was sent and awaits an ACK.
+  `track()` registers the `PENDING` entry with a deadline. `on_ack()` (UC_08)
+  transitions to `ACKED`. `sweep_expired()` reclaims both timed-out `PENDING`
+  and `ACKED` slots.
+- **Why in this flow:** `RELIABLE_RETRY` messages require ACK tracking to know
+  when delivery is confirmed. The `AckTracker` holds the ACK deadline
+  independently of the retry schedule.
+
+### RetryManager
+- **Responsibility:** Manages the retry schedule with exponential backoff.
+  `schedule()` registers the active retry entry with `next_retry_us = now_us`
+  (immediate first retry). `collect_due()` harvests due entries, applies backoff
+  doubling via `advance_backoff()`, and deactivates exhausted or expired entries.
+  `on_ack()` cancels the retry entry when an ACK is received.
+- **Why in this flow:** `RELIABLE_RETRY` semantics require automatic
+  retransmission until ACK or termination condition. `RetryManager` is the sole
+  component implementing this.
+
+### advance_backoff() (static helper, RetryManager.cpp:30)
+- **Responsibility:** Doubles `current_ms`, capped at `60000U` (60 seconds).
+  Called once per retry attempt per due slot. Has two NEVER_COMPILED_OUT_ASSERT
+  calls: pre-condition `current_ms <= 60000` and in-branch confirmation.
+- **Why in this flow:** Prevents retry flooding by exponentially increasing
+  inter-retry intervals.
+
+### slot_has_expired() (static helper, RetryManager.cpp:19)
+- **Responsibility:** Returns `(expiry_us != 0ULL) && (now_us >= expiry_us)`.
+  A zero `expiry_us` means "never expires". Called before the due check, so
+  an expired message is never retransmitted.
+- **Why in this flow:** Enforces the message TTL on the retry path, independently
+  of the receive-side expiry check in `DeliveryEngine::receive()`.
+
+### TcpBackend, Serializer, ImpairmentEngine, tcp_send_frame(), socket_send_all()
+- Same roles as documented in UC_01. The retry send path goes through the
+  identical `send_via_transport()` → `TcpBackend::send_message()` chain.
+
+---
 
 ## 6. Branching Logic / Decision Points
 
-Decision                     Location                      Branch Outcomes
----------------------------  ----------------------------  ---------------------------
-reliability_class check      DeliveryEngine.cpp line 100   RELIABLE_RETRY -> track ACK
-                                                           + schedule retry;
-                                                           BEST_EFFORT -> neither
-send_via_transport result    DeliveryEngine.cpp line 92    != OK -> log WARNING_LO,
-                                                           return early (no tracking)
-track() result               DeliveryEngine.cpp line 109   ERR_FULL -> log WARNING_HI,
-                                                           continue (send still OK)
-schedule() result            DeliveryEngine.cpp line 124   ERR_FULL -> log WARNING_HI,
-                                                           continue (send still OK)
-slot active check            RetryManager.cpp line 151     inactive -> skip
-expiry check                 RetryManager.cpp line 156     expired -> deactivate, log,
-                                                           skip (no retransmit)
-exhaustion check             RetryManager.cpp line 166     retry_count>=max_retries ->
-                                                           deactivate, log WARNING_HI
-due check                    RetryManager.cpp line 177     next_retry_us > now_us ->
-                                                           skip this pass
-backoff cap                  RetryManager.cpp line 188     next_backoff_ms > 60000 ->
-                                                           clamp to 60000
-impairment drop              TcpBackend.cpp line 266       ERR_IO -> return OK (silent)
-client_count == 0            TcpBackend.cpp line 278       no clients -> discard, OK
-ACK type check               DeliveryEngine.cpp line 178   ACK -> call on_ack() pair;
-                                                           NAK/HEARTBEAT -> pass through
-send_res in pump loop        DeliveryEngine.cpp line 246   != OK -> WARNING_LO, continue
+**Branch 1–4:** Same as UC_02 (send failures, reliability class gate for
+`AckTracker`, `track()` `ERR_FULL`, reliability class gate for `RetryManager`).
 
+**Branch 5 (new): `RetryManager::schedule()` return check (line 126)**
+- Condition: `sched_res != Result::OK`
+- `ERR_FULL` (32 active slots): logs `WARNING_HI`, continues. Send is still
+  considered successful; no retry is scheduled.
+- `OK`: normal continuation.
+
+**Branch 6: `collect_due()` — expiry check (line 177)**
+- Condition: `slot_has_expired(m_slots[i].expiry_us, now_us)`
+- If true: deactivate slot, `WARNING_LO`, `continue` (NOT added to `out_buf`).
+- If false: proceed to exhaustion check.
+
+**Branch 7: `collect_due()` — exhaustion check (line 187)**
+- Condition: `m_slots[i].retry_count >= m_slots[i].max_retries`
+- If true: deactivate slot, `WARNING_HI`, `continue`.
+- If false: proceed to due check.
+
+**Branch 8: `collect_due()` — due check (line 198)**
+- Condition: `m_slots[i].next_retry_us <= now_us`
+- If true: copy envelope to `out_buf`, increment `retry_count`, apply backoff,
+  add to collection.
+- If false (not yet due): skip slot for this pump call.
+
+**Branch 9: `advance_backoff()` — cap check (RetryManager.cpp:34)**
+- Condition: `doubled > 60000U`
+- If true: return `60000U`.
+- If false: return `(uint32_t)doubled`.
+
+**Branch 10: `pump_retries()` — retry send result (line 246)**
+- Condition: `send_res != Result::OK`
+- If true: logs `WARNING_LO "Retry send failed"`. Loop continues to next entry.
+  The retry slot is NOT deactivated on a failed send; it will be retried again.
+- If false: logs `INFO "Retried message_id=%llu"`.
+
+**Branches 11+:** Impairment, client count, fd validity, frame failure — same
+as UC_01.
+
+---
 
 ## 7. Concurrency / Threading Behavior
 
-The codebase is single-threaded at the application level. No threads, mutexes,
-or std::atomic usage appear in Client.cpp, DeliveryEngine, RetryManager,
-AckTracker, or DuplicateFilter. The F-Prime style no-STL, no-thread constraint
-is enforced.
+### Threads created
+None. All operations execute synchronously on the caller's thread.
 
-All operations (send, pump_retries, receive, sweep_ack_timeouts) are called
-sequentially within the Client main() loop. The retry pump executes within the
-same thread as the send operation; there is no background timer thread.
+### Where context switches occur
+Only at POSIX blocking calls inside `socket_send_all()`: `poll()` and `send()`.
 
-TcpBackend internally calls timestamp_now_us() during send_message() to check
-impairment timing. This is a read of CLOCK_MONOTONIC -- safe in single-threaded
-context.
+### Synchronization primitives
+`RetryManager::m_slots[]` and `m_count` have no synchronization primitives.
+`AckTracker::m_slots[]` and `m_count` have no synchronization primitives. If
+`pump_retries()`, `receive()`, or `sweep_ack_timeouts()` are called from
+different threads, there are data races on both tables. No mutex or atomic
+protects them.
 
-Signal handler (Server.cpp only): g_stop_flag is volatile sig_atomic_t. Not
-relevant to Client-side retry behavior.
+`RingBuffer` uses `std::atomic<uint32_t>` for head/tail but is only relevant
+to the receive path.
 
-[ASSUMPTION]: If TcpBackend were to be used across threads in a future
-configuration, m_recv_queue, m_client_fds[], and m_client_count would require
-protection. No such protection currently exists.
+### Producer/consumer relationships
+`RetryManager` acts as both producer (schedule fills slots) and consumer
+(collect_due drains/updates them). In the single-threaded model, `schedule()`
+and `collect_due()` alternate; no concurrent access occurs.
 
+---
 
 ## 8. Memory & Ownership Semantics (C/C++ Specific)
 
-All storage is static (global), stack, or value-type member fields.
-No heap allocation occurs after system init (Power of 10 rule 3).
+### Who owns allocated memory
+No heap allocation. All storage is statically allocated:
+- Caller's `MessageEnvelope env`: stack, caller-owned.
+- `AckTracker::m_slots[32]`: member of `AckTracker`, value member of
+  `DeliveryEngine`. ~132 KB.
+- `RetryManager::m_slots[32]` (`RetryEntry` structs): member of `RetryManager`,
+  value member of `DeliveryEngine`. Each `RetryEntry` holds a full
+  `MessageEnvelope` copy plus scalar fields (~4136 + 32 bytes). ~133 KB.
+- `MessageEnvelope retry_buf[MSG_RING_CAPACITY=64]` in `pump_retries()`:
+  stack-allocated. 64 × ~4136 bytes ≈ **264 KB**. This is the largest stack
+  frame in the codebase and a significant embedded-target risk.
+- Same `delayed[32]` stack risk in `flush_delayed_to_clients()` (~132 KB).
 
-Object                          Location         Ownership/Lifetime
-------------------------------  ---------------  --------------------------------
-TransportConfig cfg             stack (main)     POD struct; copied into TcpBackend
-TcpBackend transport            stack (main)     Owns m_listen_fd, m_client_fds[],
-                                                 m_recv_queue, m_impairment,
-                                                 m_wire_buf
-DeliveryEngine engine           stack (main)     Owns AckTracker, RetryManager,
-                                                 DuplicateFilter, MessageIdGen by value
-MessageEnvelope env             stack            Built in send_test_message(), passed
-(in send_test_message)                           by ref to engine.send(), which copies
-                                                 it into RetryManager slot and
-                                                 AckTracker slot via envelope_copy()
-                                                 (memcpy of fixed-size struct)
-retry_buf[]                     stack            Temporary array in pump_retries();
-(in pump_retries)                                MSG_RING_CAPACITY elements;
-                                                 filled by collect_due() via
-                                                 envelope_copy(); discarded after loop
-RetryManager::m_slots[]         value member     Fixed array of ACK_TRACKER_CAPACITY
-                                of RetryManager  RetryEntry structs; each holds a
-                                                 full MessageEnvelope copy
-AckTracker::m_slots[]           value member     Fixed array of ACK_TRACKER_CAPACITY
-                                of AckTracker    AckEntry structs with copy of envelope
-m_wire_buf                      member of        Fixed-size scratch buffer,
-                                TcpBackend       SOCKET_RECV_BUF_BYTES; reused each
-                                                 call to send_message/receive_message
-TransportInterface* m_transport pointer member   Non-owning pointer; pointed-to object
-                                of DeliveryEngine (TcpBackend on stack) must outlive
-                                                 DeliveryEngine
+### Lifetime of key objects
+- `RetryManager` slot holds a live copy of the envelope from `schedule()` until
+  `on_ack()`, exhaustion, or expiry deactivates it.
+- `AckTracker` slot holds a copy from `track()` until `on_ack()` + sweep, or
+  deadline expiry + sweep.
 
-Key copy semantics:
-- envelope_copy() uses memcpy(&dst, &src, sizeof(MessageEnvelope)).
-  The entire envelope including the payload[] array is bitwise copied.
-- RetryManager stores a full copy in each slot -- the original envelope
-  in the caller can be destroyed after schedule() returns.
-- AckTracker likewise stores a full copy.
+### Copies of the same envelope
+The same `MessageEnvelope` (originally stack-allocated in the application) is
+copied three times at send time:
+1. `TcpBackend::m_wire_buf` — serialized bytes form.
+2. `AckTracker::m_slots[i].env` — via `envelope_copy()`.
+3. `RetryManager::m_slots[j].env` — via `envelope_copy()`.
+Each subsequent retry also copies the `RetryManager` slot's envelope into
+`retry_buf[k]` in `collect_due()`, then through serialization again.
 
-Risks:
-- sizeof(MessageEnvelope) may be large (payload[MSG_MAX_PAYLOAD_BYTES]);
-  stack frame in pump_retries() allocates MSG_RING_CAPACITY copies. If
-  MSG_MAX_PAYLOAD_BYTES and MSG_RING_CAPACITY are both large this could
-  exhaust stack space. [ASSUMPTION: constants are sized conservatively]
+### Potential leaks or unsafe patterns
+- `retry_buf[64]` on the stack (~264 KB): risk of stack overflow on targets
+  with small stacks. [RISK]
+- `delayed[32]` in `flush_delayed_to_clients()` (~132 KB): same risk. [RISK]
 
+---
 
 ## 9. Error Handling Flow
 
-Error                  Detection point              Handling
----------------------  ---------------------------  ----------------------------------
-Transport send fails   send_via_transport() returns Log WARNING_LO; send() returns
-                       != OK                        the error code to caller
-ACK tracker full       AckTracker::track() returns  Log WARNING_HI; send() continues
-                       ERR_FULL                     to return OK (ACK tracking is
-                                                    best-effort side effect)
-Retry table full       RetryManager::schedule()     Log WARNING_HI; send() continues
-                       returns ERR_FULL             to return OK (retry is side effect)
-Message expired in     collect_due() line 156-163   Slot deactivated, log WARNING_LO;
-retry table                                         NOT retransmitted
-Retries exhausted      collect_due() line 166-173   Slot deactivated, log WARNING_HI;
-                                                    no further transmission
-Retry send fails       pump_retries() line 246-250  Log WARNING_LO; loop continues
-                                                    to next message
-Impairment drops msg   TcpBackend::send_message()   Returns Result::OK silently;
-                       line 266-268                 upper layers are not notified
-                                                    of the drop
-Serialization fails    TcpBackend::send_message()   Log WARNING_LO; return error
-                                                    to DeliveryEngine::send_via_transport
-No clients connected   TcpBackend::send_message()   Log WARNING_LO; return OK
-                       line 278-282                 (message is discarded)
-socket write fails     tcp_send_frame()             Log WARNING_LO; loop continues
-                                                    to next client fd
-ACK not found          RetryManager::on_ack()       Log WARNING_LO; return ERR_INVALID
-                       line 126                     (ignored by receive())
-snprintf fails         send_test_message() line 89  Return ERR_INVALID; msg not sent
+### How errors propagate
+- Transport send failure in `send_via_transport()` (line 94): `send()` returns
+  error immediately. Neither `AckTracker::track()` nor `RetryManager::schedule()`
+  is called.
+- `AckTracker::track()` returns `ERR_FULL` (line 111): logged `WARNING_HI`,
+  send continues returning `OK`. Message tracked for retry but not for ACK.
+- `RetryManager::schedule()` returns `ERR_FULL` (line 126): logged `WARNING_HI`,
+  send continues returning `OK`. Message sent but not scheduled for retry.
+- Retry send failure in `pump_retries()` (line 246): logged `WARNING_LO`;
+  retry loop continues to next collected entry. The failing retry slot remains
+  active and will be retried again on the next `pump_retries()` call.
 
+### Retry logic
+Retry fires when `m_slots[i].next_retry_us <= now_us` AND `retry_count <
+max_retries` AND `expiry_us` not passed. Backoff doubles each time via
+`advance_backoff()`. Maximum backoff is 60 seconds. Retry terminates on:
+- ACK receipt → `on_ack()` sets `active = false` (UC_12).
+- Exhaustion → `retry_count >= max_retries` in `collect_due()`.
+- Expiry → `slot_has_expired()` returns true in `collect_due()`.
+
+### Fallback paths
+Same as UC_01/UC_02 for transport-layer failures.
+
+---
 
 ## 10. External Interactions
 
-Interaction            API Used                     Direction   Notes
----------------------  ---------------------------  ----------  --------------------
-TCP socket write       tcp_send_frame()             Outbound    Framed with length
-                       -> write()/send() [ASSUMPTION]           prefix; blocks up to
-                                                                send_timeout_ms
-TCP socket read        tcp_recv_frame()             Inbound     Framed read; blocks
-                                                                100 ms per attempt
-POSIX clock            clock_gettime(CLOCK_MONOTONIC Inbound    Called at send time,
-                       )                                        retry time, receive
-                                                                time; monotonic
-POSIX nanosleep        nanosleep() in sleep_ms()    Self        Between messages,
-                                                                INTER_MESSAGE_SLEEP_MS
-                                                                = 100 ms
-Logger output          Logger::log()                Outbound    stdout/stderr
-                                                                [ASSUMPTION]
+### Network calls
+Same as UC_01: `poll()` and `send()` syscalls on each retry send, in addition
+to the initial send.
 
+### File I/O
+None.
+
+### Hardware interaction
+None directly.
+
+### IPC
+None.
+
+---
 
 ## 11. State Changes / Side Effects
 
-Component             State Field           Before send()   After send()       After on_ack()
---------------------  --------------------  --------------  -----------------  ---------------
-MessageIdGen          m_counter             N               N+1                N+1
-AckTracker slot 0     state                 FREE            PENDING            ACKED
-AckTracker            m_count               0               1                  1 (freed on
-                                                                               sweep_expired)
-RetryManager slot 0   active                false           true               false
-RetryManager slot 0   retry_count           0               0                  0
-RetryManager slot 0   backoff_ms            0               cfg.retry_backoff  N/A (inactive)
-RetryManager slot 0   next_retry_us         0               now_us (immediate) N/A
-RetryManager          m_count               0               1                  0
-TcpBackend            m_wire_buf            undefined       last serialized    unchanged
-                                                            frame bytes
+### What system state is modified
 
-After each collect_due() that fires a retry:
-  m_slots[i].retry_count   incremented by 1
-  m_slots[i].backoff_ms    doubled (capped at 60000)
-  m_slots[i].next_retry_us set to now_us + new_backoff_us
+**`MessageEnvelope& env` (caller's object):**
+- `source_id`, `message_id`, `timestamp_us` stamped during `send()`.
 
-After exhaustion (retry_count >= max_retries):
-  m_slots[i].active = false; RetryManager::m_count decremented
+**`MessageIdGen m_id_gen`:**
+- Counter incremented.
 
+**`AckTracker::m_slots[i]`:**
+- `state`: `FREE` → `PENDING`.
+- `env`: copy of original envelope.
+- `deadline_us`: `now_us + recv_timeout_ms * 1000`.
+- `m_count`: +1.
 
-## 12. Sequence Diagram (ASCII)
+**`RetryManager::m_slots[j]`:**
+- `active`: `false` → `true`.
+- `env`: copy of original envelope.
+- `retry_count`: 0.
+- `max_retries`: from `m_cfg.max_retries`.
+- `backoff_ms`: from `m_cfg.retry_backoff_ms`.
+- `next_retry_us`: `now_us` (immediate).
+- `expiry_us`: `env.expiry_time_us`.
+- `m_count`: +1.
 
-Client::main    send_test_msg   DeliveryEngine    AckTracker   RetryManager   TcpBackend
-    |                |               |                |              |              |
-    |--msg_idx=1---->|               |                |              |              |
-    |                |--engine.send->|                |              |              |
-    |                |               |--send_via_tr-->|              |              |
-    |                |               |                |              |        send_message()
-    |                |               |                |              |        serialize->tcp_send_frame
-    |                |               |<--OK-----------+              |              |
-    |                |               |--track(env, deadline)-------->|              |
-    |                |               |                |<--OK---------+              |
-    |                |               |--schedule(env, 3, backoff_ms, now)---------->|
-    |                |               |                |              |<--OK---------+
-    |                |<--OK----------+                |              |              |
-    |<--OK-----------+               |                |              |              |
-    |                                |                |              |              |
-    |--wait_for_echo---------------->|                |              |              |
-    |   [attempt=0]                  |                |              |              |
-    |                |--engine.receive(100ms)-------->|              |              |
-    |                |               |--recv_message->+              |              |
-    |                |               |<--ERR_TIMEOUT--+              |              |
-    |                |--pump_retries(now_us)--------->|              |              |
-    |                |               |--collect_due(now_us)--------->|              |
-    |                |               |   expiry? NO                  |              |
-    |                |               |   exhausted? NO               |              |
-    |                |               |   due? YES (next_retry<=now)  |              |
-    |                |               |   backoff: 1000->2000ms       |              |
-    |                |               |<--[env copy, collected=1]-----+              |
-    |                |               |--send_via_transport(retry_buf[0])----------->|
-    |                |               |                |              |        serialize->tcp_send_frame
-    |                |               |<--OK-----------+              |              |
-    |   [attempt=1..N, retries continue until ACK or expiry]         |              |
-    |                                |                |              |              |
-    |   [ACK received from server]   |                |              |              |
-    |                |--engine.receive(100ms)-------->|              |              |
-    |                |               |--recv_message: ACK envelope   |              |
-    |                |               |--ack_tracker.on_ack(1,1)----->|              |
-    |                |               |                |<--OK---------+              |
-    |                |               |--retry_manager.on_ack(1,1)--->|              |
-    |                |               |                |       slot.active=false      |
-    |                |               |<--OK-----------+              |              |
-    |<--OK-----------+               |                |              |              |
+**After each `collect_due()` that fires a retry:**
+- `m_slots[j].retry_count` incremented by 1.
+- `m_slots[j].backoff_ms` doubled (capped at 60000).
+- `m_slots[j].next_retry_us` = `now_us + new_backoff_ms * 1000`.
 
+**After exhaustion or expiry:**
+- `m_slots[j].active = false`, `m_count` decremented.
+
+### Persistent changes (DB, disk, device state)
+None.
+
+---
+
+## 12. Sequence Diagram using mermaid
+
+```text
+App  DeliveryEngine  AckTracker  RetryManager  TcpBackend  Logger
+
+--- Initial send ---
+
+App --send(env=RELIABLE_RETRY, now_us)--> DeliveryEngine
+  stamp source_id, message_id, timestamp_us
+  send_via_transport(env)
+    --> TcpBackend::send_message() [serialize+impair+send+flush]
+    <-- OK
+  [reliability check: RELIABLE_RETRY]
+  --> AckTracker::track(env, deadline)
+    envelope_copy(); state=PENDING; m_count++
+    <-- OK
+  --> RetryManager::schedule(env, max_retries, backoff_ms, now)
+    envelope_copy(); active=true; next_retry=now; expiry=env.expiry
+    <-- OK
+App <-- OK
+
+--- Retry pump (called each loop iteration) ---
+
+App --pump_retries(now_us)--> DeliveryEngine
+  retry_buf[64] on stack
+  --> RetryManager::collect_due(now, retry_buf, 64)
+    [slot i: active, !expired, !exhausted, next_retry <= now]
+    envelope_copy(retry_buf[0], slots[i].env)
+    retry_count++; backoff doubled; next_retry updated
+    --> advance_backoff(current_ms) [doubles, caps at 60s]
+    <-- collected=1
+  [loop: send_via_transport(retry_buf[0])]
+    --> TcpBackend::send_message() [serialize+send]
+    <-- OK
+    Logger::log(INFO "Retried message_id=N")
+  <-- 1 (retried count)
+App <-- 1
+
+--- After max_retries reached ---
+
+App --pump_retries(now_us)--> DeliveryEngine
+  --> RetryManager::collect_due(now, ...)
+    [slot i: retry_count >= max_retries]
+    active=false; m_count--
+    Logger::log(WARNING_HI "Exhausted retries")
+    <-- collected=0
+  <-- 0
+App <-- 0
+```
+
+---
 
 ## 13. Initialization vs Runtime Flow
 
-Initialization (runs once, at startup):
-- TcpBackend::init() -- socket creation, TCP connect
-- DeliveryEngine::init() -- sub-component init calls, no allocation
-- AckTracker::init() -- memset + loop clearing all slots
-- RetryManager::init() -- memset + loop clearing all RetryEntry slots
-- DuplicateFilter::init() -- memset + zero pointers
-- MessageIdGen::init(seed) -- seeds counter
+### What happens during startup (init phase)
 
-Runtime (repeats per message, per loop iteration):
-- timestamp_now_us() called multiple times per iteration
-- engine.send() -- assigns IDs, calls transport, fills one AckTracker slot +
-                   one RetryManager slot
-- engine.pump_retries() -- iterates all ACK_TRACKER_CAPACITY RetryEntry slots
-                           every call; O(ACK_TRACKER_CAPACITY) per pump
-- engine.sweep_ack_timeouts() -- iterates all ACK_TRACKER_CAPACITY AckTracker
-                                  slots every call; O(ACK_TRACKER_CAPACITY)
-- engine.receive() -- may trigger on_ack() freeing slots
+`RetryManager::init()` (`RetryManager.cpp:45-67`): sets `m_count = 0`,
+`m_initialized = true`. Loops 0..`ACK_TRACKER_CAPACITY-1` setting each slot:
+`active = false`, `retry_count = 0`, `backoff_ms = 0`, `next_retry_us = 0`,
+`expiry_us = 0`, `max_retries = 0`, calls `envelope_init(m_slots[i].env)`.
 
-No dynamic allocation occurs at runtime. All data structures are fixed-size
-arrays initialized at startup.
+`AckTracker::init()`: as documented in UC_02.
 
+All other init as in UC_01/UC_02.
+
+### What happens during steady-state execution
+
+Each `send()` for `RELIABLE_RETRY` consumes one `AckTracker` slot and one
+`RetryManager` slot. Each `pump_retries()` call iterates all 32 `RetryManager`
+slots (O(ACK_TRACKER_CAPACITY) per call). Each retry transmission is a full
+`send_via_transport()` call including serialization and TCP framing. `collect_due()`
+removes exhausted and expired slots automatically, making those slots available for
+reuse by the next `schedule()` call.
+
+---
 
 ## 14. Known Risks / Observations
 
-R1. First retry is immediate.
-    RetryManager::schedule() sets next_retry_us = now_us (line 65), which means
-    the very first collect_due() call will immediately retransmit the message
-    even if the original send just succeeded. This causes a guaranteed duplicate
-    transmission on every RELIABLE_RETRY message unless an ACK arrives before
-    the first pump_retries() call. The DuplicateFilter on the receiver side is
-    designed to absorb this.
+### First retry fires immediately
 
-R2. ACK tracking deadline is very short.
-    recv_timeout_ms = 100 ms is used for both the receive poll interval and the
-    ACK deadline in AckTracker. With pump_retries() calling collect_due() every
-    100 ms and the ACK deadline also 100 ms, sweep_ack_timeouts() may mark ACK
-    as timed out even when a retry is still in progress. These two subsystems
-    (RetryManager and AckTracker) have independent expiry logic and can diverge.
+`RetryManager::schedule()` sets `next_retry_us = now_us` (line 91 of
+`RetryManager.cpp`). The first `collect_due()` call will fire immediately. Combined
+with the double-send from `process_outbound()` + `flush_delayed_to_clients()`, the
+receiver sees potentially three transmissions before any ACK can arrive:
+1. Original send (direct, from `send_to_all_clients()`).
+2. Original send (delayed flush, from `flush_delayed_to_clients()`).
+3. First retry (from first `pump_retries()` call).
+The receiver's `DuplicateFilter` suppresses re-deliveries for `RELIABLE_RETRY`
+messages. [OBSERVATION]
 
-R3. RetryManager and AckTracker use different expiry mechanisms.
-    AckTracker uses deadline_us = now_us + recv_timeout_ms (100 ms window).
-    RetryManager uses env.expiry_time_us (5-second window from send_test_message).
-    A message can be in PENDING state in AckTracker (timed out) while still
-    actively retrying in RetryManager -- they are not coordinated.
+### Source ID matching bug in both AckTracker and RetryManager
 
-R4. Stack usage in pump_retries().
-    MessageEnvelope retry_buf[MSG_RING_CAPACITY] is allocated on the stack.
-    If MSG_MAX_PAYLOAD_BYTES is large (e.g. 1024) and MSG_RING_CAPACITY is
-    also large (e.g. 16), this is 16 KB+ on the stack per pump call.
+`AckTracker::on_ack()` compares `m_slots[i].env.source_id` (the local node's
+ID, set during `send()`) against the incoming ACK's `source_id` (the remote
+peer's ID). These are different in a two-node deployment.
+`RetryManager::on_ack()` has the identical comparison at `RetryManager.cpp:131`.
+Consequence: neither `on_ack()` call succeeds. Retry slots are never cancelled
+by incoming ACKs. All retries run to exhaustion (or expiry). [RISK - appears to
+be a latent bug]
 
-R5. send_via_transport() return ignored in pump loop is partial.
-    Retry send failures are logged but the retry slot is NOT deactivated on
-    transport failure. The slot will be retried again on the next pump cycle.
-    This could cause repeated transport-layer errors to accumulate.
+### AckTracker deadline much shorter than RetryManager expiry
 
-R6. Backoff doubling starts from the configured backoff_ms, but that value is
-    applied to the *second* retry, not the first. The first retry fires
-    immediately (next_retry_us = now_us at schedule time). So the effective
-    sequence is: T+0, T+backoff, T+3*backoff, T+7*backoff, etc.
+`AckTracker` deadline = `recv_timeout_ms` (default 100 ms or 1000 ms).
+`RetryManager` expiry = `env.expiry_time_us` (application-set, e.g., 5 seconds).
+These are semantically different intervals operating independently. `WARNING_HI
+"ACK timeout"` from `sweep_ack_timeouts()` fires after the ACK deadline; the
+`RetryManager` slot continues retrying for the full 5-second window. Both emit
+independent warnings. [OBSERVATION]
 
+### Retry send failure does not deactivate the slot
+
+If `send_via_transport()` fails during a retry in `pump_retries()` (line 246),
+the loop logs `WARNING_LO` and continues. The retry slot remains active. Repeated
+transport errors cause the same slot to be collected and attempted on every
+`pump_retries()` call until exhaustion or expiry. [OBSERVATION]
+
+### Stack pressure
+
+`MessageEnvelope retry_buf[MSG_RING_CAPACITY=64]` in `pump_retries()`:
+~264 KB on the stack per call. `delayed[32]` in `flush_delayed_to_clients()`:
+~132 KB. On embedded targets with small stacks, these allocations are a
+stack overflow risk. [RISK]
+
+### Both tracker and retry tables share ACK_TRACKER_CAPACITY = 32
+
+Under high message rates with slow ACK receipt, both tables can fill. New
+messages will be sent without tracking or retry, silently downgrading them.
+[RISK]
+
+---
 
 ## 15. Unknowns / Assumptions
 
-U1. [ASSUMPTION] cfg.channels[0].retry_backoff_ms default value: not visible
-    without ChannelConfig.cpp / channel_config_default(). Documents assume 1000 ms.
+- [ASSUMPTION] `m_cfg.max_retries` defaults to `MAX_RETRY_COUNT = 5` via
+  `channel_config_default()`. Applications may override to a smaller value
+  (e.g., 3).
 
-U2. [ASSUMPTION] ACK_TRACKER_CAPACITY and MSG_RING_CAPACITY values: referenced
-    as compile-time constants in Types.hpp (not read). Documents assume small
-    values (e.g. 16 and 16).
+- [ASSUMPTION] `m_cfg.retry_backoff_ms` defaults to 100 ms via
+  `channel_config_default()`. With 100 ms initial backoff and `max_retries = 3`:
+  attempts fire at approximately T, T+200 ms, T+400 ms; exhaustion at next
+  `collect_due()` after T+400 ms. The 5-second expiry is unreachable under
+  these defaults.
 
-U3. [ASSUMPTION] MessageIdGen::next() returns a monotonically increasing uint64_t
-    starting from 1. Implementation not read (MessageId.hpp/cpp not in scope).
+- [ASSUMPTION] `advance_backoff()` doubles the backoff on every `collect_due()`
+  call that fires a due retry, regardless of whether the send succeeded.
+  Confirmed from `RetryManager.cpp:205`.
 
-U4. [ASSUMPTION] ImpairmentEngine is disabled by default (imp_cfg.enabled = false
-    from impairment_config_default()). If enabled, process_outbound() may return
-    ERR_IO, silently dropping the retry packet.
+- [CONFIRMED] `slot_has_expired()` checks `(expiry_us != 0ULL) && (now_us >=
+  expiry_us)`. Expiry check fires before exhaustion check (line 177 before
+  187). Confirmed from `RetryManager.cpp:177-198`.
 
-U5. [ASSUMPTION] tcp_send_frame() implements a length-prefixed framing protocol
-    matching the deserialization side. Implementation in SocketUtils not read.
+- [CONFIRMED] `RetryManager` stores `expiry_us` in two locations:
+  `m_slots[i].expiry_us` (checked by `slot_has_expired()`) and
+  `m_slots[i].env.expiry_time_us` (in the copied envelope). Both set from
+  `env.expiry_time_us` at `schedule()` time (line 94 of `RetryManager.cpp`);
+  no divergence possible.
 
-U6. [ASSUMPTION] Logger::log() is thread-safe or not called from multiple
-    threads simultaneously. In single-threaded context this is trivially true.
+- [ASSUMPTION] The application calls `pump_retries()` frequently enough to
+  detect due retries before the next retry interval passes. If `pump_retries()`
+  is called much less frequently than `backoff_ms` intervals, retries will still
+  fire correctly (just later than scheduled); retries are not missed, only
+  delayed.
 
-U7. The server may send a DATA echo rather than a separate ACK envelope.
-    If the server echoes via engine.send() with RELIABLE_RETRY (as seen in
-    Server.cpp send_echo_reply()), it does NOT send a bare ACK. The client's
-    DeliveryEngine::receive() only cancels retry when it sees message_type=ACK.
-    Whether the server also sends an explicit ACK is not visible from Server.cpp.
-    [ASSUMPTION] The client's retry for message_id=1 is only cancelled if an
-    ACK envelope is received; the DATA echo reply alone does NOT cancel it.
-
-U8. DEDUP_WINDOW_SIZE value unknown. If smaller than max_retries, the duplicate
-    filter may evict earlier entries before all retries are received, allowing
-    duplicates through on the receiver side.
+- [ASSUMPTION] The application calls `sweep_ack_timeouts()` periodically to
+  prevent the `AckTracker` from filling with stale `PENDING` slots.

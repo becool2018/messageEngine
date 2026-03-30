@@ -1,500 +1,445 @@
-Use Case 29: ImpairmentEngine Seeds Its PRNG for Deterministic Test Replay
-===========================================================================
+# UC_29 — PRNG deterministic seed
+
+**HL Group:** HL-13 — User seeds the impairment engine for deterministic replay
+**Actor:** System
+**Requirement traceability:** REQ-5.2.4, REQ-5.3.1
+
+---
 
 ## 1. Use Case Overview
 
-Actor:        ImpairmentEngine (initialized by LocalSimHarness or directly by a test).
-Trigger:      ImpairmentEngine::init(cfg) is called with a populated ImpairmentConfig
-              that carries a prng_seed value (zero or non-zero).
-Precondition: An ImpairmentConfig struct has been populated (e.g., via
-              impairment_config_default() then overridden). The prng_seed field
-              carries either 0 (use default 42) or a specific test-chosen seed.
-Postcondition: PrngEngine internal state m_state is set to a known, non-zero value.
-               Every subsequent call to m_prng.next(), next_double(), or next_range()
-               will produce the same sequence for the same seed, in any process run.
-               ImpairmentEngine is fully initialized and ready for process_outbound().
-Scope:        Initialization path only. The xorshift64 algorithm is described in full.
+### What triggers this flow
 
-This use case is the primary mechanism by which test engineers achieve deterministic
-replay of complex impairment scenarios (loss, jitter, duplication) without a live network.
+`ImpairmentEngine::init(cfg)` is called with an `ImpairmentConfig` that carries a `prng_seed` value (zero or non-zero). The trigger is the init call itself, typically issued from `LocalSimHarness::init()` or directly from a test fixture.
 
+### Expected outcome (single goal)
+
+`PrngEngine::m_state` is set to a known, non-zero value deterministic from the provided seed. Every subsequent call to `m_prng.next()`, `next_double()`, or `next_range()` will produce the same sequence for the same seed across any number of process runs. The `ImpairmentEngine` is fully initialized and ready for `process_outbound()` calls.
+
+---
 
 ## 2. Entry Points
 
-Primary entry point:
-  ImpairmentEngine::init(const ImpairmentConfig& cfg)
-  File: src/platform/ImpairmentEngine.cpp, line 23.
+**Primary entry point:**
+- `ImpairmentEngine::init(const ImpairmentConfig& cfg)` — `src/platform/ImpairmentEngine.cpp`, line 44.
 
-Seed delegation:
-  PrngEngine::seed(uint64_t s)
-  File: src/platform/PrngEngine.hpp, line 40 (inline).
+**Constructor (runs before init, seeds PRNG to 1ULL as a placeholder):**
+- `ImpairmentEngine::ImpairmentEngine()` — `src/platform/ImpairmentEngine.cpp`, line 26.
 
-PRNG consumption (runtime, after init):
-  PrngEngine::next()           -- PrngEngine.hpp, line 63.
-  PrngEngine::next_double()    -- PrngEngine.hpp, line 86.
-  PrngEngine::next_range()     -- PrngEngine.hpp, line 113.
+**Seed delegation:**
+- `PrngEngine::seed(uint64_t s)` — `src/platform/PrngEngine.hpp`, line 43 (inline).
 
-Configuration helper (called before init, by LocalSimHarness or tests):
-  impairment_config_default()  -- ImpairmentConfig.hpp, line 77.
+**PRNG outputs consumed at runtime (after init):**
+- `PrngEngine::next()` — `PrngEngine.hpp`, line 67.
+- `PrngEngine::next_double()` — `PrngEngine.hpp`, line 91.
+- `PrngEngine::next_range(lo, hi)` — `PrngEngine.hpp`, line 119.
 
+**Configuration helper (called before init):**
+- `impairment_config_default()` — `src/platform/ImpairmentConfig.hpp`, line 79.
+
+---
 
 ## 3. End-to-End Control Flow (Step-by-Step)
 
--- Phase A: Configuration Setup (caller, before init()) --
+**Phase A — Configuration setup (caller, before init())**
 
-Step A1  -- Caller declares ImpairmentConfig cfg.
-Step A2  -- Caller calls impairment_config_default(cfg). [ImpairmentConfig.hpp:77]
-            This sets ALL fields to safe defaults:
-              enabled                 = false
-              fixed_latency_ms        = 0U
-              jitter_mean_ms          = 0U
-              jitter_variance_ms      = 0U
-              loss_probability        = 0.0
-              duplication_probability = 0.0
-              reorder_enabled         = false
-              reorder_window_size     = 0U
-              partition_enabled       = false
-              partition_duration_ms   = 0U
-              partition_gap_ms        = 0U
-              prng_seed               = 42ULL   <-- DEFAULT DETERMINISTIC SEED
-Step A3  -- Caller optionally overrides prng_seed with a test-specific value, e.g.:
-              cfg.prng_seed = 0xDEADBEEFCAFEBABEULL
+1. Caller declares `ImpairmentConfig cfg`.
+2. Caller calls `impairment_config_default(cfg)` (`ImpairmentConfig.hpp:79`). Sets all fields to safe defaults:
+   - `enabled = false`, `fixed_latency_ms = 0U`, `jitter_mean_ms = 0U`, `jitter_variance_ms = 0U`
+   - `loss_probability = 0.0`, `duplication_probability = 0.0`
+   - `reorder_enabled = false`, `reorder_window_size = 0U`
+   - `partition_enabled = false`, `partition_duration_ms = 0U`, `partition_gap_ms = 0U`
+   - `prng_seed = 42ULL` — default deterministic seed.
+3. Caller optionally overrides `cfg.prng_seed` with a test-specific value (e.g., `cfg.prng_seed = 0xDEADBEEFCAFEBABEULL`).
 
--- Phase B: ImpairmentEngine::init() --
+**Phase B — Constructor (runs automatically on object declaration)**
 
-Step B1  -- ImpairmentEngine::init(cfg) is entered. [ImpairmentEngine.cpp:23]
+4. `ImpairmentEngine::ImpairmentEngine()` constructor (`ImpairmentEngine.cpp:26-38`):
+   - Member initializer list: `m_cfg{}`, `m_delay_count(0U)`, `m_reorder_count(0U)`, `m_partition_active(false)`, `m_partition_start_us(0ULL)`, `m_next_partition_event_us(0ULL)`, `m_initialized(false)`.
+   - `memset(m_delay_buf, 0, sizeof(m_delay_buf))`.
+   - `memset(m_reorder_buf, 0, sizeof(m_reorder_buf))`.
+   - `m_prng.seed(1ULL)` — preliminary seed; will be overwritten by `init()`.
+   - `NEVER_COMPILED_OUT_ASSERT(!m_initialized)`.
+   - `NEVER_COMPILED_OUT_ASSERT(IMPAIR_DELAY_BUF_SIZE > 0U)`.
 
-Step B2  -- Two precondition assertions fire:
-              assert(cfg.reorder_window_size <= IMPAIR_DELAY_BUF_SIZE)  [line 26]
-              assert(cfg.loss_probability >= 0.0 && cfg.loss_probability <= 1.0) [line 27]
+**Phase C — ImpairmentEngine::init()**
 
-Step B3  -- m_cfg = cfg (full struct copy). [line 30]
+5. `ImpairmentEngine::init(cfg)` entered (`ImpairmentEngine.cpp:44`).
 
--- Phase C: Seed Resolution and PRNG Seeding --
+6. Two precondition assertions (`lines 47-48`):
+   - `NEVER_COMPILED_OUT_ASSERT(cfg.reorder_window_size <= IMPAIR_DELAY_BUF_SIZE)` — 0 ≤ 32.
+   - `NEVER_COMPILED_OUT_ASSERT(cfg.loss_probability >= 0.0 && cfg.loss_probability <= 1.0)`.
 
-Step C1  -- Seed resolution logic: [lines 33-34]
-              uint64_t seed = (cfg.prng_seed != 0ULL) ? cfg.prng_seed : 42ULL;
-            Decision table:
-              cfg.prng_seed == 0       -> seed = 42ULL   (default)
-              cfg.prng_seed == 42      -> seed = 42ULL   (explicit match to default)
-              cfg.prng_seed == <other> -> seed = cfg.prng_seed
+7. `m_cfg = cfg` — full struct copy of all `ImpairmentConfig` fields (line 51).
 
-Step C2  -- m_prng.seed(seed) is called. [line 34]
-            Inside PrngEngine::seed(s) [PrngEngine.hpp:40]:
-              a. Check: if (s == 0ULL): m_state = 1ULL  [line 43-44]
-                        else:           m_state = s      [line 46]
-                 NOTE: Because the caller already coerced 0 to 42 in Step C1,
-                 the s==0 branch in seed() is a secondary safety net that should
-                 never fire in normal use. It would only fire if seed() were
-                 called directly with 0.
-              b. Post-condition assertion: assert(m_state != 0ULL) [line 50]
-            PrngEngine::seed() returns (void).
+**Phase D — Seed resolution and PRNG seeding**
 
--- Phase D: Remainder of ImpairmentEngine::init() --
+8. Seed resolution (`ImpairmentEngine.cpp:54-55`):
+   ```
+   uint64_t seed = (cfg.prng_seed != 0ULL) ? cfg.prng_seed : 42ULL;
+   ```
+   Decision table:
+   - `cfg.prng_seed == 0` → `seed = 42ULL` (library default; coerces 0 to a defined value)
+   - `cfg.prng_seed == 42` → `seed = 42ULL` (explicit match to default)
+   - `cfg.prng_seed == <other>` → `seed = cfg.prng_seed`
 
-Step D1  -- Zero-fill delay buffer: [lines 37-38]
-              memset(m_delay_buf, 0, sizeof(m_delay_buf))
-              m_delay_count = 0U
-            m_delay_buf is an array of IMPAIR_DELAY_BUF_SIZE DelayEntry structs.
-            Each DelayEntry contains: MessageEnvelope env, uint64_t release_us, bool active.
+9. `m_prng.seed(seed)` called (`PrngEngine.hpp:43`):
+   - `if (s == 0ULL): m_state = 1ULL` — secondary safety net; should not fire given Step 8's guard.
+   - `else: m_state = s` — the provided seed value is stored directly.
+   - `NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)`.
+   - Returns `void`.
+   - After this call, `m_prng.m_state == seed` (for `seed != 0`).
 
-Step D2  -- Zero-fill reorder buffer: [lines 41-42]
-              memset(m_reorder_buf, 0, sizeof(m_reorder_buf))
-              m_reorder_count = 0U
-            m_reorder_buf is an array of IMPAIR_DELAY_BUF_SIZE MessageEnvelope structs.
+**Phase E — Remainder of ImpairmentEngine::init()**
 
-Step D3  -- Partition state initialization: [lines 45-48]
-              m_partition_active         = false
-              m_partition_start_us       = 0ULL
-              m_next_partition_event_us  = 0ULL
-            NOTE: The comment at line 47 states that is_partition_active() will
-            initialize m_next_partition_event_us on its first call.
+10. Zero-fill delay buffer: `memset(m_delay_buf, 0, sizeof(m_delay_buf))`, `m_delay_count = 0U`.
+11. Zero-fill reorder buffer: `memset(m_reorder_buf, 0, sizeof(m_reorder_buf))`, `m_reorder_count = 0U`.
+12. Partition state initialization: `m_partition_active = false`, `m_partition_start_us = 0ULL`, `m_next_partition_event_us = 0ULL`. `is_partition_active()` initializes `m_next_partition_event_us` properly on its first call.
+13. `m_initialized = true`.
+14. Post-condition assertions: `NEVER_COMPILED_OUT_ASSERT(m_initialized)`, `NEVER_COMPILED_OUT_ASSERT(m_delay_count == 0U)`.
+15. `ImpairmentEngine::init()` returns `void`. After this point, the PRNG has not produced any output; its state is fully determined by the seed.
 
-Step D4  -- m_initialized = true. [line 51]
+**Phase F — PRNG usage at runtime (illustrative)**
 
-Step D5  -- Post-condition assertions: [lines 54-55]
-              assert(m_initialized)
-              assert(m_delay_count == 0U)
+16. Caller later invokes `process_outbound(env, now_us)`. Inside `check_loss()` (`ImpairmentEngine.cpp:110`), if `loss_probability > 0.0`:
+    - `double rand_val = m_prng.next_double()` (`PrngEngine.hpp:91`):
+      - `NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)`.
+      - `raw = next()` — executes the xorshift64 three-step transform on `m_state`.
+      - `result = static_cast<double>(raw) / static_cast<double>(UINT64_MAX)` — scales to `[0.0, 1.0)`.
+      - `NEVER_COMPILED_OUT_ASSERT(result >= 0.0 && result < 1.0)`.
+      - Returns `result`.
+    - `return rand_val < m_cfg.loss_probability`.
+17. The sequence of values produced by `next()` is fully determined by `m_state` set in Step 9. Same seed → same sequence on every process run.
 
-Step D6  -- ImpairmentEngine::init() returns (void).
-
--- Phase E: PRNG Usage at Runtime (illustrative, not init) --
-
-Step E1  -- Caller eventually invokes process_outbound(env, now_us).
-Step E2  -- Inside process_outbound(), if loss_probability > 0.0:
-              double loss_rand = m_prng.next_double()   [ImpairmentEngine.cpp:101]
-            Inside PrngEngine::next_double() [PrngEngine.hpp:86]:
-              a. assert(m_state != 0ULL)
-              b. raw = next()          -- calls xorshift64 (see Section on algorithm)
-              c. result = (double)raw / (double)UINT64_MAX
-              d. assert(result >= 0.0 && result < 1.0)
-              e. returns result
-
-Step E3  -- The sequence of values produced by next() is fully determined by the
-            initial m_state set in Step C2. Same seed -> same sequence, every run.
-
+---
 
 ## 4. Call Tree (Hierarchical)
 
-[Pre-init call by test/harness]
-impairment_config_default(cfg)                         [ImpairmentConfig.hpp:77]
-  +-- cfg.prng_seed = 42ULL  (default)
+```
+impairment_config_default(cfg)                          [ImpairmentConfig.hpp:79]
+  └── cfg.prng_seed = 42ULL  (default)
 
-[Optionally, test overrides: cfg.prng_seed = 0xDEADBEEF...]
+[Optionally: cfg.prng_seed = <test seed>]
 
-ImpairmentEngine::init(cfg)                            [ImpairmentEngine.cpp:23]
-  |
-  +-- [assertions] reorder_window_size, loss_probability
-  |
-  +-- m_cfg = cfg  (struct copy)
-  |
-  +-- seed = (cfg.prng_seed != 0) ? cfg.prng_seed : 42ULL
-  |
-  +-- m_prng.seed(seed)                                [PrngEngine.hpp:40]
-  |     +-- if (s == 0ULL): m_state = 1ULL
-  |     |   else:           m_state = s
-  |     +-- assert(m_state != 0ULL)
-  |
-  +-- memset(m_delay_buf,   0, sizeof(m_delay_buf))
-  +-- m_delay_count = 0U
-  +-- memset(m_reorder_buf, 0, sizeof(m_reorder_buf))
-  +-- m_reorder_count = 0U
-  +-- m_partition_active = false
-  +-- m_partition_start_us = 0ULL
-  +-- m_next_partition_event_us = 0ULL
-  +-- m_initialized = true
-  +-- [assertions] m_initialized, m_delay_count == 0U
+ImpairmentEngine::ImpairmentEngine()                    [ImpairmentEngine.cpp:26]
+  ├── member initializers (m_delay_count=0, m_initialized=false, etc.)
+  ├── memset(m_delay_buf, 0, ...)
+  ├── memset(m_reorder_buf, 0, ...)
+  ├── m_prng.seed(1ULL)                                 [PrngEngine.hpp:43]
+  │   └── m_state = 1ULL
+  ├── NEVER_COMPILED_OUT_ASSERT(!m_initialized)
+  └── NEVER_COMPILED_OUT_ASSERT(IMPAIR_DELAY_BUF_SIZE > 0U)
 
-[Runtime calls -- produced in reproducible order after seeding]
-m_prng.next()                                          [PrngEngine.hpp:63]
-  +-- assert(m_state != 0ULL)
-  +-- m_state ^= m_state << 13U    // xorshift step 1
-  +-- m_state ^= m_state >> 7U     // xorshift step 2
-  +-- m_state ^= m_state << 17U    // xorshift step 3
-  +-- assert(m_state != 0ULL)
-  +-- return m_state
+ImpairmentEngine::init(cfg)                             [ImpairmentEngine.cpp:44]
+  ├── [assertions] reorder_window_size, loss_probability
+  ├── m_cfg = cfg  (struct copy)
+  ├── seed = (cfg.prng_seed != 0) ? cfg.prng_seed : 42ULL
+  ├── m_prng.seed(seed)                                 [PrngEngine.hpp:43]
+  │   ├── if (s == 0ULL): m_state = 1ULL
+  │   ├── else:           m_state = s
+  │   └── NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)
+  ├── memset(m_delay_buf, 0, sizeof(m_delay_buf))
+  ├── m_delay_count = 0U
+  ├── memset(m_reorder_buf, 0, sizeof(m_reorder_buf))
+  ├── m_reorder_count = 0U
+  ├── m_partition_active=false; m_partition_start_us=0; m_next_partition_event_us=0
+  ├── m_initialized = true
+  └── [assertions] m_initialized, m_delay_count == 0U
 
-m_prng.next_double()                                   [PrngEngine.hpp:86]
-  +-- assert(m_state != 0ULL)
-  +-- raw = next()
-  +-- result = (double)raw / (double)UINT64_MAX
-  +-- assert(result in [0.0, 1.0))
-  +-- return result
+[Runtime — after init(), PRNG sequence starts here]
+m_prng.next()                                           [PrngEngine.hpp:67]
+  ├── NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)
+  ├── m_state ^= m_state << 13U
+  ├── m_state ^= m_state >> 7U
+  ├── m_state ^= m_state << 17U
+  ├── NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)
+  └── return m_state
 
-m_prng.next_range(lo, hi)                             [PrngEngine.hpp:113]
-  +-- assert(m_state != 0ULL)
-  +-- assert(hi >= lo)
-  +-- raw = next()
-  +-- range = hi - lo + 1U
-  +-- offset = (uint32_t)(raw % (uint64_t)range)
-  +-- result = lo + offset
-  +-- assert(result in [lo, hi])
-  +-- return result
+m_prng.next_double()                                    [PrngEngine.hpp:91]
+  ├── NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)
+  ├── raw = next()
+  ├── result = (double)raw / (double)UINT64_MAX
+  ├── NEVER_COMPILED_OUT_ASSERT(result in [0.0, 1.0))
+  └── return result
 
+m_prng.next_range(lo, hi)                               [PrngEngine.hpp:119]
+  ├── NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)
+  ├── NEVER_COMPILED_OUT_ASSERT(hi >= lo)
+  ├── raw = next()
+  ├── offset = (uint32_t)(raw % (uint64_t)(hi-lo+1))
+  ├── result = lo + offset
+  ├── NEVER_COMPILED_OUT_ASSERT(result in [lo, hi])
+  └── return result
+```
+
+---
 
 ## 5. Key Components Involved
 
-Component             Type          File                              Role
------------           --------      ----                              ----
-ImpairmentEngine      class         src/platform/ImpairmentEngine.cpp Top-level impairment coordinator.
-PrngEngine            class (member) src/platform/PrngEngine.hpp      xorshift64 PRNG (header-only inline).
-ImpairmentConfig      struct        src/platform/ImpairmentConfig.hpp Config including prng_seed.
-impairment_config_default  inline fn ImpairmentConfig.hpp            Sets safe defaults, default seed=42.
-DelayEntry (inner)    struct        ImpairmentEngine.hpp              Buffered message with release time.
+**`ImpairmentEngine` — `src/platform/ImpairmentEngine.cpp/.hpp`**
+Top-level impairment coordinator. Owns `m_prng` as an inline value member. `init()` is the sole entry point for seed setup.
 
+**`PrngEngine` — `src/platform/PrngEngine.hpp`**
+Header-only inline class implementing the xorshift64 algorithm. State is a single `uint64_t m_state`. Methods: `seed(s)`, `next()`, `next_double()`, `next_range(lo, hi)`. All are safety-critical (SC), annotated HAZ-002, HAZ-007.
+
+**`ImpairmentConfig` — `src/platform/ImpairmentConfig.hpp`**
+POD struct containing all impairment parameters including `prng_seed`. `impairment_config_default()` sets `prng_seed = 42ULL`.
+
+**`check_loss()` — `ImpairmentEngine.cpp:110`** (private helper)
+Primary runtime consumer of `m_prng.next_double()`. Called by `process_outbound()` when `loss_probability > 0.0`.
+
+**`apply_duplication()` — `ImpairmentEngine.cpp:127`** (private helper)
+Secondary runtime consumer of `m_prng.next_double()`. Called by `process_outbound()` when `duplication_probability > 0.0`.
+
+**`process_outbound()` — `ImpairmentEngine.cpp:151`** (public)
+Also consumes `m_prng.next_range(0, jitter_variance_ms)` for jitter when `jitter_mean_ms > 0`.
+
+---
 
 ## 6. Branching Logic / Decision Points
 
-Branch 1: cfg.prng_seed == 0 vs non-zero [ImpairmentEngine.cpp:33]
-  - == 0:     seed = 42ULL  (library-defined default for reproducibility)
-  - != 0:     seed = cfg.prng_seed  (test-provided value for custom replay)
-  This is the primary branch that controls test determinism.
+**Branch 1 — Seed coercion in `init()`** (`ImpairmentEngine.cpp:54`)
+- Condition: `cfg.prng_seed == 0ULL`
+- True: `seed = 42ULL` — library default; coerces 0 to a well-defined deterministic value.
+- False: `seed = cfg.prng_seed` — test-provided value used directly.
+- This is the primary branch controlling test determinism.
 
-Branch 2: s == 0 in PrngEngine::seed() [PrngEngine.hpp:43]
-  - == 0:     m_state = 1ULL  (coercion; xorshift64 requires non-zero state)
-  - != 0:     m_state = s
-  This branch is a secondary safety net. Under normal ImpairmentEngine usage it should
-  never fire because Step C1 already guards against 0.
+**Branch 2 — Zero-guard in `PrngEngine::seed()`** (`PrngEngine.hpp:46`)
+- Condition: `s == 0ULL`
+- True: `m_state = 1ULL` — secondary safety net; xorshift64 requires non-zero state.
+- False: `m_state = s`.
+- Under normal `ImpairmentEngine` usage, Branch 1 already prevents `s == 0` from reaching here.
 
-Branch 3: m_cfg.enabled check in process_outbound() [ImpairmentEngine.cpp:70]
-  - false: messages pass through to delay buffer immediately with release_us=now_us.
-           PRNG is NOT consumed in this path.
-  - true:  impairments applied; PRNG IS consumed for loss, duplication, jitter checks.
-  Critical for test design: if enabled==false the PRNG state does not advance, so
-  the output sequence is still deterministic but trivially so.
+**Branch 3 — Impairments enabled flag** (`ImpairmentEngine.cpp:159`)
+- Condition: `m_cfg.enabled == false`
+- True: PRNG is NOT consumed; message goes directly to delay buffer with `release_us = now_us`.
+- False: impairments applied; PRNG IS consumed for loss, duplication, jitter.
 
-Branch 4: loss_probability > 0.0 [ImpairmentEngine.cpp:100]
-  - The PRNG next_double() call only occurs when this condition is true.
-  - If loss_probability == 0.0, the PRNG state is NOT consumed for the loss check.
-  - This means the sequence of random numbers consumed depends on configuration.
-  - For identical seeds AND identical configurations, output is reproducible.
+**Branch 4 — Loss probability guard** (`ImpairmentEngine.cpp:115`)
+- Condition: `m_cfg.loss_probability <= 0.0`
+- True: `check_loss()` returns `false` immediately; PRNG NOT consumed.
+- False: `m_prng.next_double()` called; one PRNG value consumed per message.
 
-Branch 5: jitter_mean_ms > 0U [ImpairmentEngine.cpp:114]
-  - PRNG next_range() is only called when jitter is enabled.
-  - Same implication as Branch 4 for reproducibility.
+**Branch 5 — Jitter guard** (`ImpairmentEngine.cpp:185`)
+- Condition: `m_cfg.jitter_mean_ms > 0U`
+- True: `m_prng.next_range()` called; one PRNG value consumed per message.
+- False: PRNG not consumed for jitter.
 
-Branch 6: duplication_probability > 0.0 [ImpairmentEngine.cpp:144]
-  - PRNG next_double() is only called when this condition is true.
+**Branch 6 — Duplication guard** (`ImpairmentEngine.cpp:203`)
+- Condition: `m_cfg.duplication_probability > 0.0`
+- True: `apply_duplication()` calls `m_prng.next_double()`; one PRNG value consumed.
+- False: PRNG not consumed for duplication.
 
-Branch 7: partition_enabled in is_partition_active() [ImpairmentEngine.cpp:285]
-  - false: returns immediately without consuming PRNG.
-  - true:  state machine runs. PRNG is NOT used for partition timing (durations are
-           deterministic from the config values).
+**Branch 7 — Partition guard** (`ImpairmentEngine.cpp:328`)
+- Condition: `m_cfg.partition_enabled == false`
+- True: `is_partition_active()` returns immediately; PRNG is NOT used for partition decisions.
+- Partition timing is purely clock-driven (`m_cfg.partition_duration_ms`, `partition_gap_ms`).
 
+---
 
 ## 7. Concurrency / Threading Behavior
 
-PrngEngine is NOT thread-safe. m_state is a plain uint64_t with no atomic protection.
+`PrngEngine` is NOT thread-safe. `m_state` is a plain `uint64_t` with no atomic protection. The three-step XOR sequence in `next()` requires read-modify-write atomicity that a plain `uint64_t` does not provide.
 
-ImpairmentEngine::init() is intended to complete before concurrent use begins.
-After init(), PrngEngine::next() modifies m_state on every call. If process_outbound()
-and collect_deliverable() were called from different threads, m_state would be subject
-to a data race. The design assumes single-threaded use of each ImpairmentEngine instance
-(consistent with the SPSC model used by LocalSimHarness's RingBuffer).
+`ImpairmentEngine::init()` is intended to complete before concurrent use begins. After `init()`, each call to `process_outbound()` mutates `m_state` via `next()`/`next_double()`/`next_range()`. Concurrent `process_outbound()` calls on the same instance produce a data race on `m_state`.
 
-The xorshift64 algorithm itself is not safe for concurrent calls because the three-step
-XOR sequence requires read-modify-write atomicity that plain uint64_t does not provide.
+The design assumes single-threaded use of each `ImpairmentEngine` instance. This is consistent with the SPSC model used by `LocalSimHarness`'s `RingBuffer`.
 
-Conclusion: Use from a single thread only. This is consistent with the F-Prime model
-where each channel/harness is driven by a single thread or event loop.
+---
 
+## 8. Memory & Ownership Semantics (C/C++ Specific)
 
-## 8. Memory and Ownership Semantics (C/C++ Specific)
+**`PrngEngine` state:** single `uint64_t m_state` (8 bytes). No dynamic allocation.
+- Set to `1ULL` by the constructor's `m_prng.seed(1ULL)`.
+- Overwritten to the config-derived seed value by `init()`'s `m_prng.seed(seed)`.
 
-PrngEngine state: single uint64_t m_state (8 bytes). No dynamic allocation.
-  - Value-initialized in the containing ImpairmentEngine object.
-  - Seeded by value copy from the caller's cfg.prng_seed.
+**`ImpairmentConfig` copy:** passed by `const` reference; copied into `m_cfg` at line 51 of `ImpairmentEngine.cpp`. After `init()` returns, `m_cfg` is independent of the caller's struct.
 
-ImpairmentConfig is passed by const reference and copied into m_cfg (line 30).
-  - After init() returns, m_cfg is independent of the caller's struct.
+**Delay buffer:** `m_delay_buf[IMPAIR_DELAY_BUF_SIZE]` (32 entries) — inline in `ImpairmentEngine`. Each `DelayEntry` contains a `MessageEnvelope` (4096-byte payload array), `release_us` (`uint64_t`), `active` (`bool`). Per entry ~4129 bytes; total ~132 KB. Zero-filled by `memset` in both constructor and `init()`.
 
-DelayEntry array: m_delay_buf[IMPAIR_DELAY_BUF_SIZE] -- inline in ImpairmentEngine.
-  - Contains MessageEnvelope structs (potentially large objects).
-  - Zero-filled by memset at init. [ASSUMPTION: MessageEnvelope has trivial zero repr.]
+**Reorder buffer:** `m_reorder_buf[IMPAIR_DELAY_BUF_SIZE]` (32 `MessageEnvelope` entries) — inline in `ImpairmentEngine`. ~132 KB. Zero-filled similarly.
 
-Reorder buffer: m_reorder_buf[IMPAIR_DELAY_BUF_SIZE] -- inline in ImpairmentEngine.
-  - Zero-filled by memset at init.
+**Total `ImpairmentEngine` stack footprint:** approximately 264 KB (dominated by two fixed arrays of 32 `MessageEnvelope` objects).
 
-No heap allocation occurs anywhere in the init or PRNG seeding path (Power of 10 rule 3).
+No heap allocation anywhere in the init or PRNG seeding path (Power of 10 Rule 3).
 
-sizeof considerations:
-  - PrngEngine: 8 bytes.
-  - ImpairmentConfig: approximately 64 bytes (estimated from field types).
-  - ImpairmentEngine total: dominated by two arrays of IMPAIR_DELAY_BUF_SIZE
-    DelayEntry/MessageEnvelope structs. [ASSUMPTION: IMPAIR_DELAY_BUF_SIZE is O(16-64).]
-
+---
 
 ## 9. Error Handling Flow
 
-ImpairmentEngine::init() is void; no Result is returned.
-All error detection is via assert().
+`ImpairmentEngine::init()` is `void`; no `Result` is returned.
 
-Assertion failures during init:
-  - cfg.reorder_window_size > IMPAIR_DELAY_BUF_SIZE -> assert at line 26.
-  - cfg.loss_probability outside [0.0, 1.0]         -> assert at line 27.
-  - m_state == 0 after seed()                        -> assert at PrngEngine.hpp:50.
-                                                        (Cannot fire if seed>0 is passed.)
+All error detection is via `NEVER_COMPILED_OUT_ASSERT()` — always active regardless of `NDEBUG`.
 
-At runtime (PRNG consumption):
-  - assert(m_state != 0ULL) fires in next()/next_double()/next_range() if somehow
-    m_state becomes 0. The xorshift64 algorithm provably cannot reach 0 if the initial
-    state is non-zero (the three-step XOR operation preserves this invariant).
-    [MATHEMATICAL PROPERTY: xorshift64 generates a maximal-length sequence over all
-    non-zero 64-bit values; 0 is a fixed point and is never reachable from non-zero state.]
+| Condition | Location | Effect |
+|---|---|---|
+| `cfg.reorder_window_size > IMPAIR_DELAY_BUF_SIZE` | `ImpairmentEngine.cpp:47` | Assert fires; program terminates. |
+| `cfg.loss_probability` outside `[0.0, 1.0]` | `ImpairmentEngine.cpp:48` | Assert fires; program terminates. |
+| `m_state == 0` after `seed()` | `PrngEngine.hpp:53` | Assert fires; but seed coercion prevents this in normal flow. |
 
-Assertion in next_double():
-  - assert(result >= 0.0 && result < 1.0). This should always pass since raw is a
-    positive uint64_t divided by UINT64_MAX. Only a floating-point implementation
-    defect could violate this.
+At runtime, `NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)` in `next()`, `next_double()`, and `next_range()` guards against state corruption. The xorshift64 algorithm provably cannot reach 0 from a non-zero initial state (0 is a fixed point of the three XOR steps; the sequence has period 2^64 - 1 over all non-zero states).
 
-Assertion in next_range():
-  - assert(hi >= lo) fires if caller provides inverted range.
-  - assert(result >= lo && result <= hi) validates the modulo arithmetic.
+**No `Logger::log()` is called during `ImpairmentEngine::init()`.** The effective seed is not observable at runtime without a debugger (see RISK-4).
 
+---
 
 ## 10. External Interactions
 
-During init():
-  - No OS calls.
-  - No I/O.
-  - No network.
-  - No Logger::log() call inside ImpairmentEngine::init() itself.
-    [OBSERVATION: Unlike DeliveryEngine::init(), there is no INFO log at the end of
-    ImpairmentEngine::init(). This is an observability gap.]
+During constructor and `init()`:
+- No OS calls.
+- No I/O.
+- No network.
+- No `Logger::log()` call inside `ImpairmentEngine::init()` itself.
 
 During runtime PRNG consumption:
-  - PrngEngine::next() and its callers are pure computation with no external interactions.
-  - Logger::log() IS called inside process_outbound() on impairment events (loss drop,
-    duplication), but those are runtime events, not init events.
+- `PrngEngine::next()` and its callers are pure computation with no external interactions.
+- `Logger::log()` IS called inside `process_outbound()` on impairment events (partition drop, loss drop, duplication, delay buffer full), but those are runtime events, not init events.
 
+---
 
 ## 11. State Changes / Side Effects
 
-Before init():
-  m_cfg                    undefined
-  m_prng.m_state           undefined (uninitialized uint64_t)
-  m_delay_buf              undefined
-  m_delay_count            undefined
-  m_reorder_buf            undefined
-  m_reorder_count          undefined
-  m_partition_active       undefined
-  m_partition_start_us     undefined
-  m_next_partition_event_us undefined
-  m_initialized            undefined (false if zero-initialized by constructor)
+**Before constructor:**
+All members undefined.
 
-After init(cfg) with, e.g., cfg.prng_seed = 999:
-  m_cfg                    = copy of cfg parameter
-  m_prng.m_state           = 999ULL
-  m_delay_buf[0..N-1]      = all-zeros (active=false, release_us=0, env=zeroed)
-  m_delay_count            = 0U
-  m_reorder_buf[0..N-1]    = all-zeros
-  m_reorder_count          = 0U
-  m_partition_active       = false
-  m_partition_start_us     = 0ULL
-  m_next_partition_event_us = 0ULL
-  m_initialized            = true
+**After constructor (before `init()`):**
 
-After first call to m_prng.next() (e.g., seed=999):
-  xorshift64 steps on 999:
-    step 1: 999 ^= 999 << 13  = 999 ^ 8183808   = 8182857
-    step 2: 8182857 ^= 8182857 >> 7  (illustrative; exact value requires binary arithmetic)
-    step 3: result ^= result << 17
-  m_state transitions to the xorshift64 successor of 999.
-  This value is deterministic and reproducible on every platform with conforming C++17.
+| Field | Value |
+|---|---|
+| `m_cfg` | `{}` (zero-initialized) |
+| `m_prng.m_state` | `1ULL` |
+| `m_delay_buf[0..31]` | all-zeros |
+| `m_delay_count` | `0U` |
+| `m_reorder_buf[0..31]` | all-zeros |
+| `m_reorder_count` | `0U` |
+| `m_partition_active` | `false` |
+| `m_initialized` | `false` |
 
+**After `init(cfg)` with, e.g., `cfg.prng_seed = 999`:**
 
-## 12. Sequence Diagram (ASCII)
+| Field | Value |
+|---|---|
+| `m_cfg` | copy of `cfg` parameter |
+| `m_prng.m_state` | `999ULL` |
+| `m_delay_buf[0..31].active` | `false`; `release_us = 0`; `env` zeroed |
+| `m_delay_count` | `0U` |
+| `m_reorder_buf[0..31]` | all-zeros |
+| `m_reorder_count` | `0U` |
+| `m_partition_active` | `false` |
+| `m_initialized` | `true` |
 
-  Test/Caller             ImpairmentEngine        PrngEngine           Logger
-      |                         |                     |                    |
-      |-- config_default() -->  [cfg.prng_seed=42]    |                    |
-      |-- cfg.prng_seed=SEED -> [cfg.prng_seed=SEED]  |                    |
-      |                         |                     |                    |
-      |-- init(cfg) ----------> |                     |                    |
-      |                         |-- assert bounds     |                    |
-      |                         |-- m_cfg = cfg       |                    |
-      |                         |                     |                    |
-      |                         |-- seed=(cfg.prng_seed!=0)?cfg.prng_seed:42
-      |                         |                     |                    |
-      |                         |-- seed(seed) -----> |                    |
-      |                         |                     |-- if s==0: state=1 |
-      |                         |                     |-- else: state=s    |
-      |                         |                     |-- assert(state!=0) |
-      |                         |                     |                    |
-      |                         |-- memset delay_buf  |                    |
-      |                         |-- m_delay_count=0   |                    |
-      |                         |-- memset reorder_buf|                    |
-      |                         |-- m_reorder_count=0 |                    |
-      |                         |-- partition state=0 |                    |
-      |                         |-- m_initialized=true|                    |
-      |                         |-- assert(init)      |                    |
-      |                         |-- assert(delay==0)  |                    |
-      | <-- (void) ------------ |                     |                    |
-      |                         |                     |                    |
-      | (later at runtime)      |                     |                    |
-      |-- process_outbound() -> |                     |                    |
-      |                         |-- next_double() --> |                    |
-      |                         |                     |-- next()           |
-      |                         |                     |   state^=state<<13 |
-      |                         |                     |   state^=state>>7  |
-      |                         |                     |   state^=state<<17 |
-      |                         |                     |-- returns state    |
-      |                         |                     |-- /UINT64_MAX      |
-      |                         |                     |-- return double    |
-      |                         |                     |                    |
-      |                         |  [loss check pass]  |                    |
-      |                         |-- [buffer message]  |                    |
-      |                         |-- (returns OK)      |                    |
-      | <-- Result::OK -------- |                     |                    |
+**After first call to `m_prng.next()` with seed=999:**
+xorshift64 on 999:
+- Step 1: `999 ^= 999 << 13` = `999 ^ 8183808` = `8182857`
+- Step 2: `8182857 ^= 8182857 >> 7`
+- Step 3: result `^= result << 17`
+`m_state` transitions to the xorshift64 successor of 999. This value is deterministic and reproducible on every platform with conforming C++17.
 
+---
+
+## 12. Sequence Diagram using mermaid
+
+```mermaid
+sequenceDiagram
+    participant Caller as Test/Caller
+    participant IE as ImpairmentEngine
+    participant PE as PrngEngine
+
+    Caller->>IE: impairment_config_default(cfg)
+    note over Caller: cfg.prng_seed = 42 (default)
+    note over Caller: Optionally: cfg.prng_seed = SEED
+
+    note over IE: [ImpairmentEngine eng;] -> constructor
+    IE->>PE: seed(1ULL)
+    PE-->>IE: m_state = 1ULL
+
+    Caller->>IE: init(cfg)
+    IE->>IE: assert bounds
+    IE->>IE: m_cfg = cfg
+    IE->>IE: seed = cfg.prng_seed != 0 ? prng_seed : 42
+    IE->>PE: seed(seed)
+    PE->>PE: if s==0: state=1; else: state=s
+    PE->>PE: assert(state != 0)
+    PE-->>IE: done
+    IE->>IE: memset delay_buf; m_delay_count=0
+    IE->>IE: memset reorder_buf; m_reorder_count=0
+    IE->>IE: partition state = 0
+    IE->>IE: m_initialized = true
+    IE-->>Caller: (void)
+
+    note over Caller: Later at runtime:
+    Caller->>IE: process_outbound(env, now_us)
+    IE->>PE: next_double() [via check_loss()]
+    PE->>PE: state ^= state<<13; state ^= state>>7; state ^= state<<17
+    PE-->>IE: return double in [0.0, 1.0)
+    IE-->>Caller: Result::OK or ERR_IO
+```
+
+---
 
 ## 13. Initialization vs Runtime Flow
 
-Initialization (this use case):
-  1. impairment_config_default() sets prng_seed = 42 (or caller provides custom seed).
-  2. ImpairmentEngine::init(cfg) copies config, resolves seed, calls m_prng.seed(seed).
-  3. m_prng.m_state is set. All buffers zeroed. m_initialized = true.
-  4. After init() returns, the PRNG is seeded but has not yet produced output.
-     The state is deterministic given the seed; the sequence is thus fully reproducible.
+### Startup / initialization (this use case)
 
-Runtime (post-init):
-  - Each call to m_prng.next() advances m_state via three XOR-shift steps.
-  - m_prng.next_double() calls next() then divides.
-  - m_prng.next_range(lo, hi) calls next() then applies modulo.
-  - The ORDER in which these methods are called depends on enabled impairments
-    and message arrival patterns. For identical seeds AND identical cfg AND identical
-    message sequences, all impairment decisions reproduce exactly.
+1. `ImpairmentEngine` constructor zeros state, seeds PRNG to `1ULL` (placeholder).
+2. `impairment_config_default()` sets `prng_seed = 42` (or caller provides a custom seed).
+3. `ImpairmentEngine::init(cfg)` copies config, resolves seed, calls `m_prng.seed(seed)`.
+4. `m_prng.m_state` is set. All buffers zeroed. `m_initialized = true`.
+5. After `init()` returns, the PRNG is seeded but has not yet produced output. The state is deterministic given the seed; the sequence is fully reproducible.
 
-xorshift64 Algorithm (Complete):
-  Given state S (non-zero uint64_t):
-    S = S XOR (S left-shift 13)
-    S = S XOR (S right-shift 7)
-    S = S XOR (S left-shift 17)
-    return S
+### Steady-state runtime (post-init)
 
-  Properties:
-    - Period: 2^64 - 1 (visits all non-zero 64-bit states exactly once).
-    - Fixed point: 0 (never reachable from non-zero initial state).
-    - No floating-point operations in the core step (fast, deterministic).
-    - No seed-dependent branching in the hot path.
-    - All three shift constants (13, 7, 17) are from Marsaglia's published
-      maximal-period xorshift64 parameter table.
+PRNG consumers in order of call within `process_outbound()`:
+1. `is_partition_active()` — does NOT consume PRNG (uses wall-clock only).
+2. `check_loss()` — consumes one `next_double()` if `loss_probability > 0`.
+3. `next_range(0, jitter_variance_ms)` — consumes one `next_range()` if `jitter_mean_ms > 0`.
+4. `apply_duplication()` — consumes one `next_double()` if `duplication_probability > 0`.
 
+With all three active, each `process_outbound()` call consumes up to 3 PRNG values. For identical seeds AND identical cfg AND identical message sequences, all impairment decisions reproduce exactly.
+
+**xorshift64 algorithm (complete):**
+Given state S (non-zero uint64\_t):
+1. `S = S XOR (S << 13)`
+2. `S = S XOR (S >> 7)`
+3. `S = S XOR (S << 17)`
+4. return S
+
+Properties: period 2^64 - 1 (visits all non-zero 64-bit states exactly once); fixed point 0 (never reachable from non-zero initial state); no floating-point in the core step; shift constants (13, 7, 17) from Marsaglia's published maximal-period xorshift64 parameter table.
+
+---
 
 ## 14. Known Risks / Observations
 
-Risk 1: PRNG state is not reset between tests if the same ImpairmentEngine object is reused.
-  If init() is called a second time with a different seed, m_prng.m_state is correctly
-  re-seeded. But if init() is NOT called again and process_outbound() is called from
-  a new test, the PRNG continues from where the previous test left off. This can break
-  determinism across tests.
+**RISK-1 — PRNG state not reset between tests if object is reused:**
+If `init()` is called a second time with a different seed, `m_prng.m_state` is correctly re-seeded. But if `init()` is NOT called again and `process_outbound()` is called from a new test, the PRNG continues from where the previous test left off. This breaks determinism across tests on the same object instance.
 
-Risk 2: seed==0 handling has two layers (ImpairmentEngine and PrngEngine).
-  Both coerce 0 to a non-zero value (42 and 1 respectively). If the behavior of the
-  double-coercion is not understood, a test author who explicitly sets prng_seed=0
-  expecting "no seeding" will get seed=42, which is non-obvious.
+**RISK-2 — Seed == 0 has two coercion layers:**
+Both `ImpairmentEngine::init()` (to 42) and `PrngEngine::seed()` (to 1) coerce a zero seed to a different non-zero value. A test author who explicitly sets `prng_seed = 0` expecting "no seeding" will silently get seed = 42. The behavior is defined but non-obvious.
 
-Risk 3: Impairment decision reproducibility requires matching config.
-  As noted in Branch 4-6, the PRNG is only consumed when the corresponding impairment
-  is enabled. Different cfg values (even with the same seed) produce different sequences
-  of consumed random values. Tests must document both seed AND full ImpairmentConfig.
+**RISK-3 — Reproducibility requires matching config:**
+The PRNG is only consumed when the corresponding impairment is enabled (Branches 4–6). Different `cfg` values with the same seed produce different sequences of consumed random values. Tests must document both the seed AND the full `ImpairmentConfig` to guarantee reproducibility.
 
-Risk 4: No Logger::log() on init.
-  Unlike DeliveryEngine, ImpairmentEngine::init() emits no log message. The effective
-  seed used is not observable at runtime without a debugger.
+**RISK-4 — No `Logger::log()` on init:**
+Unlike `LocalSimHarness`, `ImpairmentEngine::init()` emits no log message. The effective seed used (`42ULL` vs. user-provided) is not observable at runtime without a debugger.
 
-Risk 5: memset on structs containing non-trivial members.
-  If MessageEnvelope or DelayEntry ever gains a non-trivially-constructible member
-  (e.g., a string object), the memset will corrupt it. The current code is safe because
-  all fields are POD, but this is a latent maintenance risk.
+**RISK-5 — `memset` on structs with non-trivially-constructible members:**
+If `MessageEnvelope` or `DelayEntry` ever gains a non-trivially-constructible member (e.g., a `std::string` object), the `memset` will corrupt it. The current code is safe because all fields are POD.
 
-Observation: The xorshift64 algorithm has known weaknesses for cryptographic use but is
-  entirely appropriate for simulation impairment decisions. It is fast, reproducible, and
-  has a period of 2^64-1 which is far more than sufficient for test replay.
+**RISK-6 — Constructor pre-seeds PRNG to 1ULL:**
+If `process_outbound()` were called before `init()` (a contract violation), the PRNG would produce a sequence from seed `1ULL`. The `NEVER_COMPILED_OUT_ASSERT(m_initialized)` in `process_outbound()` catches this at runtime in all builds.
 
+---
 
 ## 15. Unknowns / Assumptions
 
-[ASSUMPTION] IMPAIR_DELAY_BUF_SIZE is a compile-time constant of sufficient size to hold
-  both the delay buffer and the reorder buffer. Its exact value was not in the read files.
+`[CONFIRMED]` xorshift64 shift constants are (13, 7, 17) from `PrngEngine.hpp:73-75`. These match Marsaglia's maximal-period xorshift64 parameter table.
 
-[ASSUMPTION] MessageEnvelope is a POD struct with a trivial zero-representation such that
-  memset to 0 produces a valid "empty/uninitialized" envelope state.
+`[CONFIRMED]` `IMPAIR_DELAY_BUF_SIZE = 32` from `Types.hpp:28`.
 
-[ASSUMPTION] The xorshift64 shift constants (13, 7, 17) are those from the original
-  Marsaglia paper for maximal-period 64-bit output. The code comment confirms "xorshift64"
-  but does not cite the specific parameter set.
+`[CONFIRMED]` `UINT64_MAX` is available and correctly equals `2^64 - 1` on all C++17-conforming platforms (guaranteed by the standard).
 
-[ASSUMPTION] UINT64_MAX is available and correctly equals 2^64 - 1 on the target platform.
-  This is guaranteed by the C++17 standard on all conforming platforms.
+`[CONFIRMED]` `impairment_config_default()` sets `prng_seed = 42ULL` (`ImpairmentConfig.hpp:92`). This is the fallback when the caller passes `cfg.prng_seed = 0`.
 
-[UNKNOWN] Whether ImpairmentEngine::init() is ever called more than once (e.g., to reset
-  impairment state mid-test). The code supports it but no test in test_LocalSim.cpp
-  demonstrates this pattern.
+`[ASSUMPTION]` `MessageEnvelope` is a POD struct with a trivial zero-representation such that `memset` to 0 produces a valid "empty/uninitialized" envelope state.
 
-[UNKNOWN] The exact value of IMPAIR_DELAY_BUF_SIZE and whether it matches MSG_RING_CAPACITY.
-  These constants determine the worst-case memory footprint of ImpairmentEngine.
-
-[ASSUMPTION] The partition state machine does NOT consume the PRNG. Partition timing is
-  fully deterministic from the config values (duration_ms, gap_ms) and the clock. This
-  is confirmed by reading is_partition_active() which uses only integer comparisons.
+`[UNKNOWN]` Whether `ImpairmentEngine::init()` is ever called more than once on the same object (e.g., to reset impairment state mid-test). The code supports it mechanically (all state is re-zeroed) but no test demonstrates this pattern.

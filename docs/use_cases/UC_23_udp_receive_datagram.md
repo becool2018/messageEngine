@@ -1,638 +1,425 @@
-================================================================================
-UC_23 — UDP RECEIVE DATAGRAM
-Flow-of-Control Document
-Source files traced:
-  src/platform/UdpBackend.cpp / .hpp
-  src/platform/SocketUtils.cpp
-  src/core/Serializer.cpp
-  src/platform/ImpairmentEngine.cpp
-  src/core/RingBuffer.hpp
-  src/core/Types.hpp
-================================================================================
+# UC_23 — UDP receive datagram
+
+**HL Group:** HL-17 — User sends or receives over UDP
+**Actor:** User
+**Requirement traceability:** REQ-4.1.3, REQ-6.2.1, REQ-6.2.2, REQ-6.2.4, REQ-3.2.6, REQ-7.1.4
+
+---
 
 ## 1. Use Case Overview
 
-Name:       UC_23 — UDP Receive Datagram
-Actor:      Any caller holding a UdpBackend* that has successfully called
-            UdpBackend::init().
-Goal:       Block (with bounded timeout) for an incoming UDP datagram on the
-            bound socket, deserialize the raw bytes into a MessageEnvelope,
-            flush any delayed envelopes from the impairment engine, push and
-            pop through the RingBuffer, and return the first available envelope
-            to the caller.
-Preconditions:
-  - UdpBackend::init() has returned Result::OK.
-  - m_open == true and m_fd >= 0.
-  - The socket is bound and may already have datagrams in the OS receive buffer.
-Postconditions (happy path):
-  - A valid MessageEnvelope is written into the caller's envelope reference.
-  - Result::OK is returned.
-  - The received datagram has been consumed from the OS socket buffer.
-Timeout path:
-  - No datagram arrived within timeout_ms milliseconds.
-  - Result::ERR_TIMEOUT is returned; envelope is unmodified.
+### Clear description of what triggers this flow
 
---------------------------------------------------------------------------------
+The User calls `UdpBackend::receive_message(MessageEnvelope& envelope, uint32_t timeout_ms)` on a `UdpBackend` that has been successfully initialized. The call checks the internal ring buffer for a pre-queued message, then polls the UDP socket for new datagrams in a bounded loop (up to 50 iterations × 100 ms each = up to 5 seconds). On each iteration it also flushes any delayed messages from the impairment engine that have reached their `release_us` time.
+
+### Expected outcome (single goal)
+
+A valid `MessageEnvelope` is written into the caller's reference and `Result::OK` is returned. If no message arrives within the bounded timeout window, `Result::ERR_TIMEOUT` is returned with the envelope unmodified.
+
+---
 
 ## 2. Entry Points
 
-Primary entry point:
-  UdpBackend::receive_message(MessageEnvelope& envelope, uint32_t timeout_ms)
-    File:   src/platform/UdpBackend.cpp, line 161
+### Exact functions, threads, or events where execution begins
 
-Supporting functions reached during this call:
-  RingBuffer::pop(envelope)
-    File:   src/core/RingBuffer.hpp, line 159
+**Primary entry point:**
+`UdpBackend::receive_message(MessageEnvelope& envelope, uint32_t timeout_ms)` — `src/platform/UdpBackend.cpp`, line 220.
+Precondition assertions (lines 222–223):
+- `NEVER_COMPILED_OUT_ASSERT(m_open)`
+- `NEVER_COMPILED_OUT_ASSERT(m_fd >= 0)`
 
-  socket_recv_from(fd, buf, cap, timeout_ms, &out_len, src_ip, &src_port)
-    File:   src/platform/SocketUtils.cpp, line 530
-    POSIX:  poll(2), then recvfrom(2)
+**Supporting functions reached:**
+- `RingBuffer::pop()` — `src/core/RingBuffer.hpp`
+- `UdpBackend::recv_one_datagram()` — `UdpBackend.cpp:165`
+- `socket_recv_from()` — `src/platform/SocketUtils.cpp:532`
+- `Serializer::deserialize()` — `src/core/Serializer.cpp`
+- `RingBuffer::push()` — `src/core/RingBuffer.hpp`
+- `UdpBackend::flush_delayed_to_queue()` — `UdpBackend.cpp:200`
+- `ImpairmentEngine::collect_deliverable()` — `src/platform/ImpairmentEngine.cpp:216`
+- `timestamp_now_us()` — `src/core/Timestamp.hpp` (inline)
 
-  Serializer::deserialize(buf, out_len, envelope)
-    File:   src/core/Serializer.cpp, line 173
+---
 
-  timestamp_now_us()
-    File:   src/core/Timestamp.hpp / .cpp [ASSUMPTION]
+## 3. End-to-End Control Flow (Step-by-Step)
 
-  ImpairmentEngine::collect_deliverable(now_us, delayed, IMPAIR_DELAY_BUF_SIZE)
-    File:   src/platform/ImpairmentEngine.cpp, line 174
+1. **`UdpBackend::receive_message()` entry (UdpBackend.cpp:220)**
+   - `NEVER_COMPILED_OUT_ASSERT(m_open)` — transport is initialized.
+   - `NEVER_COMPILED_OUT_ASSERT(m_fd >= 0)` — socket fd is valid.
 
-  RingBuffer::push(delayed[i])
-    File:   src/core/RingBuffer.hpp, line 127
+2. **Fast path: check ring buffer first (UdpBackend.cpp:226–229)**
+   - `m_recv_queue.pop(envelope)` (`RingBuffer.hpp`):
+     - Loads `m_head` with acquire ordering.
+     - If `m_head == m_tail` → queue is empty; returns `ERR_EMPTY`.
+     - Otherwise: `envelope_copy(m_buf[m_head % MSG_RING_CAPACITY], envelope)`; increments `m_head` with release ordering; returns `OK`.
+   - If `result_ok(res)` → return `OK` immediately (message was already queued from a prior poll).
 
-  RingBuffer::pop(envelope) — called again after push
-    File:   src/core/RingBuffer.hpp, line 159
+3. **Compute bounded poll count (UdpBackend.cpp:231–235)**
+   - `poll_count = (timeout_ms + 99U) / 100U` — ceiling division to convert to 100 ms units.
+   - If `poll_count > 50U` → cap at 50 (maximum 5 seconds).
+   - `NEVER_COMPILED_OUT_ASSERT(poll_count <= 50U)` — Power of 10 bounded loop count.
 
---------------------------------------------------------------------------------
+4. **Bounded poll loop (UdpBackend.cpp:238–253)**
+   Power of 10 rule 2: fixed loop bound (capped at 50 above).
 
-## 3. End-to-Step Control Flow (Step-by-Step)
+   For each attempt `= 0..poll_count-1`:
 
-Step 1  —  UdpBackend::receive_message() entry (UdpBackend.cpp:161)
-           assert(m_open)   — transport is initialized
-           assert(m_fd >= 0) — socket is valid
+   **4a. `recv_one_datagram(100U)` (UdpBackend.cpp:239; UdpBackend.cpp:165)**
+   - `NEVER_COMPILED_OUT_ASSERT(m_open)`, `NEVER_COMPILED_OUT_ASSERT(m_fd >= 0)`.
+   - `uint32_t out_len = 0U`; `char src_ip[48]`; `uint16_t src_port = 0U`.
+   - `socket_recv_from(m_fd, m_wire_buf, SOCKET_RECV_BUF_BYTES, 100U, &out_len, src_ip, &src_port)` (SocketUtils.cpp:532):
+     - `NEVER_COMPILED_OUT_ASSERT` checks on all pointer parameters.
+     - `poll(m_fd, POLLIN, 100)` — wait up to 100 ms for readability.
+     - If `poll_result <= 0` → log `WARNING_LO "recvfrom poll timeout"`; return false.
+     - `recvfrom(fd, m_wire_buf, SOCKET_RECV_BUF_BYTES, 0, &src_addr, &src_len)` → receive up to 8192 bytes.
+     - If `recv_result < 0` → log `WARNING_LO "recvfrom() failed"`; return false.
+     - If `recv_result == 0` → log `WARNING_LO "recvfrom() returned 0 bytes"`; return false.
+     - `inet_ntop(AF_INET, &src_addr.sin_addr, out_ip, 48)` — extract source IP string.
+     - If `inet_ntop` returns `nullptr` → log `WARNING_LO`; return false.
+     - `*out_port = ntohs(src_addr.sin_port)`.
+     - `*out_len = (uint32_t)recv_result`.
+     - `NEVER_COMPILED_OUT_ASSERT(*out_len > 0U && *out_len <= buf_cap)`.
+     - Returns `true`.
+   - If `socket_recv_from` returns false → `recv_one_datagram` returns false. No envelope queued for this attempt.
+   - If true: `Serializer::deserialize(m_wire_buf, out_len, env)` (Serializer.cpp):
+     - Reads 44-byte header big-endian; validates length field; copies payload via `memcpy`.
+     - Returns `ERR_INVALID` if length fields are inconsistent or buffer too short.
+     - Returns `OK` on success; populates `env`.
+   - If deserialize fails → log `WARNING_LO "Deserialize failed: %u"`; `recv_one_datagram` returns false.
+   - `m_recv_queue.push(env)` (`RingBuffer.hpp`):
+     - Loads `m_tail` with acquire ordering; checks if full (`m_tail - m_head >= MSG_RING_CAPACITY = 64`).
+     - If full → returns `ERR_FULL`; `UdpBackend.cpp:188`: log `WARNING_HI "Recv queue full; dropping datagram from %s:%u"`.
+     - Otherwise: `envelope_copy(m_buf[m_tail % MSG_RING_CAPACITY], env)`; increments `m_tail` with release ordering; returns `OK`.
+   - `recv_one_datagram` returns `true` (even if push failed; the datagram was received but dropped).
 
-Step 2  —  Queue fast-path check (UdpBackend.cpp:167)
-           m_recv_queue.pop(envelope)
-           If result_ok(res): return res immediately.
-           [This handles the case where a previous call left a message in the
-            RingBuffer (e.g., after a push/pop sequence where push succeeded
-            but a second pop was not reached) — unusual but safe.]
+   **4b. Try pop from ring buffer (UdpBackend.cpp:241–244)**
+   - `m_recv_queue.pop(envelope)`.
+   - If `result_ok(res)` → return `OK` immediately.
 
-Step 3  —  Compute poll iteration count (UdpBackend.cpp:174)
-           poll_count = (timeout_ms + 99) / 100    — ceiling division: 100ms/iter
-           If poll_count > 50: poll_count = 50      — cap: max 5000ms total
-           [Power of 10 rule 2: fixed upper bound enforced here.]
+   **4c. `timestamp_now_us()` (UdpBackend.cpp:246)**
+   - `clock_gettime(CLOCK_MONOTONIC, &ts)`; returns `uint64_t` microseconds.
+   - Assigned to local `now_us`.
 
-Step 4  —  Poll loop (UdpBackend.cpp:179, outer bound = poll_count)
-           for (attempt = 0; attempt < poll_count; attempt++)
+   **4d. `flush_delayed_to_queue(now_us)` (UdpBackend.cpp:247; UdpBackend.cpp:200)**
+   - `NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL)`, `NEVER_COMPILED_OUT_ASSERT(m_open)`.
+   - `ImpairmentEngine::collect_deliverable(now_us, delayed, IMPAIR_DELAY_BUF_SIZE)` (ImpairmentEngine.cpp:216):
+     - Scans `m_delay_buf[0..31]`: for each `active` entry where `release_us <= now_us`, copies to `delayed[]`, marks slot inactive, decrements `m_delay_count`.
+     - Returns `count` (0 to 32).
+   - Fixed loop `i = 0..count-1`: `NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE)`; `(void)m_recv_queue.push(delayed[i])`.
 
-  Step 4a — socket_recv_from() (SocketUtils.cpp:530)
-             Internally:
-               a. Build pollfd: fd=m_fd, events=POLLIN
-               b. poll(&pfd, 1, 100) — 100ms timeout per iteration
-                  If poll_result <= 0: log WARNING_LO "recvfrom poll timeout"
-                  Return false → continue outer loop (next attempt)
-               c. Build sockaddr_in for source address
-               d. recvfrom(fd, buf, buf_cap, 0, &src_addr, &src_len)
-                  If recv_result < 0: log WARNING_LO, return false → continue
-                  If recv_result == 0: log WARNING_LO, return false → continue
-               e. inet_ntop(AF_INET, &src_addr.sin_addr, out_ip, 48)
-                  If inet_ntop == NULL: log WARNING_LO, return false → continue
-               f. *out_port = ntohs(src_addr.sin_port)
-               g. *out_len = (uint32_t)recv_result
-               h. assert(*out_len > 0 && *out_len <= buf_cap)
-               i. return true
-             [m_wire_buf (UdpBackend::m_wire_buf) is passed as buf;
-              socket_recv_from writes datagram bytes directly into it.]
+   **4e. Try pop from ring buffer again (UdpBackend.cpp:249–252)**
+   - `m_recv_queue.pop(envelope)`.
+   - If `result_ok(res)` → return `OK`.
 
-  Step 4b — Deserialize (UdpBackend.cpp:191)
-             Serializer::deserialize(m_wire_buf, out_len, envelope)
-             (Serializer.cpp:173):
-               a. assert(buf != nullptr), assert(buf_len valid)
-               b. If buf_len < WIRE_HEADER_SIZE: return ERR_INVALID
-               c. envelope_init(env)  — zero/reset destination envelope
-               d. Sequential big-endian reads via read_u8/read_u32/read_u64:
-                  offset 0:  env.message_type      (1 byte)
-                  offset 1:  env.reliability_class  (1 byte)
-                  offset 2:  env.priority           (1 byte)
-                  offset 3:  padding1 (must be 0)   (1 byte)
-                  offset 4:  env.message_id         (8 bytes)
-                  offset 12: env.timestamp_us        (8 bytes)
-                  offset 20: env.source_id           (4 bytes)
-                  offset 24: env.destination_id      (4 bytes)
-                  offset 28: env.expiry_time_us      (8 bytes)
-                  offset 36: env.payload_length      (4 bytes)
-                  offset 40: padding2 (must be 0)    (4 bytes)
-               e. assert(offset == WIRE_HEADER_SIZE)
-               f. Validate env.payload_length <= MSG_MAX_PAYLOAD_BYTES (4096)
-               g. Check buf_len >= WIRE_HEADER_SIZE + payload_length
-               h. memcpy(env.payload, &buf[WIRE_HEADER_SIZE], payload_length)
-               i. assert(envelope_valid(env))
-               j. return Result::OK
-             If !result_ok(res): log WARNING_LO; continue outer loop.
+5. **Timeout — loop exhausted (UdpBackend.cpp:255)**
+   - Return `Result::ERR_TIMEOUT`. The envelope reference is unmodified.
 
-  Step 4c — Impairment engine delayed flush (UdpBackend.cpp:199)
-             timestamp_now_us() → now_us
-             m_impairment.collect_deliverable(now_us, delayed[0..31], 32)
-             (ImpairmentEngine.cpp:174):
-               Iterates m_delay_buf[0..31]; for each active slot where
-               release_us <= now_us: copies env to out_buf, deactivates slot,
-               decrements m_delay_count.
-               Returns delayed_count.
-
-  Step 4d — Push delayed envelopes to ring buffer (UdpBackend.cpp:204)
-             for (i = 0; i < delayed_count; i++):
-               assert(i < IMPAIR_DELAY_BUF_SIZE)
-               (void)m_recv_queue.push(delayed[i])
-               [push return is void-cast; queue-full silently drops the
-                delayed envelope.]
-
-  Step 4e — Push freshly-received envelope (UdpBackend.cpp:210)
-             res = m_recv_queue.push(envelope)
-             If !result_ok(res): log WARNING_HI "Recv queue full; dropping"
-             [Even on push failure, execution continues to pop.]
-
-  Step 4f — Pop and return (UdpBackend.cpp:218)
-             res = m_recv_queue.pop(envelope)
-             If result_ok(res): return res  [SUCCESS — exits function]
-             [If push failed (queue was full), pop may return ERR_EMPTY if
-              the envelope was not actually stored; unusual corner case.]
-
-Step 5  —  Post-loop delayed flush (UdpBackend.cpp:225)
-           Executed after all poll attempts are exhausted with no datagram:
-           timestamp_now_us() → now_us
-           collect_deliverable(now_us, delayed[32], 32)
-           for (i in 0..delayed_count): push(delayed[i]) → m_recv_queue
-           res = m_recv_queue.pop(envelope)
-           If result_ok(res): return res
-           [This handles the case where delayed messages become deliverable
-            by the time the timeout elapses.]
-
-Step 6  —  Timeout return (UdpBackend.cpp:241)
-           return Result::ERR_TIMEOUT
-
---------------------------------------------------------------------------------
+---
 
 ## 4. Call Tree (Hierarchical)
 
-UdpBackend::receive_message(envelope, timeout_ms)    [UdpBackend.cpp:161]
-├── assert(m_open, m_fd >= 0)
-├── RingBuffer::pop(envelope)                        [RingBuffer.hpp:159]  [fast path]
-│   ├── m_head.load(relaxed) / m_tail.load(acquire)
-│   └── envelope_copy(env, m_buf[h & RING_MASK])    [on hit]
-├── [compute poll_count: cap to 50]
-└── for attempt = 0..poll_count-1
-    ├── socket_recv_from(fd, m_wire_buf, 8192, 100, &out_len, src_ip, &src_port)
-    │   │                                            [SocketUtils.cpp:530]
-    │   ├── poll(&pfd, 1, 100)                       [syscall]
-    │   ├── recvfrom(fd, buf, cap, 0, &src_addr, &src_len)  [syscall]
-    │   ├── inet_ntop(AF_INET, ...)
-    │   └── *out_len = (uint32_t)recv_result
-    ├── Serializer::deserialize(m_wire_buf, out_len, envelope)
-    │   │                                            [Serializer.cpp:173]
-    │   ├── envelope_init(env)
-    │   ├── read_u8()  ×4                            [Serializer.cpp:67]
-    │   ├── read_u64() ×3                            [Serializer.cpp:92]
-    │   ├── read_u32() ×4                            [Serializer.cpp:76]
-    │   ├── assert(offset == WIRE_HEADER_SIZE)
-    │   └── memcpy(env.payload, ...)
-    ├── timestamp_now_us()
-    ├── ImpairmentEngine::collect_deliverable(now_us, delayed, 32)
-    │   │                                            [ImpairmentEngine.cpp:174]
-    │   └── [loop 0..31] envelope_copy + deactivate slot
-    ├── [loop i=0..delayed_count] (void)RingBuffer::push(delayed[i])
-    │   └── RingBuffer::push()                       [RingBuffer.hpp:127]
-    │       ├── m_tail.load(relaxed) / m_head.load(acquire)
-    │       ├── envelope_copy(m_buf[t & RING_MASK], env)
-    │       └── m_tail.store(t+1, release)
-    ├── RingBuffer::push(envelope)                   [RingBuffer.hpp:127]
-    │   └── [same as above]
-    └── RingBuffer::pop(envelope)                    [RingBuffer.hpp:159]  → return OK
-        ├── m_head.load(relaxed) / m_tail.load(acquire)
-        ├── envelope_copy(env, m_buf[h & RING_MASK])
-        └── m_head.store(h+1, release)
-
-[post-loop if timeout]
-├── timestamp_now_us()
-├── ImpairmentEngine::collect_deliverable(...)
-├── [loop] RingBuffer::push(delayed[i])
-└── RingBuffer::pop(envelope)   → return OK or ERR_TIMEOUT
-
---------------------------------------------------------------------------------
-
-## 5. Key Components Involved
-
-Component              File(s)                         Role
-─────────────────────────────────────────────────────────────────────────────
-UdpBackend             UdpBackend.cpp / .hpp           Orchestrates receive:
-                                                        owns poll loop, m_wire_buf,
-                                                        m_recv_queue, m_impairment.
-socket_recv_from()     src/platform/SocketUtils.cpp    POSIX wrapper: poll + recvfrom;
-                                                        delivers raw bytes into
-                                                        m_wire_buf.
-poll(2)                OS kernel                        Multiplexed I/O wait; returns
-                                                        when socket is readable or
-                                                        100ms elapses.
-recvfrom(2)            OS kernel                        Copies one UDP datagram from
-                                                        the kernel receive buffer into
-                                                        m_wire_buf.
-Serializer             src/core/Serializer.cpp         Interprets big-endian wire
-                                                        bytes into MessageEnvelope
-                                                        fields; validates padding.
-ImpairmentEngine       src/platform/ImpairmentEngine.cpp  Flushes messages whose
-                                                        simulated delay has elapsed.
-RingBuffer             src/core/RingBuffer.hpp         SPSC lock-free FIFO; buffers
-                                                        ready envelopes; mediates
-                                                        push (receive path) → pop
-                                                        (caller).
-MessageEnvelope        src/core/MessageEnvelope.hpp    Data structure populated by
-                                                        Serializer::deserialize().
-Types.hpp              src/core/Types.hpp              SOCKET_RECV_BUF_BYTES=8192,
-                                                        IMPAIR_DELAY_BUF_SIZE=32,
-                                                        MSG_RING_CAPACITY=64.
-Logger                 src/core/Logger.hpp             Records timeouts, errors,
-                                                        queue-full events.
-
---------------------------------------------------------------------------------
-
-## 6. Branching Logic / Decision Points
-
-Branch Point 1 — Queue fast-path hit (UdpBackend.cpp:168)
-  Condition:  m_recv_queue.pop() returns Result::OK
-  True path:  Return immediately; no socket interaction needed.
-  False path: Proceed to poll loop.
-
-Branch Point 2 — poll() timeout (SocketUtils.cpp:549)
-  Condition:  poll_result <= 0 (timeout or interrupted)
-  True path:  Log WARNING_LO; return false from socket_recv_from()
-              → UdpBackend continues to next attempt.
-  False path: Proceed to recvfrom().
-
-Branch Point 3 — recvfrom() error (SocketUtils.cpp:563)
-  Condition:  recv_result < 0
-  True path:  Log WARNING_LO; return false → continue outer loop.
-  False path: Check for zero-byte datagram.
-
-Branch Point 4 — Zero-byte datagram (SocketUtils.cpp:569)
-  Condition:  recv_result == 0
-  True path:  Log WARNING_LO; return false → continue.
-  False path: Proceed to inet_ntop.
-
-Branch Point 5 — inet_ntop failure (SocketUtils.cpp:578)
-  Condition:  inet_result == NULL
-  True path:  Log WARNING_LO; return false → continue outer loop.
-  False path: Extract port; set out_len; return true.
-
-Branch Point 6 — Deserialize failure (UdpBackend.cpp:192)
-  Condition:  !result_ok(res) from Serializer::deserialize()
-  True path:  Log WARNING_LO; continue outer loop (discard malformed datagram).
-  False path: Proceed to impairment flush and push.
-
-Branch Point 7 — Padding validation failure (Serializer.cpp:205, 230)
-  Condition:  padding1 != 0 or padding2 != 0 in the wire stream
-  True path:  Return ERR_INVALID → branch point 6 true path.
-  False path: Continue field parsing.
-
-Branch Point 8 — payload_length oversize (Serializer.cpp:238)
-  Condition:  env.payload_length > MSG_MAX_PAYLOAD_BYTES (4096)
-  True path:  Return ERR_INVALID → branch point 6 true path.
-  False path: Validate total size and memcpy payload.
-
-Branch Point 9 — RingBuffer push failure for delayed envelopes (UdpBackend.cpp:206)
-  Condition:  m_recv_queue.push(delayed[i]) returns ERR_FULL
-  True path:  (void)-cast; silently dropped; no log, no error propagation.
-  False path: Slot written; tail incremented.
-
-Branch Point 10 — RingBuffer push failure for received envelope (UdpBackend.cpp:211)
-  Condition:  !result_ok(m_recv_queue.push(envelope))
-  True path:  Log WARNING_HI "Recv queue full; dropping datagram"; continue to pop.
-  False path: Slot written; attempt pop.
-
-Branch Point 11 — Pop after push (UdpBackend.cpp:219)
-  Condition:  result_ok(m_recv_queue.pop(envelope))
-  True path:  Return OK to caller.
-  False path: Continue to next poll attempt (unusual; means push also failed).
-
-Branch Point 12 — Post-loop delayed message available (UdpBackend.cpp:236)
-  Condition:  result_ok(m_recv_queue.pop(envelope)) after final collect_deliverable
-  True path:  Return OK.
-  False path: Return ERR_TIMEOUT.
-
---------------------------------------------------------------------------------
-
-## 7. Concurrency / Threading Behavior
-
-RingBuffer — SPSC design (single-producer, single-consumer):
-  Producer role in this context: receive_message() itself calls push().
-  Consumer role: receive_message() itself calls pop().
-  Within a single call to receive_message() on a single thread, all push/pop
-  operations are sequential; there is no concurrent producer. The atomic
-  acquire/release ordering in RingBuffer is therefore strictly stronger than
-  required for single-threaded use, but causes no harm.
-
-  If a background thread were also to call send_message() on the same UdpBackend
-  instance, it would call collect_deliverable() which modifies m_delay_buf —
-  this would race with the receive_message() path's collect_deliverable() call.
-  No mutex protects m_delay_buf. [RISK: see Section 14.]
-
-poll(2) — blocking per iteration with a 100ms timeout. The function does not
-  use select or epoll; it issues one poll() syscall per outer loop iteration.
-  This means the calling thread is blocked inside poll for up to 100ms per
-  attempt, then returns to the C++ level, then re-enters poll.
-
-No threads are spawned by receive_message(). There is no background receive
-thread; the caller's thread does all the work.
-
-The SPSC contract of RingBuffer.hpp states:
-  - Exactly one thread may push() / full()
-  - Exactly one thread may pop() / peek() / empty()
-  In this implementation both roles are performed by the same thread, which is
-  a subset of the SPSC contract and is safe.
-
---------------------------------------------------------------------------------
-
-## 8. Memory & Ownership Semantics (C/C++ Specific)
-
-m_wire_buf (uint8_t[8192], member of UdpBackend):
-  Passed by pointer to socket_recv_from(); the OS writes directly into it via
-  recvfrom(). Then passed by const pointer to Serializer::deserialize(). No
-  allocation; the 8192-byte region is static within the object. Overwritten on
-  every successful recvfrom.
-
-out_len (uint32_t, local in receive_message()):
-  Set by socket_recv_from(); used as the buf_len argument to
-  Serializer::deserialize(). Stack variable; no heap.
-
-src_ip[48] (char[], local in receive_message()):
-  Stack buffer. inet_ntop writes at most 48 bytes (INET6_ADDRSTRLEN).
-  Populated by socket_recv_from() and used only for logging in UdpBackend.
-  [Note: src_ip and src_port are extracted by socket_recv_from but the
-   UdpBackend receive_message() passes them to socket_recv_from but does
-   not subsequently use src_ip/src_port for any routing logic — they are
-   available only for the WARNING_HI log message at line 213.]
-
-envelope (MessageEnvelope&, out-parameter from caller):
-  Written by Serializer::deserialize() during field parsing.
-  Also written by RingBuffer::pop() via envelope_copy() on return.
-  Caller retains ownership throughout; UdpBackend never takes a pointer to it
-  beyond the duration of receive_message().
-
-delayed[] (MessageEnvelope[32], stack local in receive_message()):
-  Fixed-size stack frame within receive_message().
-  collect_deliverable() writes into it via envelope_copy().
-  Entries are then pushed into m_recv_queue via envelope_copy() (another copy).
-  The local array is discarded when the stack frame exits.
-
-m_recv_queue (RingBuffer, member of UdpBackend):
-  Inline object containing MessageEnvelope m_buf[64] (fixed, static).
-  No heap allocation. push/pop perform in-place envelope_copy into/from m_buf.
-
-m_impairment.m_delay_buf (DelayedEntry[32], member of ImpairmentEngine):
-  Inline, no heap. collect_deliverable() reads and deactivates entries.
-
---------------------------------------------------------------------------------
-
-## 9. Error Handling Flow
-
-Error                         Source                   Handling
-──────────────────────────────────────────────────────────────────────────────
-poll timeout                  socket_recv_from/poll()  WARNING_LO logged;
-                                                        continue outer loop.
-recvfrom() < 0                socket_recv_from()        WARNING_LO logged;
-                                                        continue outer loop.
-recvfrom() == 0               socket_recv_from()        WARNING_LO logged;
-                                                        continue outer loop.
-inet_ntop() NULL              socket_recv_from()        WARNING_LO logged;
-                                                        continue outer loop.
-buf_len < WIRE_HEADER_SIZE    Serializer::deserialize() ERR_INVALID;
-                                                        WARNING_LO logged;
-                                                        continue outer loop.
-padding1 or padding2 != 0     Serializer::deserialize() ERR_INVALID;
-                                                        continue outer loop.
-payload_length > 4096         Serializer::deserialize() ERR_INVALID;
-                                                        continue outer loop.
-m_recv_queue push fail        UdpBackend.cpp:211        WARNING_HI logged;
-(main envelope)                                         pop attempted anyway;
-                                                        likely returns ERR_EMPTY;
-                                                        continue outer loop.
-m_recv_queue push fail        UdpBackend.cpp:206        (void)-cast; silent drop.
-(delayed envelope)
-All poll attempts exhausted   UdpBackend.cpp:241        ERR_TIMEOUT returned.
-
-No error on this path escalates to FATAL. All recoverable: WARNING_LO or
-WARNING_HI per the F-Prime severity model.
-
---------------------------------------------------------------------------------
-
-## 10. External Interactions
-
-Interaction              Details
-──────────────────────────────────────────────────────────────────────────────
-poll(2) syscall          Called inside socket_recv_from() per outer loop iter.
-                         Args: pfd={m_fd, POLLIN, 0}, nfds=1, timeout=100 (ms).
-                         Blocks calling thread for up to 100ms.
-                         Returns: >0 (readable), 0 (timeout), <0 (error/signal).
-
-recvfrom(2) syscall      Called after poll signals readability.
-                         Args: fd=m_fd, buf=m_wire_buf, len=8192, flags=0,
-                               src_addr=&src_addr, addrlen=&src_len.
-                         Returns: bytes received (1..8192) or negative on error.
-                         Copies exactly one UDP datagram per call.
-
-inet_ntop(3)             Converts binary src_addr.sin_addr to dotted-decimal
-                         ASCII in out_ip[48]. Used only for diagnostic logging.
-
-OS UDP receive buffer    Kernel-side buffer for the bound socket. Datagrams
-                         accumulate here until recvfrom() drains them. If the
-                         OS buffer fills (e.g., during a receive_message()
-                         timeout), subsequent datagrams are dropped by the OS
-                         with no notification to the application.
-
-Logger::log()            [ASSUMPTION] Writes to platform log sink. Called on
-                         WARNING_LO/HI paths; not called on the happy path.
-
---------------------------------------------------------------------------------
-
-## 11. State Changes / Side Effects
-
-Object            Field                     Change
-──────────────────────────────────────────────────────────────────────────────
-UdpBackend        m_wire_buf                Overwritten with datagram bytes
-                                            by recvfrom() via socket_recv_from.
-ImpairmentEngine  m_delay_buf[i].active     Set to false for delivered entries.
-ImpairmentEngine  m_delay_count             Decremented for each delivered entry.
-RingBuffer        m_buf[t & RING_MASK]      Written by envelope_copy on push.
-RingBuffer        m_tail (atomic)           Incremented by push (release store).
-RingBuffer        m_head (atomic)           Incremented by pop (release store).
-envelope (out)    All fields                Populated by Serializer::deserialize
-                                            and then overwritten by pop's
-                                            envelope_copy.
-OS socket buffer  datagram bytes            Consumed by recvfrom; removed from
-                                            kernel buffer.
-
-NOT changed:
-  m_open, m_fd, m_cfg — read-only on the receive path.
-  m_impairment PRNG state — collect_deliverable does not call the PRNG.
-  m_impairment m_delay_buf content — entries are deactivated, not erased
-  (active flag set to false; stale data remains in the slot until it is
-  overwritten by process_outbound on the next impaired send).
-
---------------------------------------------------------------------------------
-
-## 12. Sequence Diagram (ASCII)
-
-  Caller         UdpBackend       RingBuffer      SocketUtils       Serializer      ImpairmentEngine  OS Kernel
-    |                |                |               |                  |                 |              |
-    |--recv_msg()-->|                |               |                  |                 |              |
-    |               |--pop()-------->|               |                  |                 |              |
-    |               |<--ERR_EMPTY---|               |                  |                 |              |
-    |               | [compute poll_count = cap(ceil(timeout/100), 50)] |               |              |
-    |               | attempt=0..poll_count-1        |                  |                 |              |
-    |               |--socket_recv_from(fd,buf,8192,100ms)------------>|                 |              |
-    |               |               |               |--poll(fd,POLLIN,100)-------------->|              |
-    |               |               |               |               |                 |<-poll(2)------->|
-    |               |               |               |               |                 |<--POLLIN evt----|
-    |               |               |               |<--1 (ready)---|                 |              |
-    |               |               |               |--recvfrom(fd,buf,8192)--------->|              |
-    |               |               |               |               |                 |<-recvfrom(2)->|
-    |               |               |               |               |                 |<--N bytes-----|
-    |               |               |               |--inet_ntop()->|                 |              |
-    |               |               |               |<--true (out_len=N)              |              |
-    |               |<--true,out_len=N               |               |                 |              |
-    |               |--deserialize(buf, N, env)------|-->            |                 |              |
-    |               |               |               |  [read fields, memcpy payload]  |              |
-    |               |               |               |<--Result::OK   |                 |              |
-    |               |--timestamp_now_us()            |               |                 |              |
-    |               |--collect_deliverable(now_us)-->|               |                 |              |
-    |               |               |               |               |                 |              |
-    |               |<--delayed_count=0(no due msgs)|               |                 |              |
-    |               |--push(envelope)--------------->|               |                 |              |
-    |               |               |--envelope_copy->m_buf[]        |                 |              |
-    |               |               |--m_tail.store(t+1, release)    |                 |              |
-    |               |               |<--Result::OK   |               |                 |              |
-    |               |--pop(envelope)--------------->|                |                 |              |
-    |               |               |--m_tail.load(acquire)          |                 |              |
-    |               |               |--envelope_copy env<-m_buf[]    |                 |              |
-    |               |               |--m_head.store(h+1, release)    |                 |              |
-    |               |               |<--Result::OK   |               |                 |              |
-    |<--Result::OK--|               |               |                |                 |              |
-
-  Timeout path (no datagram during all attempts):
-    |--recv_msg()-->|
-    |               | [loop poll_count times: poll 100ms each → timeout each]
-    |               |--collect_deliverable(final now_us)
-    |               |--pop() → ERR_EMPTY
-    |<--ERR_TIMEOUT-|
-
---------------------------------------------------------------------------------
-
-## 13. Initialization vs Runtime Flow
-
-Initialization (UdpBackend::init(), UdpBackend.cpp:45):
-  - socket_create_udp() creates AF_INET/SOCK_DGRAM socket; fd stored in m_fd.
-  - socket_set_reuseaddr(), socket_bind() configure the socket so recvfrom can
-    receive datagrams on config.bind_port.
-  - m_recv_queue.init() resets atomic m_head=0, m_tail=0.
-  - m_impairment.init() seeds PRNG, zeros m_delay_buf.
-  - m_open = true.
-
-Runtime (receive_message()):
-  - No allocation. m_wire_buf is a member array; delayed[] is a stack local.
-  - poll()/recvfrom() are OS-blocking calls; their return values drive the
-    control flow.
-  - The RingBuffer push/pop is used even for a single message because the
-    design allows delayed messages to arrive first (FIFO order via push then
-    immediate pop). The push+pop round-trip adds a copy but preserves
-    consistent semantics across all enqueue paths.
-
-The RingBuffer m_buf[64] is fully allocated in the object's memory from
-construction; init() only resets head/tail indices. No runtime allocation.
-
---------------------------------------------------------------------------------
-
-## 14. Known Risks / Observations
-
-RISK-1 — Push/pop redundancy for the single-message case:
-  In the common case (no delayed messages, queue empty), receive_message()
-  performs: push(envelope) then pop(envelope). This is two envelope_copy()
-  operations for no benefit. The design appears to be intended to maintain a
-  single dequeueing path, but it introduces extra latency and memory writes
-  on every receive.
-
-RISK-2 — Delayed envelope push result discarded (UdpBackend.cpp:206):
-  The (void)m_recv_queue.push(delayed[i]) call does not check the result. If
-  the ring buffer is nearly full, delayed envelopes from the impairment engine
-  are silently dropped with no log and no metric increment. This can cause
-  impairment simulation results to differ from expectations in tests.
-
-RISK-3 — Race on m_delay_buf between send and receive paths:
-  send_message() calls collect_deliverable() and process_outbound().
-  receive_message() also calls collect_deliverable().
-  Both mutate m_delay_buf and m_delay_count without any lock. If one thread
-  calls send_message() while another calls receive_message() on the same
-  UdpBackend instance, a data race occurs on ImpairmentEngine state.
-  [The SPSC RingBuffer is race-safe, but the ImpairmentEngine is not.]
-
-RISK-4 — poll_count computation for sub-100ms timeouts:
-  For timeout_ms < 100, poll_count = ceil(timeout_ms/100) = 1 iteration with
-  a 100ms poll timeout. A caller requesting a 10ms timeout will actually wait
-  up to 100ms. The cap of 50 iterations (5000ms) also means a 10-second
-  timeout_ms is silently truncated to 5 seconds.
-
-RISK-5 — No inbound impairment processing:
-  receive_message() does not call ImpairmentEngine::process_inbound(). The
-  inbound reordering logic (ImpairmentEngine.cpp:209) exists but is never
-  invoked on the UDP receive path. This means reorder_enabled and
-  reorder_window_size have no effect on received datagrams.
-
-RISK-6 — src_ip only used for logging:
-  The source IP and port of the received datagram are extracted but are only
-  used in the WARNING_HI log message when the queue is full. There is no
-  source validation (CLAUDE.md §6.2 "Validate source address"). Any peer can
-  send datagrams to the bound port and they will be deserialized and delivered.
-
-RISK-7 — OS buffer saturation during long receive timeouts:
-  When poll blocks for up to 5000ms with no traffic, the OS UDP receive buffer
-  may fill with incoming datagrams. Excess datagrams are silently dropped by
-  the kernel. There is no mechanism to detect or log this condition.
-
---------------------------------------------------------------------------------
-
-## 15. Unknowns / Assumptions
-
-[ASSUMPTION-1] timestamp_now_us() returns a uint64_t monotonic microsecond
-  timestamp. Implementation not provided; assumed POSIX clock_gettime().
-
-[ASSUMPTION-2] envelope_init(env) zero-initializes all fields of the
-  MessageEnvelope struct, including the payload array. Definition in
-  MessageEnvelope.hpp (not provided).
-
-[ASSUMPTION-3] envelope_copy() performs a complete value copy, including the
-  inline payload array of MSG_MAX_PAYLOAD_BYTES (4096 bytes). If the payload is
-  a pointer, this would be a shallow copy — a critical correctness concern.
-  Power of 10 rule 3 (no dynamic allocation) strongly suggests the payload is
-  an inline array, making envelope_copy() a deep copy.
-
-[ASSUMPTION-4] MSG_RING_CAPACITY = 64 (from Types.hpp). The ring buffer can
-  hold at most 64 MessageEnvelope objects simultaneously.
-
-[ASSUMPTION-5] sizeof(MessageEnvelope) includes an inline payload of
-  MSG_MAX_PAYLOAD_BYTES (4096 bytes) plus the header fields (~44 bytes).
-  Each RingBuffer entry therefore occupies approximately 4140+ bytes; m_buf[64]
-  consumes approximately 265 KB of object memory.
-
-[ASSUMPTION-6] The caller's timeout_ms intention for sub-100ms timeouts is
-  not honored exactly (see RISK-4). This is an implicit contract gap.
-
-[ASSUMPTION-7] No signal handling is assumed. If recvfrom or poll is
-  interrupted by a signal (EINTR), the current code treats recv_result < 0 as
-  an error and logs a WARNING_LO, then continues the outer loop. This is
-  acceptable behavior.
-
-[ASSUMPTION-8] The RingBuffer SPSC contract is satisfied because, in the
-  current code structure, push and pop are always called from the same thread
-  (receive_message()). A future refactor that separates a background receive
-  thread from the consumer thread would need to revisit this.
+```
+UdpBackend::receive_message(envelope, timeout_ms)          [UdpBackend.cpp:220]
+├── NEVER_COMPILED_OUT_ASSERT(m_open, m_fd>=0)
+├── m_recv_queue.pop(envelope)                             [RingBuffer.hpp — fast path]
+│   └── envelope_copy() if non-empty
+├── [compute poll_count = min((timeout_ms+99)/100, 50)]
+└── [loop 0..poll_count-1]
+    ├── recv_one_datagram(100U)                            [UdpBackend.cpp:165]
+    │   ├── socket_recv_from(m_fd, m_wire_buf, 8192, 100,
+    │   │                     &out_len, src_ip, &src_port) [SocketUtils.cpp:532]
+    │   │   ├── poll(m_fd, POLLIN, 100)                   [POSIX syscall]
+    │   │   ├── recvfrom(fd, m_wire_buf, 8192, 0,
+    │   │   │             &src_addr, &src_len)             [POSIX syscall]
+    │   │   └── inet_ntop(AF_INET, &src_addr.sin_addr, ...)
+    │   ├── Serializer::deserialize(m_wire_buf, out_len, env)
+    │   └── m_recv_queue.push(env)                        [RingBuffer.hpp]
+    │       └── envelope_copy() into m_buf slot
+    ├── m_recv_queue.pop(envelope)                        [RingBuffer.hpp]
+    ├── timestamp_now_us()                                 [Timestamp.hpp inline]
+    │   └── clock_gettime(CLOCK_MONOTONIC, &ts)           [POSIX syscall]
+    ├── flush_delayed_to_queue(now_us)                    [UdpBackend.cpp:200]
+    │   └── ImpairmentEngine::collect_deliverable(now_us, delayed, 32)
+    │       │                                             [ImpairmentEngine.cpp:216]
+    │       └── [loop 0..31] envelope_copy + deactivate if release_us<=now_us
+    │       └── [loop 0..count-1] m_recv_queue.push(delayed[i])
+    └── m_recv_queue.pop(envelope)                        [RingBuffer.hpp]
 ```
 
 ---
+
+## 5. Key Components Involved
+
+| Component | File / Location | Role in this flow |
+|---|---|---|
+| `UdpBackend` | `src/platform/UdpBackend.cpp/.hpp` | Orchestrator; owns `m_fd`, `m_wire_buf`, `m_recv_queue`, `m_impairment`. |
+| `UdpBackend::recv_one_datagram()` | `UdpBackend.cpp:165` | Private helper: polls socket once (100 ms), receives one datagram, deserializes, pushes to ring buffer. |
+| `UdpBackend::flush_delayed_to_queue()` | `UdpBackend.cpp:200` | Private helper: calls `collect_deliverable()`, pushes each resulting envelope to `m_recv_queue`. |
+| `RingBuffer` | `src/core/RingBuffer.hpp` | Lock-free SPSC ring buffer (capacity 64). Stores deserialized `MessageEnvelope` objects waiting for the caller. |
+| `socket_recv_from()` | `src/platform/SocketUtils.cpp:532` | Thin POSIX wrapper: `poll()` + `recvfrom(2)` + `inet_ntop`. Returns datagram bytes and source address. |
+| `Serializer::deserialize()` | `src/core/Serializer.cpp` | Reads 44-byte big-endian wire header; validates length; copies payload. Returns `ERR_INVALID` on malformed input. |
+| `ImpairmentEngine::collect_deliverable()` | `src/platform/ImpairmentEngine.cpp:216` | Scans delay buffer for entries whose `release_us <= now_us`; copies them out; clears slots. |
+| `timestamp_now_us()` | `src/core/Timestamp.hpp` | Inline; `clock_gettime(CLOCK_MONOTONIC)`; returns `uint64_t` microseconds. |
+| `Types.hpp` | `src/core/Types.hpp` | `SOCKET_RECV_BUF_BYTES=8192`, `IMPAIR_DELAY_BUF_SIZE=32`, `MSG_RING_CAPACITY=64`. |
+| `Logger` | `src/core/Logger.hpp` | Called on `WARNING_LO`/`WARNING_HI` for timeout, deserialize failure, queue full. |
+
+---
+
+## 6. Branching Logic / Decision Points
+
+**Branch 1: Fast-path ring buffer pop (UdpBackend.cpp:226–229)**
+- `m_recv_queue.pop()` returns `OK` → return `OK` immediately; skip loop entirely.
+- Returns `ERR_EMPTY` → proceed to compute `poll_count` and enter loop.
+
+**Branch 2: Poll timeout exceeded (SocketUtils.cpp:551)**
+- `poll_result <= 0` → log `WARNING_LO "recvfrom poll timeout"`; `socket_recv_from` returns false.
+- `poll_result > 0` → proceed to `recvfrom(2)`.
+
+**Branch 3: recvfrom error (SocketUtils.cpp:565)**
+- `recv_result < 0` → log `WARNING_LO "recvfrom() failed"`; return false.
+- `recv_result == 0` → log `WARNING_LO "recvfrom() returned 0 bytes"`; return false.
+- `recv_result > 0` → extract source address; proceed to `inet_ntop`.
+
+**Branch 4: inet_ntop failure (SocketUtils.cpp:578–583)**
+- `inet_ntop` returns `nullptr` → log `WARNING_LO`; return false.
+- Returns non-null → set `*out_ip`, `*out_port`, `*out_len`; return true.
+
+**Branch 5: Deserialize failure (UdpBackend.cpp:181–185)**
+- `!result_ok(res)` → log `WARNING_LO "Deserialize failed"`; `recv_one_datagram` returns false.
+- `result_ok(res)` → proceed to push.
+
+**Branch 6: Ring buffer full on push (UdpBackend.cpp:187–191)**
+- `m_recv_queue.push()` returns `ERR_FULL` → log `WARNING_HI "Recv queue full; dropping datagram"`; `recv_one_datagram` still returns true (datagram was received, but envelope was dropped).
+- Returns `OK` → envelope is now in `m_recv_queue`.
+
+**Branch 7: Pop after recv_one_datagram (UdpBackend.cpp:241–244)**
+- `m_recv_queue.pop()` returns `OK` → return `OK` immediately.
+- Returns `ERR_EMPTY` → proceed to `timestamp_now_us()` and `flush_delayed_to_queue()`.
+
+**Branch 8: Pop after flush_delayed_to_queue (UdpBackend.cpp:249–252)**
+- `m_recv_queue.pop()` returns `OK` → return `OK`.
+- Returns `ERR_EMPTY` → continue to next loop iteration.
+
+**Branch 9: Loop exhausted (UdpBackend.cpp:255)**
+- All `poll_count` iterations completed without a message → return `ERR_TIMEOUT`.
+
+**Branch 10: Delayed message ready in flush (ImpairmentEngine.cpp:229)**
+- `m_delay_buf[i].active && m_delay_buf[i].release_us <= now_us` → copy to output; deactivate slot.
+- Otherwise → skip slot.
+
+---
+
+## 7. Concurrency / Threading Behavior
+
+### Threads created
+
+None. `UdpBackend` is single-threaded by design. `receive_message()` is not re-entrant.
+
+### Where context switches occur
+
+`poll(2)` inside `socket_recv_from()` is the only blocking call, with a 100 ms per-iteration timeout. The outer loop can block up to `poll_count × 100 ms` (≤ 5 seconds). If SIGINT arrives during `poll(2)`, it returns `-1` with `errno=EINTR` (or `0` on some platforms); `socket_recv_from` treats this as a timeout and returns false for that iteration.
+
+### Synchronization primitives
+
+- `RingBuffer` uses `std::atomic<uint32_t>` (`m_head`, `m_tail`) with acquire/release memory ordering for SPSC lock-free safety. Push and pop access different atomic variables, so no mutual exclusion is needed in the SPSC model.
+- `m_wire_buf`, `m_impairment`, and `m_recv_queue` members have no additional locks. Concurrent `receive_message()` calls from multiple threads would race on `m_wire_buf` and `m_impairment`. The design assumes single-threaded access.
+
+### Producer/consumer relationships
+
+- **Producer role:** `recv_one_datagram()` and `flush_delayed_to_queue()` call `m_recv_queue.push()`.
+- **Consumer role:** `receive_message()` calls `m_recv_queue.pop()`.
+- In practice both roles execute on the same main thread.
+
+---
+
+## 8. Memory & Ownership Semantics (C/C++ Specific)
+
+### Who owns allocated memory
+
+All storage is statically allocated within the `UdpBackend` object — no heap:
+
+- `m_wire_buf` (uint8_t[8192]): inline member; overwritten on every `recv_one_datagram()` call.
+- `m_recv_queue.m_buf` (`MessageEnvelope[64]`): inline in `RingBuffer` which is an inline member of `UdpBackend`. Total size 64 × `sizeof(MessageEnvelope)`.
+- `delayed[]` (`MessageEnvelope[IMPAIR_DELAY_BUF_SIZE]`): stack-local in `flush_delayed_to_queue()`. Fixed size 32 at compile time.
+- `src_ip[48]` and `src_port`: stack locals in `recv_one_datagram()`.
+
+### Lifetime of key objects
+
+- The `envelope` reference passed to `receive_message()` is written by `m_recv_queue.pop()` via `envelope_copy()`. The caller owns the `MessageEnvelope` object.
+- `envelope_copy()` (`MessageEnvelope.hpp:56`) is `memcpy(&dst, &src, sizeof(MessageEnvelope))` — deep copy including inline `payload[4096]`.
+- Deserialized envelopes in `m_recv_queue.m_buf[]` exist until popped; they are value copies.
+
+### Stack vs heap usage
+
+No heap. `delayed[32]` in `flush_delayed_to_queue()` is bounded at compile time.
+
+### RAII usage
+
+None specific to the receive path. `UdpBackend::~UdpBackend()` calls `close()` for fd cleanup.
+
+### Potential leaks or unsafe patterns
+
+If `m_recv_queue` is full when `recv_one_datagram()` calls `push()`, the deserialized envelope is silently dropped. There is no backpressure mechanism to the sender. This is an expected condition (queue full at `WARNING_HI`), not a leak.
+
+---
+
+## 9. Error Handling Flow
+
+| Error | Source | Handling |
+|---|---|---|
+| `poll()` timeout or error | `socket_recv_from()` (SocketUtils.cpp:551) | Log `WARNING_LO`; return false; iteration continues. |
+| `recvfrom()` fails | `socket_recv_from()` (SocketUtils.cpp:565) | Log `WARNING_LO`; return false; iteration continues. |
+| `recvfrom()` returns 0 | `socket_recv_from()` (SocketUtils.cpp:571) | Log `WARNING_LO`; return false; iteration continues. |
+| `inet_ntop()` fails | `socket_recv_from()` (SocketUtils.cpp:578) | Log `WARNING_LO`; return false; iteration continues. |
+| Deserialize fails | `recv_one_datagram()` (UdpBackend.cpp:181) | Log `WARNING_LO "Deserialize failed: %u"`; return false; iteration continues. |
+| Ring buffer full | `recv_one_datagram()` (UdpBackend.cpp:187) | Log `WARNING_HI "Recv queue full; dropping datagram"`; datagram silently dropped. `recv_one_datagram` still returns true. |
+| Delayed push fails | `flush_delayed_to_queue()` (UdpBackend.cpp:212) | Return value of `push()` discarded with `(void)`. Silent drop. |
+| Loop exhausted | `receive_message()` (UdpBackend.cpp:255) | Return `ERR_TIMEOUT`. Envelope unmodified. |
+
+**Severity mapping (F-Prime model):**
+- `WARNING_LO` — localized, recoverable (single datagram lost or timeout).
+- `WARNING_HI` — system-wide but recoverable (receive queue saturated).
+- `FATAL` — not emitted on the receive path.
+
+---
+
+## 10. External Interactions
+
+| Interaction | Details |
+|---|---|
+| `poll(2)` syscall | Called inside `socket_recv_from()` (SocketUtils.cpp:550). `fd=m_fd`, `events=POLLIN`, `timeout=100ms`. Returns number of ready fds or -1/0 on error/timeout. |
+| `recvfrom(2)` syscall | Called inside `socket_recv_from()` (SocketUtils.cpp:562). Reads one UDP datagram from the bound socket. Returns datagram length or -1 on error. |
+| `inet_ntop(3)` | Called inside `socket_recv_from()` to convert source `in_addr` to printable IPv4 string. |
+| `clock_gettime(CLOCK_MONOTONIC)` | Called inside `timestamp_now_us()`. Used for `flush_delayed_to_queue()` comparison. |
+| OS UDP socket | `m_fd` is the bound `AF_INET/SOCK_DGRAM` socket from `init()`. The kernel buffers incoming datagrams until `recvfrom()` is called. Datagrams arriving when the kernel buffer is full are silently dropped by the OS. |
+
+No TLS/DTLS hooks are invoked. No TCP-style connection state is involved.
+
+---
+
+## 11. State Changes / Side Effects
+
+| Object | Field | Change |
+|---|---|---|
+| `UdpBackend` | `m_wire_buf` | Overwritten with raw bytes from `recvfrom()` on each successful `recv_one_datagram()` call. |
+| `RingBuffer` | `m_tail` | Incremented on each successful `push()`. |
+| `RingBuffer` | `m_head` | Incremented on each successful `pop()`. |
+| `RingBuffer` | `m_buf[tail % 64]` | Written with deserialized `MessageEnvelope` on push; read on pop. |
+| `ImpairmentEngine` | `m_delay_buf[i].active` | Set to `false` when `release_us <= now_us` in `collect_deliverable`. |
+| `ImpairmentEngine` | `m_delay_count` | Decremented for each delivered delayed message. |
+| Caller's `envelope` | all fields | Overwritten on `OK` return; unmodified on `ERR_TIMEOUT`. |
+| OS Kernel | UDP receive buffer | Datagram consumed by `recvfrom()`; removed from kernel buffer. |
+
+---
+
+## 12. Sequence Diagram using mermaid
+
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant U as UdpBackend
+    participant RB as RingBuffer
+    participant SU as SocketUtils
+    participant OS as OS Kernel
+    participant IE as ImpairmentEngine
+
+    C->>U: receive_message(envelope, timeout_ms)
+    U->>RB: pop(envelope)  [fast path]
+    RB-->>U: ERR_EMPTY
+    Note over U: compute poll_count = min((timeout_ms+99)/100, 50)
+    loop attempt = 0..poll_count-1
+        U->>U: recv_one_datagram(100)
+        U->>SU: socket_recv_from(m_fd, m_wire_buf, 8192, 100, ...)
+        SU->>OS: poll(m_fd, POLLIN, 100)
+        OS-->>SU: 1 (ready)
+        SU->>OS: recvfrom(m_fd, m_wire_buf, 8192, 0, &src_addr, &src_len)
+        OS-->>SU: datagram bytes
+        SU-->>U: true, out_len, src_ip, src_port
+        U->>U: Serializer::deserialize(m_wire_buf, out_len, env)
+        U->>RB: push(env)
+        RB-->>U: OK
+        U->>RB: pop(envelope)
+        RB-->>U: OK
+        U-->>C: Result::OK
+    end
+```
+
+Timeout path (no datagram arrives):
+
+```mermaid
+sequenceDiagram
+    participant C as Caller
+    participant U as UdpBackend
+    participant RB as RingBuffer
+    participant SU as SocketUtils
+    participant IE as ImpairmentEngine
+
+    C->>U: receive_message(envelope, timeout_ms)
+    U->>RB: pop(envelope)
+    RB-->>U: ERR_EMPTY
+    loop each attempt (up to 50 × 100ms)
+        U->>SU: socket_recv_from(..., 100, ...)
+        SU-->>U: false (poll timeout)
+        U->>RB: pop(envelope) → ERR_EMPTY
+        U->>IE: collect_deliverable(now_us, delayed, 32)
+        IE-->>U: 0 (nothing to flush)
+        U->>RB: pop(envelope) → ERR_EMPTY
+    end
+    U-->>C: Result::ERR_TIMEOUT
+```
+
+---
+
+## 13. Initialization vs Runtime Flow
+
+### What happens during startup (init phase)
+
+`UdpBackend::init()` (UdpBackend.cpp:49): creates UDP socket, sets `SO_REUSEADDR`, binds to `bind_ip:bind_port`, initializes `m_recv_queue` (atomic head/tail to 0), initializes `m_impairment` (PRNG seeded, delay buffer zeroed). Sets `m_open = true`. No allocation after init. See UC_22 §13 for full init details.
+
+### What happens during steady-state execution (runtime)
+
+- No allocation. `m_wire_buf` is reused every call. `delayed[]` is a bounded stack local.
+- Each call makes up to 50 poll iterations × 100 ms = up to 5 seconds maximum latency.
+- The `flush_delayed_to_queue()` call on each iteration delivers impairment-delayed messages from prior `send_message()` calls that have now elapsed. This makes delayed message delivery opportunistic: it depends on someone calling `receive_message()`.
+- The bounded loop with `poll_count <= 50` satisfies Power of 10 rule 2.
+
+---
+
+## 14. Known Risks / Observations
+
+**Risk 1: Delayed message delivery is opportunistic**
+Delayed messages (from impairment latency/jitter) are only flushed when `receive_message()` or `send_message()` is called. If neither is invoked for a long period, delayed messages accumulate in `m_delay_buf` and are not delivered despite their `release_us` having passed. There is no background timer.
+
+**Risk 2: Ring buffer full silently drops datagrams**
+If `m_recv_queue` fills up (capacity 64) before the caller pops messages, incoming datagrams are deserialized but then dropped at the `push()` step. Only a `WARNING_HI` log indicates this. No backpressure to the sender.
+
+**Risk 3: Source address not validated against configured peer**
+`recv_one_datagram()` accepts datagrams from any source address and port (`recvfrom` with no filter). The requirement [REQ-6.2.4] ("Validate source address and basic sanity of incoming datagrams") is only partially met: deserialization validates the wire format but the source IP/port is not checked against `m_cfg.peer_ip`/`m_cfg.peer_port`.
+
+**Risk 4: Delayed flush push result discarded**
+In `flush_delayed_to_queue()`, `(void)m_recv_queue.push(delayed[i])`. If the ring buffer is full, the delayed envelope is silently dropped and the `ERR_FULL` result is discarded.
+
+**Risk 5: poll() interrupted by signal**
+If SIGINT arrives during `poll(2)` inside `socket_recv_from()`, `poll` returns -1 with `errno=EINTR`. `socket_recv_from()` treats `poll_result <= 0` as a timeout and returns false. The outer loop continues to the next iteration. If `g_stop_flag` is set, the caller will detect it at the top of its own loop; the receive path itself has no stop-flag awareness.
+
+**Risk 6: Large payload stack pressure in flush**
+`flush_delayed_to_queue()` declares `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]` on its stack frame — 32 × `sizeof(MessageEnvelope)`. Each `MessageEnvelope` is approximately 4096 + 40 bytes. This amounts to ~132 KB of stack usage in the worst case. [ASSUMPTION: the platform's default stack is large enough; see docs/STACK_ANALYSIS.md.]
+
+---
+
+## 15. Unknowns / Assumptions
+
+- [ASSUMPTION] `socket_recv_from()` returns false for both genuine errors and innocent timeouts (`poll` returning 0). No distinction is made between these cases in `recv_one_datagram()`. A genuine `EBADF` error from `recvfrom` would be treated the same as a timeout — the outer loop continues rather than aborting.
+
+- [ASSUMPTION] `Serializer::deserialize()` validates the wire format length fields and returns `ERR_INVALID` for malformed input. Confirmed by reading `Serializer.hpp`. It does not validate `source_id` or `destination_id` semantically; that is the caller's responsibility.
+
+- [ASSUMPTION] `envelope_copy()` is `memcpy(&dst, &src, sizeof(MessageEnvelope))`. Confirmed in `MessageEnvelope.hpp:56`.
+
+- [ASSUMPTION] `RingBuffer::pop()` uses acquire/release ordering compatible with SPSC use. In the single-threaded model used here, this is safe but has unnecessary memory ordering overhead.
+
+- [ASSUMPTION] `timestamp_now_us()` uses `clock_gettime(CLOCK_MONOTONIC)`. Returns microseconds. Not wall-clock time; not subject to NTP adjustments.
+
+- [ASSUMPTION] `ImpairmentEngine::collect_deliverable()` only collects messages where `release_us <= now_us`. If `now_us` advances by less than the configured `fixed_latency_ms`, no delayed messages are flushed during this iteration.
+
+- [ASSUMPTION] `Logger::log()` is thread-safe or is only called from a single thread context.
+
+- [UNKNOWN] Whether `recvfrom()` on a UDP socket can return a zero-length datagram (`recv_result == 0`) in practice. POSIX allows zero-length UDP datagrams; the code correctly handles this case by returning false from `socket_recv_from()`.
