@@ -170,7 +170,39 @@ messageEngine/
 
 ## Building
 
-**Prerequisites:** GCC with C++17 support, GNU Make, pthreads.
+### Required Tools
+
+| Tool | Minimum Version | Purpose |
+|---|---|---|
+| **GCC** or **Clang** | GCC 8+ / Clang 7+ | C++17 compiler; must support `-std=c++17 -fno-exceptions -fno-rtti` |
+| **GNU Make** | 3.81+ | Build system; no CMake required |
+| **pthreads** | POSIX | TCP/UDP receiver threads; linked via `-lpthread` |
+
+### Optional Tools (static analysis and coverage)
+
+| Tool | Purpose | Install |
+|---|---|---|
+| **Clang-Tidy** | Tier 2a static analysis (`make lint`) | `brew install llvm` / `apt install clang-tidy` |
+| **Cppcheck** | Tier 2b MISRA checking (`make cppcheck`) | `brew install cppcheck` / `apt install cppcheck` |
+| **scan-build** (LLVM) | Tier 2c path-sensitive analysis (`make scan_build`) | Included with LLVM (`brew install llvm`) |
+| **llvm-profdata / llvm-cov** | Branch coverage (`make coverage`) | Included with LLVM (`brew install llvm`) |
+
+> **macOS note:** The Makefile expects LLVM tools at `/opt/homebrew/opt/llvm/bin/`. After `brew install llvm` run `brew info llvm` for the exact path and adjust `SCAN_BUILD`, `COV_CXX`, `LLVM_PROFDATA`, and `LLVM_COV` in the Makefile if your installation differs.
+
+### Installing Prerequisites
+
+**macOS (Homebrew):**
+```bash
+brew install gcc make llvm cppcheck
+```
+
+**Ubuntu / Debian:**
+```bash
+sudo apt update
+sudo apt install build-essential clang clang-tidy cppcheck llvm
+```
+
+### Building
 
 ```bash
 # Build everything (server, client, all test binaries)
