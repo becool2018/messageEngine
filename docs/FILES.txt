@@ -6,158 +6,308 @@ BUILD / CONFIG
 Makefile
   GNU make build file; compiles all libraries, server, client, and test binaries
   with the full strict warning set (-Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti).
+  Targets: all, server, client, tests, run_tests, lint, cppcheck, scan_build,
+  static_analysis, coverage, coverage_show, clean.
 
 docs/CMakeLists.txt
   CMake equivalent of the Makefile (provided for IDEs/CI that prefer cmake).
 
+.gitignore
+  Excludes the build/ output directory from version control.
+
+.cppcheck-suppress
+  Cppcheck suppression list; each entry has a justification comment and a
+  DEFECT_LOG.md reference.
+
+src/.clang-tidy
+  Clang-Tidy configuration for production code (src/); strict rules matching
+  JPL Power of 10, MISRA C++:2023, and F-Prime style subset.
+
+tests/.clang-tidy
+  Clang-Tidy configuration for test code (tests/); slightly relaxed relative
+  to src/ to accommodate test-framework idioms (see CLAUDE.md §3).
+
+check_requirements.txt
+  Checklist used to verify that all numbered requirements ([REQ-x.x]) are
+  implemented and tested; cross-referenced against TRACEABILITY_MATRIX.md.
+
 PROJECT DOCS
 ------------
+README.md
+  Project overview: requirements summary, architecture diagram, directory
+  structure, build instructions (required and optional tools), test execution,
+  coverage analysis, static analysis, demo usage, library integration guide,
+  coding standards, and code statistics.
+
 CLAUDE.md
-  Top-level project requirements: layered architecture, message envelope spec,
-  transport API, impairment engine spec, and per-transport backend requirements.
+  Top-level project-specific requirements: layered architecture, message
+  envelope spec, transport API, impairment engine spec, delivery semantics,
+  per-transport backend requirements, and traceability/inspection/safety rules.
 
 .claude/CLAUDE.md
-  Global C/C++ coding standard: Power of 10 rules, MISRA C++, F-Prime style subset,
-  architecture layering rules, and instructions for AI-assisted development.
+  Global C/C++ coding standard: all 10 JPL Power of 10 rules (including the
+  infrastructure-loop deviation), MISRA C++:2023, F-Prime style subset,
+  architecture layering rules, NEVER_COMPILED_OUT_ASSERT policy, and
+  instructions for AI-assisted development.
+
+.claude/settings.local.json
+  Claude Code local settings (editor preferences, tool permissions).
 
 docs/DirectoryStructure.txt
-  High-level directory tree showing all source, test, build, and docs directories.
+  High-level directory tree showing all source, test, build, and docs
+  directories.
 
 docs/FILES.txt
   This file. Per-file descriptions for every source, config, and doc artifact.
 
+docs/Design.md
+  Comprehensive software design document: design goals and principles, system
+  context, layered architecture, full MessageEnvelope data model, error
+  handling model, memory model (all static allocation, 9-frame worst-case
+  stack), concurrency model (SPSC RingBuffer, std::atomic rationale), module
+  designs for all core and platform components, state machines (AckTracker,
+  RetryManager, ImpairmentEngine partition and delay buffer), wire format
+  (byte-level layout), impairment pipeline, safety design (hazard table and SC
+  functions), testability design, capacity constants table, and 6 key design
+  decisions with rationale.
+
 docs/ClassArchitecture.md
   Class relationship overview: inheritance, composition, and dependency graph.
+
+docs/Requirements.txt
+  Numbered application requirements ([REQ-x.x]) in flat-text form; source of
+  truth for traceability.
+
+docs/TRACEABILITY_MATRIX.md
+  Cross-reference table: requirements → implementing functions → verifying
+  tests. Updated after every change.
+
+docs/HAZARD_ANALYSIS.md
+  Software Safety Hazard Analysis and FMEA: hazard IDs (HAZ-001 … HAZ-006),
+  failure modes, effects, detection mechanisms, and safety-critical (SC)
+  function classification.
+
+docs/STATE_MACHINES.md
+  Formal state machine specifications for AckTracker (FREE / PENDING / ACKED),
+  RetryManager (INACTIVE / WAITING / DUE / EXHAUSTED / EXPIRED), and
+  ImpairmentEngine (NO_PARTITION / PARTITION_ACTIVE, plus delay-buffer slot
+  states SLOT_FREE / SLOT_HELD / SLOT_READY).
+
+docs/STACK_ANALYSIS.md
+  Worst-case stack depth analysis: identifies the deepest call chains
+  (outbound send, inbound receive, retry pump) and the maximum stack frame
+  for each function; confirms the 9-frame worst-case ceiling.
+
+docs/WCET_ANALYSIS.md
+  Worst-Case Execution Time (WCET) analysis: per-function operation counts
+  based on compile-time capacity constants, with O() classification and
+  notes on bounded vs unbounded behavior.
+
+docs/INSPECTION_CHECKLIST.md
+  Code inspection checklist used for formal peer reviews: entry gate, Power of
+  10 rules, MISRA/F-Prime items, safety requirements, and sign-off fields.
+
+docs/DEFECT_LOG.md
+  Defect and inspection log; records all formal code inspections (INSP-xxx),
+  deviations, and cppcheck suppressions with justification and resolution.
 
 docs/generate_use_cases.txt
   Prompt template used to generate Flow-of-Control documents for each use case.
 
 docs/user_case_list.txt
-  Master list of all 35 use cases used as input to the document generation process.
+  Master list of all 35 use cases used as input to the document generation
+  process.
 
 docs/use_cases/HIGH_LEVEL_USE_CASES.md
   Index of 18 high-level use cases (HL-1 through HL-18) with links to the 35
-  detailed Flow-of-Control documents. Also identifies Application Workflow and
-  System Internal UCs that sit outside the User → System boundary.
+  detailed Flow-of-Control documents.
 
 docs/use_cases/UC_01 … UC_35
-  35 Flow-of-Control documents, one per use case. Each document has 15 sections:
-  overview, entry points, step-by-step control flow, call tree, key components,
-  branching logic, concurrency, memory/ownership, error handling, external
-  interactions, state changes, sequence diagram (ASCII), init vs runtime,
-  known risks, and unknowns/assumptions.
+  35 Flow-of-Control documents, one per use case. Each document has 15
+  sections: overview, entry points, step-by-step control flow, call tree, key
+  components, branching logic, concurrency, memory/ownership, error handling,
+  external interactions, state changes, sequence diagram (ASCII), init vs
+  runtime, known risks, and unknowns/assumptions.
 
 SOURCE — src/core/   (message layer; no OS or socket dependencies)
 -------------------------------------------------------------------
 Types.hpp
-  All shared enumerations (MessageType, ReliabilityClass, Result, Severity, etc.),
-  compile-time capacity constants, and NodeId typedef.
+  All shared enumerations (MessageType, ReliabilityClass, Result, Severity,
+  TransportKind, OrderingMode), compile-time capacity constants
+  (MSG_MAX_PAYLOAD_BYTES=4096, MSG_RING_CAPACITY=64, ACK_TRACKER_CAPACITY=32,
+  DEDUP_WINDOW_SIZE=128, MAX_RETRY_COUNT=5, IMPAIR_DELAY_BUF_SIZE=32, etc.),
+  and the NodeId typedef.
+
+Assert.hpp
+  NEVER_COMPILED_OUT_ASSERT macro: always compiled in (never NDEBUG-disabled);
+  debug/test builds call abort(); production logs FATAL and triggers a
+  controlled component reset.
 
 Logger.hpp
-  Header-only, heap-free logger; writes severity-tagged lines to stderr.
+  Header-only, heap-free logger; writes severity-tagged lines to stderr using
+  a fixed 512-byte stack buffer. No dynamic allocation.
 
 MessageEnvelope.hpp
-  The standard wire envelope struct (type, id, timestamps, src/dst, priority,
-  reliability class, expiry, opaque payload) plus init/copy/validate helpers.
+  The standard wire envelope struct (message_type, message_id, timestamp_us,
+  expiry_time_us, source_id, destination_id, priority, reliability_class,
+  payload[4096]) plus inline helpers: envelope_init, envelope_copy,
+  envelope_valid, envelope_is_data, envelope_is_control, envelope_make_ack.
 
 ChannelConfig.hpp
   ChannelConfig and TransportConfig POD structs with per-channel priority,
   reliability mode, queue depth, timeouts, and impairment toggle.
+  Provides channel_config_default() and transport_config_default() inline
+  helpers.
 
 TransportInterface.hpp
   Pure-virtual abstract base class (init / send_message / receive_message /
   close / is_open) that decouples the message layer from all socket backends.
 
 RingBuffer.hpp
-  Header-only, statically allocated, power-of-two ring buffer for MessageEnvelope;
-  supports push / pop / peek with ERR_FULL / ERR_EMPTY result codes.
+  Header-only, statically allocated, lock-free SPSC ring buffer for
+  MessageEnvelope (capacity MSG_RING_CAPACITY=64); push / pop / peek with
+  ERR_FULL / ERR_EMPTY result codes; uses std::atomic<uint32_t> with
+  acquire/release ordering.
 
 Serializer.hpp / Serializer.cpp
-  Deterministic, big-endian wire serialization of MessageEnvelope into a 44-byte
-  header + variable payload; uses manual bit-shift I/O (no htons/ntohl).
+  Deterministic, big-endian (network byte order) wire serialization of
+  MessageEnvelope into a fixed 44-byte header + variable payload; uses manual
+  bit-shift I/O (no htons/ntohl). Validates padding fields and payload bounds
+  on deserialization.
 
 MessageId.hpp / MessageId.cpp
   Monotonically incrementing 64-bit message-ID generator (MessageIdGen) with
-  seed support; never returns 0 (reserved for invalid).
+  optional seed support; never returns 0 (reserved as invalid).
 
 Timestamp.hpp / Timestamp.cpp
-  Inline helpers using CLOCK_MONOTONIC: timestamp_now_us(), timestamp_expired(),
-  and timestamp_deadline_us() for expiry and retry scheduling.
+  Helpers using CLOCK_MONOTONIC: timestamp_now_us() returns current time in
+  microseconds; timestamp_expired() checks whether a deadline has passed;
+  timestamp_deadline_us() computes a future deadline given an offset.
 
 DuplicateFilter.hpp / DuplicateFilter.cpp
-  128-entry sliding-window dedup keyed on (source_id, message_id) pairs; oldest
-  entry is evicted when the window is full.
+  128-entry sliding-window dedup keyed on (source_id, message_id) pairs;
+  evicts the oldest entry on overflow. Used by DeliveryEngine on the inbound
+  path for RELIABLE_RETRY messages.
 
 AckTracker.hpp / AckTracker.cpp
-  Fixed-capacity (32-slot) table tracking outstanding reliable messages; records
-  deadlines, detects timeouts, and removes entries on ACK receipt.
+  Fixed-capacity (32-slot) table tracking outstanding reliable messages;
+  records ACK deadlines, detects timeouts via sweep_expired(), and removes
+  entries on ACK receipt via on_ack(). States: FREE / PENDING / ACKED.
 
 RetryManager.hpp / RetryManager.cpp
-  Retry scheduler with per-message exponential backoff (doubles each attempt,
-  capped); integrates with AckTracker to cancel retries on ACK.
+  Retry scheduler with per-message exponential backoff (initial interval
+  doubles each attempt, capped at 60 s); integrates with AckTracker to cancel
+  retries on ACK via on_ack(); collect_due() returns messages ready for
+  re-send. States: INACTIVE / WAITING / DUE / EXHAUSTED / EXPIRED.
 
 DeliveryEngine.hpp / DeliveryEngine.cpp
-  Per-channel coordinator: assigns message IDs, applies reliability semantics
-  (BEST_EFFORT / RELIABLE_ACK / RELIABLE_RETRY), drives retries and ACK sweeps.
+  Per-channel coordinator that ties transport, ACK tracking, retry, and dedup
+  together. Assigns message IDs, applies reliability semantics (BEST_EFFORT /
+  RELIABLE_ACK / RELIABLE_RETRY), drives retries via pump_retries(), and
+  sweeps ACK timeouts via sweep_ack_timeouts().
 
 SOURCE — src/platform/   (OS/socket layer; adapters only, no app policy)
 -------------------------------------------------------------------------
 PrngEngine.hpp / PrngEngine.cpp
   Seedable xorshift64 PRNG used for deterministic impairment decisions;
-  exposes next(), next_double() [0,1), and next_range(lo, hi).
+  exposes next() (uint64_t), next_double() [0.0, 1.0), and next_range(lo, hi).
 
 ImpairmentConfig.hpp
-  POD configuration struct for all impairment parameters: fixed latency, jitter,
-  loss probability, duplication, reordering window, partition intervals, PRNG seed.
+  POD configuration struct for all impairment parameters: enabled flag, fixed
+  latency, jitter mean/variance, loss probability, duplication probability,
+  reordering window size, partition gap/duration, and PRNG seed.
+  Provides impairment_config_default() inline helper.
 
 ImpairmentEngine.hpp / ImpairmentEngine.cpp
-  Applies configurable network impairments (loss, duplication, latency/jitter,
-  reordering, link partitions) to messages on the outbound or inbound path.
+  Applies configurable network impairments to messages on the outbound path:
+  packet loss (drop), duplication (extra copy queued), fixed latency and
+  jitter (delay buffer, 32 slots), reordering (window-based release), and
+  link partitions (state machine: NO_PARTITION / PARTITION_ACTIVE).
+  process_inbound() handles reordering on the receive path. Fully
+  reproducible given the same PRNG seed.
 
 SocketUtils.hpp / SocketUtils.cpp
-  POSIX socket primitives: create, bind, connect-with-timeout, send_all,
-  recv_exact, sendto/recvfrom, and length-prefixed TCP framing helpers.
+  POSIX socket primitives: socket creation, bind, connect-with-timeout,
+  send_all (retry on EINTR/short write), recv_exact, sendto/recvfrom wrappers,
+  and length-prefixed TCP framing helpers (write_framed / read_framed).
 
 TcpBackend.hpp / TcpBackend.cpp
-  TransportInterface implementation over TCP; supports server mode (multi-client
-  accept loop) and client mode; integrates ImpairmentEngine and RingBuffer queue.
+  TransportInterface over TCP; server mode supports up to 8 simultaneous
+  clients via a dedicated accept thread and per-connection receive threads;
+  client mode connects with timeout. Uses length-prefixed framing,
+  ImpairmentEngine, and a RingBuffer inbound queue.
 
 UdpBackend.hpp / UdpBackend.cpp
-  TransportInterface implementation over UDP datagrams; binds a single socket,
-  serializes to wire format, and applies impairments before send/receive.
+  TransportInterface over UDP datagrams; binds a single socket, serializes
+  each MessageEnvelope to the wire format, and applies ImpairmentEngine before
+  send. Receive path deserializes from raw datagrams.
 
 LocalSimHarness.hpp / LocalSimHarness.cpp
-  In-process simulation transport: two instances are linked via link(); messages
-  are injected directly into the peer's RingBuffer — no sockets involved.
+  In-process simulation transport; two instances are linked via link(). Messages
+  sent from one are injected directly into the peer's RingBuffer via inject()
+  after passing through the ImpairmentEngine — no sockets or threads involved.
+  Used for all unit tests and deterministic simulation scenarios.
 
 SOURCE — src/app/   (application orchestration)
 ------------------------------------------------
 Server.cpp
-  Demo TCP echo server: binds on a configured port, receives DATA messages, logs
-  them, sends echo replies, and pumps retries/ACK-timeouts each iteration.
+  Demo TCP echo server: binds on a configured port, receives DATA messages,
+  logs them, sends echo replies, and pumps retries/ACK-timeouts each
+  iteration. Runs until terminated.
 
 Client.cpp
   Demo TCP client: connects to the server, sends five RELIABLE_RETRY messages
-  with "Hello from client #N" payloads, and waits for echo replies.
+  with "Hello from client #N" payloads, waits for echo replies (up to 20
+  bounded receive attempts per message), and reports the final send/echo count.
 
 TESTS — tests/
 --------------
 test_MessageEnvelope.cpp
-  Five tests covering envelope_init, envelope_valid, envelope_copy,
-  envelope_make_ack, and envelope_is_data / envelope_is_control.
+  5 tests: envelope_init, envelope_valid, envelope_copy, envelope_make_ack,
+  and envelope_is_data / envelope_is_control.
 
 test_Serializer.cpp
-  Six tests: basic round-trip, undersized buffer, invalid envelope, truncated
-  input, maximum-payload pattern fill, and WIRE_HEADER_SIZE constant check.
+  12 tests: basic round-trip, undersized buffer, invalid envelope, truncated
+  input, maximum-payload pattern fill, wire-header-size constant, zero-payload
+  round-trip, header-too-short, bad padding1, bad padding2, oversized payload
+  field, and zero-payload deserialization.
 
 test_DuplicateFilter.cpp
-  Five tests: basic dedup, different-source pass-through, different-ID
-  pass-through, unseen message, and sliding-window wraparound/eviction.
+  5 tests: basic dedup, different-source pass-through, different-ID
+  pass-through, unseen message pass-through, and sliding-window wraparound /
+  oldest-entry eviction.
+
+test_AckTracker.cpp
+  10 tests: init, track_ok, track_full (ERR_FULL), on_ack_ok, on_ack_wrong_src,
+  on_ack_wrong_id, sweep_expired_pending, sweep_pending_not_expired,
+  sweep_releases_acked (slot recycled for new message), and sweep_buf_capacity.
+
+test_RetryManager.cpp
+  12 tests: init, schedule_ok, schedule_full (ERR_FULL), on_ack_ok,
+  on_ack_not_found, collect_due_immediate, collect_not_due, collect_expired,
+  collect_exhausted (max retries reached), backoff_doubles (interval doubles
+  each attempt), backoff_cap (interval capped at MAX_BACKOFF_MS), and
+  collect_never_expires.
+
+test_DeliveryEngine.cpp
+  19 tests: send_best_effort, send_reliable_ack, send_reliable_retry,
+  receive_data_best_effort, receive_expired, receive_ack_cancels_retry,
+  receive_duplicate, receive_timeout, pump_retries_no_retries,
+  pump_retries_fires, sweep_no_timeouts, sweep_detects_timeout,
+  send_ack_tracker_full, send_retry_manager_full, pump_retries_send_fails,
+  send_transport_queue_full, receive_nak_control, receive_heartbeat_control,
+  and pump_retries_resends.
 
 test_ImpairmentEngine.cpp
-  Five tests: disabled pass-through, deterministic 100% loss, zero loss,
-  fixed-latency gating (collect_deliverable timing), and PRNG reproducibility.
+  12 tests: disabled pass-through, deterministic 100% loss, zero loss,
+  fixed-latency gating (collect_deliverable timing), PRNG reproducibility,
+  jitter enable path, duplication (1.0 probability yields two copies),
+  partition state machine (init → start → active-drop → end), process_inbound
+  passthrough (reorder disabled), process_inbound reorder window (window fills
+  then releases), delay-buffer full with impairments enabled (ERR_FULL), and
+  delay-buffer full with impairments disabled (ERR_FULL).
 
 test_LocalSim.cpp
-  Four tests: basic send/receive, bidirectional messaging, queue-full overflow
-  (ERR_FULL), and receive timeout on empty queue (ERR_TIMEOUT).
+  4 tests: basic send/receive round-trip, bidirectional messaging (both
+  directions simultaneously), queue-full overflow (ERR_FULL when ring buffer
+  capacity is exceeded), and receive timeout on empty queue (ERR_TIMEOUT).
