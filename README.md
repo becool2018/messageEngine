@@ -17,7 +17,8 @@ All production code complies with **JPL Power of 10**, **MISRA C++:2023**, and a
 7. [Static Analysis](#static-analysis)
 8. [Running the Demo (Server / Client)](#running-the-demo-server--client)
 9. [Coding Standards](#coding-standards)
-10. [Code Statistics](#code-statistics)
+10. [Project Standards Files](#project-standards-files)
+11. [Code Statistics](#code-statistics)
 
 ---
 
@@ -286,6 +287,19 @@ All production code (`src/`) is written to the following standards. Deviations r
 | **Error handling** | All errors returned via `Result` enum (`OK`, `ERR_TIMEOUT`, `ERR_FULL`, `ERR_IO`, …); no exceptions |
 | **Assertions** | `NEVER_COMPILED_OUT_ASSERT(cond)` — always compiled in; in debug/test builds calls `abort()`; in production logs FATAL and triggers a controlled reset |
 | **Layering** | App → Core → Platform → OS; no upward dependencies; no cyclic dependencies |
+
+---
+
+## Project Standards Files
+
+Two CLAUDE.md files govern all code in this repository and divide responsibility cleanly:
+
+| File | Purpose |
+|---|---|
+| `.claude/CLAUDE.md` | **Portable coding standard.** Contains the global C/C++ rules applicable to any project: all 10 JPL Power of 10 rules, MISRA C++:2023 compliance requirements, F-Prime style subset, architecture/layering rules, security posture, and NASA assurance mindset. No references to project-specific files. |
+| `CLAUDE.md` | **Project-specific spec.** Contains everything tied to this repository: numbered application requirements (`[REQ-x.x]`), references to `docs/` artifacts, the per-directory rule compliance table, named static analysis toolchain, `NEVER_COMPILED_OUT_ASSERT` policy, traceability rules, formal inspection process, and safety/coverage/WCET/formal-methods obligations. |
+
+**How they divide responsibility:** `.claude/CLAUDE.md` is the portable coding standard (no project-file references); `CLAUDE.md` is the project-specific spec (requirement IDs, file paths, process rules, safety artifacts). Anything that references a specific file in this repo lives in `CLAUDE.md`.
 
 ---
 
