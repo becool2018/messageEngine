@@ -16,9 +16,10 @@ All production code complies with **JPL Power of 10**, **MISRA C++:2023**, and a
 6. [Coverage Analysis](#coverage-analysis)
 7. [Static Analysis](#static-analysis)
 8. [Running the Demo (Server / Client)](#running-the-demo-server--client)
-9. [Coding Standards](#coding-standards)
-10. [Project Standards Files](#project-standards-files)
-11. [Code Statistics](#code-statistics)
+9. [Using the Library](#using-the-library)
+10. [Coding Standards](#coding-standards)
+11. [Project Standards Files](#project-standards-files)
+12. [Code Statistics](#code-statistics)
 
 ---
 
@@ -304,6 +305,208 @@ build/client 127.0.0.1 9001
 ```
 
 The client sends five `RELIABLE_RETRY` messages and prints each echo reply. The server logs all received messages and echoes them back.
+
+---
+
+## Using the Library
+
+This section shows how to integrate messageEngine into your own application. The public API surface is small: a `TransportConfig`, a `ChannelConfig`, a transport backend, and the `DeliveryEngine`.
+
+### 1. Choose a transport backend
+
+| Backend | Header | When to use |
+|---|---|---|
+| `TcpBackend` | `platform/TcpBackend.hpp` | Production; connection-oriented, length-framed |
+| `UdpBackend` | `platform/UdpBackend.hpp` | Production; datagram, low-overhead |
+| `LocalSimHarness` | `platform/LocalSimHarness.hpp` | Tests and simulation; no OS sockets |
+
+All three implement `TransportInterface` and are interchangeable at the `DeliveryEngine` level.
+
+### 2. Configure the transport and channel
+
+```cpp
+#include "core/ChannelConfig.hpp"
+#include "core/Types.hpp"
+
+// Start from safe defaults, then override what you need.
+TransportConfig cfg;
+transport_config_default(cfg);           // fills loopback TCP, port 9000
+
+cfg.kind               = TransportKind::TCP;
+cfg.is_server          = false;          // true for the listening side
+cfg.local_node_id      = 2U;            // must be non-zero; unique per node
+cfg.peer_port          = 9000U;
+cfg.num_channels       = 1U;
+
+// Configure channel 0
+channel_config_default(cfg.channels[0], 0U);
+cfg.channels[0].reliability    = ReliabilityClass::RELIABLE_RETRY;
+cfg.channels[0].max_retries    = 3U;
+cfg.channels[0].retry_backoff_ms = 200U; // initial interval; doubles each attempt
+cfg.channels[0].recv_timeout_ms  = 500U;
+```
+
+Key enumerations:
+
+| Type | Values |
+|---|---|
+| `ReliabilityClass` | `BEST_EFFORT`, `RELIABLE_ACK`, `RELIABLE_RETRY` |
+| `OrderingMode` | `ORDERED`, `UNORDERED` |
+| `TransportKind` | `TCP`, `UDP`, `LOCAL_SIM` |
+
+### 3. Initialize the backend and DeliveryEngine
+
+```cpp
+#include "platform/TcpBackend.hpp"
+#include "core/DeliveryEngine.hpp"
+
+TcpBackend transport;
+Result res = transport.init(cfg);
+if (!result_ok(res)) {
+    // handle fatal error — transport not available
+}
+
+DeliveryEngine engine;
+engine.init(&transport, cfg.channels[0], cfg.local_node_id);
+```
+
+`init()` is the only point where any allocation takes place. All state is fixed-size and stack/statically allocated.
+
+### 4. Send a message
+
+```cpp
+#include "core/MessageEnvelope.hpp"
+#include "core/Timestamp.hpp"
+
+uint64_t now_us = timestamp_now_us();
+
+MessageEnvelope env;
+envelope_init(env);                          // zero-fills the struct
+
+env.message_type      = MessageType::DATA;
+env.destination_id    = 1U;                  // target node ID
+env.priority          = 0U;                  // 0 = highest
+env.reliability_class = ReliabilityClass::RELIABLE_RETRY;
+env.timestamp_us      = now_us;
+env.expiry_time_us    = timestamp_deadline_us(now_us, 5000U); // 5-second TTL
+
+// Copy payload (up to MSG_MAX_PAYLOAD_BYTES = 4096)
+const char* msg = "Hello";
+(void)memcpy(env.payload, msg, 5U);
+env.payload_length = 5U;
+
+Result res = engine.send(env, now_us);
+// engine.send() fills env.message_id and env.source_id automatically
+```
+
+### 5. Receive a message
+
+```cpp
+MessageEnvelope reply;
+envelope_init(reply);
+
+Result res = engine.receive(reply, 500U /*timeout_ms*/, timestamp_now_us());
+if (result_ok(res) && envelope_is_data(reply)) {
+    // process reply.payload[0..reply.payload_length-1]
+}
+// ERR_TIMEOUT  → no message arrived within 500 ms
+// ERR_EXPIRED  → message arrived but was past its expiry_time_us
+// ERR_DUPLICATE → silently deduped (RELIABLE_RETRY only)
+```
+
+`DeliveryEngine::receive()` handles ACKs, duplicate filtering, and expiry checks transparently. Only `DATA` messages reach the caller.
+
+### 6. Service the engine periodically
+
+For `RELIABLE_RETRY` and `RELIABLE_ACK` modes, call these on every iteration of your event loop:
+
+```cpp
+uint64_t now_us = timestamp_now_us();
+uint32_t retried  = engine.pump_retries(now_us);       // re-sends due messages
+uint32_t timeouts = engine.sweep_ack_timeouts(now_us); // logs missed ACKs
+```
+
+### 7. Shutdown
+
+```cpp
+transport.close();
+```
+
+---
+
+### Testing with LocalSimHarness
+
+`LocalSimHarness` runs entirely in-process — no sockets, no threads, deterministic. Link two instances together and they exchange messages through a `RingBuffer`.
+
+```cpp
+#include "platform/LocalSimHarness.hpp"
+
+LocalSimHarness node_a;
+LocalSimHarness node_b;
+
+TransportConfig cfg_a, cfg_b;
+transport_config_default(cfg_a);
+transport_config_default(cfg_b);
+cfg_a.local_node_id = 1U;
+cfg_b.local_node_id = 2U;
+
+(void)node_a.init(cfg_a);
+(void)node_b.init(cfg_b);
+
+node_a.link(&node_b);   // messages sent from a arrive in b's queue
+node_b.link(&node_a);   // messages sent from b arrive in a's queue
+
+DeliveryEngine engine_a, engine_b;
+engine_a.init(&node_a, cfg_a.channels[0], 1U);
+engine_b.init(&node_b, cfg_b.channels[0], 2U);
+```
+
+---
+
+### Injecting Network Faults (ImpairmentEngine)
+
+To test reliability behavior, attach an `ImpairmentEngine` to a `LocalSimHarness` channel by enabling impairments in the channel config and configuring an `ImpairmentConfig`:
+
+```cpp
+#include "platform/ImpairmentEngine.hpp"
+#include "platform/ImpairmentConfig.hpp"
+
+ImpairmentConfig imp;
+impairment_config_default(imp);          // all faults off, deterministic seed
+imp.enabled              = true;
+imp.loss_probability     = 0.10;         // 10 % packet loss
+imp.fixed_latency_ms     = 20U;          // 20 ms added to every message
+imp.jitter_mean_ms       = 5U;           // ±5 ms random jitter
+imp.partition_enabled    = true;
+imp.partition_gap_ms     = 1000U;        // link up for 1 second
+imp.partition_duration_ms = 200U;        // then down for 200 ms
+imp.prng_seed            = 42ULL;        // same seed → same fault sequence
+
+ImpairmentEngine impairment;
+impairment.init(imp);
+
+// Pass impaired messages through process_outbound() before injecting
+// into the peer harness, or use it directly in a custom test harness.
+```
+
+All impairment decisions are driven by a seedable xorshift64 PRNG — given the same seed and input sequence, every run produces an identical fault pattern.
+
+---
+
+### Error Handling
+
+All functions return a `Result` enum. Never ignore a return value.
+
+| Code | Meaning |
+|---|---|
+| `OK` | Success |
+| `ERR_TIMEOUT` | No message arrived within the timeout |
+| `ERR_FULL` | Send queue or delay buffer is full |
+| `ERR_IO` | Socket or transport error; or link is partitioned |
+| `ERR_INVALID` | Bad argument or engine not initialized |
+| `ERR_EXPIRED` | Message TTL has elapsed |
+| `ERR_DUPLICATE` | Message was already seen (silently filtered) |
+| `ERR_OVERRUN` | Internal buffer overrun |
 
 ---
 
