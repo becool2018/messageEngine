@@ -108,14 +108,14 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 |----------|----------------------|-------|-------|
 | `DeliveryEngine::send()` | serialize + process_outbound + track + schedule | O(P + I + A) | Dominated by serialize O(P) |
 | `DeliveryEngine::receive()` | receive_message + is_duplicate + check_and_record | O(P + D) | Dominated by deserialize O(P) and dedup O(D) |
-| `DeliveryEngine::pump_retries()` | collect_due (O(A)) + send_via_transport per due (O(P)) | O(A × P) = O(131072) | **Worst case: all 32 slots due simultaneously** |
+| `DeliveryEngine::pump_retries()` | collect_due (O(A)) + per-due: send_via_transport → serialize (O(P)) + process_outbound + collect_deliverable (O(I)) | O(A × (P + I)) = O(32 × 4128) = O(132096) | **Worst case: all 32 slots due simultaneously; each retry traverses Serializer + ImpairmentEngine** |
 | `DeliveryEngine::sweep_ack_timeouts()` | sweep_expired O(A) | O(A) = O(32) | |
 
 ### src/core/TransportInterface.hpp (concrete implementations)
 
 | Function | Worst-case operations | Bound | Notes |
 |----------|----------------------|-------|-------|
-| `TcpBackend::send_message()` | serialize + process_outbound + send to C clients | O(P × C) = O(4096 × 8) | Wire write to each client |
+| `TcpBackend::send_message()` | serialize (O(P)) + process_outbound + collect_deliverable (O(I)) + send to C clients (O(P × C)) | O(P × C + I × P) = O(4096 × 8 + 32 × 4096) = O(163840) | Wire write to each client; when all I delay-buffer slots are simultaneously due, collect_deliverable flushes them all — each requiring a separate wire write of O(P) |
 | `TcpBackend::receive_message()` | poll_count × (accept + C recv + deserialize) | O(poll_count × C × P) | poll_count ≤ 50; bound = O(50 × 8 × 4096) |
 | `UdpBackend::send_message()` | serialize + process_outbound + 1 sendto | O(P) = O(4096) | Single datagram |
 | `UdpBackend::receive_message()` | poll_count × (recv + deserialize) | O(poll_count × P) = O(50 × 4096) | |
@@ -144,9 +144,11 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 
 The three highest-cost operations in the system:
 
-1. **`DeliveryEngine::pump_retries()` with all slots due:** O(A × P) = O(32 × 4096) = O(131 072 operations). This is the worst-case retry burst. In practice, exponential backoff and `max_retries` prevent all slots from firing simultaneously.
+1. **`DeliveryEngine::pump_retries()` with all slots due:** O(A × (P + I)) = O(32 × (4096 + 32)) = O(132 096 operations). Each retry slot invokes the full `TcpBackend::send_message()` path including `Serializer::serialize()` O(P) and `ImpairmentEngine::process_outbound()` + `collect_deliverable()` O(I). In practice, exponential backoff and `max_retries` prevent all slots from firing simultaneously.
 
-2. **`TcpBackend::receive_message()` at maximum poll depth:** O(50 × 8 × 4096) = O(1 638 400 operations). This bound is loose; in practice, receive returns early on first message.
+2. **`TcpBackend::send_message()` with full delay buffer due:** O(P × C + I × P) = O(4096 × 8 + 32 × 4096) = O(163 840 operations). The `collect_deliverable()` flush after every send can release up to I=32 buffered messages, each requiring a wire write. This bound is loose; in practice, the delay buffer rarely reaches capacity.
+
+3. **`TcpBackend::receive_message()` at maximum poll depth:** O(50 × 8 × 4096) = O(1 638 400 operations). This bound is loose; in practice, receive returns early on first message.
 
 3. **`Serializer::serialize()` / `deserialize()`:** O(P) = O(4096) byte operations per call, which is the payload copy. Unavoidable for maximum-sized messages.
 

@@ -33,6 +33,7 @@ equivalent) for all state machines documented here.
 | `FREE` | `track(env, deadline)` | `m_count < ACK_TRACKER_CAPACITY` | `PENDING` | Copy env; set deadline; increment m_count |
 | `FREE` | `track(env, deadline)` | `m_count == ACK_TRACKER_CAPACITY` | `FREE` | Return `ERR_FULL`; log `WARNING_HI` |
 | `PENDING` | `on_ack(src, msg_id)` | src and msg_id match slot | `ACKED` | — |
+| `PENDING` | `on_ack(src, msg_id)` | src or msg_id does not match | `PENDING` | Returns `ERR_INVALID`; **Known bug**: in a two-node deployment, `src` in the ACK is the remote peer's node ID, but the slot stores the local node's `source_id`. These never match, so this transition is effectively unreachable in normal operation. Slot remains PENDING until `sweep_expired()` fires. |
 | `PENDING` | `sweep_expired()` | `now_us >= deadline_us` | `FREE` | Copy to expired_buf if space; decrement m_count |
 | `PENDING` | `sweep_expired()` | `now_us < deadline_us` | `PENDING` | No action |
 | `ACKED` | `sweep_expired()` | — | `FREE` | Decrement m_count |
@@ -43,6 +44,8 @@ equivalent) for all state machines documented here.
 - A slot in `ACKED` state is freed on the very next `sweep_expired()` call.
 - A slot in `PENDING` state is never freed without being copied to `expired_buf` (if capacity allows) or transitioning through `ACKED`.
 - `on_ack()` never decrements `m_count` — only `sweep_expired()` does.
+
+> **Known implementation defect:** `on_ack(src, msg_id)` matches on `slot.env.source_id == src`. At `track()` time, `slot.env.source_id` is set to the local node's ID (the sender). At `on_ack()` time, the ACK envelope carries `source_id` = remote peer's ID. In a two-node deployment (local_id=1, remote_id=2), these are always different, so the PENDING→ACKED transition via `on_ack()` is never taken. All slot reclamation occurs via `sweep_expired()` instead. This means every sent message that receives an ACK still consumes an AckTracker slot until the sweep deadline elapses.
 
 ### State Diagram
 
@@ -88,6 +91,7 @@ logical states are:
 | `WAITING` | `collect_due(now, buf)` | `now_us ≥ expiry_us` | `INACTIVE` | Decrement m_count; log `WARNING_LO` (expired) |
 | `WAITING` | `collect_due(now, buf)` | `retry_count ≥ max_retries` | `INACTIVE` | Decrement m_count; log `WARNING_HI` (exhausted) |
 | `WAITING` | `on_ack(src, msg_id)` | src and msg_id match | `INACTIVE` | Decrement m_count; log INFO |
+| `WAITING` | `on_ack(src, msg_id)` | src or msg_id does not match | `WAITING` | Returns `ERR_INVALID`; **Known bug**: same source_id mismatch as AckTracker (see §1). In a two-node deployment this transition is unreachable; slots remain WAITING until expired or exhausted. |
 | `DUE` | `collect_due(now, buf)` | buf has space | `WAITING` | Copy to buf; increment retry_count; advance backoff; set next_retry_us |
 | `DUE` | `collect_due(now, buf)` | buf full | `DUE` | Not collected this sweep; will retry on next call |
 
@@ -98,6 +102,8 @@ logical states are:
 - `retry_count` is monotonically non-decreasing per slot.
 - A slot transitions to `INACTIVE` only through: ACK received, exhausted, or expired.
 - The `schedule()` call sets `next_retry_us = now_us` so the first retry fires immediately.
+
+> **Known implementation defect:** Same source_id mismatch as AckTracker §1. `on_ack()` matches `slot.env.source_id` (local node ID) against the ACK's `source_id` (remote peer ID). In a two-node deployment, ACKs never cancel retry slots via `on_ack()`. All slot reclamation occurs via exhaustion (`retry_count >= max_retries`) or expiry (`now_us >= expiry_us`). This means every RELIABLE_RETRY message will exhaust all `max_retries` attempts regardless of ACK receipt.
 
 ---
 
@@ -122,10 +128,12 @@ The ImpairmentEngine has two orthogonal state dimensions:
 
 **Dimension 2 — Partition (within `READY`):**
 
-| State | Condition | Meaning |
-|-------|-----------|---------|
-| `NO_PARTITION` | `m_cfg.partition_start_us == 0` OR `now_us < partition_start_us` OR `now_us > partition_end_us` | Link is up; messages pass through impairment pipeline |
-| `PARTITION_ACTIVE` | `partition_start_us ≤ now_us ≤ partition_end_us` | Simulated link outage; all outbound messages dropped with `ERR_IO` |
+| State | Fields | Meaning |
+|-------|--------|---------|
+| `NO_PARTITION` | `m_partition_active == false` | Link is up; messages pass through impairment pipeline |
+| `PARTITION_ACTIVE` | `m_partition_active == true` | Simulated link outage; all outbound messages dropped with `ERR_IO` |
+
+Transitions are driven by `m_next_partition_event_us` (uint64_t) and the `now_us` argument passed to each `process_outbound()` call. The initial state is always `NO_PARTITION`; the first active partition begins after `partition_gap_ms` elapses from the first call.
 
 ### Transition Table — Initialisation Dimension
 
@@ -136,16 +144,24 @@ The ImpairmentEngine has two orthogonal state dimensions:
 
 ### Transition Table — Partition Dimension (within READY)
 
-| Current State | Event | Guard | Next State | Action |
-|---------------|-------|-------|------------|--------|
-| `NO_PARTITION` | `process_outbound(env, now)` | `is_partition_active(now)` true | `PARTITION_ACTIVE` | Drop message; log `WARNING_LO`; return `ERR_IO` |
-| `NO_PARTITION` | `process_outbound(env, now)` | `is_partition_active(now)` false | `NO_PARTITION` | Apply loss/jitter/duplication; queue to delay buffer |
-| `PARTITION_ACTIVE` | `process_outbound(env, now)` | `is_partition_active(now)` false | `NO_PARTITION` | Apply normal pipeline |
-| `PARTITION_ACTIVE` | `process_outbound(env, now)` | `is_partition_active(now)` true | `PARTITION_ACTIVE` | Drop; return `ERR_IO` |
+`is_partition_active(now_us)` is the sole transition function. Its internal logic:
 
-Note: `is_partition_active()` is a pure time-based query; partition state transitions
-occur automatically as `now_us` advances past `partition_start_us` or `partition_end_us`.
-There is no explicit "activate partition" event — the caller provides `now_us` each call.
+| Condition | Action | Returns |
+|-----------|--------|---------|
+| `!m_cfg.partition_enabled` | No state change | `false` |
+| `m_next_partition_event_us == 0` (first call) | `m_partition_active = false`; `m_next_partition_event_us = now_us + partition_gap_ms × 1000` | `false` |
+| `!m_partition_active && now_us >= m_next_partition_event_us` | `m_partition_active = true`; `m_partition_start_us = now_us`; `m_next_partition_event_us = now_us + partition_duration_ms × 1000`; log `WARNING_LO` | `true` |
+| `m_partition_active && now_us >= m_next_partition_event_us` | `m_partition_active = false`; `m_next_partition_event_us = now_us + partition_gap_ms × 1000`; log `WARNING_LO` | `false` |
+| Otherwise | No state change | `m_partition_active` |
+
+Effect on `process_outbound()`:
+
+| `is_partition_active()` | `process_outbound()` action |
+|-------------------------|----------------------------|
+| `true` | Drop message; log `WARNING_LO`; return `ERR_IO` |
+| `false` | Apply loss/jitter/duplication; queue to delay buffer |
+
+> **Known edge case:** If `partition_gap_ms == 0`, the first call to `is_partition_active()` sets `m_next_partition_event_us = now_us`. On the very next call (same or greater `now_us`), the `!m_partition_active && now_us >= m_next_partition_event_us` guard fires, activating a partition immediately and permanently (the gap phase has zero duration). This causes a permanent partition — all messages are dropped.
 
 ### Delay Buffer Sub-State
 

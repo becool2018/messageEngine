@@ -47,7 +47,7 @@
 | Failure Mode | System Effect | Severity | Detection | Mitigation |
 |---|---|---|---|---|
 | `track()` returns `ERR_FULL` and caller ignores | Message never ACK-tracked; retry unlimited | Cat II HAZ-002, HAZ-006 | `ERR_FULL` return | Rule 7 requires return check; `WARNING_HI` logged |
-| `on_ack()` returns `ERR_INVALID` (ACK for unknown ID) | Retry continues unnecessarily | Cat III HAZ-002 | `ERR_INVALID` return; `WARNING_LO` log | Retry eventually expires; does not cause incorrect delivery |
+| `on_ack()` source_id mismatch — **known latent bug**: `on_ack()` matches on `slot.env.source_id` (local node ID stored at `track()` time) against the ACK's `source_id` (remote peer's ID). These are always different in a two-node deployment, so ACKs never clear the tracker slot | AckTracker slot stays PENDING until sweep_expired() fires; AckTracker effectively provides no ack-cancellation service; retry storm risk escalated | **Cat II HAZ-002** | `ERR_INVALID` returned on every `on_ack()` call; `WARNING_LO` logged; symptom visible in logs | Retry eventually expires via `sweep_expired()` deadline; does not cause incorrect delivery but does cause extra transmissions up to `max_retries` |
 | `sweep_expired()` misses slot | Slot leaks; capacity decreases | Cat II HAZ-006 | `sweep_one_slot()` checks all states per sweep | All `ACK_TRACKER_CAPACITY` slots swept each call |
 
 ### DuplicateFilter
@@ -82,6 +82,7 @@
 | `process_outbound()` skips partition check | Partition not simulated; real link loss masked | Cat III HAZ-007 | `is_partition_active()` called first in `process_outbound()` | First check in function; cannot be bypassed |
 | `check_loss()` uses uninitialized PRNG | Non-deterministic / always-pass behavior | Cat III HAZ-007 | `NEVER_COMPILED_OUT_ASSERT(m_initialized)` | `init()` must be called; assertion fires if not |
 | Delay buffer full; message silently dropped | HAZ-006 | Cat II | `ERR_FULL` returned; `WARNING_HI` logged | `m_delay_count < IMPAIR_DELAY_BUF_SIZE` checked before `queue_to_delay_buf()` |
+| **Double-send when `enabled == false`** — `process_outbound()` queues message to delay buffer with `release_us = now_us`, then returns `OK`; caller (`TcpBackend::flush_delayed_to_clients()` or `LocalSimHarness::send_message()`) immediately harvests it from the buffer, sending it a second time | Every message transmitted twice when impairments disabled; duplicate arrives at receiver; DuplicateFilter may suppress second copy for RELIABLE_RETRY but not for BEST_EFFORT | Cat II HAZ-003 | Visible in logs as two sends per call; DuplicateFilter counters | Documented behavior; callers must account for this; DuplicateFilter mitigates for RELIABLE_RETRY traffic |
 | Duplicate injected at wrong offset | Double-delivery from wrong source | Cat II HAZ-003 | `envelope_copy` preserves source metadata | Duplicate carries original `source_id` / `message_id`; DuplicateFilter catches it |
 
 ---
@@ -253,7 +254,16 @@ All `SocketUtils` functions are **NSC** — raw POSIX I/O primitives with no mes
 
 ### src/platform/LocalSimHarness.hpp
 
-All `LocalSimHarness` methods are **NSC** — test harness only; not used in production deployment.
+| Function | Class | SC/NSC | HAZ IDs |
+|---|---|---|---|
+| `init()` | `LocalSimHarness` | NSC | — |
+| `link()` | `LocalSimHarness` | NSC | — |
+| `inject()` | `LocalSimHarness` | SC | HAZ-006 |
+| `send_message()` | `LocalSimHarness` | SC | HAZ-001, HAZ-003, HAZ-005, HAZ-006 |
+| `receive_message()` | `LocalSimHarness` | SC | HAZ-001, HAZ-004, HAZ-005 |
+| `close()` | `LocalSimHarness` | NSC | — |
+
+Note: `LocalSimHarness` implements `TransportInterface` and is used as the transport backend in integration tests that exercise the full SC send/receive path. Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `TcpBackend`. The previous all-NSC classification was incorrect.
 
 ---
 

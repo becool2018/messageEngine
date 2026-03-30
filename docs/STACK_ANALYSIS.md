@@ -68,10 +68,13 @@ main()  [~64 B]
                  └─ RetryManager::collect_due()  [~48 B]
                       └─ DeliveryEngine::send_via_transport()  [~48 B]
                            └─ TcpBackend::send_message()  [~48 B]
+                                └─ Serializer::serialize()  [~32 B]
+                                     └─ ImpairmentEngine::process_outbound()  [~80 B]
+                                          └─ ImpairmentEngine::queue_to_delay_buf()  [~32 B]
 ```
 
-**Depth:** 7 frames
-**Estimated peak stack:** ~448 B
+**Depth:** 10 frames  ← **worst case across all chains**
+**Estimated peak stack:** ~572 B
 
 ---
 
@@ -97,12 +100,19 @@ main()  [~64 B]
 |-------|---------------|---------------------|
 | 1 — Outbound send | 9 | ~748 B |
 | 2 — Inbound receive | 8 | ~480 B |
-| 3 — Retry pump | 7 | ~448 B |
+| 3 — Retry pump | **10** | ~572 B |
 | 4 — ACK timeout sweep | 6 | ~384 B |
-| **Worst case** | **9** | **~748 B** |
+| **Worst case** | **10 (Chain 3)** | **~748 B (Chain 1, dominated by payload_buf[256])** |
 
-The worst-case estimated stack usage is approximately **748 bytes** across 9 frames.
-This is dominated by the `payload_buf[256]` local array in `send_test_message()`.
+The worst-case **frame depth** is **10 frames** (Chain 3 — retry pump), which extends
+Chain 1's path by appending the `Serializer::serialize()` →
+`ImpairmentEngine::process_outbound()` → `queue_to_delay_buf()` tail that
+`TcpBackend::send_message()` always invokes.
+
+The worst-case **stack size** remains **~748 bytes** (Chain 1), dominated by
+the `payload_buf[256]` local array in `send_test_message()`. Chain 3 reaches only
+~572 B because it lacks that large local buffer; the extra three frames add
+approximately 144 B of frame overhead.
 
 ---
 
@@ -121,7 +131,7 @@ No stack overflow risk exists on either supported platform at current code struc
 
 This document must be updated when:
 - A new function is added that creates a larger on-stack buffer than `payload_buf[256]`.
-- A new call chain adds frames beyond depth 9.
+- A new call chain adds frames beyond depth 10.
 - A new thread entry point is added (start a new chain analysis from that entry point).
 
 Frame size estimates are conservative upper bounds; actual sizes depend on compiler

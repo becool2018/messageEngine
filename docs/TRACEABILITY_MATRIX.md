@@ -10,14 +10,14 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-3.2.1 | Message ID generation and comparison               | src/core/MessageId.hpp, src/core/MessageId.cpp              | — (no dedicated test; covered indirectly by send-path tests) |
 | REQ-3.2.2 | Timestamps and expiry checking                     | src/core/Timestamp.hpp, src/core/Timestamp.cpp              | — (no dedicated test)                                |
 | REQ-3.2.3 | Serialization / deserialization                    | src/core/Serializer.hpp, src/core/Serializer.cpp            | test_Serializer.cpp :: all six tests                 |
-| REQ-3.2.4 | ACK handling                                       | src/core/AckTracker.hpp, src/core/AckTracker.cpp            | test_MessageEnvelope.cpp :: test_envelope_make_ack   |
-| REQ-3.2.5 | Retry logic                                        | src/core/RetryManager.hpp, src/core/RetryManager.cpp        | — (no dedicated test)                                |
+| REQ-3.2.4 | ACK handling                                       | src/core/AckTracker.hpp, src/core/AckTracker.cpp            | test_MessageEnvelope.cpp :: test_envelope_make_ack; test_AckTracker.cpp :: test_track_ok, test_track_full, test_on_ack_ok, test_on_ack_wrong_src, test_on_ack_wrong_id, test_sweep_expired_pending, test_sweep_pending_not_expired, test_sweep_releases_acked, test_sweep_buf_capacity |
+| REQ-3.2.5 | Retry logic                                        | src/core/RetryManager.hpp, src/core/RetryManager.cpp        | test_RetryManager.cpp :: test_schedule_ok, test_schedule_full, test_on_ack_ok, test_on_ack_not_found, test_collect_due_immediate, test_collect_not_due, test_collect_expired, test_collect_exhausted, test_backoff_doubles, test_backoff_cap, test_collect_never_expires |
 | REQ-3.2.6 | Duplicate suppression                              | src/core/DuplicateFilter.hpp, src/core/DuplicateFilter.cpp  | test_DuplicateFilter.cpp :: all five tests           |
 | REQ-3.2.7 | Expiry handling on delivery path                   | src/core/DeliveryEngine.hpp, src/core/DeliveryEngine.cpp    | — (no dedicated test)                                |
-| REQ-3.3.1 | Best effort delivery semantic                      | src/core/DeliveryEngine.cpp, src/core/Types.hpp             | — (no dedicated test)                                |
-| REQ-3.3.2 | Reliable with ACK delivery semantic                | src/core/DeliveryEngine.cpp, src/core/AckTracker.cpp        | — (no dedicated test)                                |
-| REQ-3.3.3 | Reliable with retry and dedupe semantic            | src/core/DeliveryEngine.cpp, src/core/RetryManager.cpp, src/core/DuplicateFilter.cpp | — (no dedicated test) |
-| REQ-3.3.4 | Expiring messages delivery semantic                | src/core/DeliveryEngine.cpp, src/core/Timestamp.cpp         | — (no dedicated test)                                |
+| REQ-3.3.1 | Best effort delivery semantic                      | src/core/DeliveryEngine.cpp, src/core/Types.hpp             | test_DeliveryEngine.cpp :: test_send_best_effort, test_receive_data_best_effort |
+| REQ-3.3.2 | Reliable with ACK delivery semantic                | src/core/DeliveryEngine.cpp, src/core/AckTracker.cpp        | test_AckTracker.cpp :: all ten tests; test_DeliveryEngine.cpp :: test_send_reliable_ack, test_sweep_detects_timeout, test_send_ack_tracker_full |
+| REQ-3.3.3 | Reliable with retry and dedupe semantic            | src/core/DeliveryEngine.cpp, src/core/RetryManager.cpp, src/core/DuplicateFilter.cpp | test_RetryManager.cpp :: all twelve tests; test_DeliveryEngine.cpp :: test_send_reliable_retry, test_receive_duplicate, test_receive_ack_cancels_retry, test_pump_retries_fires, test_pump_retries_resends, test_send_retry_manager_full |
+| REQ-3.3.4 | Expiring messages delivery semantic                | src/core/DeliveryEngine.cpp, src/core/Timestamp.cpp         | test_DeliveryEngine.cpp :: test_receive_expired |
 | REQ-3.3.5 | Ordered / unordered channel support                | src/core/ChannelConfig.hpp                                  | — (no dedicated test)                                |
 | REQ-4.1.1 | init(config) transport operation                   | src/core/TransportInterface.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp, src/platform/LocalSimHarness.cpp | — |
 | REQ-4.1.2 | send_message(envelope) transport operation         | src/core/TransportInterface.hpp, src/core/RingBuffer.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp, src/platform/LocalSimHarness.cpp | test_LocalSim.cpp :: basic send/receive, bidirectional, queue-full |
@@ -66,10 +66,18 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 ## Coverage gaps (requirements with no test)
 
 The following REQ IDs have no `Verifies:` entry. These are candidates for new tests:
-REQ-3.2.1, REQ-3.2.2, REQ-3.2.4, REQ-3.2.5, REQ-3.2.7,
-REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5,
+REQ-3.2.1, REQ-3.2.2, REQ-3.2.7,
+REQ-3.3.5,
 REQ-4.1.1, REQ-4.2.1, REQ-4.2.2,
 REQ-5.1.2, REQ-5.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.2.3, REQ-5.2.5,
 REQ-6.1.1 through REQ-6.1.7, REQ-6.2.1 through REQ-6.2.4,
 REQ-6.3.1, REQ-6.3.2, REQ-6.3.4, REQ-6.3.5,
 REQ-7.1.1 through REQ-7.2.4
+
+Resolved since last generation (tests added):
+- REQ-3.2.4 — now covered by test_AckTracker.cpp (10 tests)
+- REQ-3.2.5 — now covered by test_RetryManager.cpp (12 tests)
+- REQ-3.3.1 — now covered by test_DeliveryEngine.cpp
+- REQ-3.3.2 — now covered by test_AckTracker.cpp + test_DeliveryEngine.cpp
+- REQ-3.3.3 — now covered by test_RetryManager.cpp + test_DeliveryEngine.cpp
+- REQ-3.3.4 — now covered by test_DeliveryEngine.cpp :: test_receive_expired
