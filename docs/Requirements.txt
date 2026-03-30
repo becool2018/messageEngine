@@ -1,0 +1,1 @@
+Requirements are detailed in CLAUDE.md and in .claude/CLAUDE.md

@@ -1,0 +1,494 @@
+/**
+ * @file test_Serializer.cpp
+ * @brief Unit tests for Serializer round-trip and edge cases.
+ *
+ * Tests serialization and deserialization of MessageEnvelope to/from
+ * binary wire format with various payload sizes and error conditions.
+ *
+ * Rules applied:
+ *   - Power of 10: fixed buffer sizes, bounded loops, ≥2 assertions per test.
+ *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
+ *   - F-Prime style: simple test framework using assert() and printf().
+ */
+
+// Verifies: REQ-3.2.3
+
+#include <cstdio>
+#include <cstring>
+#include <cassert>
+#include <cstdint>
+
+#include "core/Types.hpp"
+#include "core/MessageEnvelope.hpp"
+#include "core/Serializer.hpp"
+
+// Fixed-size wire buffer for all serialization tests
+// (Power of 10 rule 3: no dynamic allocation)
+static uint8_t wire_buf[8192U];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 1: Basic round-trip serialization and deserialization
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_serialize_deserialize_basic()
+{
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type = MessageType::DATA;
+    original.message_id = 0x0102030405060708ULL;
+    original.timestamp_us = 0x0A0B0C0D0E0F1011ULL;
+    original.source_id = 42U;
+    original.destination_id = 99U;
+    original.priority = 1U;
+    original.reliability_class = ReliabilityClass::RELIABLE_ACK;
+    original.expiry_time_us = 500000ULL;
+    original.payload_length = 5U;
+    original.payload[0] = 'H';
+    original.payload[1] = 'e';
+    original.payload[2] = 'l';
+    original.payload[3] = 'l';
+    original.payload[4] = 'o';
+
+    // Serialize
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+    assert(out_len == Serializer::WIRE_HEADER_SIZE + 5U);
+
+    // Deserialize
+    MessageEnvelope deserialized;
+    envelope_init(deserialized);
+    Result dr = Serializer::deserialize(wire_buf, out_len, deserialized);
+    assert(dr == Result::OK);
+
+    // Verify all fields match
+    assert(deserialized.message_type == original.message_type);
+    assert(deserialized.message_id == original.message_id);
+    assert(deserialized.timestamp_us == original.timestamp_us);
+    assert(deserialized.source_id == original.source_id);
+    assert(deserialized.destination_id == original.destination_id);
+    assert(deserialized.priority == original.priority);
+    assert(deserialized.reliability_class == original.reliability_class);
+    assert(deserialized.expiry_time_us == original.expiry_time_us);
+    assert(deserialized.payload_length == original.payload_length);
+    assert(deserialized.payload[0] == 'H');
+    assert(deserialized.payload[4] == 'o');
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 2: Serialize with buffer too small
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_serialize_buffer_too_small()
+{
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type = MessageType::DATA;
+    env.source_id = 1U;
+    env.payload_length = 100U;
+
+    uint8_t small_buf[10U];
+    uint32_t out_len = 0U;
+
+    // Buffer size (10) is less than WIRE_HEADER_SIZE (44)
+    Result r = Serializer::serialize(env, small_buf, sizeof(small_buf), out_len);
+    assert(r == Result::ERR_INVALID);
+    assert(out_len == 0U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 3: Serialize invalid envelope
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_serialize_invalid_envelope()
+{
+    // Envelope with INVALID message type
+    MessageEnvelope invalid_type;
+    envelope_init(invalid_type);
+    invalid_type.message_type = MessageType::INVALID;
+    invalid_type.source_id = 1U;
+
+    uint32_t out_len = 0U;
+    Result r1 = Serializer::serialize(invalid_type, wire_buf, sizeof(wire_buf), out_len);
+    assert(r1 == Result::ERR_INVALID);
+
+    // Envelope with invalid (zero) source_id
+    MessageEnvelope invalid_src;
+    envelope_init(invalid_src);
+    invalid_src.message_type = MessageType::DATA;
+    invalid_src.source_id = NODE_ID_INVALID;  // zero is invalid
+
+    out_len = 0U;
+    Result r2 = Serializer::serialize(invalid_src, wire_buf, sizeof(wire_buf), out_len);
+    assert(r2 == Result::ERR_INVALID);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 4: Deserialize with truncated buffer
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_deserialize_truncated()
+{
+    // First, create a valid serialized message
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type = MessageType::DATA;
+    original.source_id = 5U;
+    original.payload_length = 20U;
+    for (uint32_t i = 0U; i < 20U; ++i) {
+        original.payload[i] = static_cast<uint8_t>(i & 0xFFU);
+    }
+
+    uint32_t full_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), full_len);
+    assert(sr == Result::OK);
+    assert(full_len > Serializer::WIRE_HEADER_SIZE);
+
+    // Try to deserialize with buffer size one byte short
+    MessageEnvelope truncated;
+    envelope_init(truncated);
+    Result dr = Serializer::deserialize(wire_buf, full_len - 1U, truncated);
+    assert(dr == Result::ERR_INVALID);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 5: Serialize and deserialize maximum payload size
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_serialize_max_payload()
+{
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type = MessageType::DATA;
+    original.source_id = 100U;
+    original.payload_length = MSG_MAX_PAYLOAD_BYTES;
+
+    // Fill payload with 0xAB pattern
+    for (uint32_t i = 0U; i < MSG_MAX_PAYLOAD_BYTES; ++i) {
+        original.payload[i] = 0xABU;
+    }
+
+    // Use large buffer for serialization
+    uint8_t large_buf[4096U + 100U];
+    uint32_t out_len = 0U;
+
+    Result sr = Serializer::serialize(original, large_buf, sizeof(large_buf), out_len);
+    assert(sr == Result::OK);
+    assert(out_len == Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES);
+
+    // Deserialize
+    MessageEnvelope deserialized;
+    envelope_init(deserialized);
+    Result dr = Serializer::deserialize(large_buf, out_len, deserialized);
+    assert(dr == Result::OK);
+
+    // Verify payload matches
+    assert(deserialized.payload_length == MSG_MAX_PAYLOAD_BYTES);
+    for (uint32_t i = 0U; i < MSG_MAX_PAYLOAD_BYTES; ++i) {
+        assert(deserialized.payload[i] == 0xABU);
+    }
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 6: Verify WIRE_HEADER_SIZE constant
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_wire_header_size()
+{
+    // Layout (from Serializer.hpp):
+    // 1 byte message_type + 1 reliability_class + 1 priority + 1 padding
+    // + 8 message_id + 8 timestamp_us + 4 source_id + 4 destination_id
+    // + 8 expiry_time_us + 4 payload_length + 4 padding
+    // = 1 + 1 + 1 + 1 + 8 + 8 + 4 + 4 + 8 + 4 + 4 = 44
+    assert(Serializer::WIRE_HEADER_SIZE == 44U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 7: Serialize zero-payload envelope (covers False branch of
+//         'if (env.payload_length > 0U)' in serialize)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_serialize_zero_payload()
+{
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type   = MessageType::DATA;
+    env.source_id      = 7U;
+    env.payload_length = 0U;  // zero payload — skips memcpy branch in serialize
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(env, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+    assert(out_len == Serializer::WIRE_HEADER_SIZE);
+
+    // Round-trip: deserialize back and verify zero payload
+    MessageEnvelope deser;
+    envelope_init(deser);
+    Result dr = Serializer::deserialize(wire_buf, out_len, deser);
+    assert(dr == Result::OK);
+    assert(deser.payload_length == 0U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 8: Deserialize with buffer shorter than WIRE_HEADER_SIZE (covers True
+//         branch of 'if (buf_len < WIRE_HEADER_SIZE)' in deserialize)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_deserialize_header_too_short()
+{
+    // Any buffer smaller than 44 bytes must be rejected before reading header
+    uint8_t tiny[10U];
+    (void)memset(tiny, 0, sizeof(tiny));
+
+    MessageEnvelope env;
+    envelope_init(env);
+    Result r = Serializer::deserialize(tiny, static_cast<uint32_t>(sizeof(tiny)), env);
+    assert(r == Result::ERR_INVALID);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 9: Deserialize with corrupt first padding byte (covers True branch of
+//         'if (padding1 != 0U)' in deserialize)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_deserialize_bad_padding1()
+{
+    // Serialize a valid message to get a well-formed wire buffer
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type  = MessageType::DATA;
+    original.source_id     = 3U;
+    original.payload_length = 4U;
+    original.payload[0] = 'T';
+    original.payload[1] = 'e';
+    original.payload[2] = 's';
+    original.payload[3] = 't';
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+    assert(out_len >= Serializer::WIRE_HEADER_SIZE);
+
+    // Corrupt padding byte at wire offset 3 (must be 0 per spec)
+    wire_buf[3U] = 0xFFU;
+
+    MessageEnvelope env;
+    envelope_init(env);
+    Result r = Serializer::deserialize(wire_buf, out_len, env);
+    assert(r == Result::ERR_INVALID);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 10: Deserialize with corrupt second padding word (covers True branch of
+//          'if (padding2 != 0U)' in deserialize)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_deserialize_bad_padding2()
+{
+    // Serialize a valid message to get a well-formed wire buffer
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type   = MessageType::DATA;
+    original.source_id      = 4U;
+    original.payload_length = 4U;
+    original.payload[0] = 'D';
+    original.payload[1] = 'a';
+    original.payload[2] = 't';
+    original.payload[3] = 'a';
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+    assert(out_len >= Serializer::WIRE_HEADER_SIZE);
+
+    // Corrupt padding word at wire offset 40-43 (must be 0x00000000 per spec)
+    wire_buf[40U] = 0x01U;
+
+    MessageEnvelope env;
+    envelope_init(env);
+    Result r = Serializer::deserialize(wire_buf, out_len, env);
+    assert(r == Result::ERR_INVALID);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 11: Deserialize with payload_length field > MSG_MAX_PAYLOAD_BYTES
+//          (covers True branch of 'if (env.payload_length > MSG_MAX_PAYLOAD_BYTES)'
+//           in deserialize)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_deserialize_oversized_payload_field()
+{
+    // Serialize a valid message to get a clean header
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type   = MessageType::DATA;
+    original.source_id      = 5U;
+    original.payload_length = 4U;
+    original.payload[0] = 0x01U;
+    original.payload[1] = 0x02U;
+    original.payload[2] = 0x03U;
+    original.payload[3] = 0x04U;
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+
+    // Overwrite payload_length field (big-endian, offset 36) with oversized value
+    uint32_t oversized = MSG_MAX_PAYLOAD_BYTES + 1U;
+    wire_buf[36U] = static_cast<uint8_t>((oversized >> 24U) & 0xFFU);
+    wire_buf[37U] = static_cast<uint8_t>((oversized >> 16U) & 0xFFU);
+    wire_buf[38U] = static_cast<uint8_t>((oversized >> 8U)  & 0xFFU);
+    wire_buf[39U] = static_cast<uint8_t>((oversized >> 0U)  & 0xFFU);
+
+    MessageEnvelope env;
+    envelope_init(env);
+    Result r = Serializer::deserialize(wire_buf, out_len, env);
+    assert(r == Result::ERR_INVALID);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 12: Deserialize zero-payload message (covers False branch of
+//          'if (env.payload_length > 0U)' in deserialize)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_deserialize_zero_payload()
+{
+    // Serialize a zero-payload envelope
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type   = MessageType::ACK;
+    original.source_id      = 8U;
+    original.destination_id = 1U;
+    original.payload_length = 0U;
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+    assert(out_len == Serializer::WIRE_HEADER_SIZE);
+
+    // Deserialize: payload_length == 0 → skips memcpy branch in deserialize
+    MessageEnvelope deser;
+    envelope_init(deser);
+    Result dr = Serializer::deserialize(wire_buf, out_len, deser);
+    assert(dr == Result::OK);
+    assert(deser.payload_length == 0U);
+    assert(deser.source_id == 8U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main test runner
+// ─────────────────────────────────────────────────────────────────────────────
+int main()
+{
+    int failed = 0;
+
+    if (!test_serialize_deserialize_basic()) {
+        printf("FAIL: test_serialize_deserialize_basic\n");
+        ++failed;
+    } else {
+        printf("PASS: test_serialize_deserialize_basic\n");
+    }
+
+    if (!test_serialize_buffer_too_small()) {
+        printf("FAIL: test_serialize_buffer_too_small\n");
+        ++failed;
+    } else {
+        printf("PASS: test_serialize_buffer_too_small\n");
+    }
+
+    if (!test_serialize_invalid_envelope()) {
+        printf("FAIL: test_serialize_invalid_envelope\n");
+        ++failed;
+    } else {
+        printf("PASS: test_serialize_invalid_envelope\n");
+    }
+
+    if (!test_deserialize_truncated()) {
+        printf("FAIL: test_deserialize_truncated\n");
+        ++failed;
+    } else {
+        printf("PASS: test_deserialize_truncated\n");
+    }
+
+    if (!test_serialize_max_payload()) {
+        printf("FAIL: test_serialize_max_payload\n");
+        ++failed;
+    } else {
+        printf("PASS: test_serialize_max_payload\n");
+    }
+
+    if (!test_wire_header_size()) {
+        printf("FAIL: test_wire_header_size\n");
+        ++failed;
+    } else {
+        printf("PASS: test_wire_header_size\n");
+    }
+
+    if (!test_serialize_zero_payload()) {
+        printf("FAIL: test_serialize_zero_payload\n");
+        ++failed;
+    } else {
+        printf("PASS: test_serialize_zero_payload\n");
+    }
+
+    if (!test_deserialize_header_too_short()) {
+        printf("FAIL: test_deserialize_header_too_short\n");
+        ++failed;
+    } else {
+        printf("PASS: test_deserialize_header_too_short\n");
+    }
+
+    if (!test_deserialize_bad_padding1()) {
+        printf("FAIL: test_deserialize_bad_padding1\n");
+        ++failed;
+    } else {
+        printf("PASS: test_deserialize_bad_padding1\n");
+    }
+
+    if (!test_deserialize_bad_padding2()) {
+        printf("FAIL: test_deserialize_bad_padding2\n");
+        ++failed;
+    } else {
+        printf("PASS: test_deserialize_bad_padding2\n");
+    }
+
+    if (!test_deserialize_oversized_payload_field()) {
+        printf("FAIL: test_deserialize_oversized_payload_field\n");
+        ++failed;
+    } else {
+        printf("PASS: test_deserialize_oversized_payload_field\n");
+    }
+
+    if (!test_deserialize_zero_payload()) {
+        printf("FAIL: test_deserialize_zero_payload\n");
+        ++failed;
+    } else {
+        printf("PASS: test_deserialize_zero_payload\n");
+    }
+
+    return (failed > 0) ? 1 : 0;
+}

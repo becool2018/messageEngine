@@ -1,0 +1,287 @@
+/**
+ * @file test_LocalSim.cpp
+ * @brief Unit tests for LocalSimHarness end-to-end in-process messaging.
+ *
+ * Tests the LocalSimHarness transport for bidirectional messaging, queue
+ * overflow, and timeout behavior in a deterministic in-process environment.
+ *
+ * Rules applied:
+ *   - Power of 10: fixed buffers, bounded loops, ≥2 assertions per test.
+ *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
+ *   - F-Prime style: simple test framework using assert() and printf().
+ */
+
+// Verifies: REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.3.3
+
+#include <cstdio>
+#include <cstring>
+#include <cassert>
+#include <cstdint>
+
+#include "core/Types.hpp"
+#include "core/MessageEnvelope.hpp"
+#include "core/ChannelConfig.hpp"
+#include "platform/LocalSimHarness.hpp"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: Create a test transport config for LOCAL_SIM
+// ─────────────────────────────────────────────────────────────────────────────
+static void create_local_sim_config(TransportConfig& cfg, NodeId node_id)
+{
+    transport_config_default(cfg);
+    cfg.kind = TransportKind::LOCAL_SIM;
+    cfg.local_node_id = node_id;
+    cfg.is_server = false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: Create a test DATA envelope with payload
+// ─────────────────────────────────────────────────────────────────────────────
+static void create_test_data_envelope(MessageEnvelope& env,
+                                       NodeId src,
+                                       NodeId dst,
+                                       const char* payload_str)
+{
+    envelope_init(env);
+    env.message_type = MessageType::DATA;
+    env.message_id = 12345ULL;
+    env.timestamp_us = 0ULL;
+    env.source_id = src;
+    env.destination_id = dst;
+    env.priority = 0U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    env.expiry_time_us = 0ULL;
+
+    // Copy payload string (bounded by MSG_MAX_PAYLOAD_BYTES)
+    uint32_t len = 0U;
+    while (payload_str[len] != '\0' && len < MSG_MAX_PAYLOAD_BYTES) {
+        env.payload[len] = static_cast<uint8_t>(payload_str[len]);
+        ++len;
+    }
+    env.payload_length = len;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 1: Basic send/receive between two harnesses
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-4.1.2, REQ-4.1.3
+static bool test_basic_send_receive()
+{
+    // Create two harnesses
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+
+    // Initialize with LOCAL_SIM transport
+    TransportConfig cfg_a;
+    create_local_sim_config(cfg_a, 1U);
+    Result init_a = harness_a.init(cfg_a);
+    assert(init_a == Result::OK);
+    assert(harness_a.is_open() == true);
+
+    TransportConfig cfg_b;
+    create_local_sim_config(cfg_b, 2U);
+    Result init_b = harness_b.init(cfg_b);
+    assert(init_b == Result::OK);
+    assert(harness_b.is_open() == true);
+
+    // Link A → B (messages from A go to B)
+    harness_a.link(&harness_b);
+
+    // Send a message from A to B
+    MessageEnvelope send_env;
+    create_test_data_envelope(send_env, 1U, 2U, "Hello");
+
+    Result send_r = harness_a.send_message(send_env);
+    assert(send_r == Result::OK);
+
+    // Receive on B
+    MessageEnvelope recv_env;
+    Result recv_r = harness_b.receive_message(recv_env, 100U);
+    assert(recv_r == Result::OK);
+
+    // Verify message fields match
+    assert(recv_env.message_id == send_env.message_id);
+    assert(recv_env.source_id == send_env.source_id);
+    assert(recv_env.destination_id == send_env.destination_id);
+    assert(recv_env.payload_length == send_env.payload_length);
+
+    // Verify payload matches
+    for (uint32_t i = 0U; i < recv_env.payload_length; ++i) {
+        assert(recv_env.payload[i] == send_env.payload[i]);
+    }
+
+    harness_a.close();
+    harness_b.close();
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 2: Bidirectional messaging (A → B and B → A)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-4.1.2, REQ-4.1.3
+static bool test_bidirectional()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+
+    // Initialize
+    TransportConfig cfg_a;
+    create_local_sim_config(cfg_a, 10U);
+    harness_a.init(cfg_a);
+
+    TransportConfig cfg_b;
+    create_local_sim_config(cfg_b, 20U);
+    harness_b.init(cfg_b);
+
+    // Link both directions: A → B and B → A
+    harness_a.link(&harness_b);
+    harness_b.link(&harness_a);
+
+    // Send from A to B
+    MessageEnvelope env_a_to_b;
+    create_test_data_envelope(env_a_to_b, 10U, 20U, "A->B");
+    env_a_to_b.message_id = 111ULL;
+
+    Result send_a = harness_a.send_message(env_a_to_b);
+    assert(send_a == Result::OK);
+
+    // Receive on B
+    MessageEnvelope recv_b;
+    Result recv_b_r = harness_b.receive_message(recv_b, 100U);
+    assert(recv_b_r == Result::OK);
+    assert(recv_b.message_id == 111ULL);
+
+    // Send from B to A
+    MessageEnvelope env_b_to_a;
+    create_test_data_envelope(env_b_to_a, 20U, 10U, "B->A");
+    env_b_to_a.message_id = 222ULL;
+
+    Result send_b = harness_b.send_message(env_b_to_a);
+    assert(send_b == Result::OK);
+
+    // Receive on A
+    MessageEnvelope recv_a;
+    Result recv_a_r = harness_a.receive_message(recv_a, 100U);
+    assert(recv_a_r == Result::OK);
+    assert(recv_a.message_id == 222ULL);
+
+    harness_a.close();
+    harness_b.close();
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 3: Queue full behavior
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-4.1.2
+static bool test_queue_full()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+
+    TransportConfig cfg_a;
+    create_local_sim_config(cfg_a, 5U);
+    harness_a.init(cfg_a);
+
+    TransportConfig cfg_b;
+    create_local_sim_config(cfg_b, 6U);
+    harness_b.init(cfg_b);
+
+    harness_a.link(&harness_b);
+
+    // Inject MSG_RING_CAPACITY messages directly to fill harness_b's receive queue
+    // Power of 10: bounded loop
+    for (uint32_t i = 0U; i < MSG_RING_CAPACITY; ++i) {
+        MessageEnvelope env;
+        envelope_init(env);
+        env.message_type = MessageType::DATA;
+        env.source_id = 5U;
+        env.destination_id = 6U;
+        env.message_id = static_cast<uint64_t>(i);
+        env.payload_length = 0U;
+
+        Result r = harness_b.inject(env);
+        assert(r == Result::OK);
+    }
+
+    // Try to inject one more message; should fail with ERR_FULL
+    MessageEnvelope overflow_env;
+    envelope_init(overflow_env);
+    overflow_env.message_type = MessageType::DATA;
+    overflow_env.source_id = 5U;
+    overflow_env.destination_id = 6U;
+    overflow_env.message_id = 999ULL;
+    overflow_env.payload_length = 0U;
+
+    Result r = harness_b.inject(overflow_env);
+    assert(r == Result::ERR_FULL);
+
+    harness_a.close();
+    harness_b.close();
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 4: Receive with timeout (no message available)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-4.1.3, REQ-6.3.3
+static bool test_recv_timeout()
+{
+    LocalSimHarness harness;
+
+    TransportConfig cfg;
+    create_local_sim_config(cfg, 7U);
+    harness.init(cfg);
+
+    // Don't send anything; just try to receive with zero timeout (non-blocking)
+    MessageEnvelope env;
+    Result r = harness.receive_message(env, 0U);
+
+    // Should timeout immediately (no message available)
+    assert(r == Result::ERR_TIMEOUT);
+
+    harness.close();
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main test runner
+// ─────────────────────────────────────────────────────────────────────────────
+int main()
+{
+    int failed = 0;
+
+    if (!test_basic_send_receive()) {
+        printf("FAIL: test_basic_send_receive\n");
+        ++failed;
+    } else {
+        printf("PASS: test_basic_send_receive\n");
+    }
+
+    if (!test_bidirectional()) {
+        printf("FAIL: test_bidirectional\n");
+        ++failed;
+    } else {
+        printf("PASS: test_bidirectional\n");
+    }
+
+    if (!test_queue_full()) {
+        printf("FAIL: test_queue_full\n");
+        ++failed;
+    } else {
+        printf("PASS: test_queue_full\n");
+    }
+
+    if (!test_recv_timeout()) {
+        printf("FAIL: test_recv_timeout\n");
+        ++failed;
+    } else {
+        printf("PASS: test_recv_timeout\n");
+    }
+
+    return (failed > 0) ? 1 : 0;
+}

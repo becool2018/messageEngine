@@ -1,0 +1,33 @@
+messageEngine/
+├── Makefile
+├── src/
+│   ├── core/          ← message layer (transport-agnostic)
+│   │   ├── Types, Logger, MessageEnvelope, TransportInterface, ChannelConfig
+│   │   ├── Serializer (44-byte big-endian wire format)
+│   │   ├── MessageId, Timestamp, RingBuffer (fixed-cap, power-of-two)
+│   │   ├── DuplicateFilter (128-entry sliding window)
+│   │   ├── AckTracker (32-slot outstanding-ACK table)
+│   │   ├── RetryManager (exponential backoff)
+│   │   └── DeliveryEngine (ties it all together per channel)
+│   ├── platform/      ← OS/socket layer
+│   │   ├── PrngEngine (xorshift64, seedable)
+│   │   ├── ImpairmentEngine (loss, jitter, latency, reorder, partition)
+│   │   ├── SocketUtils (TCP framing, UDP recvfrom, poll-based timeouts)
+│   │   ├── TcpBackend (server+client, multi-connection)
+│   │   ├── UdpBackend (datagram send/recv)
+│   │   └── LocalSimHarness (in-process, linkable, no sockets)
+│   └── app/
+│       ├── Server.cpp (echo server, SIGINT-graceful, bounded loop)
+│       └── Client.cpp (sends 5 messages, waits for echo replies)
+├── tests/  (21 tests across 5 suites — all green)
+├── build/  (compiled objects and binaries — not checked in)
+└── docs/
+    ├── CMakeLists.txt          (CMake build equivalent of Makefile)
+    ├── ClassArchitecture.md    (class relationship overview)
+    ├── DirectoryStructure.txt  (this file)
+    ├── FILES.txt               (per-file descriptions)
+    ├── generate_use_cases.txt  (prompt template for UC document generation)
+    ├── user_case_list.txt      (source list of all 35 use cases)
+    └── use_cases/
+        ├── HIGH_LEVEL_USE_CASES.md   (index: 18 HL use cases → detailed UCs)
+        └── UC_01 … UC_35            (35 Flow-of-Control documents)

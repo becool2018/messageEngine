@@ -1,0 +1,2 @@
+please read .claude/CLAUDE.md and explain if any requirements are in confliction.  Are there any NASA standards for software devlopment
+  that are missing? 

@@ -1,0 +1,163 @@
+FILES.txt — messageEngine repository file index
+================================================
+
+BUILD / CONFIG
+--------------
+Makefile
+  GNU make build file; compiles all libraries, server, client, and test binaries
+  with the full strict warning set (-Wall -Wextra -Wpedantic -fno-exceptions -fno-rtti).
+
+docs/CMakeLists.txt
+  CMake equivalent of the Makefile (provided for IDEs/CI that prefer cmake).
+
+PROJECT DOCS
+------------
+CLAUDE.md
+  Top-level project requirements: layered architecture, message envelope spec,
+  transport API, impairment engine spec, and per-transport backend requirements.
+
+.claude/CLAUDE.md
+  Global C/C++ coding standard: Power of 10 rules, MISRA C++, F-Prime style subset,
+  architecture layering rules, and instructions for AI-assisted development.
+
+docs/DirectoryStructure.txt
+  High-level directory tree showing all source, test, build, and docs directories.
+
+docs/FILES.txt
+  This file. Per-file descriptions for every source, config, and doc artifact.
+
+docs/ClassArchitecture.md
+  Class relationship overview: inheritance, composition, and dependency graph.
+
+docs/generate_use_cases.txt
+  Prompt template used to generate Flow-of-Control documents for each use case.
+
+docs/user_case_list.txt
+  Master list of all 35 use cases used as input to the document generation process.
+
+docs/use_cases/HIGH_LEVEL_USE_CASES.md
+  Index of 18 high-level use cases (HL-1 through HL-18) with links to the 35
+  detailed Flow-of-Control documents. Also identifies Application Workflow and
+  System Internal UCs that sit outside the User → System boundary.
+
+docs/use_cases/UC_01 … UC_35
+  35 Flow-of-Control documents, one per use case. Each document has 15 sections:
+  overview, entry points, step-by-step control flow, call tree, key components,
+  branching logic, concurrency, memory/ownership, error handling, external
+  interactions, state changes, sequence diagram (ASCII), init vs runtime,
+  known risks, and unknowns/assumptions.
+
+SOURCE — src/core/   (message layer; no OS or socket dependencies)
+-------------------------------------------------------------------
+Types.hpp
+  All shared enumerations (MessageType, ReliabilityClass, Result, Severity, etc.),
+  compile-time capacity constants, and NodeId typedef.
+
+Logger.hpp
+  Header-only, heap-free logger; writes severity-tagged lines to stderr.
+
+MessageEnvelope.hpp
+  The standard wire envelope struct (type, id, timestamps, src/dst, priority,
+  reliability class, expiry, opaque payload) plus init/copy/validate helpers.
+
+ChannelConfig.hpp
+  ChannelConfig and TransportConfig POD structs with per-channel priority,
+  reliability mode, queue depth, timeouts, and impairment toggle.
+
+TransportInterface.hpp
+  Pure-virtual abstract base class (init / send_message / receive_message /
+  close / is_open) that decouples the message layer from all socket backends.
+
+RingBuffer.hpp
+  Header-only, statically allocated, power-of-two ring buffer for MessageEnvelope;
+  supports push / pop / peek with ERR_FULL / ERR_EMPTY result codes.
+
+Serializer.hpp / Serializer.cpp
+  Deterministic, big-endian wire serialization of MessageEnvelope into a 44-byte
+  header + variable payload; uses manual bit-shift I/O (no htons/ntohl).
+
+MessageId.hpp / MessageId.cpp
+  Monotonically incrementing 64-bit message-ID generator (MessageIdGen) with
+  seed support; never returns 0 (reserved for invalid).
+
+Timestamp.hpp / Timestamp.cpp
+  Inline helpers using CLOCK_MONOTONIC: timestamp_now_us(), timestamp_expired(),
+  and timestamp_deadline_us() for expiry and retry scheduling.
+
+DuplicateFilter.hpp / DuplicateFilter.cpp
+  128-entry sliding-window dedup keyed on (source_id, message_id) pairs; oldest
+  entry is evicted when the window is full.
+
+AckTracker.hpp / AckTracker.cpp
+  Fixed-capacity (32-slot) table tracking outstanding reliable messages; records
+  deadlines, detects timeouts, and removes entries on ACK receipt.
+
+RetryManager.hpp / RetryManager.cpp
+  Retry scheduler with per-message exponential backoff (doubles each attempt,
+  capped); integrates with AckTracker to cancel retries on ACK.
+
+DeliveryEngine.hpp / DeliveryEngine.cpp
+  Per-channel coordinator: assigns message IDs, applies reliability semantics
+  (BEST_EFFORT / RELIABLE_ACK / RELIABLE_RETRY), drives retries and ACK sweeps.
+
+SOURCE — src/platform/   (OS/socket layer; adapters only, no app policy)
+-------------------------------------------------------------------------
+PrngEngine.hpp / PrngEngine.cpp
+  Seedable xorshift64 PRNG used for deterministic impairment decisions;
+  exposes next(), next_double() [0,1), and next_range(lo, hi).
+
+ImpairmentConfig.hpp
+  POD configuration struct for all impairment parameters: fixed latency, jitter,
+  loss probability, duplication, reordering window, partition intervals, PRNG seed.
+
+ImpairmentEngine.hpp / ImpairmentEngine.cpp
+  Applies configurable network impairments (loss, duplication, latency/jitter,
+  reordering, link partitions) to messages on the outbound or inbound path.
+
+SocketUtils.hpp / SocketUtils.cpp
+  POSIX socket primitives: create, bind, connect-with-timeout, send_all,
+  recv_exact, sendto/recvfrom, and length-prefixed TCP framing helpers.
+
+TcpBackend.hpp / TcpBackend.cpp
+  TransportInterface implementation over TCP; supports server mode (multi-client
+  accept loop) and client mode; integrates ImpairmentEngine and RingBuffer queue.
+
+UdpBackend.hpp / UdpBackend.cpp
+  TransportInterface implementation over UDP datagrams; binds a single socket,
+  serializes to wire format, and applies impairments before send/receive.
+
+LocalSimHarness.hpp / LocalSimHarness.cpp
+  In-process simulation transport: two instances are linked via link(); messages
+  are injected directly into the peer's RingBuffer — no sockets involved.
+
+SOURCE — src/app/   (application orchestration)
+------------------------------------------------
+Server.cpp
+  Demo TCP echo server: binds on a configured port, receives DATA messages, logs
+  them, sends echo replies, and pumps retries/ACK-timeouts each iteration.
+
+Client.cpp
+  Demo TCP client: connects to the server, sends five RELIABLE_RETRY messages
+  with "Hello from client #N" payloads, and waits for echo replies.
+
+TESTS — tests/
+--------------
+test_MessageEnvelope.cpp
+  Five tests covering envelope_init, envelope_valid, envelope_copy,
+  envelope_make_ack, and envelope_is_data / envelope_is_control.
+
+test_Serializer.cpp
+  Six tests: basic round-trip, undersized buffer, invalid envelope, truncated
+  input, maximum-payload pattern fill, and WIRE_HEADER_SIZE constant check.
+
+test_DuplicateFilter.cpp
+  Five tests: basic dedup, different-source pass-through, different-ID
+  pass-through, unseen message, and sliding-window wraparound/eviction.
+
+test_ImpairmentEngine.cpp
+  Five tests: disabled pass-through, deterministic 100% loss, zero loss,
+  fixed-latency gating (collect_deliverable timing), and PRNG reproducibility.
+
+test_LocalSim.cpp
+  Four tests: basic send/receive, bidirectional messaging, queue-full overflow
+  (ERR_FULL), and receive timeout on empty queue (ERR_TIMEOUT).

@@ -1,0 +1,154 @@
+You are acting as a senior C/C++ systems engineer performing a codebase walkthrough for another engineer who must maintain this system.
+
+Your task is to generate a **Flow-of-Control Document** for a specific use case.
+
+========================
+INPUT
+========================
+Use Case: <INSERT USE CASE NAME HERE>
+Goal: <WHAT THE USER/ SYSTEM IS TRYING TO ACHIEVE>
+
+Code Context:
+<PASTE FILES OR LET CLAUDE READ REPO>
+
+========================
+REQUIREMENTS
+========================
+
+DO NOT summarize files.
+DO NOT describe code at a high level only.
+
+You MUST trace the **actual runtime flow of execution** as precisely as possible.
+
+If something is unclear or inferred, explicitly mark it as:
+[ASSUMPTION]
+
+========================
+OUTPUT FORMAT
+========================
+
+## 1. Use Case Overview
+### Clear description of what triggers this flow
+### Expected outcome (single goal)
+
+## 2. Entry Points
+### Exact functions, threads, or events where execution begins
+### Example: main(), ISR, callback, RPC handler, etc.
+
+## 3. End-to-End Control Flow (Step-by-Step)
+Provide an ordered sequence of execution:
+
+Example format:
+1. main() initializes system
+2. X::start() creates worker thread
+3. Thread enters event loop
+4. Callback Y() is triggered
+5. Control passes to Z::handle()
+
+Be explicit about:
+### function calls
+### object interactions
+### transitions between modules
+
+## 4. Call Tree (Hierarchical)
+Show the major execution path:
+
+example:
+function_A()
+ ├── function_B()
+ │    ├── function_C()
+ │    └── function_D()
+ └── function_E()
+
+## 5. Key Components Involved
+For each major class/function:
+### responsibility
+### why it exists in this flow
+
+## 6. Branching Logic / Decision Points
+List all important branches:
+### condition
+### outcome
+### where control goes next
+
+Example:
+- if (timeout) → retry loop
+- if (error) → cleanup + return failure
+
+## 7. Concurrency / Threading Behavior
+Explicitly identify:
+### threads created
+### where context switches occur
+### synchronization primitives (mutex, atomic, lock-free, etc.)
+### producer/consumer relationships
+
+## 8. Memory & Ownership Semantics (C/C++ Specific)
+### who owns allocated memory
+### lifetime of key objects
+### stack vs heap usage
+### RAII usage (constructors/destructors)
+### potential leaks or unsafe patterns
+
+## 9. Error Handling Flow
+### how errors propagate
+### retry logic
+### fallback paths
+
+## 10. External Interactions
+### network calls
+### file I/O
+### hardware interaction
+### IPC
+
+## 11. State Changes / Side Effects
+### what system state is modified
+### persistent changes (DB, disk, device state)
+
+## 12. Sequence Diagram using mermaid
+Provide a clear interaction diagram:
+
+Example:
+Client
+  -> Handler::request()
+  -> Service::process()
+  -> Repo::write()
+  -> Service::response()
+  -> Client
+
+## 13. Initialization vs Runtime Flow
+Separate:
+### what happens during startup
+### what happens during steady-state execution
+
+## 14. Known Risks / Observations
+Call out: 
+### race conditions
+### tight coupling
+### hidden side effects
+### unclear control paths
+
+## 15. Unknowns / Assumptions
+Explicit list of anything inferred or unclear
+
+========================
+C/C++ FOCUS RULES
+========================
+
+You MUST pay attention to:
+- constructors/destructors and side effects
+- virtual dispatch / inheritance
+- callbacks and function pointers
+- atomics vs mutex usage
+- lock-free structures (if present)
+- lifetime issues and dangling pointers
+
+========================
+QUALITY BAR
+========================
+
+The output should allow an experienced engineer to:
+- trace execution without reading the entire codebase
+- understand where to debug
+- safely modify behavior
+
+If the flow cannot be fully determined, still produce the best possible trace and clearly label gaps.

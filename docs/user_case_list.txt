@@ -1,0 +1,211 @@
+You are acting as a senior C/C++ systems engineer performing a codebase walkthrough for another engineer who must maintain this system.
+
+Your task is to generate a **Flow-of-Control Document** for a specific use case.
+
+========================
+INPUT
+========================
+Use Case: <INSERT USE CASE NAME HERE>
+Goal: <WHAT THE USER/ SYSTEM IS TRYING TO ACHIEVE>
+
+Code Context:
+<PASTE FILES OR LET CLAUDE READ REPO>
+
+========================
+REQUIREMENTS
+========================
+
+DO NOT summarize files.
+DO NOT describe code at a high level only.
+
+You MUST trace the **actual runtime flow of execution** as precisely as possible.
+
+If something is unclear or inferred, explicitly mark it as:
+[ASSUMPTION]
+
+========================
+OUTPUT FORMAT
+========================
+
+## 1. Use Case Overview
+- Clear description of what triggers this flow
+- Expected outcome
+
+## 2. Entry Points
+- Exact functions, threads, or events where execution begins
+- Example: main(), ISR, callback, RPC handler, etc.
+
+## 3. End-to-End Control Flow (Step-by-Step)
+Provide an ordered sequence of execution:
+
+Example format:
+1. main() initializes system
+2. X::start() creates worker thread
+3. Thread enters event loop
+4. Callback Y() is triggered
+5. Control passes to Z::handle()
+
+Be explicit about:
+- function calls
+- object interactions
+- transitions between modules
+
+## 4. Call Tree (Hierarchical)
+Show the major execution path:
+
+example:
+function_A()
+ ├── function_B()
+ │    ├── function_C()
+ │    └── function_D()
+ └── function_E()
+
+## 5. Key Components Involved
+For each major class/function:
+- responsibility
+- why it exists in this flow
+
+## 6. Branching Logic / Decision Points
+List all important branches:
+- condition
+- outcome
+- where control goes next
+
+Example:
+- if (timeout) → retry loop
+- if (error) → cleanup + return failure
+
+## 7. Concurrency / Threading Behavior
+Explicitly identify:
+- threads created
+- where context switches occur
+- synchronization primitives (mutex, atomic, lock-free, etc.)
+- producer/consumer relationships
+
+## 8. Memory & Ownership Semantics (C/C++ Specific)
+- who owns allocated memory
+- lifetime of key objects
+- stack vs heap usage
+- RAII usage (constructors/destructors)
+- potential leaks or unsafe patterns
+
+## 9. Error Handling Flow
+- how errors propagate
+- retry logic
+- fallback paths
+
+## 10. External Interactions
+- network calls
+- file I/O
+- hardware interaction
+- IPC
+
+## 11. State Changes / Side Effects
+- what system state is modified
+- persistent changes (DB, disk, device state)
+
+## 12. Sequence Diagram (ASCII)
+Provide a clear interaction diagram:
+
+Example:
+Client
+  -> Handler::request()
+  -> Service::process()
+  -> Repo::write()
+  -> Service::response()
+  -> Client
+
+## 13. Initialization vs Runtime Flow
+Separate:
+- what happens during startup
+- what happens during steady-state execution
+
+## 14. Known Risks / Observations
+Call out:
+- race conditions
+- tight coupling
+- hidden side effects
+- unclear control paths
+
+## 15. Unknowns / Assumptions
+Explicit list of anything inferred or unclear
+
+========================
+C/C++ FOCUS RULES
+========================
+
+You MUST pay attention to:
+- constructors/destructors and side effects
+- virtual dispatch / inheritance
+- callbacks and function pointers
+- atomics vs mutex usage
+- lock-free structures (if present)
+- lifetime issues and dangling pointers
+
+========================
+QUALITY BAR
+========================
+
+The output should allow an experienced engineer to:
+- trace execution without reading the entire codebase
+- understand where to debug
+- safely modify behavior
+
+If the flow cannot be fully determined, still produce the best possible trace and clearly label gaps.
+
+
+Level 1: 10,000-foot overview
+Level 2: exact function-by-function control flow
+
+
+⏺ Here are the use cases derivable from the codebase:                                                                   
+                                                                                                                        
+  Send Path                                                                                                             
+  1. Client sends a best-effort message over TCP with no retry or ACK tracking.                                         
+  2. Client sends a reliable-with-ACK message and waits for a single ACK before marking success.                        
+  3. Client sends a reliable-with-retry message that retransmits with exponential backoff until ACK or expiry.          
+  4. Client sends a message that expires before delivery and is silently dropped.                                       
+  5. Server echoes a received DATA message back to the originating client.                                              
+                                                                                                                        
+  Receive Path                                                                                                          
+  6. Receiver deserializes an inbound TCP-framed wire message into a MessageEnvelope.                                   
+  7. Receiver detects and drops a duplicate message using the sliding-window dedup filter.                              
+  8. Receiver receives an ACK and resolves the corresponding pending entry in the AckTracker.                           
+  9. Receiver drops an expired message before delivering it to the application.                                         
+                                                                                                                        
+  Retry & ACK Management                                                                                                
+  10. RetryManager fires a scheduled retry after backoff interval elapses.                                              
+  11. AckTracker sweeps timed-out entries and logs unacknowledged messages as failures.                                 
+  12. RetryManager cancels a retry entry upon receiving an ACK for the tracked message.                                 
+                                                                                                                        
+  Impairment Engine                                                                                                     
+  13. ImpairmentEngine drops an outbound message based on configured loss probability.                                  
+  14. ImpairmentEngine duplicates an outbound message based on configured duplication probability.                      
+  15. ImpairmentEngine buffers an outbound message and releases it after a fixed latency delay.
+  16. ImpairmentEngine applies jitter by randomizing per-message delay around a configured mean.                        
+  17. ImpairmentEngine reorders buffered messages and delivers them out of sequence.                                    
+  18. ImpairmentEngine enters a partition state and drops all traffic for a configured duration.                        
+                                                                                                                        
+  Transport Backends                                                                                                    
+  19. TcpBackend (server mode) accepts a new client connection on the listen socket.                                    
+  20. TcpBackend sends a length-prefixed framed message over an established TCP connection.                             
+  21. TcpBackend polls multiple client sockets and receives a framed message from one of them.                          
+  22. UdpBackend serializes and sends a message envelope as a UDP datagram to a configured peer.                        
+  23. UdpBackend receives a UDP datagram and deserializes it into a MessageEnvelope.                                    
+  24. LocalSimHarness links two in-process instances and delivers a message without real sockets.                       
+                                                                                                                        
+  Serialization                                                                                                         
+  25. Serializer encodes a MessageEnvelope into a deterministic big-endian wire buffer.                                 
+  26. Serializer decodes a wire buffer back into a MessageEnvelope with full field validation.                          
+                                                                                                                        
+  Initialization
+  27. TransportConfig and ChannelConfig are constructed with defaults and overridden per use.                           
+  28. DeliveryEngine initializes all sub-components (AckTracker, RetryManager, DuplicateFilter, MessageIdGen) before    
+  first use.                                                                                                            
+  29. ImpairmentEngine seeds its PRNG with a fixed seed for deterministic test replay.                                  
+                                                                                                                        
+  Testing / Simulation
+  30. Test harness runs a full send/receive round-trip through LocalSimHarness with no real network.                    
+  31. Test verifies PRNG reproducibility by seeding identically and comparing output sequences.                         
+  32. Test confirms 100% loss configuration drops all outbound messages before delivery.                                
+  33. Test validates sliding-window eviction when the dedup window exceeds 128 entries. 

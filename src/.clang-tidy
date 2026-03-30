@@ -1,0 +1,58 @@
+---
+# src/.clang-tidy — STRICT profile for production code
+# Applies to: src/core/, src/platform/, src/app/
+# Policy:     CLAUDE.md §9.1 Tier 2a / .claude/CLAUDE.md §2 (Power of 10 + MISRA C++:2023)
+# Relaxed profile for tests/ is at tests/.clang-tidy
+#
+# WarningsAsErrors: all — every finding is a build failure (Power of 10 Rule 10).
+# Run via: make lint
+
+Checks: >
+  bugprone-*,
+  clang-analyzer-*,
+  cppcoreguidelines-no-malloc,
+  cppcoreguidelines-pro-type-cstyle-cast,
+  misc-no-recursion,
+  misc-unused-parameters,
+  modernize-use-nullptr,
+  modernize-use-override,
+  performance-*,
+  portability-*,
+  readability-braces-around-statements,
+  readability-function-cognitive-complexity,
+  readability-misleading-indentation,
+  readability-misplaced-array-index,
+  readability-non-const-parameter,
+  readability-redundant-control-flow,
+  readability-simplify-boolean-expr,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-macro-parentheses,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-type-reinterpret-cast,
+  -cppcoreguidelines-pro-type-union-access,
+  -modernize-use-auto,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-uppercase-literal-suffix
+
+WarningsAsErrors: '*'
+
+# Only report findings in project headers; suppress noise from system headers.
+HeaderFilterRegex: 'src/.*'
+
+CheckOptions:
+  # Rule 4 / CLAUDE.md §9: cyclomatic complexity ceiling of 10.
+  - key:   readability-function-cognitive-complexity.Threshold
+    value: '10'
+  - key:   readability-function-cognitive-complexity.DescribeBasicIncrements
+    value: 'false'
+  # IgnoreMacros: exclude macro expansions (e.g., assert() ternary) from CC.
+  # Rationale: Power of 10 Rule 5 mandates high assertion density; assert()
+  # expands to ?:  on POSIX/Darwin, which would count as control-flow complexity
+  # even though it is defensive checking, not algorithmic branching.  The NASA
+  # CC ≤ 10 ceiling targets logical control-flow, not assertion boilerplate.
+  - key:   readability-function-cognitive-complexity.IgnoreMacros
+    value: 'true'
