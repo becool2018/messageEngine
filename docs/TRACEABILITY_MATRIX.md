@@ -31,7 +31,7 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-5.1.4 | Packet duplication impairment                      | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | — (no dedicated test)                               |
 | REQ-5.1.5 | Packet reordering impairment                       | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | — (no dedicated test)                               |
 | REQ-5.1.6 | Partition / intermittent outage impairment         | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | — (no dedicated test)                               |
-| REQ-5.2.1 | Structured impairment configuration object        | src/platform/ImpairmentConfig.hpp                           | test_ImpairmentEngine.cpp :: disabled pass-through   |
+| REQ-5.2.1 | Structured impairment configuration object        | src/platform/ImpairmentConfig.hpp, src/platform/ImpairmentConfigLoader.hpp, src/platform/ImpairmentConfigLoader.cpp | test_ImpairmentEngine.cpp :: disabled pass-through; test_ImpairmentConfigLoader.cpp :: all twelve tests |
 | REQ-5.2.2 | Enable / disable each impairment independently     | src/platform/ImpairmentConfig.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: disabled pass-through  |
 | REQ-5.2.3 | Per-channel / per-peer impairment config           | src/platform/ImpairmentConfig.hpp                           | — (no dedicated test)                                |
 | REQ-5.2.4 | Deterministic PRNG mode with seed                  | src/platform/ImpairmentConfig.hpp, src/platform/PrngEngine.hpp, src/platform/PrngEngine.cpp | test_ImpairmentEngine.cpp :: deterministic 100% loss |
@@ -81,3 +81,4 @@ Resolved since last generation (tests added):
 - REQ-3.3.2 — now covered by test_AckTracker.cpp + test_DeliveryEngine.cpp
 - REQ-3.3.3 — now covered by test_RetryManager.cpp + test_DeliveryEngine.cpp
 - REQ-3.3.4 — now covered by test_DeliveryEngine.cpp :: test_receive_expired
+- REQ-5.2.1 — now also covered by test_ImpairmentConfigLoader.cpp (12 tests); ImpairmentConfigLoader.hpp/.cpp added as Implements entries

@@ -129,6 +129,12 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 | `ImpairmentEngine::process_inbound()` | Full scan of reorder buffer | O(I) = O(32) | |
 | `ImpairmentEngine::is_partition_active()` | 2 comparisons | O(1) | |
 
+### src/platform/ImpairmentConfigLoader.hpp
+
+| Function | Worst-case operations | Bound | Notes |
+|----------|----------------------|-------|-------|
+| `impairment_config_load()` | fopen + MAX_CONFIG_LINES × fgets + parse_config_line + fclose | O(MAX_CONFIG_LINES) = O(64) | **Init-phase only.** Each `fgets` reads at most `MAX_CONFIG_LINE_LEN` = 128 bytes; each `parse_config_line` runs two `sscanf` calls (O(1)) and one `strcmp` chain (O(12) keys × O(key_len)). No heap allocation; fixed 128-byte stack buffer per line. |
+
 ### src/platform/PrngEngine.hpp
 
 | Function | Worst-case operations | Bound | Notes |

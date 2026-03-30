@@ -1,0 +1,226 @@
+/**
+ * @file ImpairmentConfigLoader.cpp
+ * @brief Implementation of impairment_config_load(): INI-style config file parser.
+ *
+ * Rules applied:
+ *   - Power of 10 Rule 2: bounded loop — at most MAX_CONFIG_LINES fgets calls.
+ *   - Power of 10 Rule 3: fixed stack buffers only; no heap allocation.
+ *   - Power of 10 Rule 4: short, single-purpose functions (CC ≤ 10 each).
+ *   - Power of 10 Rule 5: ≥2 assertions per function.
+ *   - Power of 10 Rule 7: every non-void return value checked.
+ *   - MISRA C++:2023: no STL, no exceptions, no templates.
+ *   - F-Prime style: Result return code; Logger::log() for events.
+ *
+ * Implements: REQ-5.2.1
+ */
+
+#include "ImpairmentConfigLoader.hpp"
+#include "core/Assert.hpp"
+#include "core/Logger.hpp"
+#include <cstdio>
+#include <cstring>
+
+// ─────────────────────────────────────────────────────────────────────────────
+// File-local constants (Power of 10 Rule 2 / Rule 8)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Maximum characters per input line, including newline and NUL terminator.
+static const uint32_t MAX_CONFIG_LINE_LEN = 128U;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Static helper — apply one parsed key/value pair to cfg
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Apply a single key/value string pair to the ImpairmentConfig struct.
+/// Called only when sscanf successfully extracted both key and val.
+/// Unknown keys are logged at WARNING_LO; malformed values retain defaults.
+static void apply_kv(const char* key, const char* val, ImpairmentConfig& cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(key != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(val != nullptr);
+
+    if (strcmp(key, "enabled") == 0) {
+        uint32_t v = 0U;
+        if (sscanf(val, "%u", &v) == 1) {
+            cfg.enabled = (v != 0U);
+        }
+    } else if (strcmp(key, "fixed_latency_ms") == 0) {
+        uint32_t v = 0U;
+        if (sscanf(val, "%u", &v) == 1) {
+            cfg.fixed_latency_ms = v;
+        }
+    } else if (strcmp(key, "jitter_mean_ms") == 0) {
+        uint32_t v = 0U;
+        if (sscanf(val, "%u", &v) == 1) {
+            cfg.jitter_mean_ms = v;
+        }
+    } else if (strcmp(key, "jitter_variance_ms") == 0) {
+        uint32_t v = 0U;
+        if (sscanf(val, "%u", &v) == 1) {
+            cfg.jitter_variance_ms = v;
+        }
+    } else if (strcmp(key, "loss_probability") == 0) {
+        double v = 0.0;
+        if (sscanf(val, "%lf", &v) == 1) {
+            // Clamp to [0.0, 1.0] (Power of 10: explicit bounds check)
+            if (v < 0.0) { v = 0.0; }
+            if (v > 1.0) { v = 1.0; }
+            cfg.loss_probability = v;
+        }
+    } else if (strcmp(key, "duplication_probability") == 0) {
+        double v = 0.0;
+        if (sscanf(val, "%lf", &v) == 1) {
+            if (v < 0.0) { v = 0.0; }
+            if (v > 1.0) { v = 1.0; }
+            cfg.duplication_probability = v;
+        }
+    } else if (strcmp(key, "reorder_enabled") == 0) {
+        uint32_t v = 0U;
+        if (sscanf(val, "%u", &v) == 1) {
+            cfg.reorder_enabled = (v != 0U);
+        }
+    } else if (strcmp(key, "reorder_window_size") == 0) {
+        uint32_t v = 0U;
+        if (sscanf(val, "%u", &v) == 1) {
+            // Clamp to IMPAIR_DELAY_BUF_SIZE (Power of 10: bounded buffer)
+            if (v > IMPAIR_DELAY_BUF_SIZE) {
+                Logger::log(Severity::WARNING_LO, "ConfigLoader",
+                            "reorder_window_size %u exceeds IMPAIR_DELAY_BUF_SIZE %u; clamping",
+                            v, IMPAIR_DELAY_BUF_SIZE);
+                v = IMPAIR_DELAY_BUF_SIZE;
+            }
+            cfg.reorder_window_size = v;
+        }
+    } else if (strcmp(key, "partition_enabled") == 0) {
+        uint32_t v = 0U;
+        if (sscanf(val, "%u", &v) == 1) {
+            cfg.partition_enabled = (v != 0U);
+        }
+    } else if (strcmp(key, "partition_duration_ms") == 0) {
+        uint32_t v = 0U;
+        if (sscanf(val, "%u", &v) == 1) {
+            cfg.partition_duration_ms = v;
+        }
+    } else if (strcmp(key, "partition_gap_ms") == 0) {
+        uint32_t v = 0U;
+        if (sscanf(val, "%u", &v) == 1) {
+            cfg.partition_gap_ms = v;
+        }
+    } else if (strcmp(key, "prng_seed") == 0) {
+        // sscanf %llu requires unsigned long long*; cast to uint64_t after.
+        unsigned long long ull = 0ULL;  // NOLINT(google-runtime-int) — sscanf requires this
+        if (sscanf(val, "%llu", &ull) == 1) {
+            cfg.prng_seed = static_cast<uint64_t>(ull);
+        }
+    } else {
+        Logger::log(Severity::WARNING_LO, "ConfigLoader",
+                    "Unknown config key ignored: %.40s", key);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Static helper — parse one text line and update cfg if it contains a key=value
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Parse a single input line. If the line contains a valid key=value pair,
+/// delegate to apply_kv(). Blank lines and comment lines (#, ;) are silently
+/// skipped. Malformed lines are logged at WARNING_LO.
+static void parse_config_line(const char* line, ImpairmentConfig& cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(line != nullptr);
+
+    // Skip leading whitespace
+    const char* p = line;
+    while (*p == ' ' || *p == '\t') { ++p; }
+
+    // Skip blank lines and comment lines
+    if (*p == '#' || *p == ';' || *p == '\0' || *p == '\n' || *p == '\r') {
+        return;
+    }
+
+    // Extract key and value using sscanf.
+    // Format: "%63[^ \t=]%*[ \t=]%63s"
+    //   %63[^ \t=]  — scan key: characters that are not space, tab, or '='
+    //   %*[ \t=]    — discard separator (one or more of: space, tab, '=')
+    //   %63s         — scan value: first non-whitespace token
+    // Both key and val are zero-initialised before scanning.
+    // Power of 10 Rule 3: fixed-size stack buffers.
+    char key[64];
+    char val[64];
+    (void)memset(key, 0, sizeof(key));
+    (void)memset(val, 0, sizeof(val));
+
+    int n = sscanf(p, "%63[^ \t=]%*[ \t=]%63s", key, val);
+    if (n != 2) {
+        Logger::log(Severity::WARNING_LO, "ConfigLoader",
+                    "Skipping malformed config line: %.60s", p);
+        return;
+    }
+
+    // Postcondition: sscanf matched both tokens; key is non-empty.
+    NEVER_COMPILED_OUT_ASSERT(key[0] != '\0');
+
+    apply_kv(key, val, cfg);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Public function
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result impairment_config_load(const char* path, ImpairmentConfig& cfg)
+{
+    // Precondition: path must not be null.
+    NEVER_COMPILED_OUT_ASSERT(path != nullptr);
+
+    // Always start from safe defaults so missing keys are well-defined.
+    impairment_config_default(cfg);
+
+    FILE* fp = fopen(path, "r");
+    if (fp == nullptr) {
+        Logger::log(Severity::WARNING_LO, "ConfigLoader",
+                    "Cannot open impairment config file: %s", path);
+        return Result::ERR_IO;
+    }
+
+    Logger::log(Severity::INFO, "ConfigLoader", "Loading impairment config: %s", path);
+
+    // Power of 10 Rule 2: bounded loop — at most MAX_CONFIG_LINES iterations.
+    // Power of 10 Rule 3: fixed stack buffer for each line.
+    char line[MAX_CONFIG_LINE_LEN];
+    bool eof_reached = false;
+
+    for (uint32_t i = 0U; i < MAX_CONFIG_LINES; ++i) {
+        const char* got = fgets(line, static_cast<int>(MAX_CONFIG_LINE_LEN), fp);
+        if (got == nullptr) {
+            eof_reached = true;
+            break;
+        }
+        parse_config_line(line, cfg);
+    }
+
+    if (!eof_reached) {
+        Logger::log(Severity::WARNING_LO, "ConfigLoader",
+                    "Config file has more than %u lines; remaining lines ignored",
+                    MAX_CONFIG_LINES);
+    }
+
+    // Power of 10 Rule 7: check fclose() return value.
+    int close_res = fclose(fp);
+    if (close_res != 0) {
+        Logger::log(Severity::WARNING_LO, "ConfigLoader",
+                    "fclose() returned non-zero for: %s", path);
+    }
+
+    // Postconditions: probability values must be in [0.0, 1.0] after clamping.
+    NEVER_COMPILED_OUT_ASSERT(cfg.loss_probability >= 0.0 && cfg.loss_probability <= 1.0);
+    NEVER_COMPILED_OUT_ASSERT(cfg.duplication_probability >= 0.0 && cfg.duplication_probability <= 1.0);
+
+    Logger::log(Severity::INFO, "ConfigLoader",
+                "Impairment config loaded: enabled=%d latency=%u loss=%.3f seed=%llu",
+                static_cast<int>(cfg.enabled),
+                cfg.fixed_latency_ms,
+                cfg.loss_probability,
+                static_cast<unsigned long long>(cfg.prng_seed));
+
+    return Result::OK;
+}

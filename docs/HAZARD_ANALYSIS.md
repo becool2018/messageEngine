@@ -217,6 +217,14 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 |---|---|---|---|
 | `impairment_config_default()` | — | NSC | — |
 
+### src/platform/ImpairmentConfigLoader.hpp
+
+| Function | Class | SC/NSC | HAZ IDs |
+|---|---|---|---|
+| `impairment_config_load()` | — | SC | HAZ-002, HAZ-007 |
+
+Rationale: `impairment_config_load()` sets `loss_probability`, `partition_enabled`, `partition_duration_ms`, and related fields that directly govern whether HAZ-002 (retry storm / link saturation) and HAZ-007 (partition masking) mitigations are armed. A malformed config file that sets `enabled=0` silently disables all impairments, masking real connectivity problems (HAZ-007). A config that omits `max_retries`-related clamping fields could feed unchecked values to `ImpairmentEngine::init()`. It is classified SC for init-phase safety.
+
 ### src/platform/ImpairmentEngine.hpp
 
 | Function | Class | SC/NSC | HAZ IDs |
