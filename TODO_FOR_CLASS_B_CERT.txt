@@ -1,0 +1,97 @@
+messageEngine — Remaining Tasks for Class B Certification
+==========================================================
+Generated: 2026-03-31
+Policy references: NPR 7150.2D, NASA-STD-8719.13C, NASA-STD-8739.8A
+Verification policy: .claude/VERIFICATION_POLICY.md (VVP-001)
+
+All engineering work that can be done programmatically is complete.
+The items below require external tools, licenses, or a second human reviewer.
+
+------------------------------------------------------------------------------
+Item 6 — TLA+ model checking
+------------------------------------------------------------------------------
+Requirement: CLAUDE.md §17 / docs/STATE_MACHINES.md
+What:  Formally verify the three safety-critical state machines —
+         AckTracker (§1), RetryManager (§2), ImpairmentEngine (§3) —
+       against all invariants documented in docs/STATE_MACHINES.md using
+       TLA+ or SPIN model checking.
+Blocker: Requires TLA+ toolchain (TLA+ Tools / TLC model checker) and a
+         team member with TLA+ authoring experience.
+Artifact: TLA+ spec files + model-checker output added to docs/formal/.
+
+------------------------------------------------------------------------------
+Item 7 — Frama-C WP plugin (formal bounds proof for Serializer)
+------------------------------------------------------------------------------
+Requirement: CLAUDE.md §17 / VVP-001 §6 (Class A obligation)
+What:  Prove absence of buffer overflow and out-of-bounds access in
+         Serializer::serialize() and Serializer::deserialize()
+       using the Frama-C WP (weakest precondition) plugin with ACSL
+       annotations.
+Blocker: Requires Frama-C installation, WP plugin configuration, and
+         ACSL annotation authoring for the two functions.
+Artifact: Annotated Serializer.cpp + Frama-C proof report in docs/formal/.
+
+------------------------------------------------------------------------------
+Item 8 — PC-lint Plus MISRA C++:2023 compliance report
+------------------------------------------------------------------------------
+Requirement: CLAUDE.md §9.1 Tier 3 / NPR 7150.2D §3
+What:  Run PC-lint Plus with the MISRA C++:2023 ruleset over all of src/
+       to produce a formal compliance report. The `make pclint` target is
+       a documented TODO stub in the Makefile.
+Blocker: Requires PC-lint Plus commercial license (https://gimpel.com).
+         After purchase: create pclint/co-gcc.lnt + pclint/misra_cpp_2023.lnt
+         and implement the `make pclint` target.
+Artifact: PC-lint Plus compliance report in docs/compliance/.
+
+------------------------------------------------------------------------------
+Item 9 — Independent V&V (human peer review sign-off)
+------------------------------------------------------------------------------
+Requirement: CLAUDE.md §12 / NPR 7150.2D §3.11
+What:  A second human reviewer (not the author) must complete a structured
+       inspection of all SC functions per docs/INSPECTION_CHECKLIST.md and
+       record findings in docs/DEFECT_LOG.md (INSP-002 onward).
+       INSP-001 was completed 2026-03-31 with the author acting as moderator;
+       independent V&V requires a separate reviewer.
+Blocker: Requires a second qualified engineer. For each SC function:
+         - Review source code against INSPECTION_CHECKLIST.md
+         - Verify SC annotation HAZ IDs match HAZARD_ANALYSIS.md §3
+         - Verify branch coverage evidence in CLAUDE.md §14
+         - Sign off in DEFECT_LOG.md with name and date
+Artifact: INSP-002+ entries in docs/DEFECT_LOG.md.
+
+------------------------------------------------------------------------------
+Item 10 — MC/DC written demonstration (5 highest-hazard SC functions)
+------------------------------------------------------------------------------
+Requirement: CLAUDE.md §14 §2 / VVP-001 §4 (M6)
+What:  For each of the five highest-hazard SC functions, produce a written
+       test-case analysis demonstrating that every condition in each decision
+       independently affects the outcome (MC/DC). Tool branch coverage alone
+       is insufficient; a human must review each test case and record which
+       condition is being independently varied.
+
+       Functions in scope:
+         1. DeliveryEngine::send         (HAZ-001, HAZ-002, HAZ-006)
+         2. DeliveryEngine::receive      (HAZ-001, HAZ-003, HAZ-004, HAZ-005)
+         3. DuplicateFilter::check_and_record  (HAZ-003)
+         4. Serializer::serialize        (HAZ-005)
+         5. Serializer::deserialize      (HAZ-001, HAZ-005)
+
+       For each function, the analysis must list:
+         - Every multi-condition decision (compound boolean expression)
+         - For each condition: the two test cases that independently toggle
+           that condition while holding all others fixed
+         - The test function(s) in tests/ that provide that evidence
+
+Blocker: Requires human analysis; MC/DC cannot be demonstrated by tooling alone.
+Artifact: docs/MCDC_ANALYSIS.md (one section per function).
+
+------------------------------------------------------------------------------
+Status summary
+------------------------------------------------------------------------------
+  Engineering (programmatic) work:  COMPLETE as of 2026-03-31
+  External/organizational work:     5 items remain (Items 6-10 above)
+
+  Latest commits on main:
+    13a1043  Add INSP-001 record; update STACK_ANALYSIS and WCET_ANALYSIS
+    44aea03  Complete M5 fault injection: ssl_handshake/ssl_read injectable
+    a1d9c5b  Add P0/P2 coverage remediation: 13 new SC branch tests
