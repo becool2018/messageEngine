@@ -1,6 +1,6 @@
-# UC_14 — Impairment: duplication
+# UC_14 — Packet duplication: additional copy queued for delayed delivery
 
-**HL Group:** HL-12 — User configures network impairments
+**HL Group:** HL-12 — Configure Network Impairments
 **Actor:** System
 **Requirement traceability:** REQ-5.1.4, REQ-5.2.1, REQ-5.2.2, REQ-5.2.4, REQ-5.3.1
 
@@ -8,488 +8,262 @@
 
 ## 1. Use Case Overview
 
-A caller invokes `TcpBackend::send_message()`. The message survives the loss check inside
-`ImpairmentEngine::process_outbound()` and is placed into the delay buffer via the private helper
-`queue_to_delay_buf()` with a computed `release_us`. Immediately after, `process_outbound()` calls
-the private helper `apply_duplication()`. Inside `apply_duplication()`, `m_prng.next_double()` is
-called. If that value is less than `ImpairmentConfig::duplication_probability`, a second call to
-`queue_to_delay_buf()` inserts a duplicate copy into the delay buffer with `release_us + 100`
-microseconds. Both entries are later released by `collect_deliverable()` — called from
-`flush_delayed_to_clients()` — and transmitted via `send_to_all_clients()`, causing the receiver to
-see the same message twice.
+**Trigger:** `ImpairmentEngine::process_outbound(in_env, now_us)` is called; the message survives the loss and partition checks; `m_cfg.duplication_probability > 0.0`; and the PRNG roll for duplication falls below `duplication_probability`.
+
+**Goal:** Queue an additional copy of the message in the delay buffer with a release time 100 µs after the original. Both the original and the duplicate will be returned to the caller on subsequent calls to `collect_deliverable()`.
+
+**Success outcome:** The original message is already queued in `m_delay_buf` by `queue_to_delay_buf()` (the primary path). The duplicate is also queued via `apply_duplication()` at `release_us + 100 µs`. `m_delay_count` is incremented twice (once for the original, once for the duplicate). `process_outbound()` returns `Result::OK`.
+
+**Error outcomes:**
+- If the PRNG roll for duplication is `>= duplication_probability`: no duplicate is queued; `process_outbound()` returns `OK` with only the original in the buffer.
+- If `m_delay_count >= IMPAIR_DELAY_BUF_SIZE` at the time of the duplication attempt: the duplicate is silently dropped (no error is returned from `apply_duplication()`; the log entry is only emitted if `queue_to_delay_buf()` succeeds). The original is already queued.
+- If `duplication_probability <= 0.0`: `apply_duplication()` is never called.
+- If the primary `queue_to_delay_buf()` for the original fails (delay buffer full): `process_outbound()` returns `ERR_FULL` before `apply_duplication()` is reached; no duplication occurs.
 
 ---
 
 ## 2. Entry Points
 
-| Entry Point | File | Line | Signature |
-|---|---|---|---|
-| `TcpBackend::send_message()` | `src/platform/TcpBackend.cpp` | 347 | `Result TcpBackend::send_message(const MessageEnvelope& envelope)` |
-| `ImpairmentEngine::process_outbound()` | `src/platform/ImpairmentEngine.cpp` | 151 | `Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env, uint64_t now_us)` |
-| `ImpairmentEngine::apply_duplication()` | `src/platform/ImpairmentEngine.cpp` | 127 | `void ImpairmentEngine::apply_duplication(const MessageEnvelope& env, uint64_t release_us)` — private helper |
-| `ImpairmentEngine::collect_deliverable()` | `src/platform/ImpairmentEngine.cpp` | 216 | `uint32_t ImpairmentEngine::collect_deliverable(uint64_t now_us, MessageEnvelope* out_buf, uint32_t buf_cap)` |
+**Primary entry:** Transport backend or test harness calls:
+```
+// src/platform/ImpairmentEngine.cpp, line 151
+Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env, uint64_t now_us)
+```
+
+The caller supplies:
+- `in_env` — the message envelope to be transmitted.
+- `now_us` — current monotonic time in microseconds.
+
+`apply_duplication()` and `queue_to_delay_buf()` are private helpers; not externally callable.
 
 ---
 
-## 3. End-to-End Control Flow (Step-by-Step)
+## 3. End-to-End Control Flow
 
-1. **Caller invokes `TcpBackend::send_message(envelope)`** (TcpBackend.cpp:347).
-   - `NEVER_COMPILED_OUT_ASSERT(m_open)` — always active; not stripped in release builds.
-   - `NEVER_COMPILED_OUT_ASSERT(envelope_valid(envelope))`.
-
-2. **Serialize**: `Serializer::serialize(envelope, m_wire_buf, SOCKET_RECV_BUF_BYTES, wire_len)`
-   (TcpBackend.cpp:354). Returns OK; wire bytes written to `m_wire_buf`.
-   - Return value checked: if not OK, log WARNING_LO and return to caller immediately.
-
-3. **Obtain time**: `now_us = timestamp_now_us()` (TcpBackend.cpp:362). Calls
-   `clock_gettime(CLOCK_MONOTONIC)`.
-
-4. **Call `m_impairment.process_outbound(envelope, now_us)`** (TcpBackend.cpp:363).
-
-5. **Inside `process_outbound()`** (ImpairmentEngine.cpp:151):
-   a. `NEVER_COMPILED_OUT_ASSERT(m_initialized)`, `NEVER_COMPILED_OUT_ASSERT(envelope_valid(in_env))`.
-   b. **Master switch** (line 159): `m_cfg.enabled` is true; continues.
-   c. **Partition check** (line 169): `is_partition_active(now_us)` returns false; continues.
-   d. **Loss check** (line 176): calls private `check_loss()` (ImpairmentEngine.cpp:110).
-      - `check_loss()` calls `m_prng.next_double()`; result >= `loss_probability`; returns false.
-      - Message is NOT dropped; continues.
-   e. **Latency calculation** (lines 183–189):
-      - `base_delay_us = m_cfg.fixed_latency_ms * 1000ULL`.
-      - If `m_cfg.jitter_mean_ms > 0U`: `jitter_offset_ms = m_prng.next_range(0U, m_cfg.jitter_variance_ms)`;
-        `jitter_us = jitter_offset_ms * 1000ULL`. Otherwise `jitter_us = 0ULL`.
-      - `release_us = now_us + base_delay_us + jitter_us`.
-   f. **Delay buffer capacity check** (line 192): `m_delay_count >= IMPAIR_DELAY_BUF_SIZE` is false;
-      continues.
-   g. **Primary copy buffered via `queue_to_delay_buf(in_env, release_us)`** (line 197):
-      - Enters `queue_to_delay_buf()` (ImpairmentEngine.cpp:83).
-      - `NEVER_COMPILED_OUT_ASSERT(m_initialized)`,
-        `NEVER_COMPILED_OUT_ASSERT(m_delay_count < IMPAIR_DELAY_BUF_SIZE)`.
-      - Fixed loop (bound: `IMPAIR_DELAY_BUF_SIZE`): finds first slot where `active == false`.
-      - `envelope_copy(m_delay_buf[i].env, env)` — `memcpy` of full `MessageEnvelope` (~4119 bytes).
-      - `m_delay_buf[i].release_us = release_us`.
-      - `m_delay_buf[i].active = true`.
-      - `++m_delay_count`.
-      - `NEVER_COMPILED_OUT_ASSERT(m_delay_count <= IMPAIR_DELAY_BUF_SIZE)`.
-      - Returns `Result::OK`.
-   h. Return value of `queue_to_delay_buf` checked (line 198): `result_ok(res)` is true; continues.
-   i. **Duplication probability guard** (line 203): `m_cfg.duplication_probability > 0.0` is true;
-      calls `apply_duplication(in_env, release_us)` (line 204).
-
-6. **Inside `apply_duplication(env, release_us)`** (ImpairmentEngine.cpp:127):
-   a. `NEVER_COMPILED_OUT_ASSERT(m_initialized)`,
-      `NEVER_COMPILED_OUT_ASSERT(m_cfg.duplication_probability > 0.0)`.
-   b. `dup_rand = m_prng.next_double()` — advances PRNG state; returns double in [0.0, 1.0).
-   c. `NEVER_COMPILED_OUT_ASSERT(dup_rand >= 0.0 && dup_rand < 1.0)`.
-   d. `if (dup_rand < m_cfg.duplication_probability)` — if true (duplication fires):
-      - Inner capacity check: `if (m_delay_count < IMPAIR_DELAY_BUF_SIZE)`.
-      - If capacity available: `queue_to_delay_buf(env, release_us + 100ULL)`.
-        - Finds next inactive slot; inserts duplicate with `release_us` offset by **100 µs**
-          (a fixed hardcoded constant, not 100 ms).
-        - `++m_delay_count` (now 2 total).
-        - Returns `Result::OK`.
-      - `result_ok(res)` checked (line 139): on success, logs WARNING_LO "message duplicated".
-   e. Returns (void).
-
-7. **Back in `process_outbound()`** (line 208):
-   - `NEVER_COMPILED_OUT_ASSERT(m_delay_count <= IMPAIR_DELAY_BUF_SIZE)` — postcondition.
+1. Transport backend calls `ImpairmentEngine::process_outbound(in_env, now_us)`.
+2. Pre-condition asserts fire: `NEVER_COMPILED_OUT_ASSERT(m_initialized)`, `NEVER_COMPILED_OUT_ASSERT(envelope_valid(in_env))`.
+3. Branch `!m_cfg.enabled` — impairments are enabled; continues.
+4. `is_partition_active(now_us)` — returns `false`; no partition active.
+5. `check_loss()` — returns `false`; message survives loss roll.
+6. **Latency/jitter calculation:**
+   - `base_delay_us = (uint64_t)m_cfg.fixed_latency_ms * 1000ULL`.
+   - If `m_cfg.jitter_mean_ms > 0`: calls `m_prng.next_range(0U, m_cfg.jitter_variance_ms)` → `jitter_offset_ms`; `jitter_us = jitter_offset_ms * 1000ULL`. Otherwise `jitter_us = 0`.
+   - `release_us = now_us + base_delay_us + jitter_us`.
+7. **Buffer full check for original:**
+   - If `m_delay_count >= IMPAIR_DELAY_BUF_SIZE`: logs `WARNING_HI` "delay buffer full"; returns `ERR_FULL`. Duplication not reached.
+8. **Queue original:** calls `queue_to_delay_buf(in_env, release_us)`:
+   - Pre-condition asserts: `m_initialized`, `m_delay_count < IMPAIR_DELAY_BUF_SIZE`.
+   - Linear scan `m_delay_buf[0..IMPAIR_DELAY_BUF_SIZE-1]` for first inactive slot.
+   - On finding inactive slot: `envelope_copy(m_delay_buf[i].env, in_env)`, sets `release_us`, sets `active = true`, increments `m_delay_count`.
+   - Post-condition assert: `m_delay_count <= IMPAIR_DELAY_BUF_SIZE`.
    - Returns `Result::OK`.
-
-8. **Back in `send_message()`** (TcpBackend.cpp:364):
-   - `res == Result::OK` (not `ERR_IO`); the `ERR_IO` branch is not taken.
-   - `m_client_count > 0U`; continues.
-
-9. **`send_to_all_clients(m_wire_buf, wire_len)`** (TcpBackend.cpp:375):
-   - Loops over `m_client_fds[0..MAX_TCP_CONNECTIONS-1]`; calls `tcp_send_frame()` for each active fd.
-   - Transmits the original message (pre-delay) to all connected clients immediately.
-
-10. **`flush_delayed_to_clients(now_us)`** (TcpBackend.cpp:376):
-    - Enters `flush_delayed_to_clients()` (TcpBackend.cpp:280).
-    - Stack-allocates `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]` — 32 slots on the stack.
-    - Calls `m_impairment.collect_deliverable(now_us, delayed, IMPAIR_DELAY_BUF_SIZE)`.
-    - **Inside `collect_deliverable()`** (ImpairmentEngine.cpp:216):
-      - `NEVER_COMPILED_OUT_ASSERT(m_initialized)`, `NEVER_COMPILED_OUT_ASSERT(out_buf != nullptr)`,
-        `NEVER_COMPILED_OUT_ASSERT(buf_cap > 0U)`.
-      - Loops over `m_delay_buf[0..IMPAIR_DELAY_BUF_SIZE-1]`.
-      - For each slot: if `active == true` AND `release_us <= now_us`: copies to `out_buf`, marks
-        inactive, decrements `m_delay_count`.
-      - **At the moment of the initial `send_message()` call**: if `total_delay_us > 0`, neither the
-        original nor the duplicate has matured (`release_us > now_us`). Returns `count = 0`.
-    - For each collected envelope: `Serializer::serialize()` then `send_to_all_clients()`.
-    - If nothing matured, the loop body does not execute.
-
-11. **Both entries remain buffered** until a future call (from `send_message()` or the receive-side
-    poll loop's `flush_delayed_to_queue()`) supplies a `now_us >= release_us` (original) and
-    `now_us >= release_us + 100` (duplicate). The 100 µs offset is smaller than typical OS polling
-    granularity (≥1 ms), so both are almost always collected in the same `collect_deliverable()` call.
+9. `result_ok(res)` is `true`; proceeds to duplication check.
+10. Branch `m_cfg.duplication_probability > 0.0` — true; calls `apply_duplication(in_env, release_us)`:
+    a. Pre-condition asserts: `NEVER_COMPILED_OUT_ASSERT(m_initialized)`, `NEVER_COMPILED_OUT_ASSERT(m_cfg.duplication_probability > 0.0)`.
+    b. Calls `m_prng.next_double()`:
+       - `PrngEngine::next_double()` fires `NEVER_COMPILED_OUT_ASSERT(m_state != 0)`.
+       - Applies xorshift64 (`state ^= state << 13; state ^= state >> 7; state ^= state << 17`).
+       - Converts raw `uint64_t` to `double` in `[0.0, 1.0)`.
+       - Fires post-condition assert: `dup_rand >= 0.0 && dup_rand < 1.0`.
+    c. Fires assert: `NEVER_COMPILED_OUT_ASSERT(dup_rand >= 0.0 && dup_rand < 1.0)`.
+    d. Branch `dup_rand < m_cfg.duplication_probability` — **true** (duplication fires):
+       - Branch `m_delay_count < IMPAIR_DELAY_BUF_SIZE` — space available:
+         - Calls `queue_to_delay_buf(env, release_us + 100ULL)` — queues duplicate with `release_us` offset by +100 µs.
+         - If `result_ok(res)`: logs `WARNING_LO` "message duplicated".
+       - If `m_delay_count >= IMPAIR_DELAY_BUF_SIZE`: duplicate is silently dropped; no log.
+    e. `apply_duplication()` returns `void`.
+11. Post-condition assert: `NEVER_COMPILED_OUT_ASSERT(m_delay_count <= IMPAIR_DELAY_BUF_SIZE)`.
+12. `process_outbound()` returns `Result::OK`.
 
 ---
 
-## 4. Call Tree (Hierarchical)
+## 4. Call Tree
 
 ```
-TcpBackend::send_message(envelope)                       TcpBackend.cpp:347
-├── NEVER_COMPILED_OUT_ASSERT(m_open)
-├── NEVER_COMPILED_OUT_ASSERT(envelope_valid(envelope))
-├── Serializer::serialize(envelope, m_wire_buf, ...)
-├── timestamp_now_us()
-│   └── clock_gettime(CLOCK_MONOTONIC, &ts)
-├── ImpairmentEngine::process_outbound(envelope, now_us) ImpairmentEngine.cpp:151
-│   ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
-│   ├── NEVER_COMPILED_OUT_ASSERT(envelope_valid(in_env))
-│   ├── [!m_cfg.enabled → queue_to_delay_buf; NOT taken]
-│   ├── is_partition_active(now_us) → false
-│   ├── check_loss()                                     ImpairmentEngine.cpp:110
-│   │   ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
-│   │   ├── NEVER_COMPILED_OUT_ASSERT(m_cfg.loss_probability <= 1.0)
-│   │   └── PrngEngine::next_double()                   ← PRNG call #1 (loss check)
-│   │       └── PrngEngine::next() [xorshift64]
-│   │   → returns false (message survives)
-│   ├── [jitter_mean_ms > 0U: optional]
-│   │   └── PrngEngine::next_range(0U, jitter_variance_ms) ← PRNG call #2 (jitter; conditional)
-│   │       └── PrngEngine::next() [xorshift64]
-│   ├── [m_delay_count < IMPAIR_DELAY_BUF_SIZE]
-│   ├── queue_to_delay_buf(in_env, release_us)           ImpairmentEngine.cpp:83
-│   │   ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
-│   │   ├── NEVER_COMPILED_OUT_ASSERT(m_delay_count < IMPAIR_DELAY_BUF_SIZE)
-│   │   ├── [loop: find first inactive slot in m_delay_buf]
-│   │   │   └── envelope_copy(m_delay_buf[i].env, in_env) ← PRIMARY COPY (memcpy)
-│   │   │       m_delay_buf[i].release_us = release_us
-│   │   │       m_delay_buf[i].active = true
-│   │   │       ++m_delay_count
-│   │   │       NEVER_COMPILED_OUT_ASSERT(m_delay_count <= IMPAIR_DELAY_BUF_SIZE)
-│   │   └── return Result::OK
-│   ├── [m_cfg.duplication_probability > 0.0 → call apply_duplication]
-│   ├── apply_duplication(in_env, release_us)            ImpairmentEngine.cpp:127
-│   │   ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
-│   │   ├── NEVER_COMPILED_OUT_ASSERT(m_cfg.duplication_probability > 0.0)
-│   │   ├── PrngEngine::next_double()                    ← PRNG call #N (dup check)
-│   │   │   └── PrngEngine::next() [xorshift64]
-│   │   ├── NEVER_COMPILED_OUT_ASSERT(dup_rand >= 0.0 && dup_rand < 1.0)
-│   │   └── [dup_rand < duplication_probability]
-│   │       ├── [m_delay_count < IMPAIR_DELAY_BUF_SIZE]
-│   │       ├── queue_to_delay_buf(env, release_us + 100ULL) ImpairmentEngine.cpp:83
-│   │       │   └── envelope_copy(m_delay_buf[j].env, env) ← DUPLICATE COPY (memcpy)
-│   │       │       m_delay_buf[j].release_us = release_us + 100ULL  ← +100 MICROSECONDS
-│   │       │       m_delay_buf[j].active = true
-│   │       │       ++m_delay_count
-│   │       └── [result_ok(res)] → Logger::log(WARNING_LO, "message duplicated")
-│   ├── NEVER_COMPILED_OUT_ASSERT(m_delay_count <= IMPAIR_DELAY_BUF_SIZE)
-│   └── return Result::OK
-├── [res != ERR_IO: not dropped]
-├── [m_client_count > 0U]
-├── send_to_all_clients(m_wire_buf, wire_len)            TcpBackend.cpp:258
-│   └── [loop over m_client_fds] → tcp_send_frame(fd, buf, len, timeout_ms)
-└── flush_delayed_to_clients(now_us)                     TcpBackend.cpp:280
-    ├── NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL)
-    ├── NEVER_COMPILED_OUT_ASSERT(m_open)
-    ├── [stack: MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]]  ← ~131 KB on stack
-    ├── ImpairmentEngine::collect_deliverable(now_us, delayed, 32) ImpairmentEngine.cpp:216
-    │   ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
-    │   ├── NEVER_COMPILED_OUT_ASSERT(out_buf != nullptr)
-    │   ├── NEVER_COMPILED_OUT_ASSERT(buf_cap > 0U)
-    │   ├── [loop: scan m_delay_buf[0..31]]
-    │   │   └── [active && release_us <= now_us] → envelope_copy to out_buf; active=false; --m_delay_count
-    │   ├── NEVER_COMPILED_OUT_ASSERT(out_count <= buf_cap)
-    │   ├── NEVER_COMPILED_OUT_ASSERT(m_delay_count <= IMPAIR_DELAY_BUF_SIZE)
-    │   └── return out_count  (0 if neither entry has matured yet)
-    └── [for each matured envelope in delayed[]]
-        ├── Serializer::serialize(delayed[i], m_wire_buf, ...)
-        └── send_to_all_clients(m_wire_buf, delayed_len)
-            └── tcp_send_frame(fd, buf, len, timeout_ms)
-                ← ORIGINAL and/or DUPLICATE transmitted here when release_us matures
+ImpairmentEngine::process_outbound(in_env, now_us)
+ ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
+ ├── NEVER_COMPILED_OUT_ASSERT(envelope_valid(in_env))
+ ├── !m_cfg.enabled => false
+ ├── is_partition_active(now_us) => false
+ ├── check_loss() => false                              [PRNG step #1 if loss_prob > 0]
+ ├── [latency/jitter: release_us = now_us + base + jitter]
+ │    └── m_prng.next_range() if jitter enabled         [PRNG step #2 if jitter enabled]
+ ├── m_delay_count < IMPAIR_DELAY_BUF_SIZE
+ ├── queue_to_delay_buf(in_env, release_us)             [original]
+ │    ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
+ │    ├── NEVER_COMPILED_OUT_ASSERT(m_delay_count < IMPAIR_DELAY_BUF_SIZE)
+ │    ├── [loop i=0..31] find inactive slot
+ │    ├── envelope_copy(); release_us; active=true; ++m_delay_count
+ │    └── return Result::OK
+ ├── duplication_probability > 0.0 => true
+ ├── apply_duplication(in_env, release_us)
+ │    ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
+ │    ├── NEVER_COMPILED_OUT_ASSERT(dup_prob > 0.0)
+ │    ├── m_prng.next_double()                          [PRNG step — duplication roll]
+ │    │    ├── NEVER_COMPILED_OUT_ASSERT(m_state != 0)
+ │    │    ├── PrngEngine::next()                       [xorshift64]
+ │    │    └── return raw / UINT64_MAX
+ │    ├── NEVER_COMPILED_OUT_ASSERT(dup_rand in [0.0,1.0))
+ │    ├── dup_rand < dup_prob => true
+ │    ├── m_delay_count < IMPAIR_DELAY_BUF_SIZE
+ │    └── queue_to_delay_buf(in_env, release_us + 100)  [duplicate, +100 µs]
+ │         ├── envelope_copy(); active=true; ++m_delay_count
+ │         └── return Result::OK
+ │    └── Logger::log(WARNING_LO, "message duplicated")
+ ├── NEVER_COMPILED_OUT_ASSERT(m_delay_count <= IMPAIR_DELAY_BUF_SIZE)
+ └── return Result::OK
 ```
 
 ---
 
 ## 5. Key Components Involved
 
-| Component | Type | Location | Role |
-|---|---|---|---|
-| `TcpBackend` | Class | `src/platform/TcpBackend.hpp/.cpp` | Owns `ImpairmentEngine`; orchestrates send and delayed delivery |
-| `ImpairmentEngine` | Class | `src/platform/ImpairmentEngine.hpp/.cpp` | Applies duplication via `apply_duplication()`; manages `m_delay_buf` |
-| `apply_duplication()` | Private method | `ImpairmentEngine.cpp:127` | Rolls PRNG; calls `queue_to_delay_buf()` with +100 µs offset on success |
-| `queue_to_delay_buf()` | Private method | `ImpairmentEngine.cpp:83` | Finds free slot; copies envelope; sets `release_us`; increments `m_delay_count` |
-| `collect_deliverable()` | Method | `ImpairmentEngine.cpp:216` | Releases matured entries from `m_delay_buf` to caller-supplied buffer |
-| `flush_delayed_to_clients()` | Private method | `TcpBackend.cpp:280` | Calls `collect_deliverable()`; re-serializes; calls `send_to_all_clients()` |
-| `send_to_all_clients()` | Private method | `TcpBackend.cpp:258` | Iterates `m_client_fds`; calls `tcp_send_frame()` for each active fd |
-| `ImpairmentConfig` | POD struct | `src/platform/ImpairmentConfig.hpp` | Holds `duplication_probability` (double); default 0.0 |
-| `PrngEngine` | Class | `src/platform/PrngEngine.hpp` | xorshift64; all methods inline; `next_double()` returns [0.0, 1.0) |
-| `DelayEntry` | Nested struct | `ImpairmentEngine.hpp:155` | `{MessageEnvelope env, uint64_t release_us, bool active}` — one slot per buffered message |
-| `envelope_copy()` | Inline function | `src/core/MessageEnvelope.hpp:56` | `memcpy(&dst, &src, sizeof(MessageEnvelope))` — used for both original and duplicate |
-| `Logger::log()` | Static function | `src/core/Logger.hpp` | Records WARNING_LO "message duplicated" after successful `queue_to_delay_buf()` |
+- **`ImpairmentEngine::process_outbound()`** — orchestrates the full outbound impairment pipeline; calls `apply_duplication()` only after the original is successfully queued.
+- **`ImpairmentEngine::apply_duplication()`** — private helper; performs the PRNG roll, decides whether to duplicate, and calls `queue_to_delay_buf()` for the copy.
+- **`ImpairmentEngine::queue_to_delay_buf()`** — private helper; finds the first inactive `DelayEntry` slot, copies the envelope, sets `release_us`, marks `active = true`, increments `m_delay_count`. Called twice in this UC: once for the original and once for the duplicate.
+- **`PrngEngine::next_double()`** — advances `m_state` via xorshift64 and returns a `double` in `[0.0, 1.0)`. Shared with the loss roll.
+- **`ImpairmentConfig::duplication_probability`** — the configurable threshold for duplication.
+- **`DelayEntry::release_us`** — the wall-clock µs at which the entry becomes deliverable. For the duplicate, this is the original `release_us + 100 µs`.
+- **`Logger::log()`** — emits `WARNING_LO` "message duplicated" when the duplicate is successfully queued.
 
 ---
 
 ## 6. Branching Logic / Decision Points
 
-| Decision | Location | Condition | Outcome |
-|---|---|---|---|
-| Master switch | ImpairmentEngine.cpp:159 | `!m_cfg.enabled` | If true: zero-delay buffer via `queue_to_delay_buf(in_env, now_us)`; no duplication check |
-| Partition check | ImpairmentEngine.cpp:169 | `is_partition_active(now_us)` | If true: log WARNING_LO; return ERR_IO before duplication check |
-| Loss survives | ImpairmentEngine.cpp:176 | `check_loss()` returns false | Message must survive loss to reach duplication check |
-| Jitter enabled | ImpairmentEngine.cpp:185 | `m_cfg.jitter_mean_ms > 0U` | If true: extra PRNG call for jitter offset before duplication |
-| Delay buffer full (primary) | ImpairmentEngine.cpp:192 | `m_delay_count >= IMPAIR_DELAY_BUF_SIZE` | If true: log WARNING_HI; return ERR_FULL; duplication check not reached |
-| `queue_to_delay_buf` result | ImpairmentEngine.cpp:198 | `result_ok(res)` | If false: return error; duplication check not reached |
-| Duplication probability guard | ImpairmentEngine.cpp:203 | `m_cfg.duplication_probability > 0.0` | If false: `apply_duplication()` not called; PRNG not advanced for dup check |
-| Duplication decision | `apply_duplication()` line 136 | `dup_rand < m_cfg.duplication_probability` | If true: second copy placed in delay buffer via `queue_to_delay_buf()` |
-| Delay buffer full (duplicate) | `apply_duplication()` line 137 | `m_delay_count < IMPAIR_DELAY_BUF_SIZE` | If false: duplicate silently not added; no error returned |
-| Logger fires | `apply_duplication()` line 139 | `result_ok(res)` after inner `queue_to_delay_buf` | Logger only fires when duplicate is actually buffered; not on failed inner capacity check |
-| Release time check | ImpairmentEngine.cpp:229 | `active && release_us <= now_us` | Controls when original and duplicate are handed to transmission |
-| Duplicate suppression (receiver) | DeliveryEngine.cpp (DedupFilter) | `(source_id, message_id)` match | Receiver's dedup filter detects and drops the second copy |
-
-**Critical ordering**: The original is buffered first via `queue_to_delay_buf()`, then
-`apply_duplication()` is called. If the buffer reaches capacity after inserting the primary,
-the inner capacity check in `apply_duplication()` fails silently — no duplicate is added,
-no error is returned, and the WARNING_LO log is not emitted.
+| Condition | True Branch | False Branch | Next Control |
+|-----------|-------------|--------------|--------------|
+| `!m_cfg.enabled` | Zero-latency queue; return OK | Continue impairment checks | Partition check |
+| `is_partition_active()` | Return `ERR_IO` (partition) | Continue to loss check | Loss check |
+| `check_loss()` | Return `ERR_IO` (loss drop) | Continue to latency calc | Latency/jitter |
+| `m_delay_count >= IMPAIR_DELAY_BUF_SIZE` (before original) | Return `ERR_FULL` | Queue original | `apply_duplication()` |
+| `queue_to_delay_buf()` for original returns non-OK | Return non-OK; no duplication | Proceed to duplication check | Duplication probability check |
+| `duplication_probability > 0.0` | Call `apply_duplication()` | Skip duplication | Post-condition assert |
+| `dup_rand < duplication_probability` | Attempt to queue duplicate | No duplicate | Return from `apply_duplication()` |
+| `m_delay_count < IMPAIR_DELAY_BUF_SIZE` (before duplicate) | Call `queue_to_delay_buf()` for duplicate | Silently drop duplicate | Log if queued |
+| `result_ok(queue_to_delay_buf())` for duplicate | Log `WARNING_LO` "message duplicated" | No log (failure not logged) | Return from `apply_duplication()` |
 
 ---
 
 ## 7. Concurrency / Threading Behavior
 
-- No locks or atomics in `process_outbound()`, `apply_duplication()`, `queue_to_delay_buf()`,
-  or `collect_deliverable()`.
-- `m_delay_buf` and `m_delay_count` are plain member variables. Both are modified in
-  `queue_to_delay_buf()` (writes) and `collect_deliverable()` (reads and writes). Concurrent calls
-  from multiple threads produce data races with undefined behavior.
-- [ASSUMPTION] Single-threaded access to each `TcpBackend` / `ImpairmentEngine` instance is
-  required for correctness.
-- `m_prng.m_state` is advanced at least twice in this path (loss check + duplication check, inside
-  `check_loss()` and `apply_duplication()` respectively), plus optionally a third time if jitter is
-  enabled.
+- **Thread context:** The transport backend or application thread calling `process_outbound()`. All work is in-line.
+- **`m_prng.m_state`** — single `uint64_t`; advanced once per `next_double()` call. Not atomic.
+- **`m_delay_count`** and **`m_delay_buf[i].active`** — non-atomic; modified twice in this UC (once for original, once for duplicate).
+- **[ASSUMPTION]** Single-threaded access model. Concurrent calls from two threads would race on `m_prng.m_state`, `m_delay_count`, and `m_delay_buf`.
+- **Determinism:** The duplication roll always consumes exactly one PRNG step from `next_double()`. In a session with the same seed and same call sequence, the same messages are duplicated.
 
 ---
 
-## 8. Memory & Ownership Semantics (C/C++ Specific)
+## 8. Memory & Ownership Semantics
 
-- Both the original and the duplicate are stored as full `MessageEnvelope` copies inside
-  `DelayEntry::env` in `m_delay_buf`. Each copy is a full `memcpy` of `sizeof(MessageEnvelope)`
-  bytes via `envelope_copy()`, which includes the fixed-size `payload[4096]` array regardless of
-  `payload_length`. This is approximately 4119 bytes per slot copy.
-- `m_delay_buf` is a statically-sized member array of `IMPAIR_DELAY_BUF_SIZE` (32) `DelayEntry`
-  slots. With both original and duplicate buffered, two slots are consumed until
-  `collect_deliverable()` reclaims them.
-- `m_delay_count` tracks the number of active (occupied) slots. It is incremented twice in the
-  duplication path (once per `queue_to_delay_buf()` call). Decremented by `collect_deliverable()`
-  when each entry matures.
-- `delayed[IMPAIR_DELAY_BUF_SIZE]` at `flush_delayed_to_clients()` (TcpBackend.cpp:285) is a
-  local stack array of 32 `MessageEnvelope` objects. Stack frame size: 32 × ~4119 bytes
-  ≈ 131 KB. Power of 10 rule 3 is satisfied (no heap allocation); however, the large stack
-  frame is a known risk.
-- `in_env` (the original caller's envelope reference) is never modified. Both copies are
-  independent of the caller's object.
-- Power of 10 rule 3: no `malloc` or `new` anywhere in this path.
+- **`ImpairmentEngine::m_delay_buf[IMPAIR_DELAY_BUF_SIZE]`** — fixed array of 32 `DelayEntry` structs, each containing a `MessageEnvelope` copy, `uint64_t release_us`, and `bool active`. Embedded in `ImpairmentEngine`. No heap allocation.
+- **`envelope_copy()`** — `memcpy` of sizeof(MessageEnvelope) bytes. Called twice in this UC:
+  - For the original: `m_delay_buf[i].env <- in_env`.
+  - For the duplicate: `m_delay_buf[j].env <- in_env` (same source, different slot, different `release_us`).
+- **`in_env`** — `const` reference; never modified on either the original or duplicate path.
+- **Power of 10 Rule 3 confirmation:** No dynamic allocation. Both copies go into pre-allocated slots in `m_delay_buf`.
+- **Slot ownership:** After `queue_to_delay_buf()`, the `DelayEntry` slot owns its copy of the envelope until `collect_deliverable()` frees it (sets `active = false`, decrements `m_delay_count`).
 
 ---
 
 ## 9. Error Handling Flow
 
-| Condition | Location | Outcome |
-|---|---|---|
-| Serialization fails | TcpBackend.cpp:356 | Log WARNING_LO; return error to caller; impairment engine not entered |
-| Partition active | ImpairmentEngine.cpp:169 | Log WARNING_LO; return ERR_IO; message and duplicate both dropped |
-| Loss fires | ImpairmentEngine.cpp:176 | Log WARNING_LO; return ERR_IO; duplication check not reached |
-| Primary delay buffer full | ImpairmentEngine.cpp:192 | Log WARNING_HI; return ERR_FULL; `apply_duplication()` not called |
-| `queue_to_delay_buf` fails for primary | ImpairmentEngine.cpp:198 | Return error to `process_outbound()` caller; `apply_duplication()` not called |
-| `apply_duplication()` inner capacity check fails | `apply_duplication()` line 137 | Duplicate silently not added; `apply_duplication()` returns void; `process_outbound()` still returns OK |
-| `queue_to_delay_buf` fails for duplicate | `apply_duplication()` line 138 | `result_ok(res)` is false; WARNING_LO log is NOT emitted; silent suppression |
-| `collect_deliverable` out_buf full | ImpairmentEngine.cpp:228 | Loop condition `out_count < buf_cap` exits early; remaining matured entries left in buffer until next call |
-
-The silent suppression of the duplicate when the buffer is full means the actual duplication
-rate may be lower than configured at high traffic levels, without any observable signal to the
-caller.
+| Result code | Trigger condition | System state after | Caller action |
+|-------------|------------------|--------------------|---------------|
+| `Result::OK` | Both original and duplicate queued (this UC success) | `m_delay_count` incremented by 2; two `DelayEntry` slots active | Normal; caller polls `collect_deliverable()` for both |
+| `Result::OK` (no duplicate) | Duplicate PRNG roll failed | `m_delay_count` incremented by 1; one slot active | Normal |
+| `Result::ERR_FULL` (buffer check before original) | `m_delay_count >= 32` before original | No slots allocated | Log `WARNING_HI`; caller drops message |
+| Duplicate silently dropped (buffer full) | `m_delay_count >= 32` before duplicate | Original queued; `m_delay_count` incremented by 1 | `OK` returned; caller unaware duplicate was lost |
+| `NEVER_COMPILED_OUT_ASSERT(false)` (logic error) | `queue_to_delay_buf()` finds no free slot despite count check | Abort (debug) / `on_fatal_assert()` (production) | N/A |
 
 ---
 
 ## 10. External Interactions
 
-| Interaction | Function | API |
-|---|---|---|
-| Monotonic clock | `timestamp_now_us()` | `clock_gettime(CLOCK_MONOTONIC, ...)` — POSIX |
-| Event logging (duplicate fired) | `Logger::log()` | WARNING_LO "message duplicated" (only when `queue_to_delay_buf()` succeeds for duplicate) |
-| Event logging (partition drop) | `Logger::log()` | WARNING_LO "message dropped (partition active)" |
-| Event logging (loss drop) | `Logger::log()` | WARNING_LO "message dropped (loss probability)" |
-| Event logging (buffer full) | `Logger::log()` | WARNING_HI "delay buffer full; dropping message" |
-| Socket write (original) | `tcp_send_frame()` | POSIX `write`/`send` on TCP fd — when original `release_us` matures |
-| Socket write (duplicate) | `tcp_send_frame()` | POSIX `write`/`send` on TCP fd — when `release_us + 100` matures |
+No OS calls, socket calls, or file I/O occur inside `process_outbound()`, `apply_duplication()`, or `queue_to_delay_buf()`. All state is in-process.
+
+- `Logger::log()` — writes to the configured log sink ([ASSUMPTION] synchronous write).
+- `m_prng.next_double()` — pure arithmetic on `m_state`.
+
+The transport backend calls `process_outbound()` before emitting any socket I/O. Whether the I/O actually occurs depends on the return value of `process_outbound()` and the caller's use of `collect_deliverable()`.
 
 ---
 
 ## 11. State Changes / Side Effects
 
-| State | Object | Change |
-|---|---|---|
-| `m_prng.m_state` | `PrngEngine` (inside `ImpairmentEngine`) | Advanced at least twice (inside `check_loss()` and `apply_duplication()`); three times if jitter enabled |
-| `m_delay_buf[i]` | `ImpairmentEngine` | Slot i: original copy written via `queue_to_delay_buf()`; `active = true`; `release_us` set |
-| `m_delay_buf[j]` | `ImpairmentEngine` | Slot j: duplicate copy written via `queue_to_delay_buf()`; `active = true`; `release_us = original + 100ULL` (microseconds) |
-| `m_delay_count` | `ImpairmentEngine` | Incremented by 2 (once per `queue_to_delay_buf()` call) |
-| Logger output | Process-level | WARNING_LO "message duplicated" emitted (only on successful duplicate insertion) |
-| `m_wire_buf` | `TcpBackend` | Overwritten on each `flush_delayed_to_clients()` serialization iteration |
+| Object | Member | Before | After |
+|--------|--------|--------|-------|
+| `m_delay_buf[i].active` | `false` | `true` (original slot) |
+| `m_delay_buf[i].env` | stale/zeroed | copy of `in_env` |
+| `m_delay_buf[i].release_us` | 0 | `now_us + base_delay_us + jitter_us` |
+| `m_delay_buf[j].active` | `false` | `true` (duplicate slot) |
+| `m_delay_buf[j].env` | stale/zeroed | copy of `in_env` (identical to original) |
+| `m_delay_buf[j].release_us` | 0 | `now_us + base_delay_us + jitter_us + 100` |
+| `m_delay_count` | D | D+2 (if both queued) or D+1 (if duplicate dropped) |
+| `PrngEngine::m_state` | S | xorshift64(S) — one step (for the duplication roll) |
+| `Logger` | log output | — | `WARNING_LO` "message duplicated" (if duplicate queued) |
 
-After `collect_deliverable()` processes both matured entries, `m_delay_count` decrements by 2
-and both slots revert to `active = false`.
+If a jitter roll also occurred earlier in the same `process_outbound()` call, `m_state` was already advanced by `next_range()` before the duplication roll.
 
 ---
 
-## 12. Sequence Diagram (ASCII)
+## 12. Sequence Diagram
 
 ```
-Caller        TcpBackend            ImpairmentEngine   PrngEngine    Logger   send_to_all_clients
-  |                |                       |                |            |            |
-  |send_message(e) |                       |                |            |            |
-  |--------------->|                       |                |            |            |
-  |                | process_outbound()    |                |            |            |
-  |                |---------------------->|                |            |            |
-  |                |                       | check_loss()   |            |            |
-  |                |                       | next_double()  |            |            |
-  |                |                       |[loss check]--->|            |            |
-  |                |                       |<-- 0.80 -------|            |            |
-  |                |                       |[0.80 >= 0.05: survives]     |            |
-  |                |                       |                |            |            |
-  |                |                       | [compute release_us]        |            |
-  |                |                       | queue_to_delay_buf(orig)    |            |
-  |                |                       |   m_delay_buf[0].active=true|            |
-  |                |                       |   m_delay_count=1           |            |
-  |                |                       |                |            |            |
-  |                |                       | apply_duplication()         |            |
-  |                |                       | next_double()  |            |            |
-  |                |                       |[dup check]---->|            |            |
-  |                |                       |<-- 0.03 -------|            |            |
-  |                |                       |[0.03 < 0.10: DUPLICATE]     |            |
-  |                |                       | queue_to_delay_buf(dup+100µs)|           |
-  |                |                       |   m_delay_buf[1].active=true|            |
-  |                |                       |   release_us+100            |            |
-  |                |                       |   m_delay_count=2           |            |
-  |                |                       | log(WARNING_LO)             |            |
-  |                |                       |------------------------------>            |
-  |                |<--- Result::OK -------|                |            |            |
-  |                |                       |                |            |            |
-  |                | send_to_all_clients(wire_buf)          |            |            |
-  |                |-------------------------------------------------------------->  |
-  |                |   [original wire bytes transmitted immediately]                 |
-  |                |                       |                |            |            |
-  |                | flush_delayed_to_clients(now_us)       |            |            |
-  |                | collect_deliverable(now_us)            |            |            |
-  |                |---------------------->|                |            |            |
-  |                |  [release_us > now_us: 0 ready]        |            |            |
-  |                |<--- count=0 ----------|                |            |            |
-  |<--- Result::OK-|                       |                |            |            |
-  :                :                       :                :            :            :
-  [... time passes: now_us >= release_us ...]
-  :                :                       :                :            :            :
-  |send_message(e2)|                       |                |            |            |
-  |--------------->|                       |                |            |            |
-  |                | flush_delayed_to_clients(now_us')      |            |            |
-  |                | collect_deliverable(now_us')           |            |            |
-  |                |---------------------->|                |            |            |
-  |                |  [slot 0: active && release_us <= now_us']          |            |
-  |                |<--- count=1 ----------|                |            |            |
-  |                | Serializer::serialize(delayed[0])      |            |            |
-  |                | send_to_all_clients(m_wire_buf)        |            |            |
-  |                |-------------------------------------------------------------->  |
-  |                |   [original delayed copy transmitted]                           |
-  :                :                       :                :            :            :
-  [... 100µs later: now_us >= release_us + 100 ...]
-  :                :                       :                :            :            :
-  |send_message(e3)|                       |                |            |            |
-  |--------------->|                       |                |            |            |
-  |                | flush_delayed_to_clients(now_us'')     |            |            |
-  |                | collect_deliverable(now_us'')          |            |            |
-  |                |---------------------->|                |            |            |
-  |                |  [slot 1: active && release_us+100 <= now_us'']     |            |
-  |                |<--- count=1 ----------|                |            |            |
-  |                | Serializer::serialize(delayed[0])      |            |            |
-  |                | send_to_all_clients(m_wire_buf)        |            |            |
-  |                |-------------------------------------------------------------->  |
-  |                |   [DUPLICATE transmitted]                                       |
+TransportBackend    ImpairmentEngine    queue_to_delay_buf()    apply_duplication()    PrngEngine    Logger
+     |                    |                     |                       |                  |            |
+     |--process_outbound(env,now)->              |                       |                  |            |
+     |                    |--[partition,loss,latency checks pass]        |                  |            |
+     |                    |--queue_to_delay_buf(env, release_us)-->      |                  |            |
+     |                    |                     | envelope_copy()        |                  |            |
+     |                    |                     | active=true            |                  |            |
+     |                    |                     | ++m_delay_count        |                  |            |
+     |                    |<--- OK -------------|                        |                  |            |
+     |                    |                     |                        |                  |            |
+     |                    |--apply_duplication(env, release_us)--------->|                  |            |
+     |                    |                     |                        |--next_double()-->|            |
+     |                    |                     |                        |<-- dup_rand -----|            |
+     |                    |                     |                        | dup_rand < prob  |            |
+     |                    |                     |                        |  => true         |            |
+     |                    |                     |<--queue_to_delay_buf(env, release_us+100)-|            |
+     |                    |                     | envelope_copy()        |                  |            |
+     |                    |                     | active=true            |                  |            |
+     |                    |                     | ++m_delay_count        |                  |            |
+     |                    |                     |---> OK --------------->|                  |            |
+     |                    |                     |                        |--log(WARNING_LO, "duplicated")->
+     |<--- Result::OK -----|                     |                        |                  |            |
 ```
-
-Note: The sequence above assumes `fixed_latency_ms > 0`, so neither entry matures at call time.
-If `fixed_latency_ms == 0` and `jitter_mean_ms == 0`, both entries have `release_us == now_us`
-and both are collected by `collect_deliverable()` on the same `flush_delayed_to_clients()` call.
 
 ---
 
 ## 13. Initialization vs Runtime Flow
 
-**Initialization phase**:
+**Initialization (before this UC):**
+- `ImpairmentEngine::init(cfg)` stores `cfg.duplication_probability` in `m_cfg`, zeroes `m_delay_buf` via `memset`, sets `m_delay_count = 0`, calls `m_prng.seed(cfg.prng_seed)`.
+- The constructor calls `m_prng.seed(1ULL)` as initial safe state; `init()` always reseeds.
 
-- `ImpairmentEngine::init(cfg)` (ImpairmentEngine.cpp:44) stores `m_cfg = cfg` and reseeds PRNG.
-- `m_cfg.duplication_probability` defaults to `0.0` via `impairment_config_default()`
-  (ImpairmentConfig.hpp). Must be set to a value `> 0.0` before `init()` for duplication to fire.
-- If `cfg.prng_seed == 0ULL`, `init()` substitutes seed 42 (ImpairmentEngine.cpp:54).
-- `m_delay_buf` and `m_delay_count` are zeroed; `m_initialized` is set to true.
-- `NEVER_COMPILED_OUT_ASSERT(m_initialized)` and `NEVER_COMPILED_OUT_ASSERT(m_delay_count == 0U)`
-  confirm postconditions.
-
-**Runtime phase**:
-
-- First `send_message()` call: PRNG advanced inside `check_loss()` for loss check; optionally
-  inside jitter calculation; then inside `apply_duplication()` for the duplication roll. Two
-  `DelayEntry` slots occupied.
-- Subsequent `send_message()` calls or the receive poll loop: `collect_deliverable()` scans for
-  matured entries. Original and duplicate are released at different times (`release_us` and
-  `release_us + 100`), so they may be collected on the same or different calls depending on
-  polling frequency relative to 100 µs.
-- If the polling interval is coarser than 100 µs (the `receive_message` poll uses 100 ms
-  increments), both original and duplicate are virtually always collected in the same
-  `collect_deliverable()` call.
+**Runtime (this UC):**
+- `apply_duplication()` is called only when `duplication_probability > 0.0` and the primary `queue_to_delay_buf()` succeeded.
+- The duplication PRNG roll always consumes exactly one step from `next_double()`, regardless of whether the roll results in a duplicate.
+- PRNG stream ordering in a single `process_outbound()` call (if all impairments enabled): (1) loss roll via `next_double()`, (2) jitter roll via `next_range()`, (3) duplication roll via `next_double()`. The order is deterministic and fixed.
 
 ---
 
 ## 14. Known Risks / Observations
 
-1. **Silent duplicate suppression when buffer full**: If `m_delay_count == IMPAIR_DELAY_BUF_SIZE`
-   after the primary is inserted (buffer now full at 32), the inner capacity check in
-   `apply_duplication()` fails silently. No log, no error; the configured duplication rate is not
-   achieved. The WARNING_LO "message duplicated" is also NOT emitted in this case (it is gated on
-   `result_ok(res)` from the inner `queue_to_delay_buf()` call).
-
-2. **100 µs fixed offset is a hardcoded constant**: The duplicate's `release_us + 100ULL` offset
-   (`apply_duplication()` line 138) is **100 microseconds** — not 100 milliseconds. This is not
-   part of `ImpairmentConfig` and cannot be configured. At polling granularities of ≥1 ms
-   (typical), both copies arrive at virtually the same time from the receiver's perspective.
-
-3. **Large stack frame in `flush_delayed_to_clients()`**: `delayed[IMPAIR_DELAY_BUF_SIZE]`
-   (TcpBackend.cpp:285) is 32 full `MessageEnvelope` objects on the stack. Each envelope is
-   approximately 4119 bytes (4096 payload + metadata fields), so approximately 131 KB of stack
-   is consumed per call. No guard against stack overflow is present.
-
-4. **PRNG call count depends on configuration**: The number of PRNG calls in `process_outbound()`
-   is 1 (loss check, inside `check_loss()`) + 1 if jitter enabled + 1 (duplication check, inside
-   `apply_duplication()`). Enabling or disabling jitter shifts the PRNG sequence seen by
-   `apply_duplication()`, altering which messages are duplicated in a given test run even with
-   the same seed.
-
-5. **Duplicate carries identical `message_id`**: The duplicated `MessageEnvelope` is an exact
-   `memcpy` of the original, including `message_id`. Receivers with a deduplication window
-   (e.g., `DedupFilter` keyed on `(source_id, message_id)`) will detect and suppress the second
-   copy. This is the intended behavior for testing deduplication logic.
-
-6. **`apply_duplication()` has no postcondition assertion on `m_delay_count`**: The postcondition
-   `NEVER_COMPILED_OUT_ASSERT(m_delay_count <= IMPAIR_DELAY_BUF_SIZE)` after
-   `apply_duplication()` is in `process_outbound()` (line 208), not inside `apply_duplication()`
-   itself. This means the count invariant is only verified at the `process_outbound()` level.
-
-7. **`NEVER_COMPILED_OUT_ASSERT` is never stripped**: Unlike the standard C `assert()`, this
-   macro is active in both debug and release builds. Violations terminate the program regardless
-   of build configuration.
+- **`IMPAIR_DELAY_BUF_SIZE = 32`:** With both original and duplicate, each message consumes two delay slots. At `duplication_probability = 1.0`, every message fills two slots; the effective buffer capacity is halved to 16 effective messages before `ERR_FULL` is returned.
+- **Duplicate silently dropped when buffer is full:** If `m_delay_count == 31` (one slot remaining), the original fills the last slot; `m_delay_count` becomes 32; `apply_duplication()` then finds `m_delay_count >= IMPAIR_DELAY_BUF_SIZE` and drops the duplicate silently. No error is returned and no log is emitted in this case (only logged if `queue_to_delay_buf()` succeeds). This makes full-buffer duplicate loss invisible at the `process_outbound()` return value level.
+- **Duplicate release offset is fixed at 100 µs:** The offset `release_us + 100ULL` is hardcoded, not configurable. This is a minor design limitation that could cause all duplicates to arrive in a burst 100 µs after originals under zero-latency configuration.
+- **PRNG stream coupling:** Loss and duplication share the same `PrngEngine` instance. If `loss_probability == 0.0` (check_loss fast-path returns without calling PRNG), the duplication roll consumes PRNG step N rather than step N+1. A test that sets `loss_probability` to a non-zero value and observes different duplication decisions is implicitly testing PRNG stream coupling.
+- **`WARNING_LO` per duplicate under high probability:** At `duplication_probability = 0.9`, nearly every message logs `WARNING_LO`. This can fill the log sink under load.
+- **Duplicate identity:** The duplicate envelope is byte-identical to the original (same `message_id`, `source_id`, `timestamp_us`). The receiver's `DuplicateFilter` will suppress it for `RELIABLE_RETRY` messages; for `BEST_EFFORT` or `RELIABLE_ACK` messages the duplicate passes through to the application.
 
 ---
 
 ## 15. Unknowns / Assumptions
 
-- [ASSUMPTION] The receive-side deduplication mechanism (`DedupFilter` using a sliding window
-  keyed on `(source_id, message_id)`) exists in `DeliveryEngine` and is what the duplication
-  impairment is intended to exercise.
-- [ASSUMPTION] Single-threaded access per `TcpBackend` / `ImpairmentEngine` instance. No
-  thread-safety mechanism is present in these classes.
-- [ASSUMPTION] The stack is large enough to hold `delayed[IMPAIR_DELAY_BUF_SIZE]` (~131 KB) in
-  `flush_delayed_to_clients()`. No stack guard or overflow detection is visible.
-- [UNKNOWN] Whether 100 µs is a meaningful or observable delay at the TCP transmission layer
-  given OS scheduling jitter (typically ≥1 ms on non-RTOS platforms).
-- [UNKNOWN] Whether `duplication_probability = 1.0` (all messages duplicated) has been tested
-  for buffer-full conditions that would arise under sustained traffic.
-- [UNKNOWN] The `Logger::log()` implementation's thread-safety and performance characteristics
-  (e.g., whether it blocks, allocates, or is safe to call from signal handlers).
-
----
+- [ASSUMPTION] `process_outbound()` is called from a single thread. Concurrent access races on `m_prng.m_state`, `m_delay_count`, and `m_delay_buf`.
+- [ASSUMPTION] The 100 µs duplicate offset is intentional to simulate a duplicate arriving slightly after the original (e.g., from a route echo). It is not configurable.
+- [ASSUMPTION] `duplication_probability` is in `[0.0, 1.0]` at all times. The `init()` function asserts `loss_probability` but the source does not show an explicit init-time assert for `duplication_probability`. [ASSUMPTION] The caller is expected to supply a valid value.
+- [ASSUMPTION] The caller of `process_outbound()` polls `collect_deliverable()` to retrieve both the original and the duplicate. If `collect_deliverable()` is not called before the delay buffer fills up, future messages will be dropped with `ERR_FULL`.
+- [ASSUMPTION] The PRNG stream ordering (loss → jitter → duplication) is stable across all call paths in `process_outbound()`. No code path reorders these rolls.

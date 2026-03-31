@@ -1,558 +1,238 @@
-# UC_11 — AckTracker timeout sweep
+# UC_11 — AckTracker sweep: PENDING entries past deadline_us collected as expired
 
-**HL Group:** HL-11 — User sweeps ACK timeouts
+**HL Group:** HL-11 — Sweep ACK Timeouts
 **Actor:** System
-**Requirement traceability:** REQ-3.2.4, REQ-3.3.2
+**Requirement traceability:** REQ-3.2.4, REQ-3.3.2, REQ-7.2.3
 
 ---
 
 ## 1. Use Case Overview
 
-### What triggers this flow
+**Trigger:** The application calls `DeliveryEngine::sweep_ack_timeouts(now_us)` and one or more `AckTracker` slots are in `PENDING` state with `deadline_us <= now_us`.
 
-A periodic caller (application main loop or timer thread) invokes
-DeliveryEngine::sweep_ack_timeouts(now_us) after the wall-clock has advanced past
-one or more AckTracker entry deadline_us values. At least one entry has
-state == PENDING and deadline_us <= now_us (its ACK window has expired).
-The call sweeps all slots, frees expired PENDING entries, frees any accumulated
-ACKED entries as a side effect, logs each timeout as WARNING_HI, and returns the
-count of expired PENDING entries.
+**Goal:** Identify all `PENDING` slots whose ACK deadline has passed, copy their envelopes to a stack buffer, transition those slots to `FREE`, decrement `m_count`, and return the count of timed-out messages. Also opportunistically free any `ACKED` slots encountered during the scan. Log each timeout at `WARNING_HI`.
 
-### Expected outcome (single goal)
+**Success outcome:** All expired `PENDING` slots are transitioned to `FREE` and their envelopes are available in the stack buffer. All `ACKED` slots encountered are also transitioned to `FREE`. `m_count` is decremented for every freed slot. The return value is the count of expired `PENDING` entries. The caller can inspect the returned count and trigger application-level failure handling (e.g., report unacknowledged sends).
 
-All PENDING entries whose ACK deadline has passed are transitioned to FREE.
-Each timed-out envelope is logged as a WARNING_HI event. The count of timed-out
-entries is returned to the caller. ACKED entries encountered during the sweep are
-also freed silently (no count, no log) as a garbage-collection side effect.
+**Error outcomes:**
+- If no slots are expired or `ACKED`, `sweep_ack_timeouts()` returns 0. No state is modified beyond the scan.
+- If the output buffer (`timeout_buf`) is smaller than the number of expired slots, some expired envelopes are not copied (their slots are still freed), and the return count is capped at `buf_cap`. [ASSUMPTION] In practice `buf_cap == ACK_TRACKER_CAPACITY == 32`, so this cannot happen.
 
 ---
 
 ## 2. Entry Points
 
-Primary entry point (called by application or timer):
+**Primary entry:** Application event loop calls:
+```
+// src/core/DeliveryEngine.cpp, line 267
+uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
+```
 
-    DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
-    File: src/core/DeliveryEngine.cpp, line 267
-    Sig:  uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
+The application supplies:
+- `now_us` — current monotonic time in microseconds from `timestamp_now_us()`.
 
-Prerequisite entry points (must have been called earlier):
-
-    DeliveryEngine::init(TransportInterface*, const ChannelConfig&, NodeId)
-      [DeliveryEngine.cpp:17]
-    AckTracker::init()
-      [AckTracker.cpp:23]
-    AckTracker::track(env, deadline_us)
-      [AckTracker.cpp:44]
-      [Called by DeliveryEngine::send() for RELIABLE_ACK and RELIABLE_RETRY
-      messages after a successful transport send.]
-
-Private helper called inside sweep_expired():
-
-    AckTracker::sweep_one_slot(idx, now_us, expired_buf, buf_cap, expired_count)
-      [AckTracker.cpp:112]
-      Processes one slot: copies expired PENDING envelopes to the output buffer,
-      releases ACKED slots silently.
-      Returns 1 if an expired PENDING envelope was added to the buffer, 0 otherwise.
+`sweep_ack_timeouts()` must be called periodically by the application; it is not self-triggering.
 
 ---
 
-## 3. End-to-End Control Flow (Step-by-Step)
+## 3. End-to-End Control Flow
 
-Step 1  [DeliveryEngine::sweep_ack_timeouts, line 269]
-  NEVER_COMPILED_OUT_ASSERT(m_initialized).
-  NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL).
-  Guard against calling sweep_ack_timeouts() before init(). Always active.
+1. Application calls `DeliveryEngine::sweep_ack_timeouts(now_us)`.
+2. `sweep_ack_timeouts()` fires `NEVER_COMPILED_OUT_ASSERT(m_initialized)` and `NEVER_COMPILED_OUT_ASSERT(now_us > 0)`.
+3. Declares stack buffer: `MessageEnvelope timeout_buf[ACK_TRACKER_CAPACITY]` (32 slots × sizeof(MessageEnvelope)).
+4. Initializes `uint32_t collected = 0`.
+5. Calls `AckTracker::sweep_expired(now_us, timeout_buf, ACK_TRACKER_CAPACITY)`.
 
-Step 2  [DeliveryEngine::sweep_ack_timeouts, line 273]
-  Declare stack-allocated timeout_buf[ACK_TRACKER_CAPACITY] (32 MessageEnvelope slots).
-  No heap allocation — Power of 10 rule 3.
-  Stack impact: 32 × sizeof(MessageEnvelope) ≈ 132 KB (see Known Risks).
+   **Inside `AckTracker::sweep_expired()`:**
+   5a. Fires pre-condition asserts: `expired_buf != nullptr`, `m_count <= ACK_TRACKER_CAPACITY`.
+   5b. Iterates over `m_slots[0..ACK_TRACKER_CAPACITY-1]` (32 slots, Power of 10 bounded).
+   5c. For each slot: calls `sweep_one_slot(i, now_us, expired_buf, buf_cap, expired_count)`.
 
-Step 3  [DeliveryEngine::sweep_ack_timeouts, line 278]
-  Call m_ack_tracker.sweep_expired(now_us, timeout_buf, ACK_TRACKER_CAPACITY).
-  Execution transfers to AckTracker::sweep_expired().
+   **Inside `AckTracker::sweep_one_slot(idx, now_us, expired_buf, buf_cap, expired_count)`:**
+   - Pre-condition asserts: `idx < ACK_TRACKER_CAPACITY`, `expired_buf != nullptr`.
+   - **Branch A — expired PENDING:**
+     - `m_slots[idx].state == PENDING` AND `now_us >= m_slots[idx].deadline_us`.
+     - If `expired_count < buf_cap`: calls `envelope_copy(expired_buf[expired_count], m_slots[idx].env)` — copies envelope to output; `added = 1`.
+     - Sets `m_slots[idx].state = EntryState::FREE`.
+     - If `m_count > 0`: decrements `m_count`.
+     - Returns `added` (1 if copied, 0 if buffer full).
+   - **Branch B — ACKED slot:**
+     - `m_slots[idx].state == ACKED`.
+     - Sets `m_slots[idx].state = EntryState::FREE`.
+     - If `m_count > 0`: decrements `m_count`.
+     - Returns 0 (ACKED slots are not placed in the output buffer).
+   - **Branch C — FREE or non-expired PENDING:**
+     - Returns 0. No state modification.
 
-Step 4  [AckTracker::sweep_expired, line 152]
-  NEVER_COMPILED_OUT_ASSERT(expired_buf != nullptr).
-  NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY).
-  Initialize local: expired_count = 0.
+   5d. `expired_count` is accumulated via the returned values from `sweep_one_slot()`.
+   5e. Post-condition asserts: `m_count <= ACK_TRACKER_CAPACITY`, `expired_count <= buf_cap`.
+   5f. Returns `expired_count`.
 
-Step 5  [AckTracker::sweep_expired, line 158 — main sweep loop]
-  Iterate i = 0 .. ACK_TRACKER_CAPACITY-1 (32 iterations, fixed bound).
-  Per iteration:
-    expired_count += sweep_one_slot(i, now_us, expired_buf, buf_cap, expired_count).
-
-  Step 5a — Inside sweep_one_slot() [AckTracker.cpp:112]:
-    NEVER_COMPILED_OUT_ASSERT(idx < ACK_TRACKER_CAPACITY).
-    NEVER_COMPILED_OUT_ASSERT(expired_buf != nullptr).
-
-    Branch A — PENDING and deadline passed [lines 121-132]:
-      If m_slots[idx].state == EntryState::PENDING
-      AND now_us >= m_slots[idx].deadline_us:
-        uint32_t added = 0U.
-        If expired_count < buf_cap:
-          envelope_copy(expired_buf[expired_count], m_slots[idx].env).
-          [memcpy of sizeof(MessageEnvelope) bytes; includes full 4096-byte payload.]
-          added = 1U.
-        [If buf_cap exceeded: slot is still freed but envelope is NOT copied to output.]
-        m_slots[idx].state = EntryState::FREE.
-        if (m_count > 0U): m_count--.
-        return added.  [1 if copied, 0 if buffer was full]
-
-    Branch B — ACKED [lines 134-138]:
-      If m_slots[idx].state == EntryState::ACKED:
-        [ACK was received previously by on_ack(); state became ACKED.
-         sweep_one_slot is the GC path for ACKED entries.]
-        m_slots[idx].state = EntryState::FREE.
-        if (m_count > 0U): m_count--.
-        return 0U.  [ACKED entries NOT counted as expired; not failures]
-
-    Branch C — FREE or not-yet-expired PENDING:
-      return 0U.  [no action; deadline has not yet passed]
-
-Step 6  [AckTracker::sweep_expired, lines 162-164]
-  NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY).
-  NEVER_COMPILED_OUT_ASSERT(expired_count <= buf_cap).
-  Return expired_count.
-
-Step 7  [DeliveryEngine::sweep_ack_timeouts, line 279]
-  Return value stored in local 'collected'.
-  NEVER_COMPILED_OUT_ASSERT(collected <= ACK_TRACKER_CAPACITY).
-
-Step 8  [DeliveryEngine::sweep_ack_timeouts, lines 283-288 — logging loop]
-  Bounded loop: i = 0 .. collected-1.
-  Per iteration:
-    Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                "ACK timeout for message_id=%llu sent to node=%u",
-                timeout_buf[i].message_id, timeout_buf[i].destination_id).
-
-Step 9  [Logger::log (inline)]
-  severity_tag(WARNING_HI) → "WARN_HI ".
-  snprintf + vsnprintf into 512-byte stack buffer.
-  fprintf(stderr, "%s\n", buf).
-
-Step 10  [DeliveryEngine::sweep_ack_timeouts, lines 290-293]
-  NEVER_COMPILED_OUT_ASSERT(collected <= ACK_TRACKER_CAPACITY).
-  Return collected to caller.
+6. `sweep_ack_timeouts()` stores returned count in `collected`.
+7. `NEVER_COMPILED_OUT_ASSERT(collected <= ACK_TRACKER_CAPACITY)`.
+8. Iterates over `timeout_buf[0..collected-1]` (Power of 10: bounded loop). For each expired envelope, logs `WARNING_HI` "ACK timeout for message_id=%llu sent to node=%u".
+9. Post-condition assert: `NEVER_COMPILED_OUT_ASSERT(collected <= ACK_TRACKER_CAPACITY)`.
+10. Returns `collected`.
 
 ---
 
-## 4. Call Tree (Hierarchical)
+## 4. Call Tree
 
-DeliveryEngine::sweep_ack_timeouts(now_us)                     [DeliveryEngine.cpp:267]
-  [NEVER_COMPILED_OUT_ASSERT m_initialized, now_us > 0]
-  AckTracker::sweep_expired(now_us, timeout_buf, 32)           [AckTracker.cpp:147]
-    [NEVER_COMPILED_OUT_ASSERT expired_buf!=nullptr, m_count<=32]
-    [loop i=0..31]
-      sweep_one_slot(i, now_us, expired_buf, buf_cap, expired_count)
-        [AckTracker.cpp:112]
-        [NEVER_COMPILED_OUT_ASSERT idx<32, expired_buf!=nullptr]
-        [if PENDING && now_us >= deadline_us]  — Branch A
-          [if expired_count < buf_cap]
-            envelope_copy(expired_buf[expired_count], m_slots[idx].env)
-              memcpy(&dst, &src, sizeof(MessageEnvelope))      [MessageEnvelope.hpp:56]
-          m_slots[idx].state = FREE
-          if m_count > 0: m_count--
-          return 1 (or 0 if buf full)
-        [if ACKED]  — Branch B
-          m_slots[idx].state = FREE
-          if m_count > 0: m_count--
-          return 0
-        [else (FREE or not-yet-expired PENDING)]  — Branch C
-          return 0
-    [NEVER_COMPILED_OUT_ASSERT m_count<=32, expired_count<=32]
-    return expired_count
-  [NEVER_COMPILED_OUT_ASSERT collected <= 32]
-  [loop i=0..collected-1]
-    Logger::log(WARNING_HI, "DeliveryEngine",
-                "ACK timeout for message_id=…, sent to node=…")
-      severity_tag(WARNING_HI) → "WARN_HI "
-      snprintf(buf, 512, "[WARN_HI ][DeliveryEngine] ")
-      vsnprintf(buf+hdr, 512-hdr, fmt, args)
-      fprintf(stderr, "%s\n", buf)
-  [NEVER_COMPILED_OUT_ASSERT collected <= 32]
-  return collected
+```
+DeliveryEngine::sweep_ack_timeouts(now_us)
+ ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
+ ├── NEVER_COMPILED_OUT_ASSERT(now_us > 0)
+ ├── [stack] MessageEnvelope timeout_buf[32]
+ ├── AckTracker::sweep_expired(now_us, timeout_buf, 32)
+ │    ├── NEVER_COMPILED_OUT_ASSERT(expired_buf != nullptr)
+ │    ├── NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY)
+ │    ├── [loop i=0..31]
+ │    │    └── AckTracker::sweep_one_slot(i, now_us, buf, 32, expired_count)
+ │    │         ├── NEVER_COMPILED_OUT_ASSERT(idx < ACK_TRACKER_CAPACITY)
+ │    │         ├── NEVER_COMPILED_OUT_ASSERT(expired_buf != nullptr)
+ │    │         ├── [PENDING + expired] envelope_copy(); state=FREE; --m_count; return 1
+ │    │         ├── [ACKED]             state=FREE; --m_count; return 0
+ │    │         └── [FREE or !expired]  return 0
+ │    ├── NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY)
+ │    ├── NEVER_COMPILED_OUT_ASSERT(expired_count <= buf_cap)
+ │    └── return expired_count
+ ├── NEVER_COMPILED_OUT_ASSERT(collected <= ACK_TRACKER_CAPACITY)
+ ├── [loop i=0..collected-1]
+ │    └── Logger::log(WARNING_HI, "ACK timeout for message_id=...")
+ ├── NEVER_COMPILED_OUT_ASSERT(collected <= ACK_TRACKER_CAPACITY)
+ └── return collected
+```
 
 ---
 
 ## 5. Key Components Involved
 
-Component              File                                  Role
-─────────────────────────────────────────────────────────────────────────────
-DeliveryEngine         src/core/DeliveryEngine.cpp/.hpp      Coordinator: drives
-                                                             the sweep; receives
-                                                             expired envelope
-                                                             copies; logs results
-                                                             as WARNING_HI.
-
-AckTracker             src/core/AckTracker.cpp/.hpp          Maintains 32-slot
-                                                             fixed table with
-                                                             three-state FSM
-                                                             (FREE/PENDING/ACKED).
-                                                             Delegates per-slot
-                                                             logic to private
-                                                             sweep_one_slot().
-
-sweep_one_slot()       src/core/AckTracker.cpp:112           Private helper:
-                                                             single-slot sweep
-                                                             logic; Power of 10
-                                                             single-purpose
-                                                             function.
-
-AckTracker::Entry      src/core/AckTracker.hpp:79            Per-message state:
-                                                             env copy (value),
-                                                             deadline_us,
-                                                             state enum.
-
-AckTracker::EntryState src/core/AckTracker.hpp:72            Enum: FREE=0,
-                                                             PENDING=1, ACKED=2.
-
-MessageEnvelope        src/core/MessageEnvelope.hpp          Data carrier; copied
-                                                             by value into
-                                                             timeout_buf[].
-
-Logger                 src/core/Logger.hpp                   Fixed-buffer stderr
-                                                             sink; WARNING_HI
-                                                             severity used for
-                                                             each expired entry.
-
-Types.hpp              src/core/Types.hpp                    ACK_TRACKER_CAPACITY
-                                                             (32).
+- **`DeliveryEngine::sweep_ack_timeouts()`** — application-facing sweep; coordinates collection and logging.
+- **`AckTracker::sweep_expired()`** — outer loop driver; iterates all slots and delegates to `sweep_one_slot()`.
+- **`AckTracker::sweep_one_slot()`** — private per-slot state machine; the only function that transitions slots to `FREE` and decrements `m_count`. Handles both expired-PENDING and ACKED transitions in one pass.
+- **`envelope_copy()`** — `memcpy` of one `MessageEnvelope`; copies expired envelopes into the output buffer for caller inspection.
+- **`Logger::log()`** — emits `WARNING_HI` per expired entry; the application's primary notification mechanism for lost ACKs.
 
 ---
 
 ## 6. Branching Logic / Decision Points
 
-Decision 1 — Slot state: PENDING, ACKED, or FREE?
-  Location: AckTracker::sweep_one_slot, lines 121, 134
-  Branch A (PENDING): check deadline.
-  Branch B (ACKED):   free immediately; return 0 (not a failure event).
-  Branch C (FREE or non-expired PENDING): return 0; no action.
-
-Decision 2 — Has the PENDING entry timed out?
-  Location: AckTracker::sweep_one_slot, line 122
-  Condition: now_us >= m_slots[idx].deadline_us
-  True  → copy to expired_buf (if space), free slot, return 1 (or 0 if buf full).
-  False → entry remains PENDING; not touched; return 0.
-
-Decision 3 — Is there room in expired_buf?
-  Location: AckTracker::sweep_one_slot, line 125
-  Condition: expired_count < buf_cap
-  True  → envelope_copy() the entry into the output buffer; added = 1.
-  False → slot is still freed (state → FREE, m_count--), but the envelope
-          is NOT added to the output buffer.
-          [RISK: the caller cannot log what it does not receive.]
-
-Decision 4 — m_count underflow guard
-  Location: AckTracker::sweep_one_slot, lines 130, 137
-  Condition: m_count > 0U before decrement.
-  Prevents unsigned integer underflow on m_count.
-  [OBSERVATION: a correct implementation should be able to assert m_count > 0
-  here; the soft guard suggests the implementation is not fully confident in
-  the invariant. See Known Risks.]
-
-Decision 5 — WARNING_HI severity
-  Location: DeliveryEngine::sweep_ack_timeouts, line 284
-  All timed-out messages are logged at WARNING_HI (system-wide, recoverable).
-  Fixed policy; no per-message or per-channel severity override.
+| Condition | True Branch | False Branch | Next Control |
+|-----------|-------------|--------------|--------------|
+| `slot.state == PENDING && now_us >= deadline_us` | Copy to output buffer (if space); set `FREE`; `--m_count`; return 1 | Check if ACKED | ACKED check |
+| `expired_count < buf_cap` (inside Branch A) | Copy envelope to output buffer; `added = 1` | Do not copy (buffer full); `added = 0` | Set `FREE`; decrement |
+| `slot.state == ACKED` | Set `FREE`; `--m_count`; return 0 | No action (FREE or non-expired PENDING); return 0 | Next slot |
+| `m_count > 0` (before decrement) | Decrement `m_count` | Do not decrement (guard against underflow) | Continue |
 
 ---
 
 ## 7. Concurrency / Threading Behavior
 
-No synchronization primitives exist in AckTracker or DeliveryEngine.
-
-[ASSUMPTION] sweep_ack_timeouts() is intended to be called from the same thread
-as send() and receive(). AckTracker state (m_slots[], m_count) is not protected
-by any mutex or std::atomic.
-
-Potential races:
-  Race A — receive() calls AckTracker::on_ack() which writes m_slots[i].state = ACKED.
-  If sweep_ack_timeouts() runs concurrently on another thread, both read and write
-  the same m_slots[i].state in sweep_one_slot(). No synchronization prevents it.
-  Concurrent write-write on the same field is undefined behavior under C++17.
-
-  Race B — send() calls AckTracker::track() which writes a FREE slot to PENDING
-  and increments m_count. Concurrent sweep() decrements m_count and sets state=FREE.
-  Concurrent modification of non-atomic uint32_t m_count is undefined behavior.
-
-Logger concurrency:
-  Logger::log() uses a stack-local buf[512]; no shared mutable state.
-  fprintf(stderr) is typically thread-safe on POSIX (locked internally), but
-  concurrent calls may produce interleaved output lines.
+- **Thread context:** The single application event loop thread calling `sweep_ack_timeouts()`. All work is in-line.
+- **No mutex or atomic operations** within `sweep_expired()` or `sweep_one_slot()`.
+- **[ASSUMPTION]** Single-threaded call model. Concurrent calls to `sweep_ack_timeouts()` and `receive()` from separate threads would both modify `AckTracker` state (`on_ack()` in `receive()` sets `ACKED`; `sweep_one_slot()` sets `FREE`) creating a data race on `m_slots[i].state` and `m_count`.
+- **Order dependency:** `sweep_one_slot()` is the only mechanism that returns slots to `FREE`. If `receive()` sets a slot to `ACKED` between two `sweep_ack_timeouts()` calls, that slot will be freed during the next sweep (Branch B) and will not appear in the output buffer.
 
 ---
 
-## 8. Memory & Ownership Semantics (C/C++ Specific)
+## 8. Memory & Ownership Semantics
 
-Allocation model:
-  No heap allocation. All buffers are stack-allocated or embedded in statically-
-  sized structs.
-
-Stack frame — DeliveryEngine::sweep_ack_timeouts():
-  timeout_buf[ACK_TRACKER_CAPACITY]: 32 × sizeof(MessageEnvelope) ≈ 132 KB.
-  [OBSERVATION: large stack allocation; see Known Risks.]
-  collected: uint32_t (4 bytes).
-
-Stack frame — AckTracker::sweep_one_slot():
-  idx, expired_count, added: uint32_t each. Minimal.
-
-Stack frame — Logger::log():
-  buf[512]: 512 bytes for formatted log line.
-  tag pointer, hdr (int), body (int), va_list args.
-
-AckTracker internal memory (statically embedded in DeliveryEngine):
-  m_slots[ACK_TRACKER_CAPACITY]: 32 Entry structs.
-    Each Entry: sizeof(MessageEnvelope) + sizeof(uint64_t) + sizeof(EntryState)
-    = ~4135 + 8 + 1 + padding bytes ≈ ~4144 bytes per slot.
-  Total: ~32 × 4144 ≈ ~133 KB, statically allocated as a member of DeliveryEngine.
-
-Envelope copying in sweep_one_slot():
-  envelope_copy() is memcpy(&dst, &src, sizeof(MessageEnvelope)).
-  Copies the full envelope including the 4096-byte payload[] array.
-  payload[] is value-embedded in the struct; no pointer indirection.
-
-Ownership transfer:
-  AckTracker::Entry::env is a deep copy made by envelope_copy() during track().
-  After sweep_one_slot(), ownership of timed-out envelopes is logically transferred
-  to the timeout_buf[] stack array in sweep_ack_timeouts(). After the logging loop,
-  those copies go out of scope and are discarded.
-
-m_count semantics:
-  m_count counts non-FREE slots. After a PENDING entry is freed, m_count is
-  decremented. After an ACKED entry is freed, m_count is also decremented.
-  m_count does not separately count PENDING vs ACKED.
+- **`timeout_buf[ACK_TRACKER_CAPACITY]`** — stack-allocated array of 32 `MessageEnvelope` structs on the `sweep_ack_timeouts()` frame. Size: 32 × sizeof(MessageEnvelope). Freed on function return.
+- **`AckTracker::m_slots[ACK_TRACKER_CAPACITY]`** — fixed array of 32 `Entry` structs (each containing a `MessageEnvelope`, `uint64_t deadline_us`, and `EntryState`) embedded in `AckTracker`, embedded in `DeliveryEngine`. No heap allocation.
+- **Envelope copies:** `sweep_one_slot()` copies expired envelopes into `timeout_buf` via `envelope_copy()`. The slot's own `env` field is not cleared on transition to `FREE` — it retains stale data until overwritten by the next `track()` call.
+- **Power of 10 Rule 3 confirmation:** No dynamic allocation on this path.
+- **`m_count` semantics:** Counts the number of non-FREE slots (PENDING + ACKED). After sweep it reflects only PENDING slots not yet expired plus any that arrived between this and the prior sweep.
 
 ---
 
 ## 9. Error Handling Flow
 
-expired_buf == nullptr (precondition violated):
-  NEVER_COMPILED_OUT_ASSERT(expired_buf != nullptr) fires in sweep_expired() at
-  line 152, and in sweep_one_slot() at line 119. Always active; aborts process.
-  In practice, timeout_buf is always stack-allocated by sweep_ack_timeouts() and
-  cannot be null.
-
-m_count underflow (m_count == 0 when decrement attempted):
-  Guard in sweep_one_slot(): `if (m_count > 0U) { --m_count; }` at lines 130/137.
-  Prevents unsigned underflow without an assertion failure.
-  [OBSERVATION: if m_count is 0 but a slot is found in PENDING or ACKED state,
-  the guard masks an internal inconsistency. A correct implementation should
-  assert m_count > 0 before decrement rather than silently skipping it.]
-
-Logger format error (snprintf returns < 0):
-  Logger::log() checks hdr < 0 and body < 0; returns silently.
-  The log line is dropped; no other action taken.
-
-Output buffer overflow (expired_count >= buf_cap before all expired PENDING
-entries are processed):
-  Affected entries are still freed (state → FREE, m_count--).
-  Their envelopes are NOT copied to the output buffer.
-  DeliveryEngine's logging loop only sees entries that fit in the buffer.
-  In practice, buf_cap == ACK_TRACKER_CAPACITY (32) == the table size, so this
-  cannot happen under current constants.
-
-m_initialized == false:
-  NEVER_COMPILED_OUT_ASSERT(m_initialized) at sweep_ack_timeouts() line 269 —
-  always active; aborts process.
+| Result code / condition | Trigger | System state after | Caller action |
+|-------------------------|---------|-------------------|---------------|
+| Returns 0 | No expired PENDING or ACKED slots found | No state modified | Caller continues polling |
+| `expired_count < actual expired` | More expired slots than `buf_cap` (cannot occur if `buf_cap == ACK_TRACKER_CAPACITY`) | All expired slots are freed; some envelopes not copied | [ASSUMPTION] Not reachable; `buf_cap` is always 32 |
+| `NEVER_COMPILED_OUT_ASSERT(collected > ACK_TRACKER_CAPACITY)` fires | Logic error in `sweep_expired()` | Abort (debug) or `on_fatal_assert()` (production) | N/A |
+| `WARNING_HI` log per expired slot | Normal operation — ACK not received before deadline | Slot freed; caller sees count > 0 | Application may retry, report failure, or reset peer connection |
 
 ---
 
 ## 10. External Interactions
 
-1. Logger::log() / fprintf(stderr)
-   Called once per timed-out entry inside the logging loop in
-   sweep_ack_timeouts() at lines 284-287 (WARNING_HI severity).
-   Fields logged: message_id (uint64_t) and destination_id (NodeId/uint32_t).
-   Full payload is NOT logged (per CLAUDE.md §7.1).
-   Uses a 512-byte stack buffer; output goes to stderr.
-
-2. No transport interaction
-   sweep_ack_timeouts() does not call the transport layer.
-   It does not send NAKs, does not notify the remote peer, and does not trigger
-   retries. It only frees local tracking state and logs.
-   [OBSERVATION: if the caller wants to trigger a NAK or retry on ACK timeout,
-   it must do so itself using the returned count — but the timeout_buf containing
-   envelope copies goes out of scope after sweep_ack_timeouts() returns, so the
-   information is lost. The caller only receives the count.]
-
-3. No RetryManager interaction
-   sweep_ack_timeouts() does not call RetryManager. RetryManager independently
-   tracks retry state; it is not notified when AckTracker frees a PENDING entry
-   due to timeout. Both can independently hold state for the same message_id.
+- No OS or network calls occur inside `sweep_expired()` or `sweep_one_slot()`.
+- The caller invokes `clock_gettime(CLOCK_MONOTONIC, ...)` via `timestamp_now_us()` before calling `sweep_ack_timeouts()`.
+- `Logger::log()` writes to the configured log sink (implementation-defined; [ASSUMPTION] synchronous write to stderr or a file).
 
 ---
 
 ## 11. State Changes / Side Effects
 
-Object               Field               Before                After
-─────────────────────────────────────────────────────────────────────────────
-AckTracker::Entry    state               PENDING (expired)     FREE
-AckTracker::Entry    state               ACKED                 FREE
-                                         (ACKED swept as GC side effect;
-                                         not counted in return value)
-AckTracker           m_count             N                     N - K
-                                                               K = freed entries
-                                                               (expired PENDING
-                                                               + ACKED swept)
-DeliveryEngine       timeout_buf         uninitialized         contains copies
-                     (stack local)                             of timed-out
-                                                               envelopes
-                                                               (lifetime: within
-                                                               sweep_ack_timeouts)
-stderr               log output          —                     one WARNING_HI
-                                                               line per timed-out
-                                                               PENDING entry
+| Object | Member | Before | After |
+|--------|--------|--------|-------|
+| `AckTracker::m_slots[i].state` | expired PENDING slot | `EntryState::PENDING` | `EntryState::FREE` |
+| `AckTracker::m_slots[j].state` | ACKED slot (opportunistic) | `EntryState::ACKED` | `EntryState::FREE` |
+| `AckTracker::m_count` | per freed slot | N | N-1 for each freed slot (PENDING or ACKED) |
+| `timeout_buf[k].env` (stack) | — | undefined | copy of expired envelope |
+| `Logger` | log output | — | `WARNING_HI` "ACK timeout for message_id=..., sent to node=..." per expired slot |
+
+`RetryManager` is not touched by this function. The corresponding retry slot (if the expired message had `RELIABLE_RETRY` semantics) remains active until it is naturally cleaned up by `collect_due()` in `pump_retries()`.
 
 ---
 
-## 12. Sequence Diagram (ASCII)
+## 12. Sequence Diagram
 
 ```
-Caller (app loop)    DeliveryEngine      AckTracker           Logger (stderr)
-      |                    |                  |                    |
-      | sweep_ack_timeouts |                  |                    |
-      | (now_us)           |                  |                    |
-      |------------------->|                  |                    |
-      |                    | sweep_expired(   |                    |
-      |                    |  now_us, buf, 32)|                    |
-      |                    |----------------->|                    |
-      |                    |                  | [loop i=0..31]     |
-      |                    |                  | sweep_one_slot()   |
-      |                    |                  |                    |
-      |                    |                  | [PENDING, expired] |
-      |                    |                  | envelope_copy(     |
-      |                    |                  |  buf[0], slot.env) |
-      |                    |                  | state = FREE       |
-      |                    |                  | m_count--          |
-      |                    |                  | return 1           |
-      |                    |                  |                    |
-      |                    |                  | [ACKED slot]       |
-      |                    |                  | state = FREE       |
-      |                    |                  | m_count--          |
-      |                    |                  | return 0           |
-      |                    |                  |                    |
-      |                    |<-----------------|                    |
-      |                    | returns K (expired PENDING count)     |
-      |                    |                  |                    |
-      |                    | [loop i=0..K-1]  |                    |
-      |                    | Logger::log(     |                    |
-      |                    |  WARNING_HI,     |                    |
-      |                    |  "ACK timeout…") |                    |
-      |                    |-------------------------------------------->
-      |                    |                  |   [WARN_HI][…]\n   |
-      | returns K          |                  |                    |
-      |<-------------------|                  |                    |
+Application       DeliveryEngine      AckTracker          sweep_one_slot()    Logger
+    |                   |                  |                     |               |
+    |--sweep_ack_timeouts(now_us)->         |                     |               |
+    |                   |                  |                     |               |
+    |                   |--sweep_expired(now,buf,32)->           |               |
+    |                   |                  | [loop i=0..31]      |               |
+    |                   |                  |--sweep_one_slot(i,now,buf,32,cnt)->  |
+    |                   |                  |                     | check PENDING  |
+    |                   |                  |                     | + deadline     |
+    |                   |                  |                     | envelope_copy()|
+    |                   |                  |                     | state=FREE     |
+    |                   |                  |                     | --m_count      |
+    |                   |                  |<-- return 1 --------|               |
+    |                   |                  |  (repeat for all slots)             |
+    |                   |<--- expired_count|                     |               |
+    |                   |                  |                     |               |
+    |                   | [loop i=0..expired_count-1]            |               |
+    |                   |--Logger::log(WARNING_HI, "ACK timeout")->             |
+    |                   |                  |                     |    (write log) |
+    |<-- collected ------|                  |                     |               |
 ```
 
 ---
 
 ## 13. Initialization vs Runtime Flow
 
-Initialization path (called once at startup):
+**Initialization (before this UC):**
+- `AckTracker::init()` `memset`s all 32 slots to zero (state = `FREE`), sets `m_count = 0`. Post-condition asserts verify all slots are `FREE`.
+- A prior `AckTracker::track()` call placed one or more slots into `PENDING` state with a `deadline_us`.
 
-  DeliveryEngine::init()               [DeliveryEngine.cpp:17]
-    m_ack_tracker.init()               [AckTracker.cpp:23]
-      memset(m_slots, 0, sizeof(m_slots))  [line 26]
-        [32 × Entry zeroed: env=0, deadline_us=0, state=0 (== FREE)]
-        [EntryState::FREE == 0U; memset(0) is correct for this enum.]
-      m_count = 0
-      NEVER_COMPILED_OUT_ASSERT(m_count == 0U)
-      [verify loop: all 32 slots assert state == FREE]
-
-Runtime setup — AckTracker::track() (called inside DeliveryEngine::send()):
-  [AckTracker.cpp:44]
-  Finds first FREE slot.
-  envelope_copy(slot.env, env) — deep copy of the outgoing envelope.
-  slot.deadline_us = timestamp_deadline_us(now_us, recv_timeout_ms)
-    [Timestamp.hpp:65: = now_us + (recv_timeout_ms * 1000ULL).]
-  slot.state = PENDING.
-  m_count++.
-
-Runtime path — sweep (called periodically):
-  DeliveryEngine::sweep_ack_timeouts(now_us) — as documented above.
-
-Key distinction:
-  AckTracker memory is statically embedded in DeliveryEngine; no allocation at
-  runtime. track() (adding entries) and sweep_one_slot() (removing entries) are
-  the only two mutators of m_slots[] state, plus on_ack() which transitions
-  PENDING → ACKED. sweep_one_slot() is the only function that transitions
-  any slot to FREE.
+**Runtime (this UC):**
+- Steady-state: called periodically from the application loop. O(32) linear scan each call.
+- Also opportunistically frees `ACKED` slots during the same pass, keeping `m_count` accurate without a separate cleanup step.
+- `sweep_one_slot()` is the only function that can transition `PENDING → FREE` or `ACKED → FREE`. All other transitions (`FREE → PENDING` via `track()`, `PENDING → ACKED` via `on_ack()`) go in the other direction.
 
 ---
 
 ## 14. Known Risks / Observations
 
-Risk 1 — Large stack allocation in sweep_ack_timeouts()
-  timeout_buf[32] of MessageEnvelope ≈ 32 × 4135 bytes ≈ 132 KB on the stack.
-  On an embedded system with a constrained stack this could cause stack overflow.
-  See docs/STACK_ANALYSIS.md for analysis of the worst-case call chain.
-
-Risk 2 — Timed-out envelopes are discarded after logging
-  The timeout_buf[] is stack-local. After sweep_ack_timeouts() returns, the
-  envelope copies are gone. If the application needs to re-queue, notify a peer,
-  or take corrective action beyond logging, it has no way to access the envelopes.
-  The return value (count) is the only signal.
-  [OBSERVATION: for RELIABLE_RETRY messages, RetryManager may still be tracking
-  the same entry and will independently exhaust retries. For RELIABLE_ACK messages
-  with no retry, the failure is silent after the log line.]
-
-Risk 3 — AckTracker does not notify RetryManager on timeout
-  When an AckTracker entry times out, RetryManager is not informed. Both can
-  independently hold state for the same message_id (RELIABLE_RETRY path).
-  A message can be declared an ACK timeout by AckTracker while RetryManager
-  continues to retry it.
-
-Risk 4 — ACKED entries are swept silently
-  sweep_one_slot() frees ACKED entries as a side effect, returning 0 for them
-  (not counted in expired_count). The caller (DeliveryEngine) has no visibility
-  into how many ACKED entries were garbage-collected during the sweep.
-
-Risk 5 — m_count inconsistency guard masks bugs
-  The guard `if (m_count > 0U) { --m_count; }` in sweep_one_slot() at lines 130
-  and 137 prevents underflow but does not assert that m_count > 0. A correct
-  implementation should be able to assert m_count > 0 here; the soft guard
-  suggests the implementation is not fully confident in the invariant.
-
-Risk 6 — deadline_us == 0 causes immediate expiry
-  If track() is called with deadline_us == 0, the entry will immediately appear
-  expired on the very first sweep_expired() call (now_us >= 0 is always true).
-  This would cause the message to be treated as timed out before any real time
-  elapses. [ASSUMPTION: callers always provide a valid future deadline_us.]
+- **Dual-purpose sweep:** `sweep_expired()` frees both expired-PENDING slots (returning them to caller) and ACKED slots (silent cleanup). A caller reading the return count sees only PENDING timeouts, not ACKED frees. This is correct behavior but can be confusing during debugging.
+- **`m_count` underflow guard:** `sweep_one_slot()` guards `if (m_count > 0)` before decrementing. If `m_count` is somehow zero when a slot is freed, the decrement is silently skipped rather than wrapping. This masks a potential invariant violation.
+- **Stale data in freed slots:** After `state = FREE`, the `env` field and `deadline_us` in the freed slot are not zeroed. A subsequent `track()` call overwrites them, but a bug that reads a `FREE` slot could see stale data.
+- **No notification to application:** The application learns about timeouts only via the return count and `WARNING_HI` log entries. There is no callback or event mechanism. The caller must read `timeout_buf` contents to know which messages timed out.
+- **RetryManager not cleaned up:** When an `AckTracker` slot for a `RELIABLE_RETRY` message expires here, the corresponding `RetryManager` slot is not freed. The retry manager will continue retrying until it too expires or exhausts its budget. This is by design (retry should outlive a single ACK timeout window) but means the two trackers can drift out of sync.
+- **`ACK_TRACKER_CAPACITY = 32`:** If 32 messages time out simultaneously, `collected = 32` and the stack buffer is fully utilized. The buffer is sized exactly to `ACK_TRACKER_CAPACITY`, so no overflow is possible.
 
 ---
 
 ## 15. Unknowns / Assumptions
 
-[ASSUMPTION 1] Single-threaded call model
-  sweep_ack_timeouts(), send(), and receive() are assumed to be called from the
-  same thread. No synchronization evidence found in the codebase.
-
-[ASSUMPTION 2] deadline_us computed via timestamp_deadline_us()
-  DeliveryEngine::send() line 106 calls timestamp_deadline_us(now_us, recv_timeout_ms).
-  Confirmed in Timestamp.hpp:65: returns now_us + (duration_ms * 1000ULL).
-
-[ASSUMPTION 3] memset(0) correctly initializes EntryState::FREE
-  AckTracker::init() uses memset(m_slots, 0, ...). EntryState::FREE == 0U
-  (per AckTracker.hpp:73). This relies on the enum's underlying representation
-  being 0 for FREE, which is explicitly stated in the code.
-
-[ASSUMPTION 4] ACK_TRACKER_CAPACITY == buf_cap in all production calls
-  sweep_ack_timeouts() always passes ACK_TRACKER_CAPACITY as buf_cap. The buffer
-  overflow guard inside sweep_one_slot() is therefore never exercised unless
-  constants change.
-
-[ASSUMPTION 5] WARNING_HI is the correct severity for ACK timeout
-  Per Types.hpp, WARNING_HI means "system-wide but recoverable." A single ACK
-  timeout is considered system-wide but the component can continue operating.
-  This is consistent with CLAUDE.md §8 error handling philosophy.
-
-[ASSUMPTION 6] No NAK or retry is triggered by sweep_ack_timeouts()
-  The function only logs and returns. It does not send NAKs and does not call
-  RetryManager. Any upper-layer response to ACK timeout must be implemented by
-  the caller using the returned count.
-
-[ASSUMPTION 7] ACKED entry count from sweep is not needed by callers
-  The return value of sweep_expired() is expired_count (expired PENDING only).
-  ACKED garbage-collection is a side effect with no separate count. Callers are
-  assumed not to need this information.
+- [ASSUMPTION] The application calls `sweep_ack_timeouts()` frequently enough that the gap between sweeps is smaller than the smallest configured `recv_timeout_ms`. If sweeps are infrequent, multiple messages may pile up as expired simultaneously.
+- [ASSUMPTION] Single-threaded call model. No concurrent modification of `AckTracker` state.
+- [ASSUMPTION] `deadline_us` is set relative to the same `CLOCK_MONOTONIC` epoch as the `now_us` passed to this function. Cross-node deadline sharing is not supported.
+- [ASSUMPTION] The caller reads `timeout_buf` and acts on the expired envelopes before calling `sweep_ack_timeouts()` again, since the stack buffer is only valid for the current call's duration.
+- [ASSUMPTION] `RetryManager` is permitted to remain active for a message even after `AckTracker` has freed its slot. The two components are intentionally decoupled: retry budget and ACK timeout are independent policies.

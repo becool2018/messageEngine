@@ -1,6 +1,6 @@
-# UC_07 — Duplicate message drop
+# UC_07 — Duplicate detected and dropped by DuplicateFilter::check_and_record()
 
-**HL Group:** HL-6 — System suppresses duplicate messages
+**HL Group:** HL-6 — Duplicate Message Suppression
 **Actor:** System
 **Requirement traceability:** REQ-3.2.6, REQ-3.3.3
 
@@ -8,558 +8,333 @@
 
 ## 1. Use Case Overview
 
-### What triggers this flow
+**Trigger:** `DeliveryEngine::receive()` has just received a structurally valid, non-expired
+DATA envelope whose `reliability_class` is `RELIABLE_RETRY`. It calls
+`m_dedup.check_and_record(env.source_id, env.message_id)` and that call returns
+`Result::ERR_DUPLICATE`.
 
-A sender operating in RELIABLE_RETRY mode has retransmitted a DATA message that the receiver has already seen and processed. The receiver's DeliveryEngine::receive() pulls the retransmitted envelope from the transport layer and passes it to DuplicateFilter::check_and_record(). The filter performs a linear scan of its 128-slot circular window, finds a matching (source_id, message_id) pair, and returns Result::ERR_DUPLICATE. DeliveryEngine propagates ERR_DUPLICATE to the caller without delivering the envelope to the application.
+**Goal:** Silently discard a message whose `(source_id, message_id)` pair already appears in
+the dedup sliding window, so that retransmitted copies of RELIABLE_RETRY messages are not
+delivered to the application a second time.
 
-This use case begins at DeliveryEngine::receive() after the transport layer has already successfully deserialized and delivered a valid, non-expired DATA envelope. The platform-layer framing path (UC_06) is complete before this use case starts.
+**Success outcome (from the system's perspective):** `check_and_record()` returns
+`ERR_DUPLICATE`. `DeliveryEngine::receive()` logs INFO and returns `ERR_DUPLICATE` to the
+application. The application-level caller discards the result; no duplicate is delivered.
 
-### Expected outcome (single goal)
-
-The duplicate envelope is silently suppressed — the application is not called, no state is modified in DuplicateFilter, and DeliveryEngine returns Result::ERR_DUPLICATE to the caller.
+**Error outcomes:**
+- There are no error outcomes in `check_and_record()` beyond `OK` (new message, recorded)
+  and `ERR_DUPLICATE` (seen before, not recorded again).
+- `check_and_record()` never fails with a resource error; window-full eviction is handled
+  silently by the round-robin `record()` logic (see UC_33 for eviction details).
 
 ---
 
 ## 2. Entry Points
 
-Primary entry point (called by application receive loop):
+```
+// src/core/DuplicateFilter.cpp — called from DeliveryEngine::receive()
+Result DuplicateFilter::check_and_record(NodeId src, uint64_t msg_id);
 
-    DeliveryEngine::receive(MessageEnvelope& env, uint32_t timeout_ms, uint64_t now_us)
-    File: src/core/DeliveryEngine.cpp, line 149
-    Sig:  Result DeliveryEngine::receive(MessageEnvelope&, uint32_t, uint64_t)
+// Indirect entry via:
+// src/core/DeliveryEngine.cpp
+Result DeliveryEngine::receive(MessageEnvelope& env,
+                               uint32_t timeout_ms,
+                               uint64_t now_us);
+```
 
-The deduplication sub-path is entered at line 203:
+`check_and_record()` is never called directly from application code. The User interacts with
+`DeliveryEngine::receive()` which calls it internally. The full inbound chain is:
 
-    Result dedup_res = m_dedup.check_and_record(env.source_id, env.message_id);
-
-Sub-entry points within DuplicateFilter (called in sequence from check_and_record):
-
-    DuplicateFilter::check_and_record(NodeId src, uint64_t msg_id)  [DuplicateFilter.cpp:93]
-    DuplicateFilter::is_duplicate(NodeId src, uint64_t msg_id)      [DuplicateFilter.cpp:40]
-    DuplicateFilter::record(NodeId src, uint64_t msg_id)            [DuplicateFilter.cpp:63]
-      [record() is NOT called on the duplicate path; listed for contrast only]
-
-Prerequisite entry points (must have been called earlier for dedup to fire):
-
-    DeliveryEngine::init()       [DeliveryEngine.cpp:17]
-    DuplicateFilter::init()      [DuplicateFilter.cpp:23]
-      [called from DeliveryEngine::init(); zeroes m_window[128], m_next=0, m_count=0]
-    DuplicateFilter::check_and_record() — called once on first receipt, recording the entry
+```
+[Application] → DeliveryEngine::receive()
+                  → TcpBackend::receive_message()         (get envelope)
+                  → timestamp_expired()                   (expiry check)
+                  → envelope_is_control()                 (ACK/control check)
+                  → DuplicateFilter::check_and_record()   (dedup — this UC)
+```
 
 ---
 
 ## 3. End-to-End Control Flow (Step-by-Step)
 
-Step 1  [DeliveryEngine::receive, line 153]
-  NEVER_COMPILED_OUT_ASSERT(m_initialized).
-  NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL).
-  Guard against calling receive() before init(). Always active; not NDEBUG-gated.
+### Step 1 — Context: how control arrives at check_and_record()
 
-Step 2  [DeliveryEngine::receive, line 161]
-  Call m_transport->receive_message(env, timeout_ms).
-  Virtual dispatch to TcpBackend (or LocalSimHarness in tests).
-  Returns Result::OK with env populated with the retransmitted DATA envelope.
-  env.message_type          = MessageType::DATA
-  env.reliability_class     = ReliabilityClass::RELIABLE_RETRY
-  env.source_id             = <original sender's NodeId>
-  env.message_id            = <same ID as the previously-seen first transmission>
-  env.expiry_time_us        = <future value or 0 (never expires)>
+1. Application calls `DeliveryEngine::receive(env, timeout_ms, now_us)`.
+2. `receive()` calls `m_transport->receive_message(env, timeout_ms)` → returns `OK` with a
+   DATA envelope whose `reliability_class == RELIABLE_RETRY`.
+3. `receive()` fires `NEVER_COMPILED_OUT_ASSERT(envelope_valid(env))`.
+4. `timestamp_expired(env.expiry_time_us, now_us)` returns `false` — message not expired.
+5. `envelope_is_control(env)` returns `false` — not an ACK/NAK/HEARTBEAT.
+6. `NEVER_COMPILED_OUT_ASSERT(envelope_is_data(env))` fires (passes).
+7. `receive()` checks `env.reliability_class == RELIABLE_RETRY`: TRUE.
+8. Calls `m_dedup.check_and_record(env.source_id, env.message_id)`.
 
-Step 3  [DeliveryEngine::receive, line 162]
-  Check res != OK.
-  For this use case: res == OK; execution continues.
+### Step 2 — Inside DuplicateFilter::check_and_record()
 
-Step 4  [DeliveryEngine::receive, line 168]
-  NEVER_COMPILED_OUT_ASSERT(envelope_valid(env)).
-  envelope_valid checks: message_type != INVALID, payload_length <= 4096,
-  source_id != NODE_ID_INVALID.
-  All conditions pass for the retransmitted DATA envelope.
+9. Pre-condition assert: `m_count <= DEDUP_WINDOW_SIZE`.
+10. Calls `is_duplicate(src, msg_id)`.
+11. Inside `DuplicateFilter::is_duplicate(src, msg_id) const`:
+    a. Iterates over all `DEDUP_WINDOW_SIZE (128)` slots in `m_window[]` (bounded loop).
+    b. For each slot at index `i`:
+       - `NEVER_COMPILED_OUT_ASSERT(i < DEDUP_WINDOW_SIZE)` fires.
+       - Checks `m_window[i].valid && m_window[i].src == src && m_window[i].msg_id == msg_id`.
+       - On match: returns `true` immediately.
+    c. If no match found: asserts `m_count <= DEDUP_WINDOW_SIZE`, returns `false`.
 
-Step 5  [DeliveryEngine::receive, lines 171-175 — expiry check]
-  Call timestamp_expired(env.expiry_time_us, now_us).
-  [Timestamp.hpp:51: returns (expiry_time_us != 0ULL) && (now_us >= expiry_time_us).]
-  For this use case: the message is not yet expired.
-  Condition evaluates false; execution continues.
+### Step 3 — Duplicate found path
 
-Step 6  [DeliveryEngine::receive, line 179]
-  Call envelope_is_control(env).
-  [MessageEnvelope.hpp:79: returns true only for ACK, NAK, or HEARTBEAT.]
-  env.message_type == DATA → returns false.
-  Control handling branch skipped.
+12. `is_duplicate()` returns `true` — this `(src, msg_id)` pair was previously recorded.
+13. `check_and_record()` returns `Result::ERR_DUPLICATE` immediately.
+    - **`record()` is NOT called** — the window is not updated.
+    - Post-condition assert does NOT fire (no assert after the ERR_DUPLICATE return).
 
-Step 7  [DeliveryEngine::receive, line 198]
-  NEVER_COMPILED_OUT_ASSERT(envelope_is_data(env)).
-  [MessageEnvelope.hpp:72: message_type == DATA.] Passes.
+### Step 4 — Back in DeliveryEngine::receive()
 
-Step 8  [DeliveryEngine::receive, line 201 — reliability class gate]
-  Check: env.reliability_class == ReliabilityClass::RELIABLE_RETRY.
-  For this use case: TRUE. Dedup is applied.
-  [BEST_EFFORT and RELIABLE_ACK messages skip dedup entirely.]
+14. `dedup_res == ERR_DUPLICATE`.
+15. `receive()` enters the `if (dedup_res == Result::ERR_DUPLICATE)` branch:
+    - Logs INFO: `"Suppressed duplicate message_id=... from src=..."`.
+    - Returns `Result::ERR_DUPLICATE`.
+16. Application receives `ERR_DUPLICATE`. The envelope's content is accessible in the output
+    parameter `env` (it was filled by `receive_message()`) but should be discarded.
 
-Step 9  [DeliveryEngine::receive, line 203]
-  Call m_dedup.check_and_record(env.source_id, env.message_id).
-  Execution transfers to DuplicateFilter::check_and_record().
+### Alternative path — New message (not a duplicate)
 
-Step 10  [DuplicateFilter::check_and_record, line 96]
-  NEVER_COMPILED_OUT_ASSERT(m_count <= DEDUP_WINDOW_SIZE).
-  [Precondition: window count is consistent with capacity. Always passes.]
-
-Step 11  [DuplicateFilter::check_and_record, line 99]
-  Call is_duplicate(src, msg_id).
-  Execution transfers to DuplicateFilter::is_duplicate().
-
-Step 12  [DuplicateFilter::is_duplicate, line 44 — linear scan]
-  Iterate i = 0 .. DEDUP_WINDOW_SIZE-1 (128 iterations, fixed bound).
-  Per iteration:
-    NEVER_COMPILED_OUT_ASSERT(i < DEDUP_WINDOW_SIZE).  [loop bound assertion]
-    Check: m_window[i].valid && m_window[i].src == src && m_window[i].msg_id == msg_id.
-    [Triple-condition: slot must be occupied AND both key fields must match.]
-
-  Step 12a — Duplicate path (this use case):
-    At slot i = K (where K is the slot where the first reception was recorded):
-      m_window[K].valid   == true   (was set by record() on first receipt)
-      m_window[K].src     == src    (matches)
-      m_window[K].msg_id  == msg_id (matches)
-    All three conditions true → return true immediately.
-    Loop does not run to completion.
-
-  Step 12b — First-receipt path (contrast, not this use case):
-    No slot has a matching (src, msg_id) pair.
-    Loop runs all 128 iterations without early return.
-    NEVER_COMPILED_OUT_ASSERT(m_count <= DEDUP_WINDOW_SIZE)  [line 54 — post-loop check].
-    Returns false.
-
-Step 13  [DuplicateFilter::check_and_record, line 99-100]
-  is_duplicate() returned true.
-  Immediately returns Result::ERR_DUPLICATE.
-  record() is NOT called; m_window, m_next, and m_count are not modified.
-
-Step 14  [DeliveryEngine::receive, lines 204-208]
-  dedup_res == Result::ERR_DUPLICATE → true.
-  Logger::log(Severity::INFO, "DeliveryEngine",
-              "Suppressed duplicate message_id=%llu from src=%u", ...)
-  [Uses 512-byte stack buffer; writes formatted line to stderr.]
-  return Result::ERR_DUPLICATE.
-
-Step 15  [Caller receives ERR_DUPLICATE]
-  The application's receive loop receives ERR_DUPLICATE.
-  env still contains the duplicate envelope content; the caller owns it.
-  The caller must not process this message.
-  No ACK is generated by DeliveryEngine on a duplicate drop.
+12b. `is_duplicate()` returns `false` — never seen this `(src, msg_id)` before.
+13b. `check_and_record()` calls `record(src, msg_id)`.
+14b. Inside `DuplicateFilter::record(src, msg_id)`:
+     a. Pre-condition asserts: `m_next < DEDUP_WINDOW_SIZE`, `m_count <= DEDUP_WINDOW_SIZE`.
+     b. Writes `{src, msg_id, valid=true}` to `m_window[m_next]`.
+     c. Advances `m_next = (m_next + 1) % DEDUP_WINDOW_SIZE` (round-robin).
+     d. If `m_count < DEDUP_WINDOW_SIZE`: increments `m_count`.
+        (If window is full, `m_count` stays at 128 — the write at step 14b silently evicted
+        the oldest entry by overwriting its slot without decrementing the count first.)
+     e. Post-condition asserts: `m_next < DEDUP_WINDOW_SIZE`,
+        `m_count <= DEDUP_WINDOW_SIZE`.
+15b. Post-condition assert in `check_and_record()`: `m_count <= DEDUP_WINDOW_SIZE`.
+16b. Returns `Result::OK`.
+17b. `receive()` continues to the INFO log and returns `OK` with the valid new envelope.
 
 ---
 
-## 4. Call Tree (Hierarchical)
+## 4. Call Tree
 
-DeliveryEngine::receive(env, timeout_ms, now_us)              [DeliveryEngine.cpp:149]
-  [NEVER_COMPILED_OUT_ASSERT m_initialized, now_us > 0]
-  m_transport->receive_message(env, timeout_ms)               [virtual dispatch, line 161]
-    TcpBackend::receive_message(env, timeout_ms)              [TcpBackend.cpp:386]
-      [dequeue/poll; returns OK with retransmitted DATA envelope]
-  [NEVER_COMPILED_OUT_ASSERT envelope_valid(env)]
-  timestamp_expired(env.expiry_time_us, now_us)               [inline, Timestamp.hpp:51]
-    → false (message not expired)
-  envelope_is_control(env)                                    [inline, MessageEnvelope.hpp:79]
-    → false (DATA message)
-  [NEVER_COMPILED_OUT_ASSERT envelope_is_data(env)]
-  [reliability_class == RELIABLE_RETRY: true]
-  m_dedup.check_and_record(env.source_id, env.message_id)    [DuplicateFilter.cpp:93]
-    [NEVER_COMPILED_OUT_ASSERT m_count <= 128]
-    is_duplicate(src, msg_id)                                  [DuplicateFilter.cpp:40]
-      [loop i=0..127]
-        [NEVER_COMPILED_OUT_ASSERT i < 128]
-        [at slot K: valid && src match && msg_id match → true]
-      return true
-    [is_duplicate returned true]
-    return Result::ERR_DUPLICATE
-  [dedup_res == ERR_DUPLICATE: true]
-  Logger::log(INFO, "DeliveryEngine",
-              "Suppressed duplicate message_id=... from src=...")
-    severity_tag(INFO) → "INFO     "
-    snprintf(buf, 512, "[INFO     ][DeliveryEngine] ")
-    vsnprintf(buf+hdr, 512-hdr, fmt, args)
-    fprintf(stderr, "%s\n", buf)
-  return Result::ERR_DUPLICATE
-
-Contrast — first receipt of the same message (not this use case):
-  m_dedup.check_and_record(env.source_id, env.message_id)
-    is_duplicate(src, msg_id) → false (no slot matches)
-    record(src, msg_id)                                        [DuplicateFilter.cpp:63]
-      [NEVER_COMPILED_OUT_ASSERT m_next < 128]
-      [NEVER_COMPILED_OUT_ASSERT m_count <= 128]
-      m_window[m_next] = {src, msg_id, valid=true}
-      m_next = (m_next + 1) % 128
-      if m_count < 128: m_count++
-      [NEVER_COMPILED_OUT_ASSERT m_next < 128]
-      [NEVER_COMPILED_OUT_ASSERT m_count <= 128]
-    return Result::OK
-  [dedup_res == OK; continue to deliver]
-  Logger::log(INFO, "DeliveryEngine", "Received data message_id=…")
-  return Result::OK
+```
+DeliveryEngine::receive(env, timeout_ms, now_us)
+ ├── TcpBackend::receive_message(env, timeout_ms)    [get envelope]
+ ├── timestamp_expired(expiry_us, now_us)             [expiry check]
+ ├── envelope_is_control(env)                         [ACK/control check]
+ ├── envelope_is_data(env)                            [assert]
+ └── DuplicateFilter::check_and_record(src, msg_id)  [this UC]
+      └── DuplicateFilter::is_duplicate(src, msg_id)
+           └── [linear scan over m_window[0..127]]
+      └── [if not duplicate] DuplicateFilter::record(src, msg_id)
+           └── [write to m_window[m_next], advance m_next]
+```
 
 ---
 
 ## 5. Key Components Involved
 
-Component              File                                  Role
-─────────────────────────────────────────────────────────────────────────────
-DeliveryEngine         src/core/DeliveryEngine.cpp/.hpp      Orchestrates the
-                                                             receive pipeline:
-                                                             transport → expiry →
-                                                             control handling →
-                                                             dedup gate. Owns
-                                                             m_dedup by value.
+- **`DeliveryEngine::receive()`** — Gate. Only calls `check_and_record()` for DATA envelopes
+  with `reliability_class == RELIABLE_RETRY`. BEST_EFFORT and RELIABLE_ACK messages bypass
+  the dedup filter entirely.
 
-DuplicateFilter        src/core/DuplicateFilter.cpp/.hpp     Fixed circular
-                                                             window of 128 Entry
-                                                             structs. Provides
-                                                             check_and_record(),
-                                                             is_duplicate(), and
-                                                             record() as separate
-                                                             primitives.
+- **`DuplicateFilter::check_and_record()`** — Atomic check-and-record. Prevents a time-of-
+  check / time-of-use gap that would exist if `is_duplicate()` and `record()` were called
+  separately by the caller.
 
-DuplicateFilter::Entry src/core/DuplicateFilter.hpp:54       POD struct:
-                                                             {NodeId src,
-                                                             uint64_t msg_id,
-                                                             bool valid}.
-                                                             16 bytes with
-                                                             natural alignment.
+- **`DuplicateFilter::is_duplicate()`** — Linear scan of the `m_window[]` array (up to 128
+  slots). O(DEDUP_WINDOW_SIZE) per call. Returns `true` on first match.
 
-MessageEnvelope        src/core/MessageEnvelope.hpp          Data carrier; the
-                                                             key fields
-                                                             source_id and
-                                                             message_id form
-                                                             the dedup key.
-                                                             reliability_class
-                                                             gates dedup.
-
-timestamp_expired()    src/core/Timestamp.hpp:51             Inline predicate;
-                                                             gates dedup behind
-                                                             expiry check.
-
-envelope_is_control()  src/core/MessageEnvelope.hpp:79       Inline predicate;
-                                                             gates dedup behind
-                                                             control-message
-                                                             dispatch.
-
-Logger                 src/core/Logger.hpp                   Fixed-buffer stderr
-                                                             sink; INFO severity
-                                                             on duplicate drop.
-
-Types.hpp              src/core/Types.hpp                    DEDUP_WINDOW_SIZE=128,
-                                                             Result::ERR_DUPLICATE=6.
+- **`DuplicateFilter::record()`** — Round-robin write. Advances `m_next` modulo
+  `DEDUP_WINDOW_SIZE`. When the window is full, the slot at the current `m_next` position is
+  overwritten, silently evicting the oldest recorded entry. This is the sliding-window
+  eviction mechanism.
 
 ---
 
 ## 6. Branching Logic / Decision Points
 
-Decision 1 — Did transport receive succeed?
-  Location: DeliveryEngine::receive, line 162
-  Condition: res != Result::OK
-  True  → return res immediately (ERR_TIMEOUT etc.); dedup never reached.
-  False → continue.
-
-Decision 2 — Is the message expired?
-  Location: DeliveryEngine::receive, line 171
-  Condition: timestamp_expired(env.expiry_time_us, now_us)
-             = (expiry_us != 0ULL) && (now_us >= expiry_us)
-  True  → log WARNING_LO, return ERR_EXPIRED; dedup never reached.
-  False → continue.
-
-Decision 3 — Is the message a control message?
-  Location: DeliveryEngine::receive, line 179
-  Condition: envelope_is_control(env)
-  True  → handle as ACK/NAK/HEARTBEAT; dedup never reached.
-  False → continue.
-
-Decision 4 — Is reliability_class == RELIABLE_RETRY?
-  Location: DeliveryEngine::receive, line 201
-  Condition: env.reliability_class == ReliabilityClass::RELIABLE_RETRY
-  False (BEST_EFFORT or RELIABLE_ACK) → dedup skipped; message delivered.
-  True  → dedup is applied. [This is the path exercised in this use case.]
-
-Decision 5 — Does any window slot match (valid && src == src && msg_id == msg_id)?
-  Location: DuplicateFilter::is_duplicate, line 48
-  True  → return true immediately (early exit from loop).
-  False → scan exhausts all 128 slots; return false.
-
-Decision 6 — Did is_duplicate return true?
-  Location: DuplicateFilter::check_and_record, line 99
-  True  → return ERR_DUPLICATE; record() not called. [This use case.]
-  False → call record(); return OK.
-
-Decision 7 — Is m_count < DEDUP_WINDOW_SIZE inside record()?
-  Location: DuplicateFilter::record, line 80
-  [Only reached on first receipt, not this use case.]
-  True  → increment m_count.
-  False → do not increment; oldest entry is silently overwritten at m_next.
+| Condition | True branch | False branch | Next control |
+|---|---|---|---|
+| `reliability_class == RELIABLE_RETRY` in `receive()` | Call `check_and_record()` | Skip dedup entirely | Return envelope |
+| `is_duplicate()` returns `true` | Return `ERR_DUPLICATE` from `check_and_record()`; `receive()` logs and returns `ERR_DUPLICATE` | Call `record()`; return `OK` | Return to application |
+| `m_window[i].valid && src_match && id_match` in scan | Return `true` (duplicate found) | Continue scan | Next slot or return false |
+| `m_count < DEDUP_WINDOW_SIZE` in `record()` | Increment `m_count` | Cap `m_count` at window size | Post-condition asserts |
 
 ---
 
 ## 7. Concurrency / Threading Behavior
 
-DuplicateFilter contains no mutexes, no std::atomic members, and no thread creation.
-m_window[], m_next, and m_count are plain non-atomic fields.
+- **`DuplicateFilter` has no synchronization.** It is owned by `DeliveryEngine` and must be
+  accessed from a single thread — the same thread that calls `receive()`.
 
-[ASSUMPTION] DuplicateFilter is accessed from a single thread only. DeliveryEngine::receive()
-is assumed single-threaded, consistent with send(), pump_retries(), and sweep_ack_timeouts().
+- **No `std::atomic` operations.** All reads and writes to `m_window[]`, `m_next`, and
+  `m_count` are plain C++ member accesses. If two threads called `receive()` concurrently on
+  the same `DeliveryEngine`, there would be a data race on these fields.
 
-The m_dedup object is embedded by value in DeliveryEngine. Each DeliveryEngine instance has
-its own independent DuplicateFilter. No sharing between instances.
-
-If receive() were called concurrently on the same DeliveryEngine from two threads, a data
-race would exist on m_window[m_next] between check_and_record() (read in is_duplicate,
-write in record) and any concurrent record() calls. No synchronization would prevent it.
+- **Linear scan is O(128).** The bounded loop in `is_duplicate()` always iterates all 128
+  slots regardless of `m_count` (it does not short-circuit at `m_count` entries). The inner
+  check `m_window[i].valid` guards against false matches on uninitialized or evicted slots.
 
 ---
 
-## 8. Memory & Ownership Semantics (C/C++ Specific)
+## 8. Memory & Ownership Semantics
 
-Allocation model:
-  No heap allocation on this path. All state is either embedded in DeliveryEngine (m_dedup)
-  or on the call stack (env reference, local Result variables).
+| Name | Location | Size | Notes |
+|---|---|---|---|
+| `m_window[]` | `DuplicateFilter` member | `DEDUP_WINDOW_SIZE * sizeof(Entry)` = 128 × (4 + 8 + 1 + padding) ≈ 128 × 16 = 2048 bytes | Fixed array; no heap. Stores `NodeId src`, `uint64_t msg_id`, `bool valid`. |
+| `m_next` | `DuplicateFilter` member | `uint32_t` (4 bytes) | Write pointer; wraps at `DEDUP_WINDOW_SIZE`. |
+| `m_count` | `DuplicateFilter` member | `uint32_t` (4 bytes) | Number of valid entries; capped at `DEDUP_WINDOW_SIZE`. |
 
-DuplicateFilter internal memory:
-  m_window[DEDUP_WINDOW_SIZE]: 128 Entry structs.
-    sizeof(Entry): NodeId(4) + uint64_t(8) + bool(1) + 3 bytes padding = 16 bytes.
-    sizeof(m_window) = 128 × 16 = 2048 bytes.
-  m_next:  uint32_t (4 bytes).
-  m_count: uint32_t (4 bytes).
-  Total: ~2056 bytes, statically embedded in DeliveryEngine.
+**Power of 10 Rule 3 confirmation:** No dynamic allocation. `DuplicateFilter` uses only its
+fixed `m_window[]` array.
 
-is_duplicate() is declared const (DuplicateFilter.hpp:38): read-only linear scan of
-m_window[]. No writes occur on the duplicate detection path.
-
-record() is NOT called on the duplicate drop path. m_window, m_next, and m_count are
-unchanged when ERR_DUPLICATE is returned. The dedup filter state is identical before
-and after a duplicate drop.
-
-Stack frame — DeliveryEngine::receive():
-  env:        MessageEnvelope& (reference; ~4135 bytes live in caller's storage).
-  timeout_ms: uint32_t (4 bytes).
-  now_us:     uint64_t (8 bytes).
-  res, dedup_res: Result enum (uint8_t each).
-
-Stack frame — DuplicateFilter::check_and_record():
-  src:    NodeId (uint32_t).
-  msg_id: uint64_t.
-  No local buffers.
-
-Stack frame — DuplicateFilter::is_duplicate():
-  src, msg_id: passed by value.
-  i: uint32_t loop index.
-  No local buffers.
-
-Envelope ownership:
-  env is passed by reference to receive(). On ERR_DUPLICATE return, env still holds the
-  duplicate message content. The caller owns env. DeliveryEngine does not clear or take
-  ownership of the envelope on a duplicate drop.
+**Object lifetime:** `DuplicateFilter m_dedup` is a member of `DeliveryEngine`. It is
+initialized by `m_dedup.init()` inside `DeliveryEngine::init()`. Its lifetime equals the
+lifetime of the `DeliveryEngine` instance.
 
 ---
 
 ## 9. Error Handling Flow
 
-Result::ERR_DUPLICATE (value 6):
-  Returned by is_duplicate() → check_and_record() → DeliveryEngine::receive() → caller.
-  Logged at INFO severity (not WARNING — duplicates are expected in RELIABLE_RETRY flows).
-  Caller receives the code and must not process the envelope as new data.
+| Condition | System state after | What `receive()` does |
+|---|---|---|
+| `check_and_record()` → `ERR_DUPLICATE` | `m_window[]` unchanged (no new entry added); INFO log; `receive()` returns `ERR_DUPLICATE` | Application should discard the envelope; call `receive()` again to get the next message |
+| `check_and_record()` → `OK` (new message) | One entry added/evicted in `m_window[]`; `m_next` advanced; `m_count` potentially at cap | `receive()` continues to return the valid envelope to the application |
 
-Upstream errors (returned before dedup is reached):
-  ERR_TIMEOUT: transport had no message; returned at line 163; dedup never reached.
-  ERR_EXPIRED: message was past its deadline; returned at line 175; dedup never reached.
-  Any transport error code: returned at line 163.
-
-NEVER_COMPILED_OUT_ASSERT failures (always active, not NDEBUG-gated):
-  check_and_record line 96: m_count > 128 → fires if count invariant broken.
-  is_duplicate line 46: i >= 128 → impossible given loop bound `i < 128`.
-  is_duplicate line 54: m_count > 128 → fires if count invariant broken post-loop.
-
-m_initialized == false:
-  NEVER_COMPILED_OUT_ASSERT(m_initialized) at receive() line 153 aborts process in all builds.
-
-No error recovery is attempted on ERR_DUPLICATE; it is a normal, expected code in the
-RELIABLE_RETRY delivery model.
+`check_and_record()` itself has no failure mode other than these two outcomes. It cannot
+return `ERR_INVALID`, `ERR_FULL`, or `ERR_IO`.
 
 ---
 
 ## 10. External Interactions
 
-1. TransportInterface::receive_message() [virtual call → TcpBackend or LocalSimHarness]
-   Called once at the start of receive(). Delivers the retransmitted envelope.
-   Not called again during the dedup path.
+No external interactions occur within `DuplicateFilter::check_and_record()` or its callees.
+No system calls, no I/O, no POSIX APIs, no atomics. This UC is entirely in-memory.
 
-2. Logger::log() / fprintf(stderr)
-   Called once inside DeliveryEngine::receive() at line 204-207 (INFO severity).
-   Fields logged: message_id (uint64_t), source_id (NodeId/uint32_t).
-   Full payload is NOT logged (per CLAUDE.md §7.1).
-   Uses a 512-byte stack buffer; output goes to stderr.
-
-3. No other external interactions
-   No socket writes, no OS timer calls, no impairment engine interactions.
-   The dedup check is entirely in-memory on the DuplicateFilter's stack-embedded array.
+`DeliveryEngine::receive()` (the caller) uses `TcpBackend::receive_message()` to obtain the
+envelope, but those interactions are described in UC_06 and UC_21, not here.
 
 ---
 
 ## 11. State Changes / Side Effects
 
-Object               Field         Before (duplicate drop)    After
-─────────────────────────────────────────────────────────────────────────────
-DuplicateFilter      m_window[]    contains (src, msg_id)     unchanged
-DuplicateFilter      m_next        N                          unchanged
-DuplicateFilter      m_count       M                          unchanged
-DeliveryEngine       m_ack_tracker not touched                not touched
-DeliveryEngine       m_retry_mgr   not touched                not touched
-stderr               log output    —                          one INFO line:
-                                                              "Suppressed
-                                                               duplicate
-                                                               message_id=…
-                                                               from src=…"
+### Duplicate path (ERR_DUPLICATE):
+| Object | Member | Before | After |
+|---|---|---|---|
+| `DuplicateFilter m_dedup` | `m_window[]` | Contains `{src, msg_id, valid=true}` at some index `k` | Unchanged — no write |
+| `DuplicateFilter m_dedup` | `m_next` | N | Unchanged |
+| `DuplicateFilter m_dedup` | `m_count` | C | Unchanged |
+| Logger | output | — | INFO entry: `"Suppressed duplicate message_id=... from src=..."` |
 
-Summary: A duplicate drop is a read-only operation on DuplicateFilter with a single
-log side effect. No state is modified anywhere in the delivery engine.
+### New message path (OK):
+| Object | Member | Before | After |
+|---|---|---|---|
+| `DuplicateFilter m_dedup` | `m_window[m_next_before]` | Any (valid or evicted) | `{src, msg_id, valid=true}` |
+| `DuplicateFilter m_dedup` | `m_next` | N | `(N+1) % DEDUP_WINDOW_SIZE` |
+| `DuplicateFilter m_dedup` | `m_count` | C (C < 128) | C+1 |
+| `DuplicateFilter m_dedup` | `m_count` (window full) | 128 | 128 (unchanged; eviction is silent) |
 
 ---
 
-## 12. Sequence Diagram (ASCII)
+## 12. Sequence Diagram
 
 ```
-Caller        DeliveryEngine     TcpBackend      DuplicateFilter    Logger (stderr)
-  |                |                 |                  |               |
-  |--receive()---->|                 |                  |               |
-  |                |--recv_msg()---->|                  |               |
-  |                |                | [returns OK,      |               |
-  |                |                |  DATA, dup env]   |               |
-  |                |<--OK, env------|                  |               |
-  |                |                                    |               |
-  |                | NCOA(m_initialized)                |               |
-  |                | NCOA(envelope_valid)               |               |
-  |                | timestamp_expired? -> false        |               |
-  |                | envelope_is_control? -> false      |               |
-  |                | NCOA(envelope_is_data)             |               |
-  |                | reliability_class==RETRY? -> true  |               |
-  |                |                                    |               |
-  |                |--check_and_record(src, msg_id)---->|               |
-  |                |                 | NCOA(m_count<=128)               |
-  |                |                 | is_duplicate(src, msg_id)        |
-  |                |                 | [scan m_window[0..127]:          |
-  |                |                 |  slot K: valid&&src&&id match]   |
-  |                |                 | is_duplicate → true              |
-  |                |                 | return ERR_DUPLICATE             |
-  |                |<--ERR_DUPLICATE-|                  |               |
-  |                |                                    |               |
-  |                | Logger::log(INFO,                  |               |
-  |                |  "Suppressed duplicate…") -------->|               |
-  |                |                                    |  [INFO] …\n   |
-  |<--ERR_DUPLICATE|                                    |               |
-```
+DeliveryEngine::receive()    DuplicateFilter         Logger
+       |                           |                    |
+       | [envelope received, DATA, RELIABLE_RETRY]      |
+       |--check_and_record(src, id)-->                  |
+       |                           |                    |
+       |                           |--is_duplicate(src, id)
+       |                           |   scan m_window[0..127]
+       |                           |   [duplicate path] match found at index k
+       |                           |<--true              |
+       |                           |                    |
+       |<--ERR_DUPLICATE-----------|                    |
+       |--log INFO "Suppressed duplicate"--------------->|
+       |--return ERR_DUPLICATE to application            |
 
-NCOA = NEVER_COMPILED_OUT_ASSERT
+       === Alternative: new message ===
+
+       |--check_and_record(src, id)-->                  |
+       |                           |--is_duplicate()    |
+       |                           |   [no match]<--false
+       |                           |--record(src, id)   |
+       |                           |   write m_window[m_next]
+       |                           |   advance m_next   |
+       |                           |   update m_count   |
+       |<--OK----------------------|                    |
+       | [continue to return envelope to application]   |
+```
 
 ---
 
 ## 13. Initialization vs Runtime Flow
 
-Initialization phase (called once at startup):
+**Initialization:**
+- `DuplicateFilter::init()` is called inside `DeliveryEngine::init()`:
+  - `memset(m_window, 0, sizeof(m_window))` — zeroes all 128 entries; `valid = false`.
+  - `m_next = 0`.
+  - `m_count = 0`.
+  - Post-condition asserts: `m_next == 0`, `m_count == 0`.
 
-  DeliveryEngine::init()               [DeliveryEngine.cpp:17]
-    m_dedup.init()                     [DuplicateFilter.cpp:23]
-      (void)memset(m_window, 0, 2048)  — all 128 slots: valid=false, src=0, msg_id=0
-      m_next  = 0
-      m_count = 0
-      NEVER_COMPILED_OUT_ASSERT(m_next == 0U)
-      NEVER_COMPILED_OUT_ASSERT(m_count == 0U)
-
-Runtime — first receipt of the message (before this use case fires):
-
-  DeliveryEngine::receive() called with the original transmission.
-  check_and_record(src, msg_id):
-    is_duplicate → false (no match in window)
-    record(src, msg_id):
-      m_window[m_next] = {src, msg_id, valid=true}
-      m_next = (m_next + 1) % 128
-      if m_count < 128: m_count++
-  Precondition for this use case is now satisfied: window contains the entry.
-
-Runtime — retransmission receipt (this use case):
-
-  DeliveryEngine::receive() called with the retransmitted duplicate.
-  check_and_record(src, msg_id):
-    is_duplicate → true (slot K found with matching pair)
-    return ERR_DUPLICATE
-  DeliveryEngine returns ERR_DUPLICATE to the caller.
-
-Key distinction:
-  No allocation occurs at runtime. The 128-slot window was sized and zeroed
-  at init time. Runtime only reads and writes fields within the already-allocated
-  Entry structs. The check on the duplicate path is purely read-only.
+**Steady-state:**
+- `check_and_record()` is called once per received RELIABLE_RETRY DATA message.
+- The window accumulates entries until `m_count == DEDUP_WINDOW_SIZE (128)`. Thereafter,
+  new entries evict the oldest (the one at `m_next`) silently.
+- The window is not cleared between messages; it persists for the lifetime of the
+  `DeliveryEngine` instance. Entries are only evicted by the round-robin overwrite.
+- There is no TTL on entries; a (src, msg_id) pair once recorded remains detectable as a
+  duplicate until evicted by a subsequent `record()` call that wraps around to its slot.
 
 ---
 
 ## 14. Known Risks / Observations
 
-Risk 1 — Window eviction causes false negatives after DEDUP_WINDOW_SIZE messages
-  Once 128 distinct (src, msg_id) pairs have been recorded, each new record()
-  call overwrites the oldest slot. A retransmission of an evicted message will pass
-  the is_duplicate() check (no slot found) and be delivered as if new. The retry
-  window for RELIABLE_RETRY messages must therefore be shorter than the time it takes
-  to cycle 128 messages, or evicted duplicates may be delivered.
+- **O(DEDUP_WINDOW_SIZE) linear scan.** Every call to `is_duplicate()` iterates all 128
+  slots. There is no early exit when `m_count` entries have been checked (it always scans
+  the full 128 even if only 5 entries are valid). For WCET analysis this is a fixed-cost
+  O(128) operation. See `docs/WCET_ANALYSIS.md`.
 
-Risk 2 — O(128) linear scan per message on the RELIABLE_RETRY receive path
-  is_duplicate() always scans all 128 slots regardless of m_count. For high-rate
-  RELIABLE_RETRY workloads, this is a fixed overhead of 128 comparisons per received
-  message. Not a correctness issue, but a bounded performance cost (see WCET_ANALYSIS.md:
-  DuplicateFilter::check_and_record is O(DEDUP_WINDOW_SIZE)).
+- **Silent eviction when window is full.** When `m_count == 128`, the slot at `m_next` is
+  overwritten with the new entry. The evicted `(src, msg_id)` pair is no longer detectable.
+  A retransmitted copy of the evicted message arriving after eviction would be delivered as a
+  new message (false negative dedup). This is inherent to a fixed sliding-window design.
 
-Risk 3 — No ACK sent on duplicate drop
-  DeliveryEngine::receive() returns ERR_DUPLICATE without sending an ACK to the remote
-  peer. If the sender's ACK deadline expires before the original ACK arrives, the sender
-  may retry again (creating further duplicates). The design relies on RetryManager's
-  max_retries limit to eventually terminate the cycle. An application-layer strategy
-  of sending an ACK for known duplicates would reduce spurious retransmissions but is
-  not implemented here.
+- **No per-sender tracking.** The window is shared across all source nodes. A single active
+  sender with a high message rate can fill the window and evict entries from other senders.
 
-Risk 4 — Dedup only applied for RELIABLE_RETRY, not RELIABLE_ACK
-  The gate at DeliveryEngine.cpp line 201 skips dedup for RELIABLE_ACK messages. A
-  RELIABLE_ACK message received twice (possible via impairment duplication or multiple
-  client connections) would be delivered twice to the application. This is consistent
-  with the specification (dedup is for retry flows), but callers of RELIABLE_ACK should
-  be aware.
+- **Dedup only active for RELIABLE_RETRY.** BEST_EFFORT and RELIABLE_ACK messages bypass
+  `check_and_record()` entirely. A BEST_EFFORT sender that retransmits manually will produce
+  duplicates at the application level.
 
-Risk 5 — No thread safety
-  DuplicateFilter has no synchronization. Concurrent calls to check_and_record() from
-  two threads would produce data races on m_window, m_next, and m_count. The intended
-  single-threaded model must be enforced by the caller.
+- **`check_and_record()` is not idempotent.** If the same `(src, msg_id)` pair is recorded
+  twice by accident (e.g., through a `check_and_record()` call on the new-message path
+  followed by an error that causes the receive to fail and retry the same frame), the second
+  call would correctly return `ERR_DUPLICATE` — so the guarantee holds.
 
 ---
 
 ## 15. Unknowns / Assumptions
 
-[ASSUMPTION 1] The first transmission of this message was previously received and
-  processed successfully. DuplicateFilter::record() was called during that first
-  receipt, inserting (source_id, message_id) into the window at some slot K.
+- [ASSUMPTION] `m_window[i].valid` is the correct way to identify live entries vs. slots
+  that have never been written (after init, all slots are zeroed and `valid == false`). After
+  eviction by round-robin write, the overwritten slot has `valid = true` with new content.
+  There is no way to distinguish an evicted slot from a live slot.
 
-[ASSUMPTION 2] DuplicateFilter and DeliveryEngine::receive() are called from a
-  single thread. No evidence of synchronization found in the codebase.
+- [ASSUMPTION] The `(src, msg_id)` pair is globally unique per sender session. MessageIdGen
+  generates monotonically increasing non-zero IDs per sender, so a given `(src, msg_id)` is
+  only reused after a full 64-bit wraparound (effectively never).
 
-[ASSUMPTION 3] The transport (TcpBackend or LocalSimHarness) does not modify
-  source_id or message_id between receipt and the dedup check. Traced code confirms
-  these fields are deserialized directly from the wire frame and not modified by
-  the transport layer.
+- [ASSUMPTION] The dedup window size (`DEDUP_WINDOW_SIZE = 128`) is sufficient for the
+  expected number of in-flight RELIABLE_RETRY messages plus their retransmissions. If
+  `max_retries = 3` and `ACK_TRACKER_CAPACITY = 32`, at most 32 messages can be in flight,
+  and each can produce up to 3 duplicates, so the window needs to hold at most 32 × 4 = 128
+  entries at steady state — exactly matching the window size. This capacity relationship
+  appears intentional.
 
-[ASSUMPTION 4] DeliveryEngine does not send an ACK upon a duplicate drop. Confirmed
-  by code inspection: the ACK-sending path is not triggered by ERR_DUPLICATE; the
-  function returns immediately after logging.
-
-[UNKNOWN 1] Whether the application layer re-sends an ACK for known duplicates as a
-  policy decision. DeliveryEngine provides no such facility; this would be an
-  application-level concern.
-
-[UNKNOWN 2] Whether m_dedup state is shared between multiple DeliveryEngine instances.
-  Based on code inspection, each DeliveryEngine has its own m_dedup by value. Multiple
-  channels would have independent windows. A duplicate arriving on a different channel
-  would not be caught. [ASSUMPTION: one DeliveryEngine per channel.]
-
-[UNKNOWN 3] Session restart semantics: if source_id is reused after a node restart and
-  message IDs restart from 0, window entries from the previous session could suppress
-  legitimately new messages until they are evicted. No session-aware invalidation
-  mechanism exists in DuplicateFilter.
+- [ASSUMPTION] Both sender and receiver use the same `(source_id, message_id)` for duplicate
+  detection. The sender's `source_id` is `m_local_id` (stamped by `DeliveryEngine::send()`)
+  and the `message_id` is assigned by `MessageIdGen::next()`. The dedup filter uses
+  `env.source_id` and `env.message_id` as received from the wire.

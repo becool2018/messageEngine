@@ -1,6 +1,6 @@
-# UC_13 — Impairment: packet loss
+# UC_13 — Packet loss: outbound message dropped with configured probability
 
-**HL Group:** HL-12 — User configures network impairments
+**HL Group:** HL-12 — Configure Network Impairments
 **Actor:** System
 **Requirement traceability:** REQ-5.1.3, REQ-5.2.1, REQ-5.2.2, REQ-5.2.4, REQ-5.3.1
 
@@ -8,349 +8,211 @@
 
 ## 1. Use Case Overview
 
-A caller invokes `TcpBackend::send_message()` to transmit a `MessageEnvelope` over TCP. The
-message is serialized to `m_wire_buf`. `ImpairmentEngine::process_outbound()` is then called.
-Inside `process_outbound()`, the private helper `check_loss()` is called: the PRNG generates a
-random double in [0.0, 1.0). If that value is less than `ImpairmentConfig::loss_probability`,
-the message is silently discarded and no bytes are transmitted. `process_outbound()` returns
-`Result::ERR_IO`, which `TcpBackend::send_message()` converts to `Result::OK` — the drop is
-transparent at the API boundary because loss is a simulated network event, not an application
-error.
+**Trigger:** A transport backend (or `LocalSimHarness`) calls `ImpairmentEngine::process_outbound(in_env, now_us)` and the engine's PRNG roll falls below the configured `loss_probability`.
+
+**Goal:** Drop the outbound message entirely — do not queue it in the delay buffer, do not deliver it. Return `Result::ERR_IO` to signal the caller that the message was lost.
+
+**Success outcome (for the impairment):** The message is silently discarded. `Logger::log(WARNING_LO, "message dropped (loss probability)")` is emitted. `m_delay_count` is unchanged. The caller receives `Result::ERR_IO`.
+
+**Error outcomes:**
+- If `loss_probability <= 0.0`: `check_loss()` returns `false` immediately; no PRNG roll occurs and no drop happens.
+- If `loss_probability >= 1.0`: `check_loss()` always calls the PRNG but the returned value is always `< 1.0` (by PRNG design), so every message is dropped.
+- If `m_cfg.enabled == false`: the loss check is never reached; the message is queued with zero latency.
+- If a partition is active: the partition drop fires first (`Result::ERR_IO` for partition) before the loss check is reached.
 
 ---
 
 ## 2. Entry Points
 
-| Entry Point | File | Signature |
-|---|---|---|
-| `TcpBackend::send_message()` | `src/platform/TcpBackend.cpp:347` | `Result TcpBackend::send_message(const MessageEnvelope& envelope)` |
-| `ImpairmentEngine::process_outbound()` | `src/platform/ImpairmentEngine.cpp:151` | `Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env, uint64_t now_us)` |
-| `ImpairmentEngine::check_loss()` | `src/platform/ImpairmentEngine.cpp:110` | `bool ImpairmentEngine::check_loss()` (private helper) |
+**Primary entry:** Transport backend or test harness calls:
+```
+// src/platform/ImpairmentEngine.cpp, line 151
+Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env, uint64_t now_us)
+```
 
-Callers above `TcpBackend` invoke through the `TransportInterface` virtual dispatch table
-(declared in `src/core/TransportInterface.hpp`). `send_message` is declared `virtual` in
-`TcpBackend` and is resolved at runtime through the vtable.
+The caller supplies:
+- `in_env` — the message envelope to be transmitted.
+- `now_us` — current monotonic time in microseconds.
 
----
-
-## 3. End-to-End Control Flow (Step-by-Step)
-
-1. **Caller invokes `TcpBackend::send_message(envelope)`** (TcpBackend.cpp:347).
-   - Precondition assertions:
-     `NEVER_COMPILED_OUT_ASSERT(m_open)` [line 349]
-     `NEVER_COMPILED_OUT_ASSERT(envelope_valid(envelope))` [line 350]
-
-2. **Serialize to wire buffer**: `Serializer::serialize(envelope, m_wire_buf, SOCKET_RECV_BUF_BYTES, wire_len)` (TcpBackend.cpp:354-358).
-   - Writes serialized bytes into the `m_wire_buf[8192]` member array.
-   - Returns `Result::OK` or an error code; checked immediately.
-   - If non-OK: log WARNING_LO "Serialize failed", return error.
-
-3. **Obtain current time**: `now_us = timestamp_now_us()` (TcpBackend.cpp:362).
-   - Calls `clock_gettime(CLOCK_MONOTONIC, &ts)` (Timestamp.hpp:35).
-   - Returns `uint64_t` microseconds since the monotonic epoch.
-
-4. **Call `m_impairment.process_outbound(envelope, now_us)`** (TcpBackend.cpp:363).
-   - `m_impairment` is an `ImpairmentEngine` instance embedded by value in `TcpBackend`
-     (no pointer indirection).
-
-5. **Inside `process_outbound()`** (ImpairmentEngine.cpp:151):
-   a. Preconditions asserted:
-      `NEVER_COMPILED_OUT_ASSERT(m_initialized)` [line 155]
-      `NEVER_COMPILED_OUT_ASSERT(envelope_valid(in_env))` [line 156]
-   b. **Master switch check** [line 159]: `if (!m_cfg.enabled)` — if impairments are
-      globally disabled, the message is queued in the delay buffer at `release_us = now_us`
-      (zero delay) via `queue_to_delay_buf()`. The loss path is not taken.
-   c. **Partition check** [line 169]: `if (is_partition_active(now_us))` — if a partition
-      is active, log WARNING_LO "message dropped (partition active)" and return `Result::ERR_IO`.
-      This is a distinct drop path; `check_loss()` is not reached.
-   d. **Loss check** [line 176]: `if (check_loss())`.
-      - Inside `check_loss()` [ImpairmentEngine.cpp:110]:
-        `NEVER_COMPILED_OUT_ASSERT(m_initialized)` [line 112]
-        `NEVER_COMPILED_OUT_ASSERT(m_cfg.loss_probability <= 1.0)` [line 113]
-        Guard: `if (m_cfg.loss_probability <= 0.0) return false;` [line 115]
-        `rand_val = m_prng.next_double()` — advances PRNG state via one xorshift64 iteration
-        (PrngEngine.hpp:91).
-        `NEVER_COMPILED_OUT_ASSERT(rand_val >= 0.0 && rand_val < 1.0)` [line 119]
-        Returns `rand_val < m_cfg.loss_probability`.
-      - If `check_loss()` returns true (loss fires):
-        Log WARNING_LO "message dropped (loss probability)" [lines 177-179]
-        Return `Result::ERR_IO` [line 179]
-
-6. **Back in `send_message()`** (TcpBackend.cpp:364-366):
-   - `if (res == Result::ERR_IO)` evaluates true.
-   - `return Result::OK` — the drop is converted to a success return.
-   - No bytes are written to any socket.
-
-7. **Execution terminates**. The message was consumed and discarded. Serialized bytes in
-   `m_wire_buf` are never transmitted.
+`check_loss()` is a private helper; it is not callable externally.
 
 ---
 
-## 4. Call Tree (Hierarchical)
+## 3. End-to-End Control Flow
+
+1. Transport backend calls `ImpairmentEngine::process_outbound(in_env, now_us)`.
+2. `process_outbound()` fires pre-condition asserts: `NEVER_COMPILED_OUT_ASSERT(m_initialized)` and `NEVER_COMPILED_OUT_ASSERT(envelope_valid(in_env))`.
+3. Branch: `!m_cfg.enabled` — if impairments are disabled, skip all checks and queue the message with zero latency (not this UC).
+4. Branch: `is_partition_active(now_us)` — evaluates the partition state machine. If `partition_enabled == false` or partition is not active, returns `false`; execution continues.
+5. **Loss check:** calls `check_loss()`:
+   a. `check_loss()` fires `NEVER_COMPILED_OUT_ASSERT(m_initialized)` and `NEVER_COMPILED_OUT_ASSERT(m_cfg.loss_probability <= 1.0)`.
+   b. If `m_cfg.loss_probability <= 0.0`: returns `false` immediately. Loss check passed; not this UC.
+   c. Calls `m_prng.next_double()`:
+      - `PrngEngine::next_double()` fires `NEVER_COMPILED_OUT_ASSERT(m_state != 0)`.
+      - Calls `next()`: applies xorshift64 (`state ^= state << 13; state ^= state >> 7; state ^= state << 17`). Updates `m_state` in-place.
+      - Divides raw `uint64_t` by `UINT64_MAX` to obtain `double` in `[0.0, 1.0)`.
+      - Fires post-condition assert: `result >= 0.0 && result < 1.0`.
+      - Returns `rand_val`.
+   d. `check_loss()` fires `NEVER_COMPILED_OUT_ASSERT(rand_val >= 0.0 && rand_val < 1.0)`.
+   e. Evaluates `rand_val < m_cfg.loss_probability`.
+      - If `true`: **message is dropped**; returns `true`.
+      - If `false`: message survives; returns `false` (not this UC).
+6. `process_outbound()` receives `true` from `check_loss()`.
+7. Logs `WARNING_LO` "message dropped (loss probability)".
+8. Returns `Result::ERR_IO` to the caller.
+9. **`m_delay_count` is not modified.** The message is gone.
+
+---
+
+## 4. Call Tree
 
 ```
-TcpBackend::send_message(envelope)                              [TcpBackend.cpp:347]
-├── NEVER_COMPILED_OUT_ASSERT(m_open)
-├── NEVER_COMPILED_OUT_ASSERT(envelope_valid(envelope))
-├── Serializer::serialize(envelope, m_wire_buf, 8192, wire_len) [line 354]
-├── timestamp_now_us()                                          [line 362]
-│   └── clock_gettime(CLOCK_MONOTONIC, &ts)                     [Timestamp.hpp:35]
-├── ImpairmentEngine::process_outbound(envelope, now_us)        [line 363]
-│   ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
-│   ├── NEVER_COMPILED_OUT_ASSERT(envelope_valid(in_env))
-│   ├── [if !m_cfg.enabled] → queue_to_delay_buf(now_us) [NOT taken in loss path]
-│   ├── is_partition_active(now_us)                             [line 169, skipped]
-│   ├── check_loss()                                            [line 176]
-│   │   ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
-│   │   ├── NEVER_COMPILED_OUT_ASSERT(loss_probability <= 1.0)
-│   │   ├── [if loss_probability <= 0.0: return false]
-│   │   ├── m_prng.next_double()                               [PrngEngine.hpp:91]
-│   │   │   ├── NEVER_COMPILED_OUT_ASSERT(m_state != 0)
-│   │   │   ├── PrngEngine::next()                             [PrngEngine.hpp:67]
-│   │   │   │   ├── m_state ^= m_state << 13U
-│   │   │   │   ├── m_state ^= m_state >> 7U
-│   │   │   │   └── m_state ^= m_state << 17U
-│   │   │   ├── result = (double)raw / (double)UINT64_MAX
-│   │   │   └── NEVER_COMPILED_OUT_ASSERT(result >= 0.0 && result < 1.0)
-│   │   └── return rand_val < loss_probability                  ← LOSS DECISION
-│   ├── [if check_loss() true]
-│   │   ├── Logger::log(WARNING_LO, "message dropped (loss probability)")
-│   │   └── return Result::ERR_IO                              ← LOSS DROP POINT
-│   └── [not reached: latency/dup/buffer logic]
-└── [if res == ERR_IO] return Result::OK                        ← DROP CONVERTED TO OK
-    [NO socket write; m_client_count check and send_to_all_clients not reached]
+ImpairmentEngine::process_outbound(in_env, now_us)
+ ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
+ ├── NEVER_COMPILED_OUT_ASSERT(envelope_valid(in_env))
+ ├── !m_cfg.enabled => false (impairments enabled)
+ ├── is_partition_active(now_us) => false (no partition)
+ ├── check_loss()
+ │    ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
+ │    ├── NEVER_COMPILED_OUT_ASSERT(loss_probability <= 1.0)
+ │    ├── loss_probability <= 0.0 => false
+ │    ├── m_prng.next_double()
+ │    │    ├── NEVER_COMPILED_OUT_ASSERT(m_state != 0)
+ │    │    ├── PrngEngine::next()          [xorshift64: updates m_state]
+ │    │    ├── result = raw / UINT64_MAX
+ │    │    └── NEVER_COMPILED_OUT_ASSERT(result in [0.0, 1.0))
+ │    ├── NEVER_COMPILED_OUT_ASSERT(rand_val in [0.0, 1.0))
+ │    └── return (rand_val < loss_probability) => true
+ ├── Logger::log(WARNING_LO, "message dropped (loss probability)")
+ └── return Result::ERR_IO
 ```
 
 ---
 
 ## 5. Key Components Involved
 
-| Component | Type | Location | Role |
-|---|---|---|---|
-| `TcpBackend` | Class | `src/platform/TcpBackend.hpp/.cpp` | Transport layer; owns `ImpairmentEngine` by value |
-| `ImpairmentEngine` | Class | `src/platform/ImpairmentEngine.hpp/.cpp` | Applies loss decision via `check_loss()` private helper |
-| `ImpairmentEngine::check_loss()` | Private method | `ImpairmentEngine.cpp:110` | Isolated loss logic; PRNG call + probability comparison |
-| `ImpairmentConfig` | POD struct | `src/platform/ImpairmentConfig.hpp` | Holds `loss_probability` (double), `enabled` (bool) |
-| `PrngEngine` | Class | `src/platform/PrngEngine.hpp` | xorshift64 PRNG; all methods inline; embedded in `ImpairmentEngine` as `m_prng` |
-| `Serializer::serialize()` | Static function | `src/core/Serializer.hpp` | Converts envelope to wire bytes before impairment check |
-| `timestamp_now_us()` | Inline function | `src/core/Timestamp.hpp:31` | CLOCK_MONOTONIC microsecond clock |
-| `Logger::log()` | Static function | `src/core/Logger.hpp` | Records WARNING_LO event on drop |
-| `envelope_valid()` | Inline function | `src/core/MessageEnvelope.hpp:63` | Validates message_type, payload_length, source_id |
+- **`ImpairmentEngine::process_outbound()`** — orchestrates all outbound impairments; the loss check is one of its guarded branches.
+- **`ImpairmentEngine::check_loss()`** — private helper; encapsulates the PRNG roll and probability comparison. Ensures `loss_probability == 0` short-circuits without touching the PRNG state.
+- **`PrngEngine::next_double()`** — xorshift64-based PRNG advancing `m_state` by one step; produces a double in `[0.0, 1.0)`.
+- **`PrngEngine::next()`** — the raw xorshift64 update; called by `next_double()`.
+- **`ImpairmentConfig::loss_probability`** — the configurable threshold; values in `[0.0, 1.0]`. Set at `init()` time.
+- **`Logger::log()`** — emits `WARNING_LO` to signal the drop event.
 
 ---
 
 ## 6. Branching Logic / Decision Points
 
-| Decision | Location | Condition | Outcome |
-|---|---|---|---|
-| Impairments master switch | ImpairmentEngine.cpp:159 | `!m_cfg.enabled` | If true: zero-delay buffer path via `queue_to_delay_buf()`, returns OK without loss check |
-| Partition active check | ImpairmentEngine.cpp:169 | `is_partition_active(now_us)` | If true: drop with ERR_IO before loss check is reached |
-| Loss probability guard | ImpairmentEngine.cpp:115 (in `check_loss`) | `m_cfg.loss_probability <= 0.0` | If true: return false immediately; PRNG not called |
-| Loss decision | ImpairmentEngine.cpp:120 (in `check_loss`) | `rand_val < m_cfg.loss_probability` | If true: `check_loss()` returns true → log + return ERR_IO |
-| ERR_IO interception | TcpBackend.cpp:364 | `res == Result::ERR_IO` | If true: return OK to caller (drop is transparent) |
-| Serialization failure | TcpBackend.cpp:356 | `!result_ok(res)` | If true: returns error before impairment engine is reached |
-
-**Ordering note**: Partition is checked before loss. If both are configured and a partition is
-active, the partition drop fires first and `check_loss()` is never called.
+| Condition | True Branch | False Branch | Next Control |
+|-----------|-------------|--------------|--------------|
+| `!m_cfg.enabled` | Queue with `release_us = now_us` (no impairments) | Continue to partition check | Partition check |
+| `is_partition_active(now_us)` | Return `ERR_IO` (partition drop) | Continue to `check_loss()` | `check_loss()` |
+| `loss_probability <= 0.0` (inside `check_loss()`) | Return `false` (no loss) | Call PRNG | PRNG roll |
+| `rand_val < loss_probability` | Return `true` (drop) | Return `false` (survive) | Caller checks return |
+| `check_loss()` returns `true` (in `process_outbound()`) | Log; return `ERR_IO` | Proceed to latency/jitter/queuing path | — |
 
 ---
 
 ## 7. Concurrency / Threading Behavior
 
-- `TcpBackend::send_message()` and `ImpairmentEngine::process_outbound()` contain no mutex,
-  spinlock, or atomic operations anywhere in this call path.
-- `PrngEngine::m_state` is a plain `uint64_t` (not `std::atomic`). It is not thread-safe.
-  [ASSUMPTION] The design assumes `send_message()` is called from a single thread at a time
-  per `TcpBackend` instance.
-- `Logger::log()` uses a stack-local buffer per call; no shared mutable state. `fprintf(stderr)`
-  is POSIX thread-safe but may interleave lines.
-- `timestamp_now_us()` calls `clock_gettime()`, which is POSIX thread-safe.
+- **Thread context:** The transport backend thread (or application thread if using `LocalSimHarness`) calling `process_outbound()`. All work is in-line.
+- **`m_prng.m_state`** — a single `uint64_t` inside `PrngEngine`; modified by every `next()` call. Not protected by any mutex or atomic.
+- **[ASSUMPTION]** Single-threaded access. Concurrent calls to `process_outbound()` from two threads would create a data race on `m_state` and `m_delay_count`.
+- **Determinism:** Given the same PRNG seed and the same call sequence, `next_double()` always returns the same value. This is the mechanism for reproducible impairment decisions (REQ-5.3.1).
 
 ---
 
-## 8. Memory & Ownership Semantics (C/C++ Specific)
+## 8. Memory & Ownership Semantics
 
-- `TcpBackend` owns `ImpairmentEngine m_impairment` by value. Constructed with `TcpBackend`,
-  destroyed with it. No heap allocation.
-- `ImpairmentEngine` owns `PrngEngine m_prng` and `ImpairmentConfig m_cfg` by value.
-  No heap allocation.
-- `m_cfg` is copied by value assignment in `ImpairmentEngine::init()` at line 51: `m_cfg = cfg`.
-- `m_wire_buf[SOCKET_RECV_BUF_BYTES]` (8192 bytes) is a member array of `TcpBackend`. Reused
-  across calls; no allocation.
-- The `MessageEnvelope` passed to `send_message()` and `process_outbound()` is accepted by
-  `const&`. In the loss path no copy is ever made — the reference goes out of scope and the
-  original is unmodified.
-- `m_delay_buf[IMPAIR_DELAY_BUF_SIZE]` (32 `DelayEntry` slots, each containing a full
-  `MessageEnvelope`) is a member array of `ImpairmentEngine`. In the loss path it is never
-  written.
-- Power of 10 rule 3 is fully observed: no `malloc`, `new`, or `delete` anywhere in this path.
+- **`in_env`** — passed by `const` reference; `check_loss()` and `process_outbound()` do not modify it. On a drop, `in_env` is simply not copied anywhere; no buffer slot is consumed.
+- **`ImpairmentEngine::m_delay_buf[IMPAIR_DELAY_BUF_SIZE]`** — not touched on the loss drop path.
+- **`PrngEngine::m_state`** — single `uint64_t` member; modified in-place by `next()`. Owned by `ImpairmentEngine::m_prng`.
+- **Power of 10 Rule 3 confirmation:** No dynamic allocation on this path. `check_loss()` and `next_double()` operate entirely on pre-allocated state.
 
 ---
 
 ## 9. Error Handling Flow
 
-| Condition | Source Location | Propagation |
-|---|---|---|
-| `Serializer::serialize` returns non-OK | TcpBackend.cpp:356 | Logged WARNING_LO "Serialize failed"; returned to caller; impairment engine not reached |
-| `process_outbound` returns `ERR_IO` (loss drop) | ImpairmentEngine.cpp:179 | Intercepted at TcpBackend.cpp:364; converted to `Result::OK` |
-| `process_outbound` returns `ERR_IO` (partition drop) | ImpairmentEngine.cpp:172 | Same interception path; also converted to `Result::OK` |
-| `process_outbound` returns `ERR_FULL` (delay buf full) | ImpairmentEngine.cpp:163 or 195 | Not intercepted by the ERR_IO branch; returned as-is to caller |
-| `process_outbound` returns `OK` | (normal path) | Execution continues to `m_client_count` check, `send_to_all_clients()`, `flush_delayed_to_clients()` |
-| `clock_gettime` fails | Timestamp.hpp:36 | `NEVER_COMPILED_OUT_ASSERT(result == 0)` fires; aborts process (always active in release) |
-
-The conversion of `ERR_IO` to `OK` at TcpBackend.cpp:364-366 means the caller cannot
-distinguish a packet-loss drop from a successful send. This is intentional by design.
+| Result code | Trigger condition | System state after | Caller action |
+|-------------|------------------|--------------------|---------------|
+| `Result::ERR_IO` (loss drop) | `rand_val < loss_probability` | `m_prng.m_state` advanced by one step; all other state unchanged | Caller treats message as undeliverable; may log; `RELIABLE_RETRY` senders will retry via `pump_retries()` |
+| `Result::ERR_IO` (partition drop) | `is_partition_active()` returns `true` | `m_prng.m_state` unchanged (partition check precedes loss check); partition state may advance | Same as loss |
+| `Result::ERR_FULL` | `m_delay_count >= IMPAIR_DELAY_BUF_SIZE` (reached only if loss check passes) | Not applicable to this UC | Log `WARNING_HI`; caller drops message |
+| `Result::OK` | Loss check passes; message queued | `m_delay_count` incremented; delay slot allocated | Not this UC |
 
 ---
 
 ## 10. External Interactions
 
-| Interaction | Function | API |
-|---|---|---|
-| Monotonic clock read | `timestamp_now_us()` | `clock_gettime(CLOCK_MONOTONIC, ...)` — POSIX |
-| Event logging | `Logger::log()` | Writes formatted line to stderr via fprintf |
-| Socket I/O | `send_to_all_clients()` / `tcp_send_frame()` | Not reached in the loss path |
+No OS calls, socket calls, or file I/O occur on the loss-drop path. The entire path is in-process computation:
+- `m_prng.next_double()` — pure arithmetic on `m_state`.
+- `Logger::log()` — writes to configured log sink ([ASSUMPTION] synchronous write to stderr or a buffer).
 
-In the loss path, no socket operations occur. The only external interactions are the monotonic
-clock read and the Logger call.
+The caller of `process_outbound()` is typically a transport backend such as `UdpBackend`, which itself calls `sendto(2)` — but only after `process_outbound()` returns `OK` (i.e., not on the drop path).
 
 ---
 
 ## 11. State Changes / Side Effects
 
-| State | Object | Change |
-|---|---|---|
-| `m_prng.m_state` | `PrngEngine` inside `ImpairmentEngine` | Advanced by one xorshift64 iteration (irreversible; deterministic given seed) |
-| `m_delay_buf`, `m_delay_count` | `ImpairmentEngine` | Not modified in the loss path |
-| `m_wire_buf` | `TcpBackend` | Written by serialization but never transmitted |
-| Logger output | Process-level | WARNING_LO record emitted: "message dropped (loss probability)" |
+| Object | Member | Before | After |
+|--------|--------|--------|-------|
+| `PrngEngine::m_state` | S | S | xorshift64(S) — advanced by one step |
+| `ImpairmentEngine::m_delay_buf` | — | unchanged | unchanged (no slot allocated) |
+| `ImpairmentEngine::m_delay_count` | D | D | D (unchanged) |
+| `Logger` | log output | — | `WARNING_LO` "message dropped (loss probability)" |
 
-Side-effect ordering:
-1. Serialization writes m_wire_buf (wasted work).
-2. PRNG state advances (one pseudorandom value consumed for the loss check in `check_loss()`).
-3. Logger emits a WARNING_LO record.
-4. No socket bytes are written.
-5. No delay buffer entries are created.
+The dropped message is gone. Nothing in `AckTracker` or `RetryManager` is touched by `ImpairmentEngine`; those components live one layer above in `DeliveryEngine`.
 
 ---
 
-## 12. Sequence Diagram (ASCII)
+## 12. Sequence Diagram
 
 ```
-Caller         TcpBackend        Serializer   timestamp_now_us  ImpairmentEngine  PrngEngine  Logger
-  |                 |                 |               |                 |              |           |
-  |send_message(env)|                 |               |                 |              |           |
-  |---------------->|                 |               |                 |              |           |
-  |                 |serialize(env,..) |               |                 |              |           |
-  |                 |---------------->|               |                 |              |           |
-  |                 |<--OK, wire_len--|               |                 |              |           |
-  |                 |                 |               |                 |              |           |
-  |                 |   timestamp_now_us()             |                 |              |           |
-  |                 |------------------------------->  |                 |              |           |
-  |                 |<---------- now_us --------------|                 |              |           |
-  |                 |                 |               |                 |              |           |
-  |                 |  process_outbound(env, now_us)  |                 |              |           |
-  |                 |-------------------------------------------------->|              |           |
-  |                 |                 |               |    [enabled=true]              |           |
-  |                 |                 |               |    [no partition]              |           |
-  |                 |                 |               |    check_loss()                |           |
-  |                 |                 |               |    [loss_prob > 0.0]           |           |
-  |                 |                 |               |                 |next_double() |           |
-  |                 |                 |               |                 |------------->|           |
-  |                 |                 |               |                 |<-- 0.031 ----|           |
-  |                 |                 |               |   [0.031 < 0.05: DROP]         |           |
-  |                 |                 |               |  log(WARNING_LO "dropped")     |           |
-  |                 |                 |               |                 |------------------------->|
-  |                 |<----------------------------------------- ERR_IO-|              |           |
-  |                 |[ERR_IO → return OK; no send_to_all_clients]      |              |           |
-  |<---- OK --------|                 |               |                 |              |           |
+TransportBackend    ImpairmentEngine    check_loss()     PrngEngine::next_double()    Logger
+     |                    |                 |                       |                    |
+     |--process_outbound(env,now)->         |                       |                    |
+     |                    |--!enabled?-->false                      |                    |
+     |                    |--is_partition_active()-->false          |                    |
+     |                    |--check_loss()-->|                       |                    |
+     |                    |                |--loss_prob <= 0? false |                    |
+     |                    |                |--m_prng.next_double()-->                   |
+     |                    |                |                        | xorshift64(state)  |
+     |                    |                |                        | raw/UINT64_MAX     |
+     |                    |                |<--- rand_val ----------|                    |
+     |                    |                | rand_val < prob => true|                    |
+     |                    |<--- true -------|                       |                    |
+     |                    |--Logger::log(WARNING_LO, "dropped")------>                  |
+     |<-- ERR_IO ---------|                 |                       |                    |
 ```
 
 ---
 
 ## 13. Initialization vs Runtime Flow
 
-**Initialization phase** (called once at startup via `TcpBackend::init()` at
-TcpBackend.cpp:88):
+**Initialization (before this UC):**
+- `ImpairmentEngine::init(cfg)` stores `cfg.loss_probability` in `m_cfg.loss_probability`, asserts it is in `[0.0, 1.0]`, and calls `m_prng.seed(cfg.prng_seed)` (or default seed 42).
+- The constructor also calls `m_prng.seed(1ULL)` as a safe initial state; `init()` always reseeds.
 
-1. `m_recv_queue.init()` — zeros ring buffer state.
-2. `impairment_config_default(imp_cfg)` (ImpairmentConfig.hpp:79) — sets:
-   `enabled = false`, `loss_probability = 0.0`, `duplication_probability = 0.0`,
-   `prng_seed = 42ULL`, and all other fields to 0/false.
-3. `imp_cfg.enabled = config.channels[0U].impairments_enabled` — sets master switch only
-   (TcpBackend.cpp:102). Other fields (loss_probability, etc.) remain at defaults.
-4. `m_impairment.init(imp_cfg)` (ImpairmentEngine.cpp:44):
-   - `NEVER_COMPILED_OUT_ASSERT(cfg.reorder_window_size <= IMPAIR_DELAY_BUF_SIZE)` [line 47]
-   - `NEVER_COMPILED_OUT_ASSERT(cfg.loss_probability >= 0.0 && cfg.loss_probability <= 1.0)` [line 48]
-   - `m_cfg = cfg` — full config copied by value.
-   - `seed = (cfg.prng_seed != 0ULL) ? cfg.prng_seed : 42ULL` — default is 42.
-   - `m_prng.seed(seed)` — sets `m_state`; 0 is coerced to 1 (xorshift64 requires non-zero state).
-   - `memset(m_delay_buf, 0, sizeof(m_delay_buf))`.
-   - `memset(m_reorder_buf, 0, sizeof(m_reorder_buf))`.
-   - `m_delay_count = 0`, `m_reorder_count = 0`.
-   - `m_partition_active = false`, `m_partition_start_us = 0`, `m_next_partition_event_us = 0`.
-   - `m_initialized = true`.
-
-**Note**: `loss_probability` defaults to `0.0`. `TcpBackend::init()` only sets `enabled`
-from `TransportConfig`; it does not expose `loss_probability`. [ASSUMPTION] A higher-level
-layer must configure `loss_probability` before passing the config to `init()`.
-
-**Runtime phase**: Each call to `send_message()` reads `m_cfg.loss_probability` (immutable
-after `init()`). The only mutable impairment-engine state affected in the loss path is
-`m_prng.m_state` (advanced once in `check_loss()`).
+**Runtime (this UC):**
+- On each call to `process_outbound()`, the PRNG advances exactly once via `next_double()` (or zero times if `loss_probability <= 0.0`).
+- The loss decision is consumed from the PRNG stream before the duplication roll. Order within the stream is: loss → (latency/jitter, then) duplication.
+- The PRNG state is cumulative across all messages processed in a session. Replay requires the same seed and the same sequence of `process_outbound()` calls.
 
 ---
 
 ## 14. Known Risks / Observations
 
-1. **`check_loss()` uses `loss_probability <= 0.0` as the no-loss guard**: The guard
-   `if (m_cfg.loss_probability <= 0.0)` prevents any PRNG call when loss is disabled. This
-   means the PRNG state is not advanced in the no-loss case, which affects the sequence for
-   subsequent probabilistic checks (e.g., duplication) if they are enabled. PRNG call count
-   varies by configuration.
-
-2. **`TcpBackend::init()` does not expose the full `ImpairmentConfig`**: Only `enabled`
-   is pulled from `TransportConfig`. Fields like `loss_probability`, `jitter_*`, and
-   `partition_*` remain at defaults (0.0/false/42) unless a higher-level layer sets them
-   before calling `init()`.
-
-3. **`ERR_IO` conflation**: `process_outbound()` returns `ERR_IO` for both loss drops and
-   partition drops. `TcpBackend::send_message()` converts both to `Result::OK`. The caller
-   cannot distinguish the two cases, and there is no metric counter exposed at the
-   `send_message` boundary.
-
-4. **PRNG not thread-safe**: If `send_message()` is called concurrently from multiple threads
-   on the same `TcpBackend` instance, `m_prng.m_state` is subject to a data race (undefined
-   behavior under the C++17 memory model). No atomics protect it.
-
-5. **Serialization occurs before the loss check**: CPU work and a full buffer write happen for
-   every message, including those that will be dropped. Checking loss before serializing would
-   save work, at the cost of leaving `m_wire_buf` stale on the loss path.
-
-6. **`NEVER_COMPILED_OUT_ASSERT` in `check_loss()` is always active**: The assertion
-   `NEVER_COMPILED_OUT_ASSERT(rand_val >= 0.0 && rand_val < 1.0)` at line 119 fires in both
-   debug and production builds. A PRNG implementation defect that produces an out-of-range
-   value would abort the process in production.
+- **PRNG consumed on every non-zero loss check:** Even when the loss check passes (message survives), `next_double()` advances `m_state`. The PRNG stream is shared with duplication (also calls `next_double()`). If both are enabled, each message consumes two PRNG steps.
+- **`loss_probability == 1.0` edge case:** The PRNG returns values in `[0.0, 1.0)` — strictly less than 1.0. So `rand_val < 1.0` is always true, and 100% loss is achieved for any `loss_probability >= 1.0`. Setting `loss_probability = 1.0` behaves as total loss.
+- **Impairment order:** Partition check fires before loss check. A partition in effect will never consume a PRNG step for loss; the PRNG is only advanced when partition is inactive.
+- **`IMPAIR_DELAY_BUF_SIZE = 32`:** Irrelevant to the loss-drop path (no slot is allocated), but worth noting for the survival path: if the delay buffer is full when a message survives the loss check, it is also dropped with `ERR_FULL`.
+- **`WARNING_LO` log volume:** With high `loss_probability`, every dropped message emits a `WARNING_LO` log line. Under load this can flood the log sink.
 
 ---
 
 ## 15. Unknowns / Assumptions
 
-- [ASSUMPTION] `TransportInterface` is a pure virtual base class; `TcpBackend::send_message`
-  is dispatched via vtable from callers holding a `TransportInterface*`.
-- [ASSUMPTION] `Serializer::serialize()` is deterministic and does not allocate heap memory.
-- [ASSUMPTION] `Logger::log()` is safe to call from within `process_outbound()` and does not
-  block or re-enter `ImpairmentEngine`.
-- [ASSUMPTION] `loss_probability` is configured to a non-zero value by a higher-level
-  initialization layer not shown in these files; without it, the loss path is never entered
-  at runtime.
-- [ASSUMPTION] `impairment_config_default()` is always called before `ImpairmentEngine::init()`
-  to establish safe baseline values. The default prng_seed is 42 (ImpairmentConfig.hpp:92).
-- [UNKNOWN] The `Logger::log()` implementation's thread-safety and blocking characteristics
-  (Logger.hpp not fully traced here).
-- [UNKNOWN] Whether `Serializer::serialize` can fail for valid envelopes (e.g., oversized
-  payload). Confirmed that it checks the payload_length constraint before writing.
-- [UNKNOWN] `IMPAIR_DELAY_BUF_SIZE` is 32 (Types.hpp:28). Whether this is sufficient for all
-  deployment scenarios under high message rates is a tuning question.
-
----
+- [ASSUMPTION] `process_outbound()` is called from a single thread. Concurrent access would race on `m_prng.m_state`.
+- [ASSUMPTION] The caller checks the `Result` return value of `process_outbound()` and does not attempt further delivery when `ERR_IO` is returned.
+- [ASSUMPTION] `loss_probability` is in `[0.0, 1.0]` after `init()`. The init-time assert enforces this, but runtime mutation of `m_cfg` (if any) is not guarded.
+- [ASSUMPTION] The PRNG seed is set once at `init()` time and is not changed during a session. Reseeding mid-session would break deterministic replay.
+- [ASSUMPTION] The xorshift64 algorithm's output distribution is uniform enough for packet-loss simulation purposes. No statistical bias correction is applied.
