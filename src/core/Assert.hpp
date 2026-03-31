@@ -14,16 +14,19 @@
  * Behavior by build type:
  *   Debug (!NDEBUG): logs condition + file + line at FATAL severity,
  *                    then calls ::abort() for immediate crash and stack trace.
- *   Production (NDEBUG): logs FATAL with condition + file + line, sets the
- *                    assert_state::g_fatal_fired flag for caller detection,
- *                    then returns without aborting — allows controlled
- *                    component-level recovery by the caller.
+ *   Production (NDEBUG): logs FATAL with condition + file + line, then calls
+ *                    the registered IResetHandler::on_fatal_assert() via
+ *                    virtual dispatch (Power of 10 Rule 9 vtable exception).
+ *                    If no handler has been registered, falls back to
+ *                    ::abort() — identical to the debug path.
+ *                    If the handler returns (embedded soft-reset), sets
+ *                    g_fatal_fired so callers can detect and re-init the
+ *                    component.
  *
- * Production recovery pattern (CLAUDE.md §10 option a):
- *   The caller polls assert_state::check_and_clear() after any API call to
- *   detect a fired assertion and reset the component.  Function pointers
- *   (option b) are prohibited by Power of 10 Rule 9; calling abort() in
- *   production (option c) is prohibited by CLAUDE.md §10.1.
+ * Handler registration: call assert_state::set_reset_handler(handler) once
+ *   during system initialisation.  For POSIX builds, register
+ *   AbortResetHandler::instance().  For embedded, register a target-specific
+ *   IResetHandler that calls the MCU reset API.
  *
  * The condition expression is ALWAYS evaluated regardless of build type.
  *
@@ -37,15 +40,16 @@
 #define CORE_ASSERT_HPP
 
 #include "Logger.hpp"
-#include "AssertState.hpp"  // g_fatal_fired (std::atomic<bool> carve-out, CLAUDE.md §3)
-#include <cstdlib>
+#include "AssertState.hpp"  // g_fatal_fired, get_reset_handler()
+#include <cstdlib>          // ::abort() — fallback when no handler registered
 
 // MISRA C++:2023 deviation: macro required to capture __FILE__ and __LINE__
 // at the call site. No equivalent language construct exists in C++17.
 // do-while(false) idiom prevents dangling-else and double-evaluation issues.
 #ifdef NDEBUG
-// Production build: log FATAL, set recovery flag, do not abort.
-// Caller detects failure via assert_state::check_and_clear() (CLAUDE.md §10).
+// Production build: log FATAL, call registered IResetHandler via vtable,
+// fall back to ::abort() if no handler, set g_fatal_fired if handler returns.
+// Power of 10 Rule 9 exception: virtual dispatch via IResetHandler vtable.
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define NEVER_COMPILED_OUT_ASSERT(cond)                                           \
     do {                                                                           \
@@ -53,6 +57,14 @@
             Logger::log(Severity::FATAL, "Assert",                                \
                         "Assertion failed: (%s) at %s:%d",                        \
                         #cond, __FILE__, static_cast<int>(__LINE__));             \
+            IResetHandler* h_ = assert_state::get_reset_handler();                \
+            if (h_ != nullptr) {                                                   \
+                h_->on_fatal_assert(#cond, __FILE__,                              \
+                                    static_cast<int>(__LINE__));                  \
+            } else {                                                               \
+                ::abort(); /* no handler: abort is safest fallback */             \
+            }                                                                      \
+            /* Reached only if handler returned (embedded soft-reset path). */    \
             assert_state::g_fatal_fired.store(true,                               \
                 std::memory_order_release);                                        \
         }                                                                          \
