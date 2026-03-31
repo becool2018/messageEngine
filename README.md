@@ -54,12 +54,14 @@ Expired messages (past `expiry_time`) are dropped before delivery at both sender
 - Validated on deserialization: padding bytes, payload length bounds
 
 ### 4. Transport Abstraction
-A single `TransportInterface` API (`init`, `send_message`, `receive_message`, `close`) hides all transport differences. Three implementations are provided:
+A single `TransportInterface` API (`init`, `send_message`, `receive_message`, `close`) hides all transport differences. Five implementations are provided:
 
 | Backend | Description |
 |---|---|
 | **TcpBackend** | Connection-oriented; length-prefixed framing; multi-client server support |
 | **UdpBackend** | Connectionless; one datagram per message; no built-in reliability |
+| **TlsTcpBackend** | TLS-encrypted TCP (mbedTLS 4.0 PSA Crypto); per-client TLS context; plaintext fallback for tests |
+| **DtlsUdpBackend** | DTLS-encrypted UDP; DTLS cookie anti-replay; MTU enforcement (1,400 bytes); plaintext fallback |
 | **LocalSimHarness** | In-process; two instances linked by pointer; no OS sockets; deterministic |
 
 ### 5. Impairment Engine
@@ -107,14 +109,17 @@ Dependencies flow strictly downward. No lower layer may reference a higher one; 
 │  DeliveryEngine · Serializer · AckTracker             │
 │  RetryManager · DuplicateFilter · RingBuffer          │
 │  MessageEnvelope · Timestamp · MessageIdGen           │
+│  Assert · AssertState · IResetHandler                 │
 └──────────────────────┬───────────────────────────────┘
                        │  implements TransportInterface
 ┌──────────────────────▼───────────────────────────────┐
 │  Platform Layer  (src/platform/)                      │
 │  TcpBackend · UdpBackend · LocalSimHarness            │
+│  TlsTcpBackend · DtlsUdpBackend                       │
 │  ImpairmentEngine · PrngEngine · SocketUtils          │
+│  ImpairmentConfigLoader · ISocketOps · IMbedtlsOps    │
 └──────────────────────┬───────────────────────────────┘
-                       │  POSIX sockets / OS APIs
+                       │  POSIX sockets / OS APIs / mbedTLS
 ┌──────────────────────▼───────────────────────────────┐
 │  OS  (Berkeley sockets, POSIX clocks, pthreads)       │
 └──────────────────────────────────────────────────────┘
@@ -132,7 +137,9 @@ messageEngine/
 │   │   ├── MessageEnvelope.hpp
 │   │   ├── TransportInterface.hpp
 │   │   ├── ChannelConfig.hpp
+│   │   ├── TlsConfig.hpp
 │   │   ├── RingBuffer.hpp
+│   │   ├── ImpairmentConfig.hpp
 │   │   ├── Serializer.hpp/cpp
 │   │   ├── MessageId.hpp/cpp
 │   │   ├── Timestamp.hpp/cpp
@@ -140,15 +147,25 @@ messageEngine/
 │   │   ├── AckTracker.hpp/cpp
 │   │   ├── RetryManager.hpp/cpp
 │   │   ├── DeliveryEngine.hpp/cpp
-│   │   ├── Assert.hpp
+│   │   ├── Assert.hpp            # NEVER_COMPILED_OUT_ASSERT macro
+│   │   ├── AssertState.hpp/cpp   # Global assert handler registry
+│   │   ├── IResetHandler.hpp     # Abstract fatal-assert handler interface
+│   │   ├── AbortResetHandler.hpp # POSIX abort() implementation
 │   │   └── Logger.hpp
 │   ├── platform/         # OS and socket adapters
 │   │   ├── PrngEngine.hpp/cpp
 │   │   ├── ImpairmentConfig.hpp
 │   │   ├── ImpairmentEngine.hpp/cpp
+│   │   ├── ImpairmentConfigLoader.hpp/cpp  # INI-style file parser
+│   │   ├── ISocketOps.hpp                  # Injectable POSIX socket interface
+│   │   ├── SocketOpsImpl.hpp/cpp           # Production POSIX implementation
+│   │   ├── IMbedtlsOps.hpp                 # Injectable mbedTLS interface
+│   │   ├── MbedtlsOpsImpl.hpp/cpp          # Production mbedTLS implementation
 │   │   ├── SocketUtils.hpp/cpp
 │   │   ├── TcpBackend.hpp/cpp
 │   │   ├── UdpBackend.hpp/cpp
+│   │   ├── TlsTcpBackend.hpp/cpp           # TLS over TCP (mbedTLS 4.0 PSA)
+│   │   ├── DtlsUdpBackend.hpp/cpp          # DTLS over UDP (mbedTLS 4.0 PSA)
 │   │   └── LocalSimHarness.hpp/cpp
 │   └── app/              # Demo programs
 │       ├── Server.cpp
@@ -161,7 +178,14 @@ messageEngine/
 │   ├── test_RetryManager.cpp
 │   ├── test_DeliveryEngine.cpp
 │   ├── test_ImpairmentEngine.cpp
-│   └── test_LocalSim.cpp
+│   ├── test_ImpairmentConfigLoader.cpp
+│   ├── test_LocalSim.cpp
+│   ├── test_AssertState.cpp
+│   ├── test_SocketUtils.cpp
+│   ├── test_TcpBackend.cpp
+│   ├── test_UdpBackend.cpp
+│   ├── test_TlsTcpBackend.cpp
+│   └── test_DtlsUdpBackend.cpp
 ├── docs/                 # Requirements, design, and analysis documents
 ├── Makefile
 ├── .cppcheck-suppress
@@ -241,7 +265,14 @@ build/test_AckTracker
 build/test_RetryManager
 build/test_DeliveryEngine
 build/test_ImpairmentEngine
+build/test_ImpairmentConfigLoader
 build/test_LocalSim
+build/test_AssertState
+build/test_SocketUtils
+build/test_TcpBackend
+build/test_UdpBackend
+build/test_TlsTcpBackend
+build/test_DtlsUdpBackend
 ```
 
 ---
@@ -261,24 +292,28 @@ make coverage_report
 make coverage_show
 ```
 
-Policy floor: ≥ 75% branch coverage for all safety-critical (SC) files (CLAUDE.md §14).
+Policy floor: 100% of all reachable branches for SC files (CLAUDE.md §14). Per-file ceilings below 100% are documented in `docs/COVERAGE_CEILINGS.md`; every missed branch is individually justified.
 
 | File | Branch % | SC? | Status |
 |---|---|---|---|
-| `core/Serializer.cpp` | 74.36% | SC | Ceiling — 20 missed assert branches (`[[noreturn]]`) |
+| `core/Serializer.cpp` | 74.36% | SC | Ceiling — 20 missed assert `[[noreturn]]` branches |
 | `core/DuplicateFilter.cpp` | 76.19% | SC | Pass |
 | `core/AckTracker.cpp` | 76.71% | SC | Pass |
-| `core/RetryManager.cpp` | 75.53% | SC | Pass |
+| `core/RetryManager.cpp` | 79.12% | SC | Pass |
 | `core/DeliveryEngine.cpp` | 75.22% | SC | Pass |
-| `platform/ImpairmentEngine.cpp` | 74.19% | SC | Ceiling — 40 assert + 8 unreachable branches |
-| `platform/ImpairmentConfigLoader.cpp` | 79.82% | SC | Pass |
-| `platform/TlsTcpBackend.cpp` | 76.24% | SC | Pass |
-| `platform/LocalSimHarness.cpp` | 69.01% | NSC | Line coverage sufficient |
-| `platform/SocketUtils.cpp` | 22.51% | NSC | UDP helpers untested |
-| `platform/TcpBackend.cpp` | 0% | SC | **Gap — no test suite** |
-| `platform/UdpBackend.cpp` | 0% | SC | **Gap — no test suite** |
+| `core/AssertState.cpp` | 50.00% | NSC-infra | Ceiling — abort() False branch untestable |
+| `platform/ImpairmentEngine.cpp` | 75.27% | SC | Ceiling — 40 assert + 6 unreachable branches |
+| `platform/ImpairmentConfigLoader.cpp` | 90.83% | SC | Pass |
+| `platform/TcpBackend.cpp` | 78.12% | SC | Pass |
+| `platform/UdpBackend.cpp` | 75.51% | SC | Pass |
+| `platform/TlsTcpBackend.cpp` | 76.87% | SC | Pass |
+| `platform/DtlsUdpBackend.cpp` | 83.33% | SC | Pass |
+| `platform/LocalSimHarness.cpp` | 72.46% | SC | Ceiling — 17 assert + 2 unreachable branches |
+| `platform/MbedtlsOpsImpl.cpp` | 69.77% | SC | Ceiling — 26 assert `[[noreturn]]` branches |
+| `platform/SocketUtils.cpp` | 64.50% | NSC | Ceiling — POSIX errors unreachable on loopback |
+| `platform/SocketOpsImpl.cpp` | 68.57% | NSC | Line coverage sufficient |
 
-Ceiling files are at the maximum achievable coverage given that `NEVER_COMPILED_OUT_ASSERT` generates one permanently-missed branch per call (the `abort()` path is `[[noreturn]]`; LLVM does not insert a profile counter for it). These are documented deviations, not defects.
+Ceiling files are at the maximum achievable coverage: `NEVER_COMPILED_OUT_ASSERT` generates one permanently-missed branch per call (the `[[noreturn]]` `abort()` path), and certain POSIX/mbedTLS error paths cannot be triggered in a loopback test environment. All are documented deviations, not defects.
 
 ---
 
@@ -332,6 +367,8 @@ This section shows how to integrate messageEngine into your own application. The
 |---|---|---|
 | `TcpBackend` | `platform/TcpBackend.hpp` | Production; connection-oriented, length-framed |
 | `UdpBackend` | `platform/UdpBackend.hpp` | Production; datagram, low-overhead |
+| `TlsTcpBackend` | `platform/TlsTcpBackend.hpp` | Production; TLS-encrypted TCP; set `tls_enabled=false` for plaintext test mode |
+| `DtlsUdpBackend` | `platform/DtlsUdpBackend.hpp` | Production; DTLS-encrypted UDP; MTU-bounded datagrams |
 | `LocalSimHarness` | `platform/LocalSimHarness.hpp` | Tests and simulation; no OS sockets |
 
 All three implement `TransportInterface` and are interchangeable at the `DeliveryEngine` level.
@@ -528,7 +565,7 @@ All functions return a `Result` enum. Never ignore a return value.
 
 The [`docs/use_cases/`](docs/use_cases/) directory contains detailed use case documents that trace every user-facing capability and system-internal sub-function through the live source code.
 
-- **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 35 use cases, grouped by high-level capability (HL-1 through HL-17), Application Workflow patterns, and System Internal sub-functions.
+- **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 42 use cases, grouped by high-level capability (HL-1 through HL-20), Application Workflow patterns, and System Internal sub-functions.
 
 Each individual `UC_*.md` document follows a 15-section flow-of-control format covering: entry points, end-to-end control flow, call tree, branching logic, concurrency behavior, memory ownership, error handling, external interactions, state changes, and known risks.
 
@@ -623,8 +660,8 @@ This project ships a set of reusable Claude Code skills in `.claude/skills/`. Sk
 
 | Category | Lines |
 |---|---|
-| `src/` (production + headers) | 5,778 |
-| `tests/` | 3,278 |
-| **Total** | **9,056** |
+| `src/` (production + headers) | 9,824 |
+| `tests/` | 10,999 |
+| **Total** | **20,823** |
 
-38 source files across 3 layers and 8 test suites.
+54 source files across 3 layers and 15 test suites.
