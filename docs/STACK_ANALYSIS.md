@@ -113,6 +113,12 @@ additional frame is pushed (the `MbedtlsOpsImpl::ssl_write()` thin-wrapper, ~16 
 the library call. This increases the depth to 10 frames on the flush path but does not
 change the peak stack estimate materially.
 
+**`ssl_handshake` note:** `run_dtls_handshake()` (called during `init()`, not at runtime) also
+dispatches through `IMbedtlsOps::ssl_handshake()` → `MbedtlsOpsImpl::ssl_handshake()` for
+up to `DTLS_HANDSHAKE_MAX_ITER` = 32 iterations. Because this occurs entirely within `init()`
+and not on any send/receive runtime path, it does not appear in any of the six chains above
+and does not change the worst-case runtime stack depth.
+
 **Depth:** 10 frames (with `MbedtlsOpsImpl::ssl_write()` virtual dispatch; 9 without)
 **Estimated peak stack (our code):** ~764 B (adds ~16 B wrapper frame)
 

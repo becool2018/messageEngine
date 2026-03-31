@@ -153,7 +153,10 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 
 | Function | Worst-case operations | Bound | Notes |
 |----------|----------------------|-------|-------|
-| All `MbedtlsOpsImpl` methods | 1 vtable dispatch + 1 library call passthrough | O(1) per method (wrapper overhead only) | All methods are thin wrappers: one dereference + one function call. The O(P) or O(1) cost of the underlying mbedTLS operation dominates and is already accounted for in `DtlsUdpBackend` rows above. |
+| `ssl_handshake()` | up to `DTLS_HANDSHAKE_MAX_ITER` = 32 vtable dispatches × (1 pointer deref + 1 `mbedtls_ssl_handshake` call) | O(32) = O(1) dispatches (init-phase only) | Called from `run_dtls_handshake()` during `init()` only; not on any runtime send/receive path. The mbedTLS handshake cost per call is non-deterministic (depends on network RTT); on a deterministic embedded target, use the library's documented per-state operation count. Does not contribute to runtime WCET. |
+| `ssl_write()` | 1 vtable dispatch + 1 `mbedtls_ssl_write` call | O(P) dominated by mbedTLS record encryption | Wrapper overhead O(1); underlying cost already included in `DtlsUdpBackend::send_message()` row above. |
+| `ssl_read()` | 1 vtable dispatch + 1 `mbedtls_ssl_read` call | O(P) dominated by mbedTLS record decryption | Wrapper overhead O(1); underlying cost already included in `DtlsUdpBackend::receive_message()` row above. |
+| All other `MbedtlsOpsImpl` methods | 1 vtable dispatch + 1 library call passthrough | O(1) per method (wrapper overhead only) | All other methods are init-phase thin wrappers: one pointer dereference + one function call. Cost is not on any runtime SC path. |
 
 ### src/platform/PrngEngine.hpp
 
