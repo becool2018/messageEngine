@@ -79,6 +79,16 @@ Result TcpBackend::bind_and_listen(const char* ip, uint16_t port)
         m_listen_fd = -1;
         return Result::ERR_IO;
     }
+    // Make listen fd non-blocking so accept_clients() returns immediately
+    // when no pending connection exists, allowing receive_message() to honour
+    // its timeout. Power of 10 Rule 2 deviation: infrastructure poll loop.
+    if (!socket_set_nonblocking(m_listen_fd)) {
+        Logger::log(Severity::WARNING_HI, "TcpBackend",
+                    "socket_set_nonblocking failed on listen fd");
+        socket_close(m_listen_fd);
+        m_listen_fd = -1;
+        return Result::ERR_IO;
+    }
     m_open = true;
     Logger::log(Severity::INFO, "TcpBackend", "Server listening on %s:%u", ip, port);
     NEVER_COMPILED_OUT_ASSERT(m_listen_fd >= 0);       // Power of 10: post-condition
@@ -328,10 +338,52 @@ void TcpBackend::poll_clients_once(uint32_t timeout_ms)
     NEVER_COMPILED_OUT_ASSERT(m_open);                  // Power of 10: transport must be open
     NEVER_COMPILED_OUT_ASSERT(timeout_ms <= 60000U);    // Power of 10: reasonable per-poll timeout
 
-    if (m_is_server) {
+    // Build a pollfd set: listen fd (server, not at capacity) + all client fds.
+    // This replaces the prior blocking accept() design. The listen fd is non-blocking
+    // (set in init()); poll() provides the per-iteration wait.
+    // Power of 10: fixed-size stack array; bounded build loop.
+    static const uint32_t MAX_POLL_FDS = MAX_TCP_CONNECTIONS + 1U;
+    struct pollfd pfds[MAX_POLL_FDS];
+    uint32_t nfds = 0U;
+
+    bool has_listen = m_is_server && (m_listen_fd >= 0) &&
+                      (m_client_count < MAX_TCP_CONNECTIONS);
+    if (has_listen) {
+        pfds[0U].fd      = m_listen_fd;
+        pfds[0U].events  = POLLIN;
+        pfds[0U].revents = 0;
+        nfds = 1U;
+    }
+    // Power of 10 Rule 2: fixed bound (MAX_TCP_CONNECTIONS)
+    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
+        if (m_client_fds[i] >= 0) {
+            NEVER_COMPILED_OUT_ASSERT(nfds < MAX_POLL_FDS);
+            pfds[nfds].fd      = m_client_fds[i];
+            pfds[nfds].events  = POLLIN;
+            pfds[nfds].revents = 0;
+            ++nfds;
+        }
+    }
+    NEVER_COMPILED_OUT_ASSERT(nfds <= MAX_POLL_FDS);
+
+    if (nfds == 0U) {
+        return;  // No fds to watch; outer loop handles retry timing
+    }
+
+    // Block until a fd is readable or timeout_ms elapses.
+    // Power of 10 Rule 2 deviation: infrastructure poll; bounded per-call timeout.
+    int poll_rc = poll(pfds, static_cast<nfds_t>(nfds),
+                       static_cast<int>(timeout_ms));
+    if (poll_rc <= 0) {
+        return;  // Timeout (0) or error (−1): nothing to accept or receive
+    }
+
+    // Accept new connection if listen fd is readable
+    if (has_listen && ((pfds[0U].revents & POLLIN) != 0)) {
         (void)accept_clients();
     }
 
+    // Receive from any connected client fd that is now readable.
     // Power of 10 rule 2: fixed loop bound
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         if (m_client_fds[i] >= 0) {
@@ -372,7 +424,11 @@ Result TcpBackend::send_message(const MessageEnvelope& envelope)
         return Result::OK;
     }
 
-    send_to_all_clients(m_wire_buf, wire_len);
+    // process_outbound() already queued the message into the impairment delay
+    // buffer (with release_us = now_us when latency is 0). flush_delayed_to_clients()
+    // collects all deliverable messages and sends them — covering both the 0-delay
+    // pass-through case and the delayed case.  Calling send_to_all_clients() here as
+    // well would cause every message to be sent twice.
     flush_delayed_to_clients(now_us);
 
     NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);  // Post-condition

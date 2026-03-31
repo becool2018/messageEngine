@@ -142,6 +142,19 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 | `send_message()` | serialize (O(P)) + process_outbound + collect_deliverable (O(I)) + TLS write to C clients (O(P × C)) | O(P × C + I × P) = O(163 840) | Identical bound to `TcpBackend::send_message()`; TLS record framing is O(P) per frame (mbedTLS adds ≤ 29-byte overhead per record). TLS handshake cost is init-phase only and not included here. |
 | `receive_message()` | poll_count × (net_poll + accept + C TLS recv + deserialize) | O(poll_count × C × P) = O(1 638 400) | poll_count ≤ 50; `mbedtls_net_poll()` is O(1) (select on 1 fd). TLS decryption is O(P) per record. Bound equals `TcpBackend::receive_message()`. |
 
+### src/platform/DtlsUdpBackend.hpp
+
+| Function | Worst-case operations | Bound | Notes |
+|----------|----------------------|-------|-------|
+| `send_message()` | serialize (O(P)) + MTU check (O(1)) + process_outbound (O(I)) + collect_deliverable (O(I)) + 1 vtable dispatch (O(1)) + mbedtls_ssl_write (O(P)) | O(P + I) = O(4096 + 32) | Single datagram (single-peer model). `IMbedtlsOps` virtual dispatch (1 pointer dereference + call) is O(1) and does not change the asymptotic bound. `ERR_INVALID` returned early for P > DTLS_MAX_DATAGRAM_BYTES = 1400; in practice P ≤ 1400 on the critical path. DTLS encryption is O(P) per record; handshake cost is init-phase only. |
+| `receive_message()` | poll_count × (recv_one_dtls_datagram (O(P)) + 1 vtable dispatch (O(1))) + flush_delayed_to_queue (O(I)) | O(poll_count × P + I) = O(50 × 4096 + 32) | poll_count ≤ 50; each `IMbedtlsOps::ssl_read` virtual dispatch is O(1) and folds into the per-datagram cost. Bound equal to `UdpBackend::receive_message()`. |
+
+### src/platform/IMbedtlsOps (interface) / MbedtlsOpsImpl
+
+| Function | Worst-case operations | Bound | Notes |
+|----------|----------------------|-------|-------|
+| All `MbedtlsOpsImpl` methods | 1 vtable dispatch + 1 library call passthrough | O(1) per method (wrapper overhead only) | All methods are thin wrappers: one dereference + one function call. The O(P) or O(1) cost of the underlying mbedTLS operation dominates and is already accounted for in `DtlsUdpBackend` rows above. |
+
 ### src/platform/PrngEngine.hpp
 
 | Function | Worst-case operations | Bound | Notes |

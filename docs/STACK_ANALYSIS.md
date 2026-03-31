@@ -94,25 +94,72 @@ main()  [~64 B]
 
 ---
 
+### Chain 5 — DTLS outbound send
+
+```
+main()  [~64 B]
+  └─ run_client_iteration()  [~80 B]
+       └─ send_test_message()  [~300 B]  ← large: payload_buf[256] on stack
+            └─ DeliveryEngine::send()  [~64 B]
+                 └─ DeliveryEngine::send_via_transport()  [~48 B]
+                      └─ DtlsUdpBackend::send_message()  [~48 B]
+                           └─ Serializer::serialize()  [~32 B]
+                                └─ ImpairmentEngine::process_outbound()  [~80 B]
+                                     └─ ImpairmentEngine::queue_to_delay_buf()  [~32 B]
+```
+
+When `flush_delayed_to_clients()` delivers the message via `IMbedtlsOps::ssl_write()`, one
+additional frame is pushed (the `MbedtlsOpsImpl::ssl_write()` thin-wrapper, ~16 B) before
+the library call. This increases the depth to 10 frames on the flush path but does not
+change the peak stack estimate materially.
+
+**Depth:** 10 frames (with `MbedtlsOpsImpl::ssl_write()` virtual dispatch; 9 without)
+**Estimated peak stack (our code):** ~764 B (adds ~16 B wrapper frame)
+
+**mbedTLS library note:** `mbedtls_ssl_write()` invokes DTLS record-layer encryption internally. The mbedTLS call stack is not enumerable by static inspection of this codebase, but the init-phase deviation documented in DtlsUdpBackend.hpp confirms all allocations occur in `init()` and not on the send path. For embedded deployment, use a tool-based analysis (avstack or StackAnalyzer) that includes the mbedTLS library's object files.
+
+---
+
+### Chain 6 — DTLS inbound receive
+
+```
+main()  [~64 B]
+  └─ run_client_iteration()  [~80 B]
+       └─ wait_for_echo()  [~64 B]
+            └─ DeliveryEngine::receive()  [~80 B]
+                 └─ DtlsUdpBackend::receive_message()  [~80 B]
+                      └─ DtlsUdpBackend::recv_one_dtls_datagram()  [~48 B]
+                           └─ MbedtlsOpsImpl::ssl_read()  [~16 B]  ← IMbedtlsOps virtual dispatch
+                                └─ Serializer::deserialize()  [~32 B]
+```
+
+**Depth:** 8 frames (one extra for `MbedtlsOpsImpl::ssl_read()` thin wrapper)
+**Estimated peak stack:** ~504 B
+
+---
+
 ## Summary
 
 | Chain | Depth (frames) | Peak stack estimate |
 |-------|---------------|---------------------|
-| 1 — Outbound send | 9 | ~748 B |
-| 2 — Inbound receive | 8 | ~480 B |
+| 1 — Outbound send (TCP/UDP) | 9 | ~748 B |
+| 2 — Inbound receive (TCP/UDP) | 8 | ~480 B |
 | 3 — Retry pump | **10** | ~572 B |
 | 4 — ACK timeout sweep | 6 | ~384 B |
-| **Worst case** | **10 (Chain 3)** | **~748 B (Chain 1, dominated by payload_buf[256])** |
+| 5 — DTLS outbound send | **10** | ~764 B |
+| 6 — DTLS inbound receive | 8 | ~504 B |
+| **Worst case** | **10 (Chains 3 and 5)** | **~764 B (Chain 5, dominated by payload_buf[256] + IMbedtlsOps wrapper)** |
 
 The worst-case **frame depth** is **10 frames** (Chain 3 — retry pump), which extends
 Chain 1's path by appending the `Serializer::serialize()` →
 `ImpairmentEngine::process_outbound()` → `queue_to_delay_buf()` tail that
-`TcpBackend::send_message()` always invokes.
+`TcpBackend::send_message()` always invokes. DtlsUdpBackend chains (5, 6) do not
+exceed existing worst cases.
 
-The worst-case **stack size** remains **~748 bytes** (Chain 1), dominated by
+The worst-case **stack size** remains **~748 bytes** (Chains 1 and 5), dominated by
 the `payload_buf[256]` local array in `send_test_message()`. Chain 3 reaches only
 ~572 B because it lacks that large local buffer; the extra three frames add
-approximately 144 B of frame overhead.
+approximately 144 B of frame overhead. Chain 5 equals Chain 1 in depth and size.
 
 ---
 

@@ -24,7 +24,8 @@ CORE_SRC := \
     src/core/DuplicateFilter.cpp \
     src/core/AckTracker.cpp \
     src/core/RetryManager.cpp \
-    src/core/DeliveryEngine.cpp
+    src/core/DeliveryEngine.cpp \
+    src/core/AssertState.cpp
 
 PLATFORM_SRC := \
     src/platform/PrngEngine.cpp \
@@ -34,7 +35,9 @@ PLATFORM_SRC := \
     src/platform/TcpBackend.cpp \
     src/platform/TlsTcpBackend.cpp \
     src/platform/UdpBackend.cpp \
-    src/platform/LocalSimHarness.cpp
+    src/platform/DtlsUdpBackend.cpp \
+    src/platform/LocalSimHarness.cpp \
+    src/platform/MbedtlsOpsImpl.cpp
 
 ALL_LIB_SRC := $(CORE_SRC) $(PLATFORM_SRC)
 
@@ -71,7 +74,10 @@ tests: \
     build/test_RetryManager \
     build/test_DeliveryEngine \
     build/test_ImpairmentConfigLoader \
-    build/test_TlsTcpBackend
+    build/test_TlsTcpBackend \
+    build/test_DtlsUdpBackend \
+    build/test_TcpBackend \
+    build/test_UdpBackend
 
 build/test_%: $(ALL_LIB_OBJS) build/objs/tests/test_%.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
@@ -198,7 +204,7 @@ COV_CXXFLAGS  := $(filter-out -Werror,$(CXXFLAGS)) \
                  -fprofile-instr-generate -fcoverage-mapping -O0
 COV_LDFLAGS   := -fprofile-instr-generate $(LDFLAGS)
 COV_LIB_OBJS  := $(patsubst src/%.cpp,$(COV_OBJ_DIR)/%.o,$(ALL_LIB_SRC))
-TEST_NAMES    := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader TlsTcpBackend
+TEST_NAMES    := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader TlsTcpBackend DtlsUdpBackend TcpBackend UdpBackend
 COV_TESTS     := $(patsubst %,build/cov_test_%,$(TEST_NAMES))
 
 $(COV_OBJ_DIR)/core/%.o: src/core/%.cpp
@@ -229,6 +235,9 @@ coverage: $(COV_TESTS)
 	@LLVM_PROFILE_FILE="build/cov/DeliveryEngine.profraw" build/cov_test_DeliveryEngine >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/ImpairmentConfigLoader.profraw" build/cov_test_ImpairmentConfigLoader >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/TlsTcpBackend.profraw" build/cov_test_TlsTcpBackend >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/DtlsUdpBackend.profraw" build/cov_test_DtlsUdpBackend >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/TcpBackend.profraw"    build/cov_test_TcpBackend    >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/UdpBackend.profraw"    build/cov_test_UdpBackend    >/dev/null 2>&1
 	@$(LLVM_PROFDATA) merge -sparse \
 	    build/cov/MessageEnvelope.profraw \
 	    build/cov/Serializer.profraw \
@@ -240,6 +249,9 @@ coverage: $(COV_TESTS)
 	    build/cov/DeliveryEngine.profraw \
 	    build/cov/ImpairmentConfigLoader.profraw \
 	    build/cov/TlsTcpBackend.profraw \
+	    build/cov/DtlsUdpBackend.profraw \
+	    build/cov/TcpBackend.profraw \
+	    build/cov/UdpBackend.profraw \
 	    -o build/cov/merged.profdata
 	@echo "=== Coverage Report (src/ only) ==="
 	@$(LLVM_COV) report \
@@ -254,6 +266,9 @@ coverage: $(COV_TESTS)
 	    -object build/cov_test_DeliveryEngine \
 	    -object build/cov_test_ImpairmentConfigLoader \
 	    -object build/cov_test_TlsTcpBackend \
+	    -object build/cov_test_DtlsUdpBackend \
+	    -object build/cov_test_TcpBackend \
+	    -object build/cov_test_UdpBackend \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "Policy (CLAUDE.md §12): SC functions require >= branch coverage."
@@ -274,6 +289,9 @@ coverage_show:
 	    -object build/cov_test_DeliveryEngine \
 	    -object build/cov_test_ImpairmentConfigLoader \
 	    -object build/cov_test_TlsTcpBackend \
+	    -object build/cov_test_DtlsUdpBackend \
+	    -object build/cov_test_TcpBackend \
+	    -object build/cov_test_UdpBackend \
 	    -format=text \
 	    -show-branches=count \
 	    $(CORE_SRC) $(PLATFORM_SRC)
@@ -301,6 +319,9 @@ coverage_report: coverage
 	    -object build/cov_test_DeliveryEngine \
 	    -object build/cov_test_ImpairmentConfigLoader \
 	    -object build/cov_test_TlsTcpBackend \
+	    -object build/cov_test_DtlsUdpBackend \
+	    -object build/cov_test_TcpBackend \
+	    -object build/cov_test_UdpBackend \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "--- Per-function detail ---"
@@ -317,6 +338,9 @@ coverage_report: coverage
 	    -object build/cov_test_DeliveryEngine \
 	    -object build/cov_test_ImpairmentConfigLoader \
 	    -object build/cov_test_TlsTcpBackend \
+	    -object build/cov_test_DtlsUdpBackend \
+	    -object build/cov_test_TcpBackend \
+	    -object build/cov_test_UdpBackend \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "--- Policy compliance (CLAUDE.md §14) ---"
@@ -330,9 +354,12 @@ coverage_report: coverage
 	@echo "      48 missed: 40 assert branches + 8 architecturally-impossible"
 	@echo "      logic branches (assert-protected or mathematically unreachable)."
 	@echo ""
-	@echo "  Known gaps (SC files with no test suite -- blocking defects):"
-	@echo "    platform/TcpBackend.cpp          0%  no test suite"
-	@echo "    platform/UdpBackend.cpp          0%  no test suite"
+	@echo "    platform/DtlsUdpBackend.cpp     72% ceiling"
+	@echo "      63 missed: 24 assert True branches + 10 impairment-delay paths"
+	@echo "      (fixed_latency_ms not configurable via TransportConfig public API)"
+	@echo "      + ~14 hard mbedTLS/POSIX error paths (ssl_write requires open"
+	@echo "      DTLS session; remaining paths covered by IMbedtlsOps mock tests)."
+	@echo "      Ceiling updated: 10 mock tests added via DI (items 1-4, 5-8, 9-10)."
 	@echo ""
 	@echo "  NSC files (line coverage sufficient, branch floor not enforced):"
 	@echo "    platform/LocalSimHarness.cpp"
@@ -355,4 +382,7 @@ run_tests: tests
 	@echo "=== test_DeliveryEngine ==="; build/test_DeliveryEngine
 	@echo "=== test_ImpairmentConfigLoader ==="; build/test_ImpairmentConfigLoader
 	@echo "=== test_TlsTcpBackend ==="; build/test_TlsTcpBackend
+	@echo "=== test_DtlsUdpBackend ==="; build/test_DtlsUdpBackend
+	@echo "=== test_TcpBackend ==="; build/test_TcpBackend
+	@echo "=== test_UdpBackend ==="; build/test_UdpBackend
 	@echo "=== ALL TESTS PASSED ==="

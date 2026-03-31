@@ -14,9 +14,16 @@
  * Behavior by build type:
  *   Debug (!NDEBUG): logs condition + file + line at FATAL severity,
  *                    then calls ::abort() for immediate crash and stack trace.
- *   Production (NDEBUG): logs FATAL with condition + file + line,
+ *   Production (NDEBUG): logs FATAL with condition + file + line, sets the
+ *                    assert_state::g_fatal_fired flag for caller detection,
  *                    then returns without aborting — allows controlled
  *                    component-level recovery by the caller.
+ *
+ * Production recovery pattern (CLAUDE.md §10 option a):
+ *   The caller polls assert_state::check_and_clear() after any API call to
+ *   detect a fired assertion and reset the component.  Function pointers
+ *   (option b) are prohibited by Power of 10 Rule 9; calling abort() in
+ *   production (option c) is prohibited by CLAUDE.md §10.1.
  *
  * The condition expression is ALWAYS evaluated regardless of build type.
  *
@@ -30,13 +37,15 @@
 #define CORE_ASSERT_HPP
 
 #include "Logger.hpp"
+#include "AssertState.hpp"  // g_fatal_fired (std::atomic<bool> carve-out, CLAUDE.md §3)
 #include <cstdlib>
 
 // MISRA C++:2023 deviation: macro required to capture __FILE__ and __LINE__
 // at the call site. No equivalent language construct exists in C++17.
 // do-while(false) idiom prevents dangling-else and double-evaluation issues.
 #ifdef NDEBUG
-// Production build: log FATAL, do not abort — allow controlled recovery.
+// Production build: log FATAL, set recovery flag, do not abort.
+// Caller detects failure via assert_state::check_and_clear() (CLAUDE.md §10).
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
 #define NEVER_COMPILED_OUT_ASSERT(cond)                                           \
     do {                                                                           \
@@ -44,6 +53,8 @@
             Logger::log(Severity::FATAL, "Assert",                                \
                         "Assertion failed: (%s) at %s:%d",                        \
                         #cond, __FILE__, static_cast<int>(__LINE__));             \
+            assert_state::g_fatal_fired.store(true,                               \
+                std::memory_order_release);                                        \
         }                                                                          \
     } while (false)
 #else

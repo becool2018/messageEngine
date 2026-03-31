@@ -84,6 +84,26 @@
 | Plaintext mode used when TLS expected | Unencrypted traffic on secured link | Cat II | `tls_enabled` flag controls code path | Configuration-level control; operator responsibility to set `tls_enabled=true` when security is required |
 | Partial TLS record delivered | Corrupt fields reconstructed silently | Cat I HAZ-005 | `mbedtls_ssl_read()` returns exact byte count; 4-byte length prefix checked | `tls_recv_frame()` validates payload length against header; rejects oversized frames |
 
+### DtlsUdpBackend
+
+| Failure Mode | System Effect | Severity | Detection | Mitigation |
+|---|---|---|---|---|
+| DTLS handshake failure (bad cert/key) | Connection not established; no messages exchanged | Cat III | `mbedtls_ssl_handshake()` returns non-zero; logged at `WARNING_HI`; `init()` returns `ERR_IO` | Cert/key validated in `setup_dtls_config()` before handshake; `ERR_IO` forces caller to abort |
+| DTLS cert/key files missing or corrupt | `init()` fails; transport not opened | Cat III | `mbedtls_x509_crt_parse_file()` / `mbedtls_pk_parse_keyfile()` return non-zero | `is_open()` returns `false`; upper layer must check `init()` result |
+| Plaintext mode used when DTLS expected | Unencrypted traffic on secured link | Cat II | `tls_enabled` flag; if `false`, plaintext UDP path taken (REQ-6.4.5) | Operator responsibility to set `tls_enabled=true`; same pattern as TlsTcpBackend |
+| DTLS cookie exchange bypass | Amplification attack vector; unverified client | Cat II | `mbedtls_ssl_conf_dtls_cookies()` armed in server `setup_dtls_config()`; cookie checked on every ServerHello | Cookie context initialised and armed before any handshake; `HELLO_VERIFY_REQUIRED` handled in `run_dtls_handshake()` (REQ-6.4.2) |
+| Serialized payload exceeds DTLS MTU | IP fragmentation or send failure | Cat III HAZ-005 | `wire_len > DTLS_MAX_DATAGRAM_BYTES` check in `send_message()`; returns `ERR_INVALID` | Hard check before every send; `mbedtls_ssl_set_mtu()` configures DTLS record MTU (REQ-6.4.4) |
+| DTLS handshake timeout (server never receives first datagram) | `init()` returns `ERR_TIMEOUT`; transport not opened | Cat III | `poll()` in `server_wait_and_handshake()` times out after `connect_timeout_ms` | `ERR_TIMEOUT` propagated to caller; upper layer must retry or abort |
+
+### IMbedtlsOps / MbedtlsOpsImpl
+
+| Failure Mode | System Effect | Severity | Detection | Mitigation |
+|---|---|---|---|---|
+| `MbedtlsOpsImpl` method returns wrong error code | TLS/DTLS state machine misinterprets handshake step; connection not established or silently insecure | Cat II HAZ-005 | `DtlsUdpBackend` checks every return value; `WARNING_HI` logged on non-zero return | All mbedTLS return codes mapped to `bool`; caller checks `false` and propagates `ERR_IO` |
+| Mock (`MockMbedtlsOps`) used in production build | No real TLS; cleartext DTLS traffic | Cat I HAZ-005 | Link-time symbol resolution; `IMbedtlsOps*` injection via `init()` parameter | `MbedtlsOpsImpl` is the only concrete implementation linked in production; `MockMbedtlsOps` is test-only (`tests/`) |
+| `psa_crypto_init()` failure not detected | DTLS entropy pool absent; handshake keys derived from uninitialized state | Cat I HAZ-005 | `ops->psa_crypto_init()` checked in `DtlsUdpBackend::init()`; returns `ERR_IO` on failure | Any non-zero return aborts `init()`; `is_open()` returns `false` |
+| vtable pointer overwritten (memory corruption) | Arbitrary code execution via corrupted dispatch | Cat I | Address-space protection (ASLR, stack canaries); read-only vtable segment | `IMbedtlsOps` interface is const-pointer-to-interface; no writable function pointer in app code |
+
 ### ImpairmentEngine
 
 | Failure Mode | System Effect | Severity | Detection | Mitigation |
@@ -91,7 +111,7 @@
 | `process_outbound()` skips partition check | Partition not simulated; real link loss masked | Cat III HAZ-007 | `is_partition_active()` called first in `process_outbound()` | First check in function; cannot be bypassed |
 | `check_loss()` uses uninitialized PRNG | Non-deterministic / always-pass behavior | Cat III HAZ-007 | `NEVER_COMPILED_OUT_ASSERT(m_initialized)` | `init()` must be called; assertion fires if not |
 | Delay buffer full; message silently dropped | HAZ-006 | Cat II | `ERR_FULL` returned; `WARNING_HI` logged | `m_delay_count < IMPAIR_DELAY_BUF_SIZE` checked before `queue_to_delay_buf()` |
-| **Double-send when `enabled == false`** — `process_outbound()` queues message to delay buffer with `release_us = now_us`, then returns `OK`; caller (`TcpBackend::flush_delayed_to_clients()` or `LocalSimHarness::send_message()`) immediately harvests it from the buffer, sending it a second time | Every message transmitted twice when impairments disabled; duplicate arrives at receiver; DuplicateFilter may suppress second copy for RELIABLE_RETRY but not for BEST_EFFORT | Cat II HAZ-003 | Visible in logs as two sends per call; DuplicateFilter counters | Documented behavior; callers must account for this; DuplicateFilter mitigates for RELIABLE_RETRY traffic |
+| **Double-send when `enabled == false`** — `process_outbound()` queues message to delay buffer with `release_us = now_us`; if a caller both invokes a direct send AND then calls `collect_deliverable()`, the message is sent twice | Every message transmitted twice; duplicate arrives at receiver; DuplicateFilter may suppress second copy for RELIABLE_RETRY but not for BEST_EFFORT | Cat II HAZ-003 | Visible in logs as two sends per call; DuplicateFilter counters | **Fixed in TcpBackend** (direct `send_to_all_clients()` call removed from `send_message()`; messages sent only via `flush_delayed_to_clients()`). `LocalSimHarness` must similarly ensure it does not double-send. DuplicateFilter mitigates residual risk for RELIABLE_RETRY traffic. |
 | Duplicate injected at wrong offset | Double-delivery from wrong source | Cat II HAZ-003 | `envelope_copy` preserves source metadata | Duplicate carries original `source_id` / `message_id`; DuplicateFilter catches it |
 
 ---
@@ -299,6 +319,18 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `is_open()` | `TlsTcpBackend` | NSC | — |
 
 `TlsTcpBackend` is a drop-in replacement for `TcpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `TcpBackend`. The TLS layer (when enabled) is an init-phase concern (cert/key loading, handshake) and does not alter the SC classification of the send/receive path.
+
+### src/platform/DtlsUdpBackend.hpp
+
+| Function | Class | SC/NSC | HAZ IDs |
+|---|---|---|---|
+| `init()` | `DtlsUdpBackend` | NSC | — |
+| `send_message()` | `DtlsUdpBackend` | SC | HAZ-005, HAZ-006 |
+| `receive_message()` | `DtlsUdpBackend` | SC | HAZ-004, HAZ-005 |
+| `close()` | `DtlsUdpBackend` | NSC | — |
+| `is_open()` | `DtlsUdpBackend` | NSC | — |
+
+`DtlsUdpBackend` is a drop-in replacement for `UdpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `UdpBackend`. The DTLS layer (when enabled) is an init-phase concern (cert/key loading, DTLS handshake, cookie exchange); enabling or disabling TLS does not alter the SC classification of the send/receive path. The MTU enforcement in `send_message()` (returns `ERR_INVALID` for payloads exceeding `DTLS_MAX_DATAGRAM_BYTES`) is part of the HAZ-005 mitigation.
 
 ---
 

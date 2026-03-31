@@ -29,6 +29,11 @@ static const uint32_t IMPAIR_DELAY_BUF_SIZE  = 32U;   ///< max buffered delayed 
 static const uint32_t MAX_TCP_CONNECTIONS    = 8U;
 static const uint32_t SOCKET_RECV_BUF_BYTES  = 8192U;
 static const uint32_t NODE_ID_INVALID        = 0U;
+/// Maximum DTLS datagram payload (serialized envelope) to avoid IP fragmentation.
+/// Accounts for IPv4 (20 B) + UDP (8 B) + DTLS record (13 B) overhead on a 1500 B MTU.
+/// DtlsUdpBackend rejects send_message() calls whose serialized length exceeds this.
+/// (REQ-6.4.4)
+static const uint32_t DTLS_MAX_DATAGRAM_BYTES = 1400U;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error / severity model  (F-Prime style)
@@ -74,7 +79,8 @@ enum class OrderingMode : uint8_t {
 enum class TransportKind : uint8_t {
     TCP       = 0U,
     UDP       = 1U,
-    LOCAL_SIM = 2U
+    LOCAL_SIM = 2U,
+    DTLS_UDP  = 3U   ///< DTLS-secured UDP; see DtlsUdpBackend (REQ-6.4.1)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

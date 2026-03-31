@@ -52,9 +52,14 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-6.3.1 | Configurable IP/port binding with SO_REUSEADDR     | src/platform/SocketUtils.cpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp | — |
 | REQ-6.3.2 | Explicit error handling recoverable / fatal        | src/platform/SocketUtils.cpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp | — |
 | REQ-6.3.3 | Read / write timeouts                              | src/platform/SocketUtils.cpp                                | test_LocalSim.cpp :: receive timeout                 |
-| REQ-6.3.4 | TLS / DTLS extension point                         | src/core/TlsConfig.hpp, src/core/ChannelConfig.hpp, src/platform/TlsTcpBackend.hpp, src/platform/TlsTcpBackend.cpp | tests/test_TlsTcpBackend.cpp (7 tests: plaintext bind, TLS bind, bad cert, plaintext loopback, TLS loopback, config defaults) |
+| REQ-6.3.4 | TLS / DTLS extension point                         | src/core/TlsConfig.hpp, src/core/ChannelConfig.hpp, src/platform/TlsTcpBackend.hpp, src/platform/TlsTcpBackend.cpp, src/platform/DtlsUdpBackend.hpp, src/platform/DtlsUdpBackend.cpp | tests/test_TlsTcpBackend.cpp (7 tests), tests/test_DtlsUdpBackend.cpp (6 tests) |
 | REQ-6.3.5 | Bounded explicit buffer sizes                      | src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp    | — (no dedicated unit test)                           |
-| REQ-7.1.1 | Log connection establishment and teardown          | src/core/Logger.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp | — (observable in output) |
+| REQ-6.4.1 | DTLS handshake over UDP (RFC 6347 / RFC 9147)      | src/platform/DtlsUdpBackend.hpp, src/platform/DtlsUdpBackend.cpp | tests/test_DtlsUdpBackend.cpp :: test_dtls_loopback  |
+| REQ-6.4.2 | DTLS cookie anti-replay exchange (server)          | src/platform/DtlsUdpBackend.hpp, src/platform/DtlsUdpBackend.cpp | tests/test_DtlsUdpBackend.cpp :: test_dtls_loopback  |
+| REQ-6.4.3 | DTLS retransmission timer callbacks                | src/platform/DtlsUdpBackend.hpp, src/platform/DtlsUdpBackend.cpp | tests/test_DtlsUdpBackend.cpp :: test_dtls_loopback  |
+| REQ-6.4.4 | DTLS MTU enforcement (DTLS_MAX_DATAGRAM_BYTES)     | src/core/Types.hpp, src/platform/DtlsUdpBackend.hpp, src/platform/DtlsUdpBackend.cpp | tests/test_DtlsUdpBackend.cpp :: test_oversized_payload_rejected |
+| REQ-6.4.5 | DTLS plaintext fallback (swappable without changing higher layers) | src/platform/DtlsUdpBackend.hpp, src/platform/DtlsUdpBackend.cpp | tests/test_DtlsUdpBackend.cpp :: test_plaintext_loopback |
+| REQ-7.1.1 | Log connection establishment and teardown          | src/core/Logger.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp, src/platform/DtlsUdpBackend.cpp | — (observable in output) |
 | REQ-7.1.2 | Log major state changes                            | src/core/Logger.hpp                                         | — (observable in output)                             |
 | REQ-7.1.3 | Log errors and FATAL with debug context            | src/core/Logger.hpp                                         | — (observable in output)                             |
 | REQ-7.1.4 | No full payload logging by default                 | src/core/Logger.hpp                                         | — (convention; no automated test)                    |
@@ -82,4 +87,9 @@ Resolved since last generation (tests added):
 - REQ-3.3.3 — now covered by test_RetryManager.cpp + test_DeliveryEngine.cpp
 - REQ-3.3.4 — now covered by test_DeliveryEngine.cpp :: test_receive_expired
 - REQ-5.2.1 — now also covered by test_ImpairmentConfigLoader.cpp (12 tests); ImpairmentConfigLoader.hpp/.cpp added as Implements entries
-- REQ-6.3.4 — now implemented by TlsConfig.hpp, ChannelConfig.hpp, TlsTcpBackend.hpp/.cpp; verified by test_TlsTcpBackend.cpp (7 tests)
+- REQ-6.3.4 — now implemented by TlsConfig.hpp, ChannelConfig.hpp, TlsTcpBackend.hpp/.cpp, DtlsUdpBackend.hpp/.cpp; verified by test_TlsTcpBackend.cpp (7 tests) and test_DtlsUdpBackend.cpp (6 tests)
+- REQ-6.4.1 — now implemented by DtlsUdpBackend.hpp/.cpp; verified by test_DtlsUdpBackend.cpp :: test_dtls_loopback
+- REQ-6.4.2 — now implemented by DtlsUdpBackend.hpp/.cpp (mbedtls_ssl_cookie_ctx, MBEDTLS_ERR_SSL_HELLO_VERIFY_REQUIRED); verified by test_DtlsUdpBackend.cpp :: test_dtls_loopback
+- REQ-6.4.3 — now implemented by DtlsUdpBackend.hpp/.cpp (mbedtls_timing_delay_context); verified by test_DtlsUdpBackend.cpp :: test_dtls_loopback
+- REQ-6.4.4 — now implemented by Types.hpp (DTLS_MAX_DATAGRAM_BYTES), DtlsUdpBackend.hpp/.cpp; verified by test_DtlsUdpBackend.cpp :: test_oversized_payload_rejected
+- REQ-6.4.5 — now implemented by DtlsUdpBackend.hpp/.cpp (tls_enabled=false plaintext fallback); verified by test_DtlsUdpBackend.cpp :: test_plaintext_loopback
