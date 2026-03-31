@@ -1,6 +1,6 @@
 # UC_31 — PRNG reproducibility test
 
-**HL Group:** HL-13 — User seeds the impairment engine for deterministic replay
+**HL Group:** HL-13 — Deterministic Impairment Replay
 **Actor:** Test function (`test_prng_deterministic()` in `tests/test_ImpairmentEngine.cpp`)
 **Requirement traceability:** REQ-5.2.4, REQ-5.3.1
 
@@ -329,55 +329,62 @@ No external interactions occur on this execution path.
 
 ## 12. Sequence Diagram
 
-```mermaid
-sequenceDiagram
-    participant main
-    participant test as test_prng_deterministic()
-    participant e1 as ImpairmentEngine engine1
-    participant p1 as PrngEngine (in engine1)
-    participant e2 as ImpairmentEngine engine2
-    participant p2 as PrngEngine (in engine2)
+```
+  main()   test_prng_deterministic()   ImpairmentEngine engine1   PrngEngine(e1)   ImpairmentEngine engine2   PrngEngine(e2)
+    |               |                           |                       |                      |                    |
+    |--test_prng()-->                            |                       |                      |                    |
+    |               |                           |                       |                      |                    |
+    |         [engine1 construction]             |                       |                      |                    |
+    |               |--ImpairmentEngine()------->|                       |                      |                    |
+    |               |                           |----seed(1ULL)--------->|                      |                    |
+    |               |                           |                   m_state=1ULL               |                    |
+    |               |                           | memset bufs x2        |                      |                    |
+    |               |                           | m_initialized=false   |                      |                    |
+    |               |<--------------------------|                       |                      |                    |
+    |               |                           |                       |                      |                    |
+    |         impairment_config_default(cfg1)    |                       |                      |                    |
+    |         cfg1.prng_seed = 12345ULL          |                       |                      |                    |
+    |               |                           |                       |                      |                    |
+    |               |--engine1.init(cfg1)------->|                       |                      |                    |
+    |               |                           | NCOA(reorder<=32)     |                      |                    |
+    |               |                           | NCOA(loss in [0,1])   |                      |                    |
+    |               |                           | m_cfg=cfg1            |                      |                    |
+    |               |                           | seed=12345 (non-zero) |                      |                    |
+    |               |                           |----seed(12345ULL)----->|                      |                    |
+    |               |                           |                   m_state=12345ULL           |                    |
+    |               |                           | memset bufs x2        |                      |                    |
+    |               |                           | m_initialized=true    |                      |                    |
+    |               |                           | NCOA(initialized)     |                      |                    |
+    |               |                           | NCOA(delay_count==0)  |                      |                    |
+    |               |<---------Result::OK--------|                       |                      |                    |
+    |               |                           |                       |                      |                    |
+    |         [engine2 construction]             |                       |                      |                    |
+    |               |--ImpairmentEngine()---------------------------------+--------------------->|                    |
+    |               |                           |                       |                      |----seed(1ULL)------>|
+    |               |                           |                       |                      |               m_state=1
+    |               |                           |                       |                      | memset bufs x2     |
+    |               |<--------------------------------------------------|                      |                    |
+    |               |                           |                       |                      |                    |
+    |         impairment_config_default(cfg2)    |                       |                      |                    |
+    |         cfg2.prng_seed = 12345ULL          |                       |                      |                    |
+    |               |                           |                       |                      |                    |
+    |               |--engine2.init(cfg2)--------------------------------------------+-------->|                    |
+    |               |                           |                       |             |        | m_cfg=cfg2          |
+    |               |                           |                       |             |        |----seed(12345)----->|
+    |               |                           |                       |             |        |               m_state=12345
+    |               |                           |                       |             |        | m_initialized=true  |
+    |               |<----------Result::OK--------------------------------------------|        |                    |
+    |               |                           |                       |                      |                    |
+    |         engine1.config() -> prng_seed=12345                       |                      |                    |
+    |         engine2.config() -> prng_seed=12345                       |                      |                    |
+    |         assert(12345==12345) passes        |                       |                      |                    |
+    |         assert(e1.enabled==false) passes   |                       |                      |                    |
+    |         assert(e2.enabled==false) passes   |                       |                      |                    |
+    |               |                           |                       |                      |                    |
+    |<--return true--|                            |                       |                      |                    |
+    |  printf(PASS)  |                            |                       |                      |                    |
 
-    main->>test: call test_prng_deterministic()
-
-    note over test,p1: engine1 construction
-    test->>e1: ImpairmentEngine() constructor
-    e1->>p1: seed(1ULL)
-    note over p1: m_state = 1ULL (preliminary)
-    e1-->>test: constructed
-
-    note over test: impairment_config_default(cfg1) → prng_seed=42ULL<br/>cfg1.prng_seed = 12345ULL (override)
-
-    test->>e1: init(cfg1)
-    note over e1: m_cfg = cfg1; seed=12345ULL (non-zero, no coercion)
-    e1->>p1: seed(12345ULL)
-    note over p1: m_state = 12345ULL (overwrites 1ULL)
-    p1-->>e1: done
-    note over e1: memset bufs; m_initialized=true
-    e1-->>test: Result::OK
-
-    note over test,p2: engine2 construction
-    test->>e2: ImpairmentEngine() constructor
-    e2->>p2: seed(1ULL)
-    note over p2: m_state = 1ULL (preliminary)
-    e2-->>test: constructed
-
-    note over test: impairment_config_default(cfg2) → prng_seed=42ULL<br/>cfg2.prng_seed = 12345ULL (override)
-
-    test->>e2: init(cfg2)
-    note over e2: m_cfg = cfg2; seed=12345ULL
-    e2->>p2: seed(12345ULL)
-    note over p2: m_state = 12345ULL
-    p2-->>e2: done
-    note over e2: memset bufs; m_initialized=true
-    e2-->>test: Result::OK
-
-    note over test: assert(engine1.config().prng_seed == engine2.config().prng_seed)<br/>12345ULL == 12345ULL → passes
-    note over test: assert(engine1.config().enabled == false) → passes
-    note over test: assert(engine2.config().enabled == false) → passes
-
-    test-->>main: true
-    main->>main: printf("PASS: test_prng_deterministic")
+NCOA = NEVER_COMPILED_OUT_ASSERT
 ```
 
 ---

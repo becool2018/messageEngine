@@ -1,710 +1,333 @@
-# UC_01 — Best-Effort Send
+# UC_01 — Best-effort send over TCP (no ACK, no retry, no dedup)
 
-**HL Group:** HL-1 — User sends a fire-and-forget message
+**HL Group:** HL-1 — Fire-and-Forget Message Send
 **Actor:** User
-**Requirement traceability:** REQ-3.3.1, REQ-3.2.1, REQ-3.2.3, REQ-4.1.2, REQ-6.1.5, REQ-6.1.6
+**Requirement traceability:** REQ-3.3.1, REQ-3.1, REQ-3.2.3, REQ-4.1.2, REQ-6.1.5, REQ-6.1.6
 
 ---
 
 ## 1. Use Case Overview
 
-### Clear description of what triggers this flow
+**Trigger:** The application calls `DeliveryEngine::send()` with a `MessageEnvelope` whose
+`reliability_class` is `ReliabilityClass::BEST_EFFORT`.
 
-A client application populates a `MessageEnvelope` with `message_type = DATA`,
-`reliability_class = BEST_EFFORT`, fills in `destination_id`, `priority`,
-`expiry_time_us`, `payload`, and `payload_length`, then calls
-`DeliveryEngine::send(env, now_us)`. The engine is already initialized with a
-`TcpBackend` instance as its `TransportInterface`. The TCP connection to the
-server peer was established during `TcpBackend::init()`.
+**Goal:** Transmit the envelope exactly once over TCP with no ACK slot allocated and no retry
+entry scheduled. The system serializes the envelope, applies any configured impairment, and
+delivers it to all connected TCP clients.
 
-### Expected outcome (single goal)
+**Success outcome:** `DeliveryEngine::send()` returns `Result::OK`. The serialized wire frame
+has been placed on the TCP socket(s) of all connected clients.
 
-The envelope is stamped with `source_id` and a newly generated `message_id`,
-serialized to a 44-byte header plus payload bytes in big-endian wire format,
-subjected to impairment evaluation (passes through with `release_us = now_us`
-when impairments are disabled by default), and the serialized bytes are sent
-over the TCP socket as a length-prefixed frame via `send_to_all_clients()`.
-The delay buffer is also flushed via `flush_delayed_to_clients()` immediately
-afterward. `AckTracker` and `RetryManager` are never called. The call returns
-`Result::OK` to the application.
+**Error outcomes:**
+- `Result::ERR_INVALID` — engine not initialized or envelope is invalid.
+- `Result::ERR_IO` — serialization failure or socket send failure (logged as WARNING_LO).
+- `Result::OK` (silent drop) — message dropped by the impairment engine's loss policy;
+  `process_outbound()` returns `ERR_IO`, which `send_message()` converts to `OK`.
 
 ---
 
 ## 2. Entry Points
 
-### Exact functions, threads, or events where execution begins
+```
+// src/core/DeliveryEngine.cpp
+Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us);
 
-- **Primary entry point:** `DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)`
-  — `DeliveryEngine.cpp` line 77.
-- **Caller:** Application code in `src/app` (e.g., `Client.cpp`) or a test
-  harness. No thread is created inside this call; it executes synchronously on
-  the caller's thread.
-- **Pre-condition:** `DeliveryEngine::init()` has already been called (sets
-  `m_initialized = true`, stores a valid `m_transport` pointer, calls
-  `m_id_gen.init()`). `TcpBackend::init()` has already been called (TCP
-  connection established, `m_open = true`, `m_client_fds[0]` holds valid fd,
-  `m_client_count = 1`).
+// Downstream platform entry (via virtual dispatch):
+// src/platform/TcpBackend.cpp
+Result TcpBackend::send_message(const MessageEnvelope& envelope);
+```
 
-### Example: main(), ISR, callback, RPC handler, etc.
-
-Application calls `DeliveryEngine::send()` from its main loop (e.g., an
-application entry point calls `engine.send()` after building the envelope). No
-ISR or RPC mechanism is present in the codebase.
+The caller constructs a `MessageEnvelope` on the stack, sets `reliability_class =
+BEST_EFFORT`, `message_type = DATA`, fills `destination_id`, `priority`, `payload`, and
+`payload_length`, then calls `engine.send(env, timestamp_now_us())`. Both call sites may be
+on the application main thread or any thread that owns the `DeliveryEngine` instance.
 
 ---
 
 ## 3. End-to-End Control Flow (Step-by-Step)
 
-1. **Application** constructs a `MessageEnvelope` on the stack with
-   `message_type = DATA`, `reliability_class = BEST_EFFORT`, populates payload
-   fields, and calls `DeliveryEngine::send(env, now_us)`.
-
-2. **`DeliveryEngine::send()`** (`DeliveryEngine.cpp:77`) fires two
-   precondition assertions: `NEVER_COMPILED_OUT_ASSERT(m_initialized)` and
-   `NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL)`. Checks `!m_initialized` guard
-   at line 82 (passes). Stamps `env.source_id = m_local_id` (line 88),
-   `env.message_id = m_id_gen.next()` (line 89),
-   `env.timestamp_us = now_us` (line 90).
-
-3. **`DeliveryEngine::send()`** calls `send_via_transport(env)` at line 93.
-
-4. **`DeliveryEngine::send_via_transport()`** (`DeliveryEngine.cpp:56`) fires
-   assertions: `m_initialized`, `m_transport != nullptr`,
-   `envelope_valid(env)`. Calls `m_transport->send_message(env)` at line 63.
-   Because `m_transport` is a `TcpBackend*`, this dispatches via virtual
-   dispatch to `TcpBackend::send_message()`.
-
-5. **`TcpBackend::send_message()`** (`TcpBackend.cpp:347`) fires assertions:
-   `m_open`, `envelope_valid(envelope)`. Calls `Serializer::serialize(envelope,
-   m_wire_buf, SOCKET_RECV_BUF_BYTES, wire_len)` at line 354.
-
-6. **`Serializer::serialize()`** (`Serializer.cpp:117`) validates the envelope
-   via `envelope_valid(env)`, checks `buf_len >= WIRE_HEADER_SIZE +
-   payload_length`. Writes the 44-byte header in big-endian order using
-   sequential `write_u8` / `write_u32` / `write_u64` static helper calls.
-   Asserts `offset == WIRE_HEADER_SIZE` (44) after the header write. Calls
-   `memcpy` for payload bytes if `payload_length > 0`. Sets
-   `out_len = 44 + payload_length`. Returns `Result::OK`.
-
-7. **`TcpBackend::send_message()`** continues at line 362. Calls
-   `timestamp_now_us()` to get the current monotonic time (`now_us` local
-   variable at line 362).
-
-8. **`TcpBackend::send_message()`** calls
-   `m_impairment.process_outbound(envelope, now_us)` at line 363.
-
-9. **`ImpairmentEngine::process_outbound()`** — with impairments disabled
-   (default from `impairment_config_default()`): checks
-   `m_delay_count >= IMPAIR_DELAY_BUF_SIZE`; if not full, calls
-   `queue_to_delay_buf(in_env, now_us)`. Inside `queue_to_delay_buf()`: scans
-   `m_delay_buf[0..IMPAIR_DELAY_BUF_SIZE-1]` for the first inactive slot,
-   copies the envelope into that slot with `release_us = now_us` (deliver
-   immediately), sets `active = true`, increments `m_delay_count`. Returns
-   `Result::OK`.
-
-10. **`TcpBackend::send_message()`** checks the return at line 364. Since it is
-    `Result::OK` (not `ERR_IO`), execution continues. Checks
-    `m_client_count == 0` at line 369 — it is 1 (connected), so execution
-    passes through.
-
-11. **`TcpBackend::send_message()`** calls `send_to_all_clients(m_wire_buf,
-    wire_len)` at line 375.
-
-12. **`TcpBackend::send_to_all_clients()`** (`TcpBackend.cpp:258`) fires
-    assertions: `buf != nullptr`, `len > 0`. Enters the fixed-bound loop
-    `i = 0..MAX_TCP_CONNECTIONS-1` (0..7). For `i = 0`,
-    `m_client_fds[0] >= 0` is true. Calls `tcp_send_frame(m_client_fds[0], buf,
-    len, m_cfg.channels[0].send_timeout_ms)` at line 268.
-
-13. **`tcp_send_frame()`** (`SocketUtils.cpp`) fires assertions: `fd >= 0`,
-    `buf != nullptr`. Builds a 4-byte big-endian length header from `len` using
-    manual bit shifts into a stack `uint8_t header[4]`. Calls
-    `socket_send_all(fd, header, 4U, timeout_ms)` for the length prefix.
-
-14. **`socket_send_all()`** (`SocketUtils.cpp`) fires assertions: `fd >= 0`,
-    `buf != nullptr`, `len > 0`. Enters a `while (sent < len)` loop (bound is
-    `len = 4`). Calls `poll(&pfd, 1, timeout_ms)` on the socket for `POLLOUT`.
-    On success (`poll_result > 0`), calls POSIX `send(fd, &buf[sent], remaining,
-    0)`. Advances `sent`. Loop terminates when `sent == 4`. Returns `true`.
-
-15. **`tcp_send_frame()`** checks the header send result. Passes. Calls
-    `socket_send_all(fd, buf, len, timeout_ms)` for the serialized envelope
-    bytes.
-
-16. **`socket_send_all()`** repeats the poll-then-send loop for the serialized
-    envelope bytes (`len = 44 + payload_length`). Each iteration calls `poll()`
-    then `send()`, advancing `sent` until `sent == len`. Returns `true`.
-
-17. **`tcp_send_frame()`** returns `true` to `send_to_all_clients()`.
-
-18. **`send_to_all_clients()`** completes the client loop (slots 1..7 all have
-    `m_client_fds[i] < 0`, so they are skipped via `continue`). Returns to
-    `TcpBackend::send_message()`.
-
-19. **`TcpBackend::send_message()`** calls `flush_delayed_to_clients(now_us)` at
-    line 376.
-
-20. **`TcpBackend::flush_delayed_to_clients()`** (`TcpBackend.cpp:280`) fires
-    assertions: `now_us > 0`, `m_open`. Declares
-    `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]` on the stack. Calls
-    `m_impairment.collect_deliverable(now_us, delayed, IMPAIR_DELAY_BUF_SIZE)`.
-
-21. **`ImpairmentEngine::collect_deliverable()`** iterates `m_delay_buf[]`
-    (fixed bound `IMPAIR_DELAY_BUF_SIZE = 32`). The slot buffered in step 9 has
-    `release_us == now_us`, so `release_us <= now_us` is true. Calls
-    `envelope_copy()` to copy the envelope to `delayed[0]`, marks the slot
-    inactive, decrements `m_delay_count`, increments `out_count`. Returns
-    `out_count = 1`.
-
-22. **`flush_delayed_to_clients()`** enters the fixed-bound loop
-    `i = 0..count-1` (one iteration). Calls
-    `Serializer::serialize(delayed[0], m_wire_buf, SOCKET_RECV_BUF_BYTES,
-    delayed_len)`. On success, calls `send_to_all_clients(m_wire_buf,
-    delayed_len)`. This sends the delayed envelope's serialized bytes to all
-    connected clients via `tcp_send_frame()` again.
-
-23. **`TcpBackend::send_message()`** asserts `wire_len > 0` at line 378.
-    Returns `Result::OK` to `DeliveryEngine::send_via_transport()`.
-
-24. **`DeliveryEngine::send_via_transport()`** checks `res != Result::OK` at
-    line 65 — passes. Returns `Result::OK` to `DeliveryEngine::send()`.
-
-25. **`DeliveryEngine::send()`** checks `res != Result::OK` at line 94 —
-    passes. Evaluates the reliability branch at lines 102–103: condition
-    `(RELIABLE_ACK || RELIABLE_RETRY)` is **false** for `BEST_EFFORT`.
-    **`AckTracker::track()` is never called. `RetryManager::schedule()` is
-    never called.**
-
-26. **`DeliveryEngine::send()`** fires postcondition assertions:
-    `env.source_id == m_local_id`, `env.message_id != 0ULL`. Calls
-    `Logger::log(INFO, "DeliveryEngine", "Sent message_id=%llu, reliability=%u",
-    ...)`. Returns `Result::OK` to the application.
+1. Caller invokes `DeliveryEngine::send(env, now_us)`.
+2. `send()` fires two pre-condition `NEVER_COMPILED_OUT_ASSERT`s: `m_initialized` is true,
+   `now_us > 0`.
+3. Guard check: `if (!m_initialized) return ERR_INVALID` — skipped when initialized.
+4. `send()` stamps `env.source_id = m_local_id` (the local node ID set during `init()`).
+5. `send()` calls `m_id_gen.next()`, which returns the current `m_next` and increments it
+   (wrapping 0 to 1). The returned value is stored in `env.message_id`.
+6. `send()` stamps `env.timestamp_us = now_us`.
+7. `send()` calls `send_via_transport(env)`.
+8. Inside `send_via_transport()`:
+   a. Three `NEVER_COMPILED_OUT_ASSERT`s fire: `m_initialized`, `m_transport != nullptr`,
+      `envelope_valid(env)`.
+   b. Calls `m_transport->send_message(env)` via virtual dispatch to
+      `TcpBackend::send_message()`.
+9. Inside `TcpBackend::send_message()`:
+   a. Pre-condition asserts: `m_open`, `envelope_valid(envelope)`.
+   b. Calls `Serializer::serialize(envelope, m_wire_buf, SOCKET_RECV_BUF_BYTES, wire_len)`.
+      Serializer writes a 44-byte big-endian header followed by `payload_length` payload bytes
+      into `m_wire_buf`. Returns `OK` and sets `wire_len = 44 + payload_length`.
+   c. Calls `timestamp_now_us()` to obtain a fresh `now_us` for impairment timing.
+   d. Calls `m_impairment.process_outbound(envelope, now_us)`.
+      - Loss drop: returns `ERR_IO`; `send_message()` converts this to `OK` and returns —
+        no socket write occurs.
+      - Otherwise: queues the message into the impairment delay buffer with
+        `release_us = now_us` (zero latency case) and returns `OK`.
+   e. Checks `m_client_count == 0`: if no clients connected, logs WARNING_LO, returns `OK`.
+   f. Calls `flush_delayed_to_clients(now_us)`.
+10. Inside `flush_delayed_to_clients()`:
+    a. Calls `m_impairment.collect_deliverable(now_us, delayed, IMPAIR_DELAY_BUF_SIZE)`.
+       Returns the envelope placed in step 9d (since `release_us <= now_us`).
+    b. Loops up to `IMPAIR_DELAY_BUF_SIZE` (32) times:
+       - Calls `Serializer::serialize(delayed[i], m_wire_buf, SOCKET_RECV_BUF_BYTES,
+         delayed_len)`.
+       - Calls `send_to_all_clients(m_wire_buf, delayed_len)`.
+11. Inside `send_to_all_clients()`:
+    - Iterates over `m_client_fds[0..MAX_TCP_CONNECTIONS-1]` (bounded, 8 slots).
+    - For each valid fd (`>= 0`): calls `m_sock_ops->send_frame(fd, buf, len, send_timeout_ms)`.
+    - A failure on one fd logs WARNING_LO; iteration continues to the next fd.
+12. `TcpBackend::send_message()` asserts `wire_len > 0` (post-condition) and returns `OK`.
+13. Control returns to `send_via_transport()`, which returns `OK`.
+14. Back in `DeliveryEngine::send()`:
+    a. Reliability check: `env.reliability_class == BEST_EFFORT` so neither the ACK-tracking
+       branch (`RELIABLE_ACK || RELIABLE_RETRY`) nor the retry branch (`RELIABLE_RETRY`) is
+       entered.
+    b. Two post-condition asserts fire: `env.source_id == m_local_id`,
+       `env.message_id != 0`.
+    c. Logs INFO: `"Sent message_id=..., reliability=0"`.
+    d. Returns `OK`.
+15. Caller receives `OK`.
 
 ---
 
-## 4. Call Tree (Hierarchical)
+## 4. Call Tree
 
 ```
-DeliveryEngine::send()                         [DeliveryEngine.cpp:77]
-|
-+-- m_id_gen.next()                            [MessageId.hpp - inline]
-|
-+-- DeliveryEngine::send_via_transport()       [DeliveryEngine.cpp:56]
-    |
-    +-- TcpBackend::send_message()             [TcpBackend.cpp:347]
-        |
-        +-- Serializer::serialize()            [Serializer.cpp:117]
-        |   +-- envelope_valid()               [MessageEnvelope.hpp:63 - inline]
-        |   +-- Serializer::write_u8()         [Serializer.cpp:24]  (x4)
-        |   +-- Serializer::write_u64()        [Serializer.cpp:50]  (x3)
-        |   +-- Serializer::write_u32()        [Serializer.cpp:35]  (x3)
-        |   \-- memcpy()                       [C stdlib]
-        |
-        +-- timestamp_now_us()                 [Timestamp.hpp:31 - inline]
-        |
-        +-- ImpairmentEngine::process_outbound()  [impairments disabled path]
-        |   +-- envelope_valid()               [MessageEnvelope.hpp:63]
-        |   \-- ImpairmentEngine::queue_to_delay_buf()
-        |       \-- envelope_copy()            [MessageEnvelope.hpp:56 - inline]
-        |           \-- memcpy()
-        |
-        +-- TcpBackend::send_to_all_clients()  [TcpBackend.cpp:258]
-        |   \-- tcp_send_frame()               [SocketUtils.cpp]
-        |       +-- socket_send_all()          [SocketUtils.cpp]  (4-byte length header)
-        |       |   +-- poll()                 [POSIX]
-        |       |   \-- send()                 [POSIX]
-        |       \-- socket_send_all()          [SocketUtils.cpp]  (serialized payload)
-        |           +-- poll()                 [POSIX]
-        |           \-- send()                 [POSIX]
-        |
-        \-- TcpBackend::flush_delayed_to_clients()  [TcpBackend.cpp:280]
-            +-- ImpairmentEngine::collect_deliverable()
-            |   \-- envelope_copy()            [MessageEnvelope.hpp:56]
-            +-- Serializer::serialize()        [Serializer.cpp:117]  (re-serialize delayed)
-            \-- TcpBackend::send_to_all_clients()  [TcpBackend.cpp:258]
-                \-- tcp_send_frame()           [SocketUtils.cpp]
-                    +-- socket_send_all()      (header)
-                    \-- socket_send_all()      (payload)
-
-[AckTracker::track()      -- NOT CALLED (BEST_EFFORT branch skipped)]
-[RetryManager::schedule() -- NOT CALLED (BEST_EFFORT branch skipped)]
+DeliveryEngine::send(env, now_us)
+ ├── MessageIdGen::next()                        [assigns env.message_id]
+ └── DeliveryEngine::send_via_transport(env)
+      └── TcpBackend::send_message(envelope)     [virtual dispatch]
+           ├── Serializer::serialize(...)         [header + payload → m_wire_buf]
+           ├── timestamp_now_us()                 [CLOCK_MONOTONIC]
+           ├── ImpairmentEngine::process_outbound(envelope, now_us)
+           └── TcpBackend::flush_delayed_to_clients(now_us)
+                ├── ImpairmentEngine::collect_deliverable(now_us, ...)
+                ├── Serializer::serialize(delayed[i], ...)
+                └── TcpBackend::send_to_all_clients(buf, len)
+                     └── ISocketOps::send_frame(fd, buf, len, timeout_ms)
+                          └── [POSIX write/send syscall]
 ```
 
 ---
 
 ## 5. Key Components Involved
 
-### DeliveryEngine
-- **Responsibility:** Top-level coordinator. Stamps `source_id`, `message_id`,
-  `timestamp_us` onto the envelope; dispatches to transport; conditionally
-  engages ACK tracking and retry scheduling based on `reliability_class`.
-- **Why in this flow:** It is the sole external-facing send API. It owns the
-  decision of whether to engage `AckTracker` and `RetryManager`; for
-  `BEST_EFFORT` it skips both entirely. The conditional at
-  `DeliveryEngine.cpp:102` evaluates `false` for `BEST_EFFORT`.
+- **`DeliveryEngine`** — Orchestrates the send: stamps `source_id`, `message_id`,
+  `timestamp_us`, and dispatches to the transport. Decides whether ACK tracking or retry
+  scheduling is needed (neither for BEST_EFFORT).
 
-### MessageIdGen (m_id_gen)
-- **Responsibility:** Generates monotonically increasing, unique `uint64_t`
-  message IDs from a seeded counter, implemented inline in `MessageId.hpp`. On
-  wraparound through 0, skips to 1.
-- **Why in this flow:** Assigns `env.message_id` so the message has a unique
-  identity on the wire, even though it is never tracked.
+- **`MessageIdGen`** — Monotonic counter seeded at `init()` from `local_id`. Generates the
+  unique `message_id` for this message. Wraps at `UINT64_MAX`, skipping 0.
 
-### TcpBackend
-- **Responsibility:** Implements `TransportInterface`. Owns the socket file
-  descriptors, the `ImpairmentEngine` instance, the `RingBuffer` receive queue,
-  and the wire buffer. Serializes the envelope, runs it through the impairment
-  engine, then calls private helpers `send_to_all_clients()` and
-  `flush_delayed_to_clients()` to dispatch bytes.
-- **Why in this flow:** It is the concrete transport bound to the
-  `DeliveryEngine` at init time, bridging the message layer and the OS socket
-  layer.
+- **`TcpBackend`** — Concrete `TransportInterface` implementation over TCP. Owns the wire
+  buffer (`m_wire_buf`, 8192 bytes), the impairment engine, and the receive queue. Handles
+  all socket fd management.
 
-### Serializer (static class)
-- **Responsibility:** Converts `MessageEnvelope` to/from a deterministic,
-  endian-safe 44-byte header plus payload byte stream (big-endian throughout,
-  manual bit shifts, no `htons`/`ntohl`). Wire header layout: 1 byte
-  `message_type`, 1 byte `reliability_class`, 1 byte `priority`, 1 byte padding,
-  8 bytes `message_id`, 8 bytes `timestamp_us`, 4 bytes `source_id`, 4 bytes
-  `destination_id`, 8 bytes `expiry_time_us`, 4 bytes `payload_length`, 4 bytes
-  padding — total 44 bytes (`WIRE_HEADER_SIZE`).
-- **Why in this flow:** Called twice per outbound message — once inside
-  `TcpBackend::send_message()` for the main message wire bytes, and once more
-  inside `flush_delayed_to_clients()` for the delayed-envelope re-serialization.
+- **`Serializer::serialize()`** — Static function. Converts a `MessageEnvelope` to a 44-byte
+  big-endian header + opaque payload bytes in `m_wire_buf`. No heap use. Validates envelope
+  and buffer size before writing.
 
-### ImpairmentEngine
-- **Responsibility:** Applies configurable network faults (loss, duplication,
-  latency/jitter, partition, reordering). On outbound: `process_outbound()`
-  decides fate and places the message in `m_delay_buf[]` with a `release_us`
-  timestamp. `collect_deliverable()` harvests messages whose release time has
-  passed.
-- **Why in this flow:** Always invoked regardless of `reliability_class`. With
-  impairments disabled (default, `ImpairmentConfig::enabled = false`), it acts
-  as a zero-delay passthrough via `queue_to_delay_buf(env, now_us)`, placing
-  the message with `release_us = now_us` for immediate collection.
+- **`ImpairmentEngine::process_outbound()`** — Applies the configured impairment profile
+  (loss, latency, jitter, duplication). For the zero-impairment case it places the message in
+  the delay buffer with `release_us = now_us` so `collect_deliverable()` returns it
+  immediately.
 
-### tcp_send_frame() (SocketUtils)
-- **Responsibility:** Frames a serialized message for TCP by prepending a 4-byte
-  big-endian length prefix and then sending all bytes via `socket_send_all()`.
-- **Why in this flow:** Implements the framing layer required to separate
-  discrete messages over TCP's byte stream (REQ-6.1.5). Called once per
-  connected-client slot by `send_to_all_clients()`.
-
-### socket_send_all() (SocketUtils)
-- **Responsibility:** Sends exactly `len` bytes over a TCP socket, looping
-  until all bytes are written. Uses `poll()` before each `send()` call to
-  enforce a timeout.
-- **Why in this flow:** Handles partial writes. TCP's `send()` may not accept
-  all bytes in one call (REQ-6.1.6); this function retries until the full count
-  is transferred.
-
-### AckTracker
-- **Responsibility:** Tracks messages awaiting ACK in a fixed-size slot table
-  (`ACK_TRACKER_CAPACITY = 32`).
-- **Why in this flow:** Exists in `DeliveryEngine` as a member but is **not
-  invoked**. The conditional at `DeliveryEngine.cpp:102` evaluates `false` for
-  `BEST_EFFORT`, so `AckTracker::track()` is never called.
-
-### RetryManager
-- **Responsibility:** Schedules and manages retry of `RELIABLE_RETRY` messages
-  with exponential backoff.
-- **Why in this flow:** Exists in `DeliveryEngine` as a member but is **not
-  invoked**. The conditional at `DeliveryEngine.cpp:120` evaluates `false` for
-  `BEST_EFFORT`, so `RetryManager::schedule()` is never called.
+- **`ISocketOps::send_frame()`** — Abstracted POSIX socket write. In production,
+  `SocketOpsImpl` issues a length-prefixed frame to the kernel. Can be mocked in tests.
 
 ---
 
 ## 6. Branching Logic / Decision Points
 
-**Branch 1: `m_initialized` guard in `DeliveryEngine::send()` (line 82)**
-- Condition: `!m_initialized`
-- Outcome if false (normal): execution continues.
-- Outcome if true (error): returns `Result::ERR_INVALID` immediately.
-- Where control goes next (normal): stamp fields, call `send_via_transport()`.
-
-**Branch 2: `send_via_transport()` return check in `DeliveryEngine::send()`
-(line 94)**
-- Condition: `res != Result::OK`
-- Outcome if false (normal): execution continues to reliability branch.
-- Outcome if true (error): logs `WARNING_LO`, returns `res` to caller.
-- Where control goes next (normal): reliability class conditional.
-
-**Branch 3: Reliability class conditional — AckTracker (lines 102–103)**
-- Condition: `env.reliability_class == RELIABLE_ACK || RELIABLE_RETRY`
-- For `BEST_EFFORT`: **condition is false**. `AckTracker::track()` is skipped
-  entirely.
-
-**Branch 4: Reliability class conditional — RetryManager (line 120)**
-- Condition: `env.reliability_class == RELIABLE_RETRY`
-- For `BEST_EFFORT`: **condition is false**. `RetryManager::schedule()` is
-  skipped entirely.
-
-**Branch 5: Impairment `ERR_IO` check in `TcpBackend::send_message()` (line 364)**
-- Condition: `res == Result::ERR_IO`
-- Outcome if true: returns `Result::OK` (silent drop, loss impairment active).
-- Outcome if false (default): execution continues to client count check.
-- Note: `ERR_FULL` from `process_outbound()` (delay buffer full) is NOT
-  intercepted here — it propagates back to the application as `ERR_FULL`.
-
-**Branch 6: No clients connected check (line 369)**
-- Condition: `m_client_count == 0`
-- Outcome if true: logs `WARNING_LO`, returns `Result::OK` (message discarded).
-- Outcome if false (normal): proceeds to `send_to_all_clients()`.
-
-**Branch 7: Client fd validity in `send_to_all_clients()` (line 265)**
-- Condition: `m_client_fds[i] < 0`
-- Outcome if true: `continue` to next slot.
-- Outcome if false: calls `tcp_send_frame()` for that slot.
-
-**Branch 8: `tcp_send_frame()` send failure**
-- Condition: `socket_send_all()` returns false for header or payload.
-- Outcome if true: logs `WARNING_LO`; loop continues — other client slots are
-  still attempted. Return is void; per-connection failures are not propagated
-  upward.
-
-**Branch 9: `poll()` timeout in `socket_send_all()`**
-- Condition: `poll_result <= 0`
-- Outcome: logs `WARNING_HI`, returns false. Propagates up through
-  `tcp_send_frame()`.
+| Condition | True branch | False branch | Next control |
+|---|---|---|---|
+| `!m_initialized` | Return `ERR_INVALID` immediately | Continue send | Step 4 |
+| `process_outbound()` returns `ERR_IO` (loss drop) | Return `OK` (silent drop) | Continue to flush | Return to caller |
+| `m_client_count == 0` | Log WARNING_LO, return `OK` | Continue to flush | `flush_delayed_to_clients()` |
+| `collect_deliverable()` count == 0 | Loop body in `flush_delayed_to_clients()` skipped | Loop executes | Return to `send_message()` |
+| `send_frame()` fails on a client fd | Log WARNING_LO, continue to next fd | Next iteration | Continue fd loop |
+| `reliability_class == RELIABLE_ACK \|\| RELIABLE_RETRY` | Enter ACK-tracking block | Skip tracking | Retry check |
+| `reliability_class == RELIABLE_RETRY` | Enter retry-scheduling block | Skip retry | Post-condition asserts |
 
 ---
 
 ## 7. Concurrency / Threading Behavior
 
-### Threads created
-None. This entire send path executes synchronously on the caller's thread. No
-threads are spawned inside `send()`, `TcpBackend::send_message()`, or any
-called function.
+`DeliveryEngine` and `TcpBackend` carry no internal mutexes. The design assumes:
 
-### Where context switches occur
-Only at OS blocking calls inside `socket_send_all()`:
-- `poll(fd, 1, timeout_ms)` — blocks until the socket is writable or the
-  timeout expires.
-- `send(fd, ...)` — the TCP socket may be in non-blocking mode after
-  `socket_connect_with_timeout()`. `send()` may return `EAGAIN` or partial
-  bytes; `socket_send_all()` handles both via its `while (sent < len)` loop
-  with `poll()` before each attempt.
+- **Single-threaded send path:** `send()` and `send_via_transport()` are called from exactly
+  one application thread (the caller's thread). No locks are taken.
 
-### Synchronization primitives
-None present in this send path. There is no mutex, semaphore, or `std::atomic`
-protecting `m_wire_buf`, `m_client_fds[]`, `m_client_count`, or
-`m_impairment` state. `RingBuffer` (the receive queue) uses
-`std::atomic<uint32_t>` for its head/tail with acquire/release ordering, but
-the receive queue is not touched during the send path.
+- **`RingBuffer` (`m_recv_queue`):** The receive queue inside `TcpBackend` is a SPSC ring
+  buffer using `std::atomic<uint32_t>` with acquire/release memory ordering. The send path
+  does not touch `m_recv_queue`; the ring buffer's atomics are not involved in UC_01.
 
-- [ASSUMPTION] `TcpBackend::send_message()` and
-  `TcpBackend::receive_message()` are called from the same thread. If called
-  from separate threads, `m_wire_buf` (8192-byte shared buffer), `m_client_fds[]`,
-  `m_client_count`, and `m_impairment.m_delay_buf[]` are all accessed without
-  synchronization — a data race under the C++ memory model.
+- **`timestamp_now_us()`:** Calls `clock_gettime(CLOCK_MONOTONIC)`. Thread-safe on all POSIX
+  targets.
 
-### Producer/consumer relationships
-None within this send path. `m_recv_queue` (a `RingBuffer`) is written by
-`recv_from_client()` and read by `receive_message()`, but it is not touched
-during the send path.
+- **`ImpairmentEngine`:** Not thread-safe; used exclusively on the send path (single thread).
+
+- **`m_wire_buf`:** A member of `TcpBackend` (8192 bytes). Used serially: first by
+  `Serializer::serialize()`, then by `send_to_all_clients()`. No concurrent access.
 
 ---
 
-## 8. Memory & Ownership Semantics (C/C++ Specific)
+## 8. Memory & Ownership Semantics
 
-### Who owns allocated memory
-All memory is statically allocated inside the objects themselves:
-- `MessageEnvelope env` in the application: caller-owned, stack-allocated.
-- `TcpBackend::m_wire_buf[SOCKET_RECV_BUF_BYTES]` (8192 bytes): member array
-  of `TcpBackend`, allocated in place when `TcpBackend` is constructed.
-- `TcpBackend::m_impairment` (an `ImpairmentEngine`): member of `TcpBackend`;
-  its `m_delay_buf[IMPAIR_DELAY_BUF_SIZE]` (32 slots) is a member array.
-- `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]` (32 elements): declared on
-  the stack inside `TcpBackend::flush_delayed_to_clients()`.
-- `uint8_t header[4]` in `tcp_send_frame()`: stack array.
-- `struct pollfd pfd` in `socket_send_all()`: stack-allocated per call.
-- No `new`, `malloc`, or `delete` anywhere in this path (Power of 10 rule 3).
+| Name | Location | Size | Notes |
+|---|---|---|---|
+| `env` (caller's) | Caller's stack | `sizeof(MessageEnvelope)` ≈ 4140 bytes | Passed by reference; `source_id`, `message_id`, `timestamp_us` stamped in-place |
+| `m_wire_buf` | `TcpBackend` member | `SOCKET_RECV_BUF_BYTES` = 8192 bytes | Fixed at object construction; reused each `send_message()` call |
+| `delayed[]` in `flush_delayed_to_clients` | Stack frame of that function | `IMPAIR_DELAY_BUF_SIZE * sizeof(MessageEnvelope)` = 32 × ~4140 ≈ 132 KB | Stack-allocated; Power of 10 Rule 3 — no heap |
+| `m_slots` (AckTracker) | `AckTracker` member inside `DeliveryEngine` | `ACK_TRACKER_CAPACITY * sizeof(Entry)` = 32 entries | Not written for BEST_EFFORT |
+| `m_slots` (RetryManager) | `RetryManager` member inside `DeliveryEngine` | `ACK_TRACKER_CAPACITY * sizeof(RetryEntry)` = 32 entries | Not written for BEST_EFFORT |
 
-### Lifetime of key objects
-- `MessageEnvelope& env` passed to `send()` must remain valid for the duration
-  of the call (passed by reference and read inside `TcpBackend::send_message()`
-  during serialization). After `send()` returns, it may go out of scope safely.
-- `TcpBackend` must outlive all calls to `send_message()` — it is owned by the
-  application layer that constructs and passes the `TransportInterface*` to
-  `DeliveryEngine::init()`.
+**Power of 10 Rule 3 confirmation:** No `malloc`, `new`, or equivalent dynamic allocation
+occurs on any path exercised by UC_01. All storage is either static members of objects
+created during `init()` or stack-allocated within bounded function frames.
 
-### Stack vs heap usage
-- Every local in this entire call chain is stack-allocated or lives in object
-  members.
-- `delayed[IMPAIR_DELAY_BUF_SIZE]` inside `flush_delayed_to_clients()` is
-  stack-allocated. `sizeof(MessageEnvelope)` is approximately
-  `3×uint64_t + 3×uint32_t + 3×uint8_t + padding + uint8_t[4096] ~= 4136 bytes`.
-  So `delayed[32]` is approximately 132 KB on the stack. This is a potential
-  stack overflow risk on embedded or constrained targets.
-
-### RAII usage
-- `TcpBackend` destructor (`~TcpBackend()`) calls `TcpBackend::close()`, which
-  closes all sockets using explicit qualified dispatch to avoid virtual dispatch
-  in the destructor.
-- No `std::unique_ptr`, `std::lock_guard`, or other RAII wrappers (consistent
-  with no-STL rule).
-
-### Potential leaks or unsafe patterns
-- If `tcp_send_frame()` fails mid-frame (header sent but payload send fails),
-  the receiving end will have consumed 4 bytes of length prefix but not the
-  corresponding payload. The TCP stream is in an inconsistent framing state with
-  no recovery mechanism in this path. [OBSERVATION]
-- `m_wire_buf` is written by `Serializer::serialize()` for the main message,
-  then read by `send_to_all_clients()`, then overwritten by `Serializer::serialize()`
-  inside `flush_delayed_to_clients()`, then read again. Safe in single-threaded
-  context. [OBSERVATION]
+**Object lifetimes:** `DeliveryEngine` and `TcpBackend` are expected to be stack- or
+statically-allocated by the application. The `DeliveryEngine` holds a non-owning pointer to
+`TcpBackend` (`m_transport`); the backend must outlive the engine.
 
 ---
 
 ## 9. Error Handling Flow
 
-### How errors propagate
-- Errors inside `socket_send_all()` return `false` to `tcp_send_frame()`, which
-  returns `false` to `send_to_all_clients()`.
-- In `send_to_all_clients()`, a failed `tcp_send_frame()` is logged at
-  `WARNING_LO` but the loop continues to other clients; the function has void
-  return type, so per-connection failures are not propagated upward.
-- `Serializer::serialize()` returning non-OK causes `send_message()` to return
-  that result immediately; this propagates through `send_via_transport()` to
-  `send()`, which logs it and returns it to the application.
-- `ImpairmentEngine::process_outbound()` returning `ERR_IO` causes
-  `TcpBackend::send_message()` to return `Result::OK` (silent drop at line 365).
-  The application receives `OK` even though the message was dropped.
-- `ImpairmentEngine::process_outbound()` returning `ERR_FULL` (delay buffer
-  full) is NOT intercepted as `ERR_IO` — it propagates up through `send_message()`
-  and back to the application as `ERR_FULL`.
-
-### Retry logic
-None in this path. `BEST_EFFORT` has no retry. The application receives
-`Result::OK` whether or not the bytes reached the network (unless serialization
-fails or the delay buffer is full).
-
-### Fallback paths
-- If `m_client_count == 0`, the function returns `Result::OK` without sending
-  anything.
-- If all `tcp_send_frame()` calls fail, `send_to_all_clients()` still returns
-  (void), and `send_message()` still returns `Result::OK`.
+| Condition | System state after | What caller should do |
+|---|---|---|
+| `!m_initialized` → `ERR_INVALID` | No state changes; send aborted at guard | Call `init()` before retrying |
+| `Serializer::serialize()` → `ERR_INVALID` | `wire_len` is 0; no socket write | Retry with a valid envelope |
+| `process_outbound()` → `ERR_IO` (impairment drop) | Impairment counters may increment; no socket write | `OK` returned; caller sees success (fire-and-forget semantics) |
+| `m_client_count == 0` | No socket write; WARNING_LO logged | Retry after a client connects |
+| `send_frame()` → false on one fd | That fd not closed; WARNING_LO logged; other fds still attempted | Monitor logs; dead clients cleaned up on receive path via `remove_client_fd()` |
 
 ---
 
 ## 10. External Interactions
 
-### Network calls
-All POSIX socket calls occur inside `socket_send_all()` (`SocketUtils.cpp`):
-- `poll(pfd, 1, timeout_ms)` — waits for the TCP socket to become writable.
-- `send(fd, buf, remaining, 0)` — writes bytes to the TCP stream.
-These are the only points where the process enters kernel space for I/O in this
-send path.
+| API | fd / clock type | Notes |
+|---|---|---|
+| `clock_gettime(CLOCK_MONOTONIC, &ts)` | POSIX monotonic clock | Called inside `timestamp_now_us()` inside `TcpBackend::send_message()`. |
+| `ISocketOps::send_frame()` → `SocketOpsImpl::send_frame()` | TCP socket fd (int, created during `init()`) | Issues a length-prefixed write on the TCP connection. Timeout is `send_timeout_ms` from `ChannelConfig`. |
 
-### File I/O
-None in this path.
-
-### Hardware interaction
-None directly. The kernel's TCP stack handles NIC interaction transparently.
-
-### IPC
-None. The send path is entirely in-process.
+No file I/O, IPC, or hardware interaction occurs on the UC_01 send path.
 
 ---
 
 ## 11. State Changes / Side Effects
 
-### What system state is modified
+| Object | Member | Before | After |
+|---|---|---|---|
+| `MessageEnvelope& env` (caller's) | `source_id` | Caller-supplied (may be 0) | `m_local_id` |
+| `MessageEnvelope& env` | `message_id` | Any | Non-zero monotonic counter value |
+| `MessageEnvelope& env` | `timestamp_us` | Caller-supplied | `now_us` argument |
+| `MessageIdGen m_id_gen` | `m_next` | N | N+1 (or 1 if N+1 == 0) |
+| `TcpBackend m_wire_buf` | bytes [0..wire_len-1] | Stale previous content | Serialized wire frame of this message |
+| Impairment engine delay buffer | one slot | Empty or stale | Holds envelope with `release_us = now_us`; drained in same call by `collect_deliverable()` |
+| Kernel TCP send buffer (each client fd) | bytes | Previous content | Appended with length-prefixed serialized frame |
 
-**`MessageEnvelope& env` (caller's object, passed by reference):**
-- `env.source_id` set to `m_local_id` (`DeliveryEngine.cpp:88`).
-- `env.message_id` set to `m_id_gen.next()` (`DeliveryEngine.cpp:89`).
-- `env.timestamp_us` set to `now_us` (`DeliveryEngine.cpp:90`).
-
-**`MessageIdGen m_id_gen` (member of `DeliveryEngine`):**
-- Internal counter incremented by `next()`. This is a permanent, monotonic side
-  effect — the next call to `send()` will receive a higher ID.
-
-**`ImpairmentEngine::m_delay_buf[]` and `m_delay_count` (member of
-`TcpBackend`):**
-- One slot is activated in `process_outbound()` via `queue_to_delay_buf()`,
-  then immediately deactivated in `collect_deliverable()` (called from
-  `flush_delayed_to_clients()`). Net state after `send_message()` returns:
-  same as before the call.
-
-**`TcpBackend::m_wire_buf[8192]` (member of `TcpBackend`):**
-- Overwritten first with the main-message serialization, then overwritten again
-  by `flush_delayed_to_clients()` re-serialization. State persists after
-  `send_message()` returns.
-
-**TCP kernel send buffer:**
-- Bytes are enqueued in the OS TCP send buffer. The kernel schedules
-  transmission independently.
-
-### Persistent changes (DB, disk, device state)
-None. No disk writes, no database, no device registers.
+No persistent disk, database, or device state is modified.
 
 ---
 
-## 12. Sequence Diagram using mermaid
+## 12. Sequence Diagram
 
-```text
-Participants:
-  App  DeliveryEngine  TcpBackend  ImpairEngine  Serializer  SocketUtils  OS/Kernel
-
-Flow:
-
-App --send(env, now_us)--> DeliveryEngine
-  stamp source_id, message_id, timestamp_us
-  send_via_transport(env)
-    DeliveryEngine --> TcpBackend::send_message(env)
-      TcpBackend --> Serializer::serialize(env) --> wire bytes in m_wire_buf
-      TcpBackend: now_us2 = timestamp_now_us()
-      TcpBackend --> ImpairmentEngine::process_outbound(env, now_us2)
-        [impairments disabled: queue_to_delay_buf(env, now_us2), release_us=now_us2]
-        returns OK
-      TcpBackend --> send_to_all_clients(m_wire_buf, wire_len)
-        TcpBackend --> tcp_send_frame(fd, wire_buf, len, tmo)
-          SocketUtils --> socket_send_all(fd, hdr, 4, tmo)
-            poll(POLLOUT) -> OS/Kernel
-            send(hdr, 4) -> OS/Kernel
-          SocketUtils --> socket_send_all(fd, buf, wlen, tmo)
-            poll(POLLOUT) -> OS/Kernel
-            send(bytes, wlen) -> OS/Kernel
-          returns true
-      TcpBackend --> flush_delayed_to_clients(now_us2)
-        TcpBackend --> ImpairmentEngine::collect_deliverable(now_us2)
-          [slot active, release_us<=now_us2: copy out, free slot]
-          returns 1
-        TcpBackend --> Serializer::serialize(delayed[0]) --> m_wire_buf
-        TcpBackend --> send_to_all_clients(m_wire_buf, delayed_len)
-          [same poll/send sequence as above]
-      asserts wire_len > 0
-      returns Result::OK
-    returns Result::OK
-  [BEST_EFFORT: reliability check FALSE]
-  [AckTracker::track()      NOT CALLED]
-  [RetryManager::schedule() NOT CALLED]
-  asserts env.source_id == m_local_id, env.message_id != 0
-  Logger::log(INFO, "Sent message_id=N, reliability=0")
-App <-- Result::OK
+```
+Caller         DeliveryEngine     MessageIdGen   TcpBackend        ImpairmentEngine  Serializer  ISocketOps
+  |                  |                |               |                    |              |             |
+  |--send(env,now)-->|                |               |                    |              |             |
+  |                  |--next()------->|               |                    |              |             |
+  |                  |<-message_id----|               |                    |              |             |
+  |                  | (stamp env)    |               |                    |              |             |
+  |                  |--send_via_transport(env)------->|                    |              |             |
+  |                  |                |               |--serialize(env)---->|              |             |
+  |                  |                |               |<--OK, wire_len------|              |             |
+  |                  |                |               |--process_outbound(env,now)-------->|             |
+  |                  |                |               |<--OK (queued in delay buf)---------|             |
+  |                  |                |               |--flush_delayed_to_clients(now)--->|              |
+  |                  |                |               |    collect_deliverable()---------->|              |
+  |                  |                |               |    <--[envelope]------------------|              |
+  |                  |                |               |    serialize(delayed[0])---------->|             |
+  |                  |                |               |    <--OK, delayed_len-------------|             |
+  |                  |                |               |    send_to_all_clients()-----------|----send_frame->|
+  |                  |                |               |                    |              |  [TCP write]  |
+  |                  |<--OK-----------|               |                    |              |             |
+  |  (BEST_EFFORT: no ACK track, no retry schedule)   |                    |              |             |
+  |<--OK-------------|                |               |                    |              |             |
 ```
 
 ---
 
 ## 13. Initialization vs Runtime Flow
 
-### What happens during startup (init phase)
+**Initialization (preconditions before UC_01 can execute):**
+- `TcpBackend::init(config)` must have been called: creates the TCP socket (client:
+  `connect_to_server()`; server: `bind_and_listen()`), sets `m_open = true`, initializes
+  `m_recv_queue` and `m_impairment`.
+- `DeliveryEngine::init(transport, cfg, local_id)` must have been called: sets `m_transport`,
+  calls `m_ack_tracker.init()`, `m_retry_manager.init()`, `m_dedup.init()`,
+  `m_id_gen.init(seed)`, sets `m_initialized = true`.
 
-1. Application constructs `TcpBackend` — constructor (`TcpBackend.cpp:28`)
-   zero-initializes `m_client_fds[]` to -1, sets `m_open = false`,
-   `m_is_server = false`, using a bounded init loop.
-2. Application calls `TcpBackend::init(config)` — initializes `m_recv_queue`,
-   calls `impairment_config_default(imp_cfg)` (sets `enabled = false`), reads
-   `config.channels[0].impairments_enabled` to override, calls
-   `m_impairment.init(imp_cfg)`. For client mode calls `connect_to_server()`:
-   creates TCP socket via `socket_create_tcp()`, calls `socket_set_reuseaddr()`,
-   calls `socket_connect_with_timeout()`. On success, stores fd in
-   `m_client_fds[0]`, sets `m_open = true`, `m_client_count = 1`.
-3. Application constructs `DeliveryEngine` and calls `DeliveryEngine::init
-   (transport, cfg, local_id)` — stores `m_transport`, copies `m_cfg`, calls
-   `m_ack_tracker.init()`, `m_retry_manager.init()`, `m_dedup.init()`,
-   `m_id_gen.init(seed = local_id)`, sets `m_initialized = true`.
-
-### What happens during steady-state execution
-
-Each call to `DeliveryEngine::send()` follows the path described in section 3.
-No new memory is allocated. The `m_id_gen` counter increments with each send.
-The `ImpairmentEngine` delay buffer is transiently written and immediately
-cleared within each `send_message()` call (zero-delay path). The TCP kernel
-send buffer accumulates bytes until the kernel transmits them.
+**Steady-state (UC_01 runtime):**
+- Each call to `send()` is entirely self-contained. It reads and updates `m_id_gen.m_next`
+  (monotonic counter), stamps three fields on the caller's envelope, calls through to the
+  transport, and returns. No background threads or timers are involved.
+- The impairment engine's delay buffer is both written (`process_outbound`) and drained
+  (`flush_delayed_to_clients`) within a single `send_message()` call for the zero-latency
+  case.
 
 ---
 
 ## 14. Known Risks / Observations
 
-### Double-send of the same message data
+- **`m_wire_buf` is not thread-safe.** If two threads both call `send_message()` on the same
+  `TcpBackend` instance, they would race on `m_wire_buf` and the `m_impairment` state. The
+  design assumes a single caller thread per backend instance.
 
-`TcpBackend::send_message()` serializes the envelope into `m_wire_buf` and
-calls `send_to_all_clients()` with those bytes (the main send at line 375).
-Then calls `flush_delayed_to_clients()` (line 376), which drains the delay
-buffer. The slot placed there in `process_outbound()` with `release_us = now_us`
-is immediately eligible. `flush_delayed_to_clients()` re-serializes it and
-calls `send_to_all_clients()` again. **The same logical message is sent twice to
-each connected client in the zero-impairment path.** This appears to be a design
-defect: when impairments are disabled, the delay buffer acts as a passthrough
-queue, and `flush_delayed_to_clients()` in the same call cycle immediately
-delivers the queued item. [OBSERVATION - potential bug]
+- **`flush_delayed_to_clients()` stack frame is large.** The `delayed[]` array is
+  `IMPAIR_DELAY_BUF_SIZE * sizeof(MessageEnvelope) = 32 * ~4140 ≈ 132 KB` on the stack.
+  See `docs/STACK_ANALYSIS.md` for platform headroom analysis.
 
-### Unsynchronized shared state
+- **Double serialization on zero-latency path.** `Serializer::serialize()` is called once
+  before `process_outbound()` (result stored in `wire_len` but `m_wire_buf` content is
+  immediately overwritten by `flush_delayed_to_clients()`) and again inside
+  `flush_delayed_to_clients()` for the copy retrieved from the delay buffer. The first
+  serialization into `m_wire_buf` is discarded by the second call. This is a minor
+  inefficiency, not a correctness issue.
 
-`TcpBackend::m_wire_buf`, `m_client_fds[]`, `m_client_count`, and
-`ImpairmentEngine::m_delay_buf[]` are all modified by `send_message()` and
-read/written by `receive_message()` and `recv_from_client()`. If send and
-receive are called from different threads (expected usage pattern), all of
-these accesses are data races under the C++ memory model. No mutex,
-`std::atomic`, or other synchronization is present (except on the
-`RingBuffer`'s own head/tail). [RISK]
+- **`m_client_count == 0` returns `OK`.** A caller cannot distinguish "sent successfully"
+  from "no clients to send to" using the `Result` code alone.
 
-### Stack pressure from `delayed[]` in flush_delayed_to_clients()
-
-`MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]` (32 elements) is
-stack-allocated inside `flush_delayed_to_clients()`. `sizeof(MessageEnvelope)`
-is approximately 4136 bytes. 32 elements is approximately 132 KB on the stack.
-On platforms with small stack sizes this is a stack overflow risk. [RISK]
-
-### tcp_send_frame() failure is silently absorbed
-
-In `send_to_all_clients()`, if `tcp_send_frame()` returns false, a `WARNING_LO`
-is logged but the loop continues and the function returns void. The
-`DeliveryEngine` receives `OK` (from `send_message()`) and the application has
-no way to distinguish a failed send from a successful one. For `BEST_EFFORT`
-this may be intentional (fire and forget), but the same code path applies for
-reliable modes. [OBSERVATION]
-
-### Logger call at send completion
-
-`Logger::log(INFO, ...)` is called at `DeliveryEngine.cpp:138-141` with
-`message_id` and `reliability_class` on every send. If `Logger` does
-synchronous file or console I/O, it adds latency to every send. [OBSERVATION]
+- **BEST_EFFORT messages are silently dropped on transport errors.** There is no feedback
+  mechanism to the caller beyond a WARNING_LO log entry. This is by design (REQ-3.3.1).
 
 ---
 
 ## 15. Unknowns / Assumptions
 
-- [ASSUMPTION] The application passes `reliability_class = BEST_EFFORT`
-  correctly set in the envelope before calling `send()`. The engine does not
-  validate or override this field; it trusts the caller.
+- [ASSUMPTION] `ImpairmentEngine::process_outbound()` returns `ERR_IO` specifically for a
+  loss-dropped message. Inferred from the `if (res == Result::ERR_IO) { return Result::OK; }`
+  guard in `TcpBackend::send_message()`.
 
-- [ASSUMPTION] `TcpBackend` is used in client mode (not server mode) for this
-  use case. In server mode, `send_message()` calls the same helpers;
-  `send_to_all_clients()` iterates all `m_client_fds[]` slots and would send
-  to every connected client.
+- [ASSUMPTION] The impairment engine's `collect_deliverable()` returns messages in FIFO order
+  for the zero-latency case.
 
-- [ASSUMPTION] `impairment_config_default()` initializes
-  `ImpairmentConfig::enabled = false`. When disabled, `process_outbound()`
-  passes messages through the delay buffer with `release_us = now_us`, causing
-  immediate double-send via `flush_delayed_to_clients()`.
+- [ASSUMPTION] `SocketOpsImpl::send_frame()` issues a length-prefixed frame (REQ-6.1.5). The
+  exact framing format (e.g., 4-byte big-endian length prefix) is implemented in `SocketUtils`
+  which was not part of the source files read for this document.
 
-- `MessageIdGen::next()` returns a monotonically increasing non-zero `uint64_t`
-  seeded with `local_id`. On wraparound through 0, it skips to 1. Confirmed at
-  `MessageId.hpp`.
+- [ASSUMPTION] The `TcpBackend` instance is used by a single thread. No synchronization is
+  present in the implementation; concurrent use would produce data races.
 
-- `timestamp_now_us()` returns the current `CLOCK_MONOTONIC` time in
-  microseconds as a `uint64_t`. Confirmed at `Timestamp.hpp:31-45`.
-
-- [ASSUMPTION] `RingBuffer::push()` and `RingBuffer::pop()` are SPSC lock-free
-  operations using `std::atomic<uint32_t>` with acquire/release ordering.
-  Capacity is `MSG_RING_CAPACITY = 64`.
-
-- [ASSUMPTION] `DeliveryEngine::send()` is called from a single thread. No
-  synchronization exists; concurrent calls would create data races on `m_id_gen`
-  (shared counter) and `TcpBackend::m_wire_buf`.
-
-- The TCP socket may remain in non-blocking mode after
-  `socket_connect_with_timeout()` completes. `send()` inside `socket_send_all()`
-  may return partial bytes or `EAGAIN`; the `while` loop handles both via
-  `poll()` before each attempt.
-
-- The exact struct size and padding of `MessageEnvelope` depends on the
-  compiler. Estimated `sizeof(MessageEnvelope) ~= 4136` bytes
-  (3×`uint64_t` + 3×`uint32_t` + 3×`uint8_t` + padding + `uint8_t[4096]`).
-
-- [ASSUMPTION] `Logger::log()` thread-safety is not established by the source
-  code reviewed. If not thread-safe, concurrent sends from multiple threads will
-  produce interleaved log output.
+- [ASSUMPTION] `timestamp_now_us()` always succeeds on the target platform. The
+  `NEVER_COMPILED_OUT_ASSERT(result == 0)` would trigger the registered `IResetHandler` on
+  failure.

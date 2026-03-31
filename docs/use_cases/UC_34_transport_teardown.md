@@ -1,6 +1,6 @@
 # UC_34 — Transport teardown
 
-**HL Group:** HL-9 — User closes a transport
+**HL Group:** HL-9 — Close a Transport
 **Actor:** User
 **Requirement traceability:** REQ-4.1.4, REQ-6.1.3, REQ-6.3.2, REQ-7.1.1, REQ-7.1.2
 
@@ -326,44 +326,63 @@ None. Server and Client communicate via TCP sockets, closed during teardown as d
 
 ---
 
-## 12. Sequence Diagram using mermaid
+## 12. Sequence Diagram (ASCII)
 
-```mermaid
-sequenceDiagram
-    participant OS_Signal as OS / Signal
-    participant Server as Server main
-    participant DE as DeliveryEngine
-    participant TB as TcpBackend
-    participant SU as SocketUtils
-    participant OS as OS Kernel
+```
+  OS/Signal   Server main   DeliveryEngine   TcpBackend   SocketUtils   OS Kernel
+      |             |               |               |            |           |
+  SIGINT ---------> |               |               |            |           |
+  (signal_handler)  |               |               |            |           |
+  g_stop_flag=1     |               |               |            |           |
+                    | (poll returns EINTR/timeout)  |            |           |
+                    |               |               |            |           |
+                    |--receive()---> |               |            |           |
+                    |               |--recv_msg()-->|            |           |
+                    |               |               | (poll ret) |           |
+                    |               |<--ERR_TIMEOUT--|            |           |
+                    |<--ERR_TIMEOUT--|               |            |           |
+                    |               |               |            |           |
+  [g_stop_flag!=0 → break]          |               |            |           |
+                    |               |               |            |           |
+                    |--pump_retries(now_us)--------> |            |           |
+                    |               |--send_msg()-->|            |           |
+                    |               |               |--tcp_send->|           |
+                    |               |               |            |--send(2)->|
+                    |               |               |            |<---0------|
+                    |               |<--------------|            |           |
+                    |<--------------|               |            |           |
+                    |               |               |            |           |
+                    |--sweep_ack_timeouts(now_us)--> |            |           |
+                    |<--------------|               |            |           |
+                    |               |               |            |           |
+                    |--transport.close()------------>|            |           |
+                    |               |               | NCOA(fd>=0)|           |
+                    |               |               |--sock_close(listen_fd)->|
+                    |               |               |            |--close()-->|
+                    |               |               |            |<---0-------|
+                    |               |               | m_listen_fd=-1          |
+                    |               |               | [loop i=0..7]           |
+                    |               |               |--sock_close(client[i])->|
+                    |               |               |            |--close()-->|
+                    |               |               |            |<---0-------|
+                    |               |               | m_client_fds[i]=-1      |
+                    |               |               | [end loop] |           |
+                    |               |               | m_client_count=0        |
+                    |               |               | m_open=false            |
+                    |               |               | log(INFO,"Transport closed")
+                    |<--(void)-------|               |            |           |
+                    |               |               |            |           |
+  [return 0 → stack unwind]         |               |            |           |
+                    |               |               |            |           |
+                    |         ~TcpBackend() calls TcpBackend::close() [qualified]
+                    |               |               | all fds==-1 → no-ops   |
+                    |               |               | m_open already false   |
+                    |               |               | log(INFO,"Transport closed") [duplicate]
+                    |               |               |            |           |
+                    |         ~DeliveryEngine() [compiler-generated, no I/O]
+                    |               |               |            |           |
 
-    OS_Signal->>Server: SIGINT → signal_handler sets g_stop_flag=1
-    Note over Server: poll(2) returns EINTR
-    Server->>DE: engine.receive() → ERR_TIMEOUT
-    Note over Server: top of loop: g_stop_flag != 0 → break
-
-    Server->>DE: engine.pump_retries(now_us)
-    DE->>TB: send_message() [final retry sends]
-    TB->>SU: tcp_send_frame()
-    SU->>OS: send(2)
-
-    Server->>DE: engine.sweep_ack_timeouts(now_us)
-
-    Server->>TB: transport.close()
-    TB->>SU: socket_close(m_listen_fd)
-    SU->>OS: close(listen_fd)
-    OS-->>SU: 0
-    loop i=0..MAX_TCP_CONNECTIONS-1
-        TB->>SU: socket_close(m_client_fds[i])
-        SU->>OS: close(client_fd)
-        OS-->>SU: 0
-    end
-    Note over TB: m_client_count=0; m_open=false; log INFO "Transport closed"
-    TB-->>Server: void
-
-    Note over Server: return 0 → stack unwind
-    Note over TB: ~TcpBackend() → close() [no-op, all fds=-1]
-    Note over DE: ~DeliveryEngine() [compiler-generated; no I/O]
+NCOA = NEVER_COMPILED_OUT_ASSERT
 ```
 
 ---

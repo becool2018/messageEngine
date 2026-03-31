@@ -1,524 +1,316 @@
-# UC_02 — Reliable-with-ACK Send
+# UC_02 — RELIABLE_ACK send: single transmission, ACK slot allocated in AckTracker
 
-**HL Group:** HL-2 — User sends a message requiring confirmation
+**HL Group:** HL-2 — Send with Acknowledgement
 **Actor:** User
-**Requirement traceability:** REQ-3.3.2, REQ-3.2.4, REQ-3.2.1, REQ-3.2.3, REQ-4.1.2, REQ-6.1.5, REQ-6.1.6
+**Requirement traceability:** REQ-3.3.2, REQ-3.2.4, REQ-3.2.1, REQ-3.2.3, REQ-4.1.2,
+REQ-6.1.5, REQ-6.1.6
 
 ---
 
 ## 1. Use Case Overview
 
-### Clear description of what triggers this flow
+**Trigger:** The application calls `DeliveryEngine::send()` with a `MessageEnvelope` whose
+`reliability_class` is `ReliabilityClass::RELIABLE_ACK`.
 
-A client application populates a `MessageEnvelope` with `message_type = DATA`,
-`reliability_class = RELIABLE_ACK`, fills in `destination_id`, `priority`,
-`expiry_time_us`, `payload`, and `payload_length`, then calls
-`DeliveryEngine::send(env, now_us)`. The engine is initialized with a
-`TcpBackend` instance and a `ChannelConfig` that supplies `recv_timeout_ms`
-(used as the ACK deadline duration). The TCP connection to the server peer was
-established during `TcpBackend::init()`.
+**Goal:** Transmit the envelope exactly once over TCP and allocate one slot in the
+`AckTracker` so the system can detect whether the remote peer sends an ACK within the
+configured timeout (`recv_timeout_ms`). No automatic retry is scheduled.
 
-This use case covers only the send phase. The ACK resolution phase (when the
-remote peer's ACK arrives and is processed) is documented in UC_08.
+**Success outcome:** `DeliveryEngine::send()` returns `Result::OK`. The serialized wire
+frame has reached the TCP socket(s). An `AckTracker` slot transitions from FREE to PENDING
+with `deadline_us = now_us + recv_timeout_ms * 1000`.
 
-### Expected outcome (single goal)
-
-The envelope is stamped with `source_id` and a newly generated `message_id`,
-serialized to wire format, subjected to impairment evaluation, and sent over
-TCP as a length-prefixed frame. After a successful transport send, the engine
-computes an ACK deadline (`now_us + recv_timeout_ms * 1000`) and calls
-`AckTracker::track()` to register a `PENDING` entry. `RetryManager::schedule()`
-is **not** called because `RELIABLE_ACK` does not auto-retry. The call returns
-`Result::OK` to the application. The `AckTracker` slot remains `PENDING` until
-UC_08 (ACK resolution) or `sweep_ack_timeouts()` clears it.
+**Error outcomes:**
+- `Result::ERR_INVALID` — engine not initialized or envelope is invalid.
+- `Result::ERR_IO` from transport — serialization or socket send failure; ACK tracking is
+  still attempted because tracking is a best-effort side effect.
+- `Result::OK` with AckTracker `ERR_FULL` — send succeeded but ACK tracking could not be
+  registered (tracker full); WARNING_HI is logged; the message is untracked.
+- `Result::OK` (silent drop) — impairment loss policy dropped the message before socket
+  write; ACK tracking still attempted.
 
 ---
 
 ## 2. Entry Points
 
-### Exact functions, threads, or events where execution begins
+```
+// src/core/DeliveryEngine.cpp
+Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us);
 
-- **Primary entry point:** `DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)`
-  — `DeliveryEngine.cpp` line 77.
-- **Caller:** Application code in `src/app` or a test harness. No thread is
-  created inside this call; it executes synchronously on the caller's thread.
-- **Pre-condition:** `DeliveryEngine::init()` has been called successfully
-  (`m_initialized = true`). `TcpBackend::init()` has been called (`m_open = true`,
-  `m_client_count >= 1`). `m_ack_tracker` has been initialized with all slots
-  `FREE`, `m_count = 0`.
+// Downstream platform entry (via virtual dispatch):
+// src/platform/TcpBackend.cpp
+Result TcpBackend::send_message(const MessageEnvelope& envelope);
 
-### Example: main(), ISR, callback, RPC handler, etc.
+// ACK tracking:
+// src/core/AckTracker.cpp
+Result AckTracker::track(const MessageEnvelope& env, uint64_t deadline_us);
+```
 
-Application calls `DeliveryEngine::send()` from its main loop after populating
-an envelope with `RELIABLE_ACK`. No ISR or RPC mechanism is present in the
-codebase.
+The caller fills the envelope with `reliability_class = RELIABLE_ACK`, then calls
+`engine.send(env, timestamp_now_us())`.
 
 ---
 
 ## 3. End-to-End Control Flow (Step-by-Step)
 
-**--- Phase A: Transport send (identical to UC_01 steps 1–24) ---**
-
-1. **Application** constructs a `MessageEnvelope` on the stack with
-   `message_type = DATA`, `reliability_class = RELIABLE_ACK`, and calls
-   `DeliveryEngine::send(env, now_us)`.
-
-2. **`DeliveryEngine::send()`** (`DeliveryEngine.cpp:77`) fires precondition
-   assertions `m_initialized` and `now_us > 0`. Checks `!m_initialized` guard.
-   Stamps `env.source_id = m_local_id` (line 88), `env.message_id =
-   m_id_gen.next()` (line 89), `env.timestamp_us = now_us` (line 90).
-
-3. Calls `send_via_transport(env)` at line 93.
-
-4. **`send_via_transport()`** fires assertions, then calls
-   `m_transport->send_message(env)` via virtual dispatch to
-   `TcpBackend::send_message()`.
-
-5. **`TcpBackend::send_message()`** (`TcpBackend.cpp:347`):
-   - Calls `Serializer::serialize(envelope, m_wire_buf, SOCKET_RECV_BUF_BYTES,
-     wire_len)` — produces 44-byte big-endian header plus payload bytes in
-     `m_wire_buf`.
-   - Calls `timestamp_now_us()` for the impairment engine.
-   - Calls `m_impairment.process_outbound(envelope, now_us)` — with impairments
-     disabled (default), queues the envelope in the delay buffer with
-     `release_us = now_us`. Returns `Result::OK`.
-   - Checks `m_client_count == 0` (false, client connected). Calls
-     `send_to_all_clients(m_wire_buf, wire_len)` — calls `tcp_send_frame()` for
-     each connected fd, which calls `socket_send_all()` twice (4-byte length
-     header, then serialized body), using `poll()` + `send()` syscalls.
-   - Calls `flush_delayed_to_clients(now_us)` — drains the delay buffer slot
-     placed above, re-serializes, sends again (same double-send observation as
-     UC_01). Returns `Result::OK`.
-
-6. **`send_via_transport()`** returns `Result::OK` to `send()`.
-
-7. **`DeliveryEngine::send()`** checks `res != Result::OK` at line 94 (passes).
-
-**--- Phase B: ACK tracking registration ---**
-
-8. **`DeliveryEngine::send()`** evaluates reliability class at line 102:
-   `RELIABLE_ACK` satisfies `(env.reliability_class == RELIABLE_ACK ||
-   env.reliability_class == RELIABLE_RETRY)`. **Branch taken.**
-
-9. Computes `ack_deadline = timestamp_deadline_us(now_us, m_cfg.recv_timeout_ms)`
-   at line 106. `timestamp_deadline_us()` returns `now_us + recv_timeout_ms *
-   1000ULL`. Default `recv_timeout_ms` is 1000 ms (configurable);
-   `ack_deadline = now_us + 1 000 000 µs`.
-
-10. Calls `m_ack_tracker.track(env, ack_deadline)` at line 110.
-
-11. **`AckTracker::track()`** (`AckTracker.cpp:44`):
-    - Fires precondition assertion: `m_count <= ACK_TRACKER_CAPACITY`.
-    - Iterates `m_slots[0..ACK_TRACKER_CAPACITY-1]` (fixed bound, 32 slots) for
-      the first `EntryState::FREE` slot.
-    - On finding slot `i`: calls `envelope_copy(m_slots[i].env, env)` (memcpy of
-      `sizeof(MessageEnvelope)` bytes, approximately 4136 bytes). Sets
-      `m_slots[i].deadline_us = ack_deadline`. Sets
-      `m_slots[i].state = EntryState::PENDING`. Increments `m_count`.
-    - Fires postcondition assertions: `m_slots[i].state == PENDING`,
-      `m_count <= ACK_TRACKER_CAPACITY`.
-    - Returns `Result::OK`.
-
-12. **`DeliveryEngine::send()`** checks `track_res != Result::OK` at line 111.
-    For success: passes. For `ERR_FULL` (all 32 slots occupied): logs
-    `WARNING_HI` ("Failed to track ACK for message_id=...") and continues
-    without failing the send. ACK tracking failure does not fail the send.
-
-**--- Phase C: Retry scheduling skipped ---**
-
-13. **`DeliveryEngine::send()`** evaluates the retry conditional at line 120:
-    `env.reliability_class == RELIABLE_RETRY` is **false** for `RELIABLE_ACK`.
-    **`RetryManager::schedule()` is never called.**
-
-**--- Phase D: Completion ---**
-
-14. **`DeliveryEngine::send()`** fires postcondition assertions:
-    `env.source_id == m_local_id`, `env.message_id != 0ULL`. Logs
-    `INFO "Sent message_id=%llu, reliability=1"`. Returns `Result::OK`.
+1. Caller invokes `DeliveryEngine::send(env, now_us)`.
+2. Pre-condition asserts: `m_initialized`, `now_us > 0`.
+3. Guard check: `if (!m_initialized) return ERR_INVALID` — skipped when initialized.
+4. `send()` stamps `env.source_id = m_local_id`.
+5. `send()` calls `m_id_gen.next()` → stores result in `env.message_id`.
+6. `send()` stamps `env.timestamp_us = now_us`.
+7. `send()` calls `send_via_transport(env)`.
+8. `send_via_transport()` asserts `m_initialized`, `m_transport != nullptr`,
+   `envelope_valid(env)`, then calls `m_transport->send_message(env)` via virtual dispatch.
+9. `TcpBackend::send_message()` executes identically to UC_01 steps 9a–12:
+   serializes, applies impairment, flushes delay buffer, sends to all clients, returns `OK`
+   (or an error code if something fails).
+10. Control returns to `DeliveryEngine::send()` with `res` from `send_via_transport()`.
+11. Transport error check: `if (res != Result::OK)` — logs WARNING_LO and returns `res`.
+    For the success path, `res == OK` and execution continues.
+12. Reliability class check — first branch:
+    `if (env.reliability_class == RELIABLE_ACK || env.reliability_class == RELIABLE_RETRY)`:
+    condition is TRUE for RELIABLE_ACK.
+    a. Computes ACK deadline: `ack_deadline = timestamp_deadline_us(now_us, m_cfg.recv_timeout_ms)`.
+       This is `now_us + (recv_timeout_ms * 1000)` in microseconds.
+    b. Calls `m_ack_tracker.track(env, ack_deadline)`.
+13. Inside `AckTracker::track(env, deadline_us)`:
+    a. Pre-condition assert: `m_count <= ACK_TRACKER_CAPACITY`.
+    b. Scans `m_slots[0..ACK_TRACKER_CAPACITY-1]` (32 slots, bounded) for a slot where
+       `state == EntryState::FREE`.
+    c. On finding a free slot at index `i`:
+       - Calls `envelope_copy(m_slots[i].env, env)` — copies entire `MessageEnvelope`
+         (memcpy, 4140 bytes).
+       - Sets `m_slots[i].deadline_us = deadline_us`.
+       - Sets `m_slots[i].state = EntryState::PENDING`.
+       - Increments `m_count`.
+       - Post-condition asserts: `m_slots[i].state == PENDING`, `m_count <= ACK_TRACKER_CAPACITY`.
+       - Returns `Result::OK`.
+    d. If no free slot found: asserts `m_count == ACK_TRACKER_CAPACITY`, returns `ERR_FULL`.
+14. Back in `DeliveryEngine::send()`: checks `track_res`:
+    - `ERR_FULL` or any non-OK → logs WARNING_HI: `"Failed to track ACK for message_id=..."`.
+      Does NOT return early — tracking failure is a side effect; the send itself succeeded.
+15. Second reliability check: `if (env.reliability_class == RELIABLE_RETRY)` — FALSE for
+    RELIABLE_ACK. Retry scheduling block is skipped entirely.
+16. Post-condition asserts: `env.source_id == m_local_id`, `env.message_id != 0`.
+17. Logs INFO: `"Sent message_id=..., reliability=1"`.
+18. Returns `OK`.
+19. Caller receives `OK`. The `AckTracker` now has one PENDING slot for this message.
 
 ---
 
-## 4. Call Tree (Hierarchical)
+## 4. Call Tree
 
 ```
-DeliveryEngine::send()                         [DeliveryEngine.cpp:77]
-|
-+-- m_id_gen.next()                            [MessageId.hpp - inline]
-|
-+-- DeliveryEngine::send_via_transport()       [DeliveryEngine.cpp:56]
-|   |
-|   +-- TcpBackend::send_message()             [TcpBackend.cpp:347]
-|       +-- Serializer::serialize()            [Serializer.cpp:117]
-|       |   +-- envelope_valid()               [MessageEnvelope.hpp:63]
-|       |   +-- write_u8() x4, write_u64() x3, write_u32() x3
-|       |   \-- memcpy()
-|       +-- timestamp_now_us()                 [Timestamp.hpp:31]
-|       +-- ImpairmentEngine::process_outbound()
-|       |   \-- queue_to_delay_buf()
-|       |       \-- envelope_copy() -> memcpy()
-|       +-- send_to_all_clients()              [TcpBackend.cpp:258]
-|       |   \-- tcp_send_frame()               [SocketUtils.cpp]
-|       |       +-- socket_send_all()          (4-byte length header)
-|       |       |   \-- poll() + send()        [POSIX]
-|       |       \-- socket_send_all()          (serialized payload)
-|       |           \-- poll() + send()        [POSIX]
-|       \-- flush_delayed_to_clients()         [TcpBackend.cpp:280]
-|           +-- ImpairmentEngine::collect_deliverable()
-|           |   \-- envelope_copy()
-|           +-- Serializer::serialize()
-|           \-- send_to_all_clients()
-|               \-- tcp_send_frame() [repeat as above]
-|
-+-- timestamp_deadline_us()                    [Timestamp.hpp:65 - inline]
-|
-+-- AckTracker::track(env, deadline_us)        [AckTracker.cpp:44]
-|   \-- envelope_copy()                        [MessageEnvelope.hpp:56]
-|       \-- memcpy()
-|
-[RetryManager::schedule() -- NOT CALLED (RELIABLE_ACK branch skipped)]
+DeliveryEngine::send(env, now_us)
+ ├── MessageIdGen::next()                        [assigns env.message_id]
+ ├── DeliveryEngine::send_via_transport(env)
+ │    └── TcpBackend::send_message(envelope)     [virtual dispatch]
+ │         ├── Serializer::serialize(...)
+ │         ├── timestamp_now_us()
+ │         ├── ImpairmentEngine::process_outbound(...)
+ │         └── TcpBackend::flush_delayed_to_clients(now_us)
+ │              ├── ImpairmentEngine::collect_deliverable(...)
+ │              ├── Serializer::serialize(delayed[i], ...)
+ │              └── TcpBackend::send_to_all_clients(...)
+ │                   └── ISocketOps::send_frame(fd, buf, len, timeout_ms)
+ └── AckTracker::track(env, ack_deadline)        [only if res==OK]
+      └── envelope_copy(m_slots[i].env, env)     [memcpy]
 ```
 
 ---
 
 ## 5. Key Components Involved
 
-### DeliveryEngine
-- **Responsibility:** Stamps the envelope, dispatches to transport, then
-  selectively engages ACK tracking and retry scheduling based on
-  `reliability_class`. For `RELIABLE_ACK`, engages `AckTracker` but not
-  `RetryManager`.
-- **Why in this flow:** It is the sole send API. The conditional at lines
-  102–103 distinguishes `RELIABLE_ACK` from `BEST_EFFORT` and `RELIABLE_RETRY`.
+- **`DeliveryEngine`** — Orchestrates send; after a successful transport send, computes the
+  ACK deadline and calls `AckTracker::track()`. Does not retry on ACK non-receipt; that is
+  left to the application to detect via `sweep_ack_timeouts()`.
 
-### AckTracker
-- **Responsibility:** Maintains a fixed-size slot table (`ACK_TRACKER_CAPACITY
-  = 32`) of `Entry` structs, each holding a full `MessageEnvelope` copy, a
-  deadline, and a state (`FREE`, `PENDING`, `ACKED`). `track()` registers a new
-  `PENDING` entry. `on_ack()` (called from `receive()` in UC_08) transitions it
-  to `ACKED`. `sweep_expired()` reclaims `ACKED` and timed-out `PENDING` slots.
-- **Why in this flow:** `RELIABLE_ACK` semantics require the engine to know
-  whether the remote peer ACKed the message; this tracking is the mechanism.
+- **`MessageIdGen`** — Assigns `env.message_id`. The message_id stored in the AckTracker
+  slot is the same value; it is used later by `AckTracker::on_ack()` to find the matching
+  PENDING slot when an ACK arrives.
 
-### timestamp_deadline_us()
-- **Responsibility:** Inline function in `Timestamp.hpp:65`. Computes
-  `now_us + duration_ms * 1000ULL`. Used here to compute the ACK deadline.
-- **Why in this flow:** The ACK deadline is the absolute time after which
-  `sweep_ack_timeouts()` will log a timeout and reclaim the slot.
+- **`TcpBackend`** — Same as UC_01; see UC_01 §5 for detail.
 
-### TcpBackend, Serializer, ImpairmentEngine, tcp_send_frame(), socket_send_all()
-- Same roles as documented in UC_01. See UC_01 section 5 for full descriptions.
+- **`AckTracker`** — Maintains a fixed table of 32 `Entry` slots (FREE / PENDING / ACKED
+  state machine). `track()` places one entry in PENDING state with the computed deadline.
+  The `m_count` member tracks occupancy.
 
-### RetryManager
-- **Responsibility:** Schedules and manages retry of `RELIABLE_RETRY` messages.
-- **Why in this flow:** Exists as a `DeliveryEngine` member but is **not
-  invoked**. The conditional at `DeliveryEngine.cpp:120` evaluates `false` for
-  `RELIABLE_ACK`, so `RetryManager::schedule()` is never called.
+- **`timestamp_deadline_us()`** — Inline function in `Timestamp.hpp`. Computes
+  `now_us + duration_ms * 1000` without overflow, returning the absolute ACK deadline.
 
 ---
 
 ## 6. Branching Logic / Decision Points
 
-**Branch 1: `m_initialized` guard (line 82)**
-- Condition: `!m_initialized`
-- Normal: continue. Error: returns `ERR_INVALID`.
-
-**Branch 2: `send_via_transport()` return check (line 94)**
-- Condition: `res != Result::OK`
-- Normal: continue to ACK tracking. Error: logs `WARNING_LO`, returns `res`.
-  Note: if the transport send fails, `AckTracker::track()` is not called.
-
-**Branch 3: Reliability class conditional — AckTracker (lines 102–103)**
-- Condition: `RELIABLE_ACK || RELIABLE_RETRY`
-- For `RELIABLE_ACK`: **condition is true**. `AckTracker::track()` is called.
-- For `BEST_EFFORT`: false — no tracking.
-
-**Branch 4: `AckTracker::track()` return check (line 111)**
-- Condition: `track_res != Result::OK`
-- Normal (`OK`): continue.
-- `ERR_FULL` (32 slots occupied): logs `WARNING_HI` ("Failed to track ACK"),
-  continues. The send is still considered successful; ACK is not tracked.
-
-**Branch 5: Reliability class conditional — RetryManager (line 120)**
-- Condition: `RELIABLE_RETRY`
-- For `RELIABLE_ACK`: **condition is false**. `RetryManager::schedule()` is
-  never called.
-
-**Branch 6: AckTracker slot search — FREE slot found vs not found**
-- `AckTracker::track()` scans 0..31 for `EntryState::FREE`.
-- Found: copies envelope, sets `PENDING`, increments `m_count`, returns `OK`.
-- Not found: asserts `m_count == ACK_TRACKER_CAPACITY`, returns `ERR_FULL`.
-
-**Branches 7–11: Same as UC_01 branches 5–9** (impairment, client count,
-fd validity, send frame failure, poll timeout).
+| Condition | True branch | False branch | Next control |
+|---|---|---|---|
+| `!m_initialized` | Return `ERR_INVALID` | Continue | Step 4 |
+| `send_via_transport()` returns non-OK | Log WARNING_LO, return that result | Continue to ACK tracking | Step 12 |
+| `reliability_class == RELIABLE_ACK \|\| RELIABLE_RETRY` | Enter ACK-tracking block, compute deadline, call `track()` | Skip ACK block | Retry check |
+| `AckTracker::track()` returns `ERR_FULL` | Log WARNING_HI; continue (no early return) | Continue | Post-condition asserts |
+| `reliability_class == RELIABLE_RETRY` | Enter retry-scheduling block | Skip retry | Post-condition asserts |
+| Free slot found in AckTracker scan | Fill slot, increment count, return OK | Continue scan | Next slot |
+| No free slot found after full scan | Assert `m_count == ACK_TRACKER_CAPACITY`, return `ERR_FULL` | — | Back to `send()` |
 
 ---
 
 ## 7. Concurrency / Threading Behavior
 
-### Threads created
-None. The entire send path executes synchronously on the caller's thread.
+- Same single-thread assumption as UC_01 for the send path.
 
-### Where context switches occur
-Only at POSIX blocking calls inside `socket_send_all()`: `poll()` and `send()`.
+- **`AckTracker`** is not thread-safe. It is owned by `DeliveryEngine` and accessed only
+  from the application thread that calls `send()` and later `sweep_ack_timeouts()` or
+  `receive()`. No locks protect it.
 
-### Synchronization primitives
-None in the `AckTracker`. `m_slots[]` and `m_count` are plain member variables
-with no atomics or mutex. If `DeliveryEngine::receive()` is called concurrently
-with `send()` (which calls `AckTracker::track()`), there is a data race on
-`m_slots[]` and `m_count`. No synchronization is present.
+- **ACK receive path interaction:** When a remote ACK arrives and `DeliveryEngine::receive()`
+  processes it, `m_ack_tracker.on_ack()` is called from the same application thread that
+  calls `receive()`. If `send()` and `receive()` are called from different threads, there is
+  a data race on `m_ack_tracker`. This is a design-level constraint (single application
+  thread).
 
-The `RingBuffer` receive queue uses `std::atomic<uint32_t>` for head/tail but
-is not accessed during the send path.
-
-### Producer/consumer relationships
-`AckTracker` acts as a producer (slots filled by `track()`) and consumer (slots
-cleared by `on_ack()` and `sweep_one_slot()`). In the single-threaded model,
-there is no concurrent access.
+- No `std::atomic` operations are involved in the ACK-tracking path; all accesses are plain
+  member reads/writes inside the engine's call chain.
 
 ---
 
-## 8. Memory & Ownership Semantics (C/C++ Specific)
+## 8. Memory & Ownership Semantics
 
-### Who owns allocated memory
-- `MessageEnvelope& env` in the application: caller-owned, stack-allocated.
-- `AckTracker::m_slots[ACK_TRACKER_CAPACITY]` (32 entries): member array of
-  `AckTracker`, which is a member of `DeliveryEngine` by value. Each entry
-  holds a full `MessageEnvelope` copy (~4136 bytes). Total for `m_slots`: ~132 KB.
-- `AckTracker::track()` copies the envelope via `envelope_copy()` (which calls
-  `memcpy(&dst, &src, sizeof(MessageEnvelope))`). The stored copy is independent
-  of the caller's stack envelope.
-- All other memory is as documented in UC_01 (no heap allocation anywhere).
+| Name | Location | Size | Notes |
+|---|---|---|---|
+| `env` (caller's) | Caller's stack | ≈ 4140 bytes | `source_id`, `message_id`, `timestamp_us` stamped in-place |
+| `m_wire_buf` | `TcpBackend` member | 8192 bytes | Reused each call |
+| `delayed[]` in `flush_delayed_to_clients` | Stack | 32 × ~4140 ≈ 132 KB | See UC_01 §8 |
+| `m_slots[i].env` in `AckTracker` | `AckTracker` member array | one `MessageEnvelope` ≈ 4140 bytes | Deep-copied from `env` via `envelope_copy()` (memcpy). AckTracker owns this copy for the duration of PENDING state. |
+| `m_slots[i].deadline_us` | `AckTracker` member | `uint64_t` (8 bytes) | Absolute expiry time in microseconds |
+| `m_slots` array | `AckTracker` member | `ACK_TRACKER_CAPACITY * sizeof(Entry)` = 32 × (4140 + 8 + 1 + padding) ≈ 132 KB | Fixed at construction; no heap |
 
-### Lifetime of key objects
-- The `AckTracker` slot holds a live copy of the envelope from the moment
-  `track()` returns until `on_ack()` or `sweep_expired()` reclaims it.
-- `TcpBackend` and `DeliveryEngine` must outlive all send/receive calls.
-
-### Stack vs heap usage
-Same as UC_01. No heap allocation. `AckTracker::track()` adds negligible stack
-(only loop index and return value).
-
-### RAII usage
-Same as UC_01. `TcpBackend` destructor calls `TcpBackend::close()`.
-
-### Potential leaks or unsafe patterns
-- If `AckTracker` is full (`ERR_FULL`) and the send returns `OK`, the message
-  was transmitted but will never be confirmed or cleaned up. The application
-  has no signal that ACK tracking was skipped. [OBSERVATION]
-- Same double-send risk from `flush_delayed_to_clients()` as documented in
-  UC_01. [OBSERVATION - potential bug]
+**Power of 10 Rule 3 confirmation:** No dynamic allocation. `AckTracker::track()` uses the
+pre-allocated `m_slots` array, copying the envelope with `memcpy`. `envelope_copy()` is an
+inline `memcpy` wrapper.
 
 ---
 
 ## 9. Error Handling Flow
 
-### How errors propagate
-- Transport send failure (step 5) causes `send()` to return the error code
-  before `AckTracker::track()` is ever called. The ACK tracker is untouched.
-- `AckTracker::track()` returning `ERR_FULL` (step 12) is logged at
-  `WARNING_HI` but does not fail `send()`. The application receives `OK` but
-  the message is not being tracked for ACK.
-- All other error paths are identical to UC_01 (see UC_01 section 9).
-
-### Retry logic
-None. `RELIABLE_ACK` does not auto-retry. If the ACK does not arrive before the
-`deadline_us`, `sweep_ack_timeouts()` will log `WARNING_HI` and release the
-slot. No retransmission occurs.
-
-### Fallback paths
-- If `m_client_count == 0`, `send_message()` returns `OK` without sending.
-  `AckTracker::track()` would still have been called if `send_via_transport()`
-  returned `OK`.
-- Note: `send_via_transport()` returns `OK` even when `send_to_all_clients()`
-  silently absorbs all per-client send failures (void return). In that case,
-  `AckTracker::track()` is called despite the message never reaching the peer.
+| Condition | System state after | What caller should do |
+|---|---|---|
+| `!m_initialized` → `ERR_INVALID` | No changes | Call `init()` |
+| `send_via_transport()` → non-OK | Message not sent; ACK tracking not attempted (early return) | Check Result; retry if appropriate |
+| `AckTracker::track()` → `ERR_FULL` | Message sent; no PENDING slot; WARNING_HI logged | Application must handle untracked reliable sends; consider reducing in-flight message count |
+| ACK never arrives (tracked but deadline expires) | `sweep_ack_timeouts()` will eventually return the expired entry as an unacknowledged message | Call `sweep_ack_timeouts()` in the event loop; handle returned expired envelopes |
 
 ---
 
 ## 10. External Interactions
 
-### Network calls
-Same as UC_01: `poll()` and `send()` syscalls inside `socket_send_all()`.
+| API | fd / clock type | Notes |
+|---|---|---|
+| `clock_gettime(CLOCK_MONOTONIC, &ts)` | POSIX monotonic clock | Called in `timestamp_now_us()` inside `TcpBackend::send_message()` and in `timestamp_deadline_us()` |
+| `ISocketOps::send_frame()` | TCP socket fd | See UC_01 §10 |
 
-### File I/O
-None.
-
-### Hardware interaction
-None directly.
-
-### IPC
-None.
+No file I/O, IPC, or hardware interaction on the UC_02 send path.
 
 ---
 
 ## 11. State Changes / Side Effects
 
-### What system state is modified
-
-**`MessageEnvelope& env` (caller's object):**
-- `env.source_id`, `env.message_id`, `env.timestamp_us` stamped as in UC_01.
-
-**`MessageIdGen m_id_gen` (member of `DeliveryEngine`):**
-- Counter incremented by `next()`.
-
-**`AckTracker::m_slots[i]` (member of `DeliveryEngine`):**
-- `m_slots[i].state`: `FREE` → `PENDING`.
-- `m_slots[i].env`: populated with `envelope_copy()` from `env`.
-- `m_slots[i].deadline_us`: set to `now_us + recv_timeout_ms * 1000`.
-- `AckTracker::m_count`: incremented by 1.
-
-**`ImpairmentEngine::m_delay_buf[]` and `m_wire_buf`:**
-- Transiently modified and restored within `send_message()`, as in UC_01.
-
-**TCP kernel send buffer:**
-- Bytes enqueued for transmission.
-
-### Persistent changes (DB, disk, device state)
-None.
+| Object | Member | Before | After |
+|---|---|---|---|
+| `MessageEnvelope& env` | `source_id` | Any | `m_local_id` |
+| `MessageEnvelope& env` | `message_id` | Any | Non-zero monotonic value |
+| `MessageEnvelope& env` | `timestamp_us` | Any | `now_us` |
+| `MessageIdGen m_id_gen` | `m_next` | N | N+1 (or 1 on wrap) |
+| `TcpBackend m_wire_buf` | bytes | Stale | Serialized frame |
+| `AckTracker m_slots[i]` | `state` | `FREE` | `PENDING` |
+| `AckTracker m_slots[i]` | `env` | Zero-initialized | Deep copy of `env` |
+| `AckTracker m_slots[i]` | `deadline_us` | 0 | `now_us + recv_timeout_ms * 1000` |
+| `AckTracker m_count` | count | N | N+1 (if slot found) |
+| Kernel TCP send buffer | bytes | Previous | Appended with length-prefixed frame |
 
 ---
 
-## 12. Sequence Diagram using mermaid
+## 12. Sequence Diagram
 
-```text
-Participants:
-  App  DeliveryEngine  TcpBackend  AckTracker  RetryManager  Serializer  SocketUtils
-
-Flow (Phase A: transport send):
-
-App --send(env=RELIABLE_ACK, now_us)--> DeliveryEngine
-  stamp source_id, message_id, timestamp_us
-  send_via_transport(env)
-    DeliveryEngine --> TcpBackend::send_message(env)
-      Serializer::serialize(env) --> m_wire_buf
-      ImpairmentEngine::process_outbound() [disabled: queue+immediate]
-      send_to_all_clients(m_wire_buf, wire_len)
-        tcp_send_frame(fd, buf, len)
-          socket_send_all(length_header) --> poll()+send()
-          socket_send_all(payload) --> poll()+send()
-      flush_delayed_to_clients() [re-serialize + send again]
-      returns OK
-    returns OK
-
-Flow (Phase B: ACK tracking):
-
-  ack_deadline = timestamp_deadline_us(now_us, recv_timeout_ms)
-  DeliveryEngine --> AckTracker::track(env, ack_deadline)
-    [scan slots 0..31 for FREE]
-    envelope_copy(slots[i].env, env)   [memcpy ~4136 bytes]
-    slots[i].deadline_us = ack_deadline
-    slots[i].state = PENDING
-    m_count++
-    returns OK
-  [track_res == OK: continue]
-
-Flow (Phase C: retry skip):
-
-  [RELIABLE_ACK: retry conditional FALSE]
-  [RetryManager::schedule() NOT CALLED]
-
-Flow (Phase D: completion):
-
-  asserts source_id, message_id
-  Logger::log(INFO, "Sent message_id=N, reliability=1")
-App <-- Result::OK
-[AckTracker slot i: state=PENDING, deadline=now+timeout]
+```
+Caller       DeliveryEngine    MessageIdGen   TcpBackend     AckTracker    timestamp_deadline_us
+  |                |                |              |               |                |
+  |--send(env,now)->|               |              |               |                |
+  |                |--next()------->|              |               |                |
+  |                |<-message_id----|              |               |                |
+  |                | (stamp env)    |              |               |                |
+  |                |--send_via_transport(env)------>|               |                |
+  |                |                |  [serialize + impairment + flush + send_frame] |
+  |                |<--OK-----------|              |               |                |
+  |                | (res==OK)       |              |               |                |
+  |                |--timestamp_deadline_us(now, recv_timeout_ms)-->|               |
+  |                |<--ack_deadline--|              |               |                |
+  |                |--track(env, ack_deadline)----->|               |                |
+  |                |                |              |  scan m_slots for FREE          |
+  |                |                |              |  copy env, set PENDING          |
+  |                |                |              |  ++m_count                      |
+  |                |<--OK (or ERR_FULL if full)---->|               |                |
+  | (RELIABLE_ACK: no retry schedule)              |               |                |
+  |<--OK------------|                |              |               |                |
 ```
 
 ---
 
 ## 13. Initialization vs Runtime Flow
 
-### What happens during startup (init phase)
+**Initialization:**
+- Same as UC_01: `TcpBackend::init()` and `DeliveryEngine::init()` must have completed.
+- `AckTracker::init()` is called inside `DeliveryEngine::init()`: zero-initializes
+  `m_slots` (memset), sets `m_count = 0`. All 32 slots start in FREE state.
 
-Same as UC_01 for `TcpBackend` and `DeliveryEngine`.
-
-`AckTracker::init()` (`AckTracker.cpp:23-38`): calls `memset(m_slots, 0,
-sizeof(m_slots))` (zeroes all 32 `Entry` structs including `state = FREE = 0`),
-sets `m_count = 0`, then loops 0..31 asserting each slot is `EntryState::FREE`.
-
-### What happens during steady-state execution
-
-Each `DeliveryEngine::send()` call for `RELIABLE_ACK` consumes one
-`AckTracker` slot. Slots accumulate until either:
-- `on_ack()` transitions them to `ACKED` (UC_08), and
-- `sweep_ack_timeouts()` calls `sweep_expired()` to reclaim `ACKED` slots.
-
-Or until the deadline passes without an ACK, at which point `sweep_expired()`
-reports the timeout at `WARNING_HI` and reclaims the slot. The application must
-call `sweep_ack_timeouts()` periodically to prevent the 32-slot table from
-filling.
+**Steady-state:**
+- `AckTracker::track()` is called once per RELIABLE_ACK send.
+- PENDING slots persist until either:
+  - An ACK is received and `DeliveryEngine::receive()` calls `m_ack_tracker.on_ack()` →
+    slot transitions to ACKED.
+  - The deadline expires and `DeliveryEngine::sweep_ack_timeouts()` calls
+    `m_ack_tracker.sweep_expired()` → slot transitions to FREE.
+- The slot is not freed inline during UC_02; it remains PENDING until one of the above events.
 
 ---
 
 ## 14. Known Risks / Observations
 
-### AckTracker full silently degrades reliability
+- **ACK tracking silently degrades at capacity.** When `AckTracker` is full
+  (`m_count == ACK_TRACKER_CAPACITY == 32`), a RELIABLE_ACK message is sent but not
+  tracked. The only indication is a WARNING_HI log entry. Applications sending many
+  simultaneous RELIABLE_ACK messages must call `sweep_ack_timeouts()` regularly to reclaim
+  slots.
 
-If `AckTracker` is full (all 32 slots `PENDING`), `track()` returns `ERR_FULL`.
-`DeliveryEngine::send()` logs `WARNING_HI` and continues, returning `OK` to
-the application. The message was sent over the wire, but the application has
-no ACK tracking for it. This silently downgrades `RELIABLE_ACK` to
-`BEST_EFFORT` behavior for that message. [RISK]
+- **Tracking attempted even after loss drop.** If the impairment engine drops the message,
+  `send_via_transport()` still returns `OK`, and `AckTracker::track()` is still called.
+  An ACK will never arrive for a lost message, so the slot will eventually expire.
 
-### ACK deadline based on send-time now_us, not transport completion time
+- **`envelope_copy()` is a full `sizeof(MessageEnvelope)` memcpy** (~4140 bytes) per
+  tracked message. For 32 simultaneous RELIABLE_ACK messages the AckTracker copies ≈ 132 KB
+  of data during `init()` or as messages arrive. This is a fixed cost, not unbounded, but
+  it is worth noting for WCET analysis.
 
-`ack_deadline = timestamp_deadline_us(now_us, recv_timeout_ms)` where `now_us`
-is the time passed to `send()` by the application, not the time when the
-transport actually transmitted the bytes. Any processing latency between the
-application's `timestamp_now_us()` capture and the moment TCP delivers the bytes
-to the kernel reduces the effective ACK window. For small payloads over fast
-links this is negligible; for large payloads or congested links it could matter.
-[OBSERVATION]
-
-### Double-send from delay buffer passthrough
-
-Same issue as UC_01: with impairments disabled, `flush_delayed_to_clients()`
-sends the same envelope a second time in the same `send_message()` call.
-[OBSERVATION - potential bug]
-
-### Source ID matching issue in AckTracker::on_ack()
-
-When `on_ack()` is called (UC_08), it matches `m_slots[i].env.source_id`
-(the local node's ID, set during `send()`) against the incoming ACK's
-`source_id` (the remote peer's ID). In a two-node deployment these are
-different values. The slot will not match, `on_ack()` returns `ERR_INVALID`,
-and the slot remains `PENDING` until `sweep_expired()` fires its timeout.
-The `WARNING_HI` for ACK timeout will fire even for messages the remote peer
-successfully acknowledged. [RISK - appears to be a latent bug]
-
-### Unsynchronized shared state
-
-Same as UC_01: no mutex protects `m_ack_tracker`, `m_wire_buf`, `m_client_fds[]`,
-or `m_impairment`. [RISK]
+- **No retry.** RELIABLE_ACK does not auto-retry. If the remote peer never sends an ACK,
+  the application learns this only via `sweep_ack_timeouts()`. There is no mid-flight
+  cancellation or resend mechanism in this class.
 
 ---
 
 ## 15. Unknowns / Assumptions
 
-- [ASSUMPTION] `m_cfg.recv_timeout_ms` is set by the `ChannelConfig` passed to
-  `DeliveryEngine::init()`. Default via `channel_config_default()` is 1000 ms.
-  The application may override this in its channel configuration.
+- [ASSUMPTION] `timestamp_deadline_us()` is called with `m_cfg.recv_timeout_ms` which is
+  set by the application in `ChannelConfig::recv_timeout_ms`. For the demo application in
+  `Server.cpp` and `Client.cpp`, this is 100 ms.
 
-- [ASSUMPTION] `AckTracker` has capacity `ACK_TRACKER_CAPACITY = 32`.
-  Confirmed from `Types.hpp:24`. Under high message rates, this capacity can
-  be exhausted if `sweep_ack_timeouts()` is not called frequently enough.
+- [ASSUMPTION] The AckTracker slot for this message will be visited by
+  `sweep_ack_timeouts()` before `AckTracker` fills up; this relies on the application
+  calling `sweep_ack_timeouts()` in its event loop.
 
-- [ASSUMPTION] The application calls `sweep_ack_timeouts()` periodically to
-  prevent the `AckTracker` from filling with stale `PENDING` or `ACKED` slots.
-  If not called, the tracker fills within 32 sent messages.
+- [ASSUMPTION] The tracking failure path (WARNING_HI + continue) means the send is
+  considered successful from the caller's perspective even if ACK tracking could not be
+  registered. This is a deliberate design choice (tracking is a "side effect" per the
+  code comment in `DeliveryEngine::send()`).
 
-- `timestamp_deadline_us(now_us, duration_ms)` returns
-  `now_us + duration_ms * 1000ULL`. Confirmed from `Timestamp.hpp:65-75`.
-
-- [ASSUMPTION] The remote peer generates ACK messages using `envelope_make_ack()`
-  (`MessageEnvelope.hpp:88`), which sets `ack.message_id = original.message_id`
-  and `ack.source_id = my_id` (the peer's node ID). Due to the source_id
-  matching issue described in section 14, `AckTracker::on_ack()` will fail to
-  match the slot in a standard two-node setup.
-
-- [ASSUMPTION] `send_via_transport()` returns `OK` even when
-  `send_to_all_clients()` silently absorbs all per-connection send failures
-  (because `send_to_all_clients()` returns void). In that scenario,
-  `AckTracker::track()` is still called for a message that never left the
-  process.
+- [ASSUMPTION] `envelope_copy()` is always safe to call with valid pointers and a
+  `sizeof(MessageEnvelope)` copy length. The inline implementation uses `memcpy` directly.

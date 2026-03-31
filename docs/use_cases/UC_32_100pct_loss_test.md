@@ -1,6 +1,6 @@
 # UC_32 — 100% loss configuration test
 
-**HL Group:** HL-12 — User configures network impairments
+**HL Group:** HL-12 — Configure Network Impairments
 **Actor:** System
 **Requirement traceability:** REQ-5.1.3, REQ-5.2.4, REQ-5.3.1, REQ-5.3.2
 

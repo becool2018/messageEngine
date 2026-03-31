@@ -1,6 +1,6 @@
 # UC_33 — Dedup sliding-window eviction test
 
-**HL Group:** HL-6 — System suppresses duplicate messages
+**HL Group:** HL-6 — Duplicate Message Suppression
 **Actor:** System
 **Requirement traceability:** REQ-3.2.6, REQ-3.3.3
 

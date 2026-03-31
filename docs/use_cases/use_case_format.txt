@@ -104,8 +104,8 @@ Explicitly identify:
 ### what system state is modified
 ### persistent changes (DB, disk, device state)
 
-## 12. Sequence Diagram using mermaid
-Provide a clear interaction diagram:
+## 12. Sequence Diagram using ASCII
+Provide a clear interaction diagram inside ticks:
 
 Example:
 Client

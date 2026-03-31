@@ -1,303 +1,284 @@
-# UC_16 — Impairment: jitter
+# UC_16 — Jitter: per-message delay drawn from uniform distribution around mean
 
-**HL Group:** HL-12 — User configures network impairments
+**HL Group:** HL-12 — Configure Network Impairments
 **Actor:** System
-**Requirement traceability:** REQ-5.1.2, REQ-5.2.1, REQ-5.2.2, REQ-5.2.4, REQ-5.3.1
+**Requirement traceability:** REQ-5.1.2, REQ-5.2.1, REQ-5.2.2, REQ-5.2.4, REQ-5.3.1, REQ-5.3.2
 
 ---
 
 ## 1. Use Case Overview
 
-When `ImpairmentConfig::jitter_mean_ms` is non-zero, `ImpairmentEngine::process_outbound()` calls `m_prng.next_range(0U, m_cfg.jitter_variance_ms)` to generate a random jitter offset in milliseconds. This offset is added to the fixed base latency (`fixed_latency_ms * 1000` µs) to produce a per-message `release_us` which is stored in the delay buffer via `queue_to_delay_buf()`. As a result, successive messages released at the same wall-clock time receive different `release_us` values, causing them to be collected and transmitted at varying future times — simulating network jitter.
+**Trigger:** A caller invokes `TcpBackend::send_message()` with a valid `MessageEnvelope`. The `ImpairmentConfig` has `enabled = true`, `jitter_mean_ms > 0`, and `jitter_variance_ms >= 0`. `loss_probability = 0.0` and no partition is active.
 
-**Design note**: Despite the field name `jitter_mean_ms`, the implementation does not produce a Gaussian distribution centered on the mean. Instead, it uses `next_range(0, jitter_variance_ms)` to produce a uniform random offset in `[0, jitter_variance_ms]` milliseconds. The `jitter_mean_ms` field serves only as an enable guard (`> 0` means jitter is on). The actual per-message additional delay is drawn from `Uniform(0, jitter_variance_ms)`, not `Normal(jitter_mean_ms, jitter_variance_ms)`. The mean of the actual distribution is `jitter_variance_ms / 2`, regardless of `jitter_mean_ms`.
+**Goal:** Each outbound message receives an additional random delay in microseconds, drawn uniformly from `[0, jitter_variance_ms]` milliseconds. The random offset is produced by `PrngEngine::next_range(0, jitter_variance_ms)`, which advances the deterministic xorshift64 PRNG state. The total release time is `now_us + base_delay_us + jitter_us`, where `base_delay_us` may be zero if `fixed_latency_ms == 0`. The envelope is then buffered in `m_delay_buf` as in UC_15 and released via `collect_deliverable()`.
+
+**Success outcome:** `process_outbound()` returns `Result::OK`; one slot in `m_delay_buf` is occupied with `release_us = now_us + fixed_latency_ms*1000 + jitter_offset_ms*1000`; the PRNG state has advanced by one call to `next_range()`.
+
+**Error outcomes:**
+- `ERR_FULL` — `m_delay_count >= IMPAIR_DELAY_BUF_SIZE` before queuing.
+- `ERR_IO` — partition active or loss roll fired (not applicable in this UC).
 
 ---
 
 ## 2. Entry Points
 
-| Entry Point | File | Line | Signature |
-|---|---|---|---|
-| `TcpBackend::send_message()` | `src/platform/TcpBackend.cpp` | 347 | `Result TcpBackend::send_message(const MessageEnvelope& envelope)` |
-| `ImpairmentEngine::process_outbound()` | `src/platform/ImpairmentEngine.cpp` | 151 | `Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env, uint64_t now_us)` |
-| `PrngEngine::next_range()` | `src/platform/PrngEngine.hpp` | 119 | `uint32_t PrngEngine::next_range(uint32_t lo, uint32_t hi)` |
-| `PrngEngine::next()` | `src/platform/PrngEngine.hpp` | 67 | `uint64_t PrngEngine::next()` |
+```
+// src/platform/ImpairmentEngine.hpp / ImpairmentEngine.cpp
+Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env,
+                                          uint64_t now_us);
+```
+
+Called from:
+
+```
+// src/platform/TcpBackend.cpp
+Result TcpBackend::send_message(const MessageEnvelope& envelope);
+```
+
+Release path (same as UC_15):
+
+```
+void TcpBackend::flush_delayed_to_clients(uint64_t now_us);
+uint32_t ImpairmentEngine::collect_deliverable(uint64_t now_us,
+                                                MessageEnvelope* out_buf,
+                                                uint32_t buf_cap);
+```
+
+PRNG method invoked:
+
+```
+// src/platform/PrngEngine.hpp
+uint32_t PrngEngine::next_range(uint32_t lo, uint32_t hi);
+```
 
 ---
 
 ## 3. End-to-End Control Flow (Step-by-Step)
 
-1. **`TcpBackend::send_message(envelope)`** (TcpBackend.cpp:347).
-   - Preconditions: `NEVER_COMPILED_OUT_ASSERT(m_open)`, `NEVER_COMPILED_OUT_ASSERT(envelope_valid(envelope))` (lines 349–350).
+1. `TcpBackend::send_message(envelope)` is called.
+2. Preconditions: `NEVER_COMPILED_OUT_ASSERT(m_open)`, `NEVER_COMPILED_OUT_ASSERT(envelope_valid(envelope))`.
+3. `Serializer::serialize(envelope, m_wire_buf, SOCKET_RECV_BUF_BYTES, wire_len)` produces wire bytes. Returns `OK` or the function returns the error.
+4. `timestamp_now_us()` → `now_us`.
+5. `m_impairment.process_outbound(envelope, now_us)` is called.
+6. Inside `process_outbound()`:
+   a. Assertions: `NEVER_COMPILED_OUT_ASSERT(m_initialized)`, `NEVER_COMPILED_OUT_ASSERT(envelope_valid(in_env))`.
+   b. `!m_cfg.enabled` is `false` — impairments are active.
+   c. `is_partition_active(now_us)` — returns `false`.
+   d. `check_loss()` — `m_cfg.loss_probability <= 0.0` → returns `false` immediately; PRNG not consumed.
+   e. `base_delay_us = static_cast<uint64_t>(m_cfg.fixed_latency_ms) * 1000ULL`. (May be 0 if `fixed_latency_ms == 0`.)
+   f. Jitter branch: `m_cfg.jitter_mean_ms > 0` is `true`.
+      - `jitter_offset_ms = m_prng.next_range(0U, m_cfg.jitter_variance_ms)`.
+      - Inside `next_range(lo=0, hi=jitter_variance_ms)`:
+        i. `NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)`.
+        ii. `NEVER_COMPILED_OUT_ASSERT(hi >= lo)`.
+        iii. `raw = next()` — advances xorshift64 state: `state ^= state << 13; state ^= state >> 7; state ^= state << 17`.
+        iv. `range = jitter_variance_ms - 0 + 1`.
+        v. `offset = static_cast<uint32_t>(raw % static_cast<uint64_t>(range))`.
+        vi. `result = 0 + offset` — in `[0, jitter_variance_ms]`.
+        vii. `NEVER_COMPILED_OUT_ASSERT(result >= lo && result <= hi)`.
+        viii. Returns `result` (uint32_t milliseconds).
+      - `jitter_us = static_cast<uint64_t>(jitter_offset_ms) * 1000ULL`.
+   g. `release_us = now_us + base_delay_us + jitter_us`.
+   h. Capacity guard: `m_delay_count < IMPAIR_DELAY_BUF_SIZE`.
+   i. `queue_to_delay_buf(in_env, release_us)` — same logic as UC_15 Step 7.
+7. Duplication check: `m_cfg.duplication_probability == 0.0` — skip.
+8. `NEVER_COMPILED_OUT_ASSERT(m_delay_count <= IMPAIR_DELAY_BUF_SIZE)`. Returns `Result::OK`.
+9. Back in `TcpBackend::send_message()`: not `ERR_IO`; proceed.
+10. `m_client_count > 0` check — assume connected.
+11. `flush_delayed_to_clients(now_us)` — `collect_deliverable(now_us, ...)` scans delay buffer.
+    - `release_us > now_us` (jitter added delay, not yet elapsed) → `count = 0`.
+12. `send_message()` returns `Result::OK`.
 
-2. **Serialize**: `Serializer::serialize(envelope, m_wire_buf, SOCKET_RECV_BUF_BYTES, wire_len)` (line 354). Returns OK.
-
-3. **Get time**: `now_us = timestamp_now_us()` (TcpBackend.cpp:362).
-   - `clock_gettime(CLOCK_MONOTONIC, &ts)`.
-   - `now_us = ts.tv_sec * 1000000 + ts.tv_nsec / 1000` (Timestamp.hpp:41–44).
-
-4. **`m_impairment.process_outbound(envelope, now_us)`** (TcpBackend.cpp:363).
-
-5. **Inside `process_outbound()`** (ImpairmentEngine.cpp:151):
-   a. Preconditions: `NEVER_COMPILED_OUT_ASSERT(m_initialized)`, `NEVER_COMPILED_OUT_ASSERT(envelope_valid(in_env))` (lines 155–156).
-   b. **Master switch**: `m_cfg.enabled == true`; continues.
-   c. **Partition check**: `is_partition_active(now_us)` (line 169) — returns false; continues.
-   d. **Loss check**: `check_loss()` (line 176). If `m_cfg.loss_probability > 0.0`, `check_loss()` (ImpairmentEngine.cpp:110) calls `m_prng.next_double()` — PRNG call #1 (optional). If message survives, continues.
-   e. **Latency/jitter calculation** (lines 183–189):
-      - `base_delay_us = static_cast<uint64_t>(m_cfg.fixed_latency_ms) * 1000ULL` (line 183).
-        - Example: `fixed_latency_ms = 20` → `base_delay_us = 20000 µs`.
-      - `jitter_us = 0ULL` (line 184).
-      - **Jitter guard** (line 185): `if (m_cfg.jitter_mean_ms > 0U)` — if true, enter jitter path:
-        - `jitter_offset_ms = m_prng.next_range(0U, m_cfg.jitter_variance_ms)` (line 186).
-        - **Inside `next_range(lo=0, hi=jitter_variance_ms)`** (PrngEngine.hpp:119):
-          - Preconditions: `NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)`, `NEVER_COMPILED_OUT_ASSERT(hi >= lo)` (lines 122–123).
-          - `raw = next()` (line 125):
-            - `NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)` (line 70).
-            - `m_state ^= m_state << 13U` (line 73).
-            - `m_state ^= m_state >> 7U` (line 74).
-            - `m_state ^= m_state << 17U` (line 75).
-            - `NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)` (line 78).
-            - Returns new `m_state`.
-          - `range = hi - lo + 1U = jitter_variance_ms + 1U` (line 126).
-          - `offset = static_cast<uint32_t>(raw % static_cast<uint64_t>(range))` (line 129).
-          - `result = lo + offset = 0 + offset`. Result in `[0, jitter_variance_ms]`.
-          - `NEVER_COMPILED_OUT_ASSERT(result >= lo && result <= hi)` (line 133).
-          - Returns `result`.
-        - `jitter_offset_ms` is a value in `[0, jitter_variance_ms]`.
-          - Example: `jitter_variance_ms = 10`, PRNG returns 7 → `jitter_offset_ms = 7`.
-        - `jitter_us = static_cast<uint64_t>(jitter_offset_ms) * 1000ULL` (line 187).
-          - Example: `7 * 1000 = 7000 µs`.
-      - `release_us = now_us + base_delay_us + jitter_us` (line 189).
-        - Example: `now_us + 20000 + 7000 = now_us + 27000`.
-   f. **Buffer capacity check** (line 192): `m_delay_count < IMPAIR_DELAY_BUF_SIZE`; passes.
-   g. **`queue_to_delay_buf(in_env, release_us)`** (line 197): find first inactive `m_delay_buf[i]`; `envelope_copy(m_delay_buf[i].env, in_env)`; set `release_us`; set `active = true`; `++m_delay_count`; assert; return OK.
-   h. **Duplication check** (line 203): if `m_cfg.duplication_probability > 0.0`, `apply_duplication()` is called — PRNG advanced again.
-   i. Postcondition assertion (line 208); return `Result::OK`.
-
-6. **`flush_delayed_to_clients(now_us)`** called from `send_message()` after `send_to_all_clients()`. The newly buffered entry has `release_us > now_us`; it is not yet collected. Returns without transmitting the buffered entry.
-
-7. **On a future call** when `now_us' >= release_us`, the entry is collected by `collect_deliverable()` and transmitted by `flush_delayed_to_clients()` — same mechanics as UC_15, but `release_us` differs per message due to jitter.
+**Release phase** (identical to UC_15 Phase C): on a subsequent `flush_delayed_to_clients()` call where `now_us >= release_us`, the slot is collected, re-serialized, and sent to all clients via `send_to_all_clients()`.
 
 ---
 
-## 4. Call Tree (Hierarchical)
+## 4. Call Tree
 
 ```
-TcpBackend::send_message(envelope)                      [TcpBackend.cpp:347]
-├── Serializer::serialize(envelope, m_wire_buf, ...)    [Serializer.cpp:117]
-├── timestamp_now_us()                                  [Timestamp.hpp:31]
-│   └── clock_gettime(CLOCK_MONOTONIC, &ts)
-├── ImpairmentEngine::process_outbound(envelope, now_us) [ImpairmentEngine.cpp:151]
-│   ├── NEVER_COMPILED_OUT_ASSERT(m_initialized)
-│   ├── NEVER_COMPILED_OUT_ASSERT(envelope_valid(in_env))
-│   ├── [m_cfg.enabled == true → impairment path]
-│   ├── is_partition_active(now_us) → false
-│   ├── check_loss()                                    [ImpairmentEngine.cpp:110]
-│   │   ├── [if loss_prob > 0.0]
-│   │   └── m_prng.next_double()     ← PRNG call #1 (optional; loss check)
-│   │       └── PrngEngine::next()   [xorshift64]
-│   ├── base_delay_us = fixed_latency_ms * 1000
-│   ├── jitter_us = 0
-│   ├── [if jitter_mean_ms > 0U]     ← JITTER ENABLE GUARD (line 185)
-│   │   └── m_prng.next_range(0U, jitter_variance_ms)  ← PRNG call #N (jitter)
-│   │       ├── NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)
-│   │       ├── NEVER_COMPILED_OUT_ASSERT(hi >= lo)
-│   │       ├── PrngEngine::next()
-│   │       │   ├── m_state ^= m_state << 13U
-│   │       │   ├── m_state ^= m_state >> 7U
-│   │       │   └── m_state ^= m_state << 17U
-│   │       ├── offset = raw % (jitter_variance_ms + 1)
-│   │       ├── result = 0 + offset  ∈ [0, jitter_variance_ms]
-│   │       └── NEVER_COMPILED_OUT_ASSERT(result >= 0 && result <= jitter_variance_ms)
-│   │   jitter_us = result * 1000ULL
-│   ├── total_delay_us = base_delay_us + jitter_us
-│   ├── release_us = now_us + total_delay_us
-│   ├── queue_to_delay_buf(in_env, release_us)          [ImpairmentEngine.cpp:83]
-│   │   └── [find inactive slot; envelope_copy; mark active; ++m_delay_count]
-│   ├── [if duplication_prob > 0.0]
-│   │   └── apply_duplication()                        ← PRNG call #N+1 (optional)
-│   │       └── m_prng.next_double()
-│   └── return OK
-├── send_to_all_clients(m_wire_buf, wire_len)            [TcpBackend.cpp:258]
-└── flush_delayed_to_clients(now_us)                     [TcpBackend.cpp:280]
-    └── collect_deliverable(now_us, delayed, 32)
-        └── [newly buffered entry: release_us > now_us → 0 collected]
+TcpBackend::send_message()
+ ├── Serializer::serialize()
+ ├── timestamp_now_us()
+ ├── ImpairmentEngine::process_outbound()
+ │    ├── ImpairmentEngine::is_partition_active()   [returns false]
+ │    ├── ImpairmentEngine::check_loss()            [returns false; prob=0]
+ │    ├── PrngEngine::next_range(0, jitter_var_ms)  [consumes PRNG state]
+ │    │    └── PrngEngine::next()                   [xorshift64 step]
+ │    └── ImpairmentEngine::queue_to_delay_buf()
+ │         └── envelope_copy()                      [memcpy into delay slot]
+ └── TcpBackend::flush_delayed_to_clients()
+      └── ImpairmentEngine::collect_deliverable()   [0 on first call; N later]
+           └── (count > 0)
+                ├── Serializer::serialize()
+                └── TcpBackend::send_to_all_clients()
+                     └── ISocketOps::send_frame()
+                          └── socket_send_all() → poll() + send()
 ```
 
 ---
 
 ## 5. Key Components Involved
 
-| Component | Type | Location | Role |
-|---|---|---|---|
-| `ImpairmentConfig::jitter_mean_ms` | `uint32_t` | `ImpairmentConfig.hpp:42` | Enable guard only: jitter active iff `> 0`; not used as a statistical parameter |
-| `ImpairmentConfig::jitter_variance_ms` | `uint32_t` | `ImpairmentConfig.hpp:43` | Upper bound of uniform jitter distribution (milliseconds) |
-| `ImpairmentConfig::fixed_latency_ms` | `uint32_t` | `ImpairmentConfig.hpp:38` | Base delay in ms; jitter is added on top of this |
-| `PrngEngine::next_range(lo, hi)` | Inline method | `PrngEngine.hpp:119` | Generates uniform integer in `[lo, hi]` inclusive; called for jitter offset |
-| `PrngEngine::next()` | Inline method | `PrngEngine.hpp:67` | xorshift64 core; called internally by `next_range` |
-| `PrngEngine::m_state` | `uint64_t` | `PrngEngine.hpp:140` | PRNG state; advanced once per `next()` call |
-| `ImpairmentEngine::m_delay_buf` | `DelayEntry[32]` member | `ImpairmentEngine.hpp:166` | Holds buffered messages with their per-message `release_us` |
-| `ImpairmentEngine::queue_to_delay_buf()` | Private method | `ImpairmentEngine.cpp:83` | Writes the jitter-adjusted entry into the first free slot |
-| `ImpairmentEngine::collect_deliverable()` | Method | `ImpairmentEngine.cpp:216` | Releases messages whose `release_us <= now_us` |
-| `envelope_copy()` | Inline function | `MessageEnvelope.hpp:56` | `memcpy` of full envelope into delay buffer slot |
+- **`ImpairmentEngine`** (`src/platform/ImpairmentEngine.hpp/.cpp`): Same role as UC_15, with the addition that `m_prng.next_range()` is called in the jitter branch to compute the per-message random offset.
+
+- **`PrngEngine`** (`src/platform/PrngEngine.hpp`): xorshift64 implementation. `next_range(lo, hi)` calls `next()` internally, advancing `m_state`. The state after this call is deterministic given the seed and call sequence. Key method for this UC.
+
+- **`ImpairmentEngine::queue_to_delay_buf()`** (private): Stores envelope in first free `m_delay_buf` slot with the jitter-adjusted `release_us`.
+
+- **`ImpairmentEngine::collect_deliverable()`**: Scans `m_delay_buf` for slots where `release_us <= now_us`. Because jitter adds a variable delay, different messages in the buffer may have different `release_us` values and may be released out of order relative to insertion order.
+
+- **`TcpBackend`**: Owns `m_impairment` and drives the two-phase (enqueue then dequeue) logic.
+
+- **`Serializer`**, **`ISocketOps`**: Same roles as UC_15.
 
 ---
 
 ## 6. Branching Logic / Decision Points
 
-| Decision | Location | Condition | Outcome |
-|---|---|---|---|
-| Jitter enable guard | ImpairmentEngine.cpp:185 | `m_cfg.jitter_mean_ms > 0U` | If false: `jitter_us = 0`; PRNG not called; pure fixed latency |
-| Loss check fires first | ImpairmentEngine.cpp:176 (via `check_loss()`) | `loss_rand < loss_probability` | If true: message dropped before jitter is computed |
-| `jitter_variance_ms == 0` with `jitter_mean_ms > 0` | PrngEngine.hpp:119 | `hi = 0, lo = 0` | `next_range(0, 0)` always returns 0; `jitter_us = 0` despite jitter being "enabled"; PRNG state still advances one step |
-| `fixed_latency_ms == 0` | ImpairmentEngine.cpp:183 | `m_cfg.fixed_latency_ms == 0` | `base_delay_us = 0`; total delay equals jitter component alone |
-| Delay buffer full | ImpairmentEngine.cpp:192 | `m_delay_count >= 32` | ERR_FULL returned; jitter was computed but message is dropped (or sent immediately — see UC_15 Risk 1) |
-| Release time reached | ImpairmentEngine.cpp:229 | `release_us <= now_us` | Entry collected and transmitted; jitter delay has elapsed |
-
-**`jitter_mean_ms` naming discrepancy**: The field is used exclusively as a boolean enable guard (`> 0`). The actual jitter distribution is `Uniform(0, jitter_variance_ms)`, not centered on `jitter_mean_ms`. If `jitter_variance_ms = 10`, the mean actual additional delay is 5 ms regardless of what `jitter_mean_ms` is set to. This is a naming discrepancy in the implementation.
-
-**PRNG call ordering within `process_outbound()`**:
-1. Loss check via `check_loss()`: `m_prng.next_double()` — only if `loss_probability > 0.0`.
-2. Jitter offset: `m_prng.next_range(0, jitter_variance_ms)` — only if `jitter_mean_ms > 0`.
-3. Duplication check via `apply_duplication()`: `m_prng.next_double()` — only if `duplication_probability > 0.0`.
-
-Enabling or disabling any one of these shifts the PRNG subsequence seen by all later checks within the same `process_outbound()` call and all future calls.
+| Condition | True branch | False branch |
+|-----------|-------------|--------------|
+| `!m_cfg.enabled` | Pass-through immediately | Proceed to all checks |
+| `is_partition_active(now_us)` | Drop; return `ERR_IO` | Continue |
+| `check_loss()` | Drop; return `ERR_IO` | Compute delays |
+| `m_cfg.jitter_mean_ms > 0` | Call `prng.next_range(0, jitter_variance_ms)`; compute `jitter_us` | `jitter_us = 0` |
+| `m_cfg.fixed_latency_ms > 0` | `base_delay_us = fixed_latency_ms * 1000` | `base_delay_us = 0` |
+| `m_delay_count >= IMPAIR_DELAY_BUF_SIZE` | Log WARNING_HI; return `ERR_FULL` | Call `queue_to_delay_buf()` |
+| `!m_delay_buf[i].active` in scan | Use slot | Skip |
+| No free slot after full scan | `NEVER_COMPILED_OUT_ASSERT(false)` | (unreachable) |
+| `m_cfg.duplication_probability > 0.0` | `apply_duplication()` — consumes another PRNG call | Skip |
+| `release_us <= now_us` in `collect_deliverable` | Copy; free slot | Skip |
+| Messages with different `release_us` in buffer | Each released independently when its own timestamp elapses | Held until its own deadline |
 
 ---
 
 ## 7. Concurrency / Threading Behavior
 
-- `PrngEngine::next_range()` and `PrngEngine::next()` modify `m_state` in place. `m_state` is a plain `uint64_t` (PrngEngine.hpp:140), not `std::atomic`. Not thread-safe.
-- `m_delay_buf` and `m_delay_count` are modified by `queue_to_delay_buf()` (called from `process_outbound()`) and read/modified by `collect_deliverable()`. No locking or atomic protection.
-- [ASSUMPTION] Single-threaded access per `ImpairmentEngine` instance.
-- `timestamp_now_us()` → `clock_gettime(CLOCK_MONOTONIC)` is POSIX thread-safe.
-- PRNG call count in `process_outbound()` when jitter is enabled: 0 or 1 (loss) + 1 (jitter) + 0 or 1 (duplication). The sequence is strictly deterministic given the same seed and configuration.
+Identical to UC_15. No synchronization primitives inside `ImpairmentEngine` or `PrngEngine`. The xorshift64 `m_state` in `PrngEngine` is a plain `uint64_t` — not atomic. Sequential calls from a single thread produce a reproducible sequence. Concurrent calls from multiple threads without external locking produce a data race on `m_state` (undefined behavior).
+
+[ASSUMPTION: single-threaded use per `TcpBackend` instance, or external locking applied by the caller.]
 
 ---
 
-## 8. Memory & Ownership Semantics (C/C++ Specific)
+## 8. Memory & Ownership Semantics
 
-- `next_range()` and `next()` are pure inline computations on `m_state` (a single `uint64_t`). Zero heap allocation. No pointers.
-- `jitter_offset_ms` is a local `uint32_t` declared inside the `if (m_cfg.jitter_mean_ms > 0U)` block (ImpairmentEngine.cpp:186). Per Power of 10 rule 6, its scope is the smallest block where it is used.
-- `jitter_us` is a `uint64_t` declared and initialized to `0ULL` at line 184, then conditionally updated at line 187. Both are stack variables; automatically reclaimed when `process_outbound()` returns.
-- `m_delay_buf[i].release_us` stores the per-message jitter-adjusted release time as the only persistent outcome of the jitter computation.
-- `base_delay_us`, `release_us` are also local `uint64_t` stack variables, reclaimed on return.
-- No heap allocation anywhere. Power of 10 rule 3 satisfied.
+Identical to UC_15 with one addition:
+
+- `PrngEngine::m_state` — single `uint64_t` member of `ImpairmentEngine::m_prng`. Modified in place by `next_range()` → `next()`. No allocation; no ownership transfer.
+- `jitter_offset_ms` — `uint32_t` local in `process_outbound()`. Lives on the stack, discarded at function return.
+- `jitter_us` — `uint64_t` local in `process_outbound()`. Lives on the stack.
+
+All other memory semantics are as in UC_15. Power of 10 Rule 3 confirmed: no dynamic allocation.
 
 ---
 
 ## 9. Error Handling Flow
 
-| Condition | Location | Outcome |
-|---|---|---|
-| `jitter_variance_ms == 0` with `jitter_mean_ms > 0` | PrngEngine.hpp:119 | `next_range(0, 0)`: `range = 1`, `offset = raw % 1 = 0`, returns 0. No error; `jitter_us = 0`. PRNG state still advances by one iteration. |
-| `hi < lo` in `next_range` | PrngEngine.hpp:123 | `NEVER_COMPILED_OUT_ASSERT(hi >= lo)` fires. With `lo = 0` and `hi = jitter_variance_ms` (a `uint32_t`), this cannot underflow. |
-| `m_prng.m_state == 0` before `next_range` | PrngEngine.hpp:122 | `NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL)` fires. Cannot happen if `seed()` was called correctly during `init()` (coerces 0 to 1). |
-| Delay buffer full after jitter computed | ImpairmentEngine.cpp:192 | ERR_FULL returned; jitter computation was done but its result is discarded with the dropped/bypassed message |
-| Potential overflow of `jitter_us` | ImpairmentEngine.cpp:187 | `jitter_offset_ms` is `uint32_t` (max ~4.29B); cast to `uint64_t` before multiply by 1000: max `jitter_us` ≈ 4.29×10¹² µs. Safe within `uint64_t`. |
-| Potential overflow of `release_us` | ImpairmentEngine.cpp:189 | `now_us + base_delay_us + jitter_us`: with both `fixed_latency_ms` and `jitter_variance_ms` as `uint32_t`, max total extra delay ≈ 8.59×10¹² µs (~99 days). A realistic `now_us` plus this sum fits safely in `uint64_t`. |
+Identical to UC_15, with one additional consideration:
+
+| Error | Trigger | State after | Caller action |
+|-------|---------|-------------|---------------|
+| `ERR_FULL` | Delay buffer full | `m_prng.m_state` has already advanced (PRNG was consumed before the capacity check fires the buffer-full path) | `send_message()` propagates `ERR_FULL`; PRNG state is advanced even though the message was not queued |
+| All others | Same as UC_15 | Same as UC_15 | Same as UC_15 |
+
+Note: the PRNG call in step 6f (jitter computation) occurs before the capacity guard check at step 6h. If the capacity guard fires, the PRNG has already advanced. This means a retry after `ERR_FULL` will produce a different jitter value than the failed attempt.
 
 ---
 
 ## 10. External Interactions
 
-| Interaction | Function | API |
-|---|---|---|
-| Monotonic clock | `timestamp_now_us()` | `clock_gettime(CLOCK_MONOTONIC, ...)` — POSIX |
-| Socket I/O | `tcp_send_frame()` | Not called at jitter-buffering time; called when `release_us` matures in a later `flush_delayed_to_clients()` |
-| Logger | `Logger::log()` | Not called on the jitter path itself; called on buffer-full (WARNING_HI), loss drop (WARNING_LO), duplication (WARNING_LO), or partition drop (WARNING_LO) |
-
-No external interaction occurs during the jitter offset computation itself. `PrngEngine` is entirely self-contained.
+Identical to UC_15. No POSIX calls occur during the buffering phase. During the release phase, `poll()` and `send()` are invoked per client fd as in UC_15 Section 10.
 
 ---
 
 ## 11. State Changes / Side Effects
 
-| State | Object | Change |
-|---|---|---|
-| `m_prng.m_state` | `PrngEngine` | Advanced by one xorshift64 iteration for the jitter `next_range` call |
-| `m_delay_buf[i].release_us` | `ImpairmentEngine` | Set to `now_us + base_delay_us + jitter_us` — varies per message due to jitter |
-| `m_delay_buf[i].env` | `ImpairmentEngine` | Filled with `memcpy` of `in_env` |
-| `m_delay_buf[i].active` | `ImpairmentEngine` | Set to `true` |
-| `m_delay_count` | `ImpairmentEngine` | Incremented by 1 |
+In addition to the UC_15 state changes:
 
-The only observable jitter effect is the variation in `release_us` across successive messages sent at the same `now_us`. Messages sent simultaneously with different PRNG-generated jitter offsets will be collected and transmitted at different future times, producing irregular inter-arrival spacing at the receiver.
+| Object | Member | Before | After |
+|--------|--------|--------|-------|
+| `PrngEngine` | `m_state` (inside `m_prng`) | seed-derived value S_n | S_{n+1} after one xorshift64 step (from `next_range()` → `next()`) |
+| `ImpairmentEngine` | `m_delay_buf[i].release_us` | `0` or stale | `now_us + fixed_latency_ms*1000 + jitter_offset_ms*1000` (jitter is non-deterministic per call unless seed is fixed) |
+
+All other state changes are as in UC_15.
 
 ---
 
 ## 12. Sequence Diagram
 
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant TcpBackend
-    participant ImpairmentEngine
-    participant PrngEngine
-
-    Note over Caller,PrngEngine: Messages A and B both sent at T=0;<br/>jitter_variance_ms=10; fixed_latency_ms=20
-
-    Caller->>TcpBackend: send_message(A)
-    TcpBackend->>ImpairmentEngine: process_outbound(A, T0)
-    ImpairmentEngine->>PrngEngine: next_range(0, 10)
-    PrngEngine-->>ImpairmentEngine: 7 (example)
-    Note over ImpairmentEngine: jitter_us=7000; release_us=T0+27000<br/>queue_to_delay_buf(A, T0+27000)
-    ImpairmentEngine-->>TcpBackend: OK
-    TcpBackend-->>Caller: OK
-
-    Caller->>TcpBackend: send_message(B)
-    TcpBackend->>ImpairmentEngine: process_outbound(B, T0)
-    ImpairmentEngine->>PrngEngine: next_range(0, 10)
-    PrngEngine-->>ImpairmentEngine: 3 (example; different PRNG state)
-    Note over ImpairmentEngine: jitter_us=3000; release_us=T0+23000<br/>queue_to_delay_buf(B, T0+23000)
-    ImpairmentEngine-->>TcpBackend: OK
-    TcpBackend-->>Caller: OK
-
-    Note over Caller,PrngEngine: At T0+23001µs: collect_deliverable<br/>slot[A]: T0+27000 > T0+23001 → skip<br/>slot[B]: T0+23000 ≤ T0+23001 → COLLECT B → transmitted first
-
-    Note over Caller,PrngEngine: At T0+27001µs: collect_deliverable<br/>slot[A]: T0+27000 ≤ T0+27001 → COLLECT A → transmitted second<br/>Arrival order: B then A (JITTER-INDUCED REORDERING)
+```
+Caller            TcpBackend           ImpairmentEngine    PrngEngine
+  |                    |                      |                 |
+  |--send_message()--->|                      |                 |
+  |                    |--serialize()-------->|                 |
+  |                    |--timestamp_now_us()  |                 |
+  |                    |--process_outbound()->|                 |
+  |                    |                      |--is_partition?  |
+  |                    |                      |  (false)        |
+  |                    |                      |--check_loss()   |
+  |                    |                      |  (false)        |
+  |                    |                      |--jitter_mean>0  |
+  |                    |                      |--next_range(0,  |
+  |                    |                      |  var_ms)------->|
+  |                    |                      |                 |--next()
+  |                    |                      |                 |  xorshift64
+  |                    |                      |<--jitter_ms-----|
+  |                    |                      |--jitter_us =    |
+  |                    |                      |  jitter_ms*1000 |
+  |                    |                      |--release_us =   |
+  |                    |                      |  now+base+jit   |
+  |                    |                      |--queue_to_      |
+  |                    |                      |  delay_buf()    |
+  |                    |<-----OK--------------|                 |
+  |                    |--flush_delayed_to_clients(now_us)      |
+  |                    |  collect_deliverable → 0 (too early)  |
+  |<---OK--------------|                      |                 |
+  |                                           |                 |
+  | ...time passes (base + jitter elapses)... |                 |
+  |                                           |                 |
+  |--send_message()--->| (or periodic flush)  |                 |
+  |                    |--flush_delayed_to_clients(now_us2)     |
+  |                    |  collect_deliverable → 1               |
+  |                    |--serialize(delayed[0])                 |
+  |                    |--send_to_all_clients()                 |
+  |<---OK--------------|                      |                 |
 ```
 
 ---
 
 ## 13. Initialization vs Runtime Flow
 
-**Initialization phase** (`ImpairmentEngine::init()` called from `TcpBackend::init()`):
-- `jitter_mean_ms` defaults to `0` in `impairment_config_default()` (ImpairmentConfig.hpp:83). Jitter is off by default.
-- `jitter_variance_ms` defaults to `0` (ImpairmentConfig.hpp:84).
-- Both must be set to non-zero values in the `ImpairmentConfig` before calling `ImpairmentEngine::init()` to enable jitter.
-- PRNG is seeded in `init()` via `m_prng.seed(seed)` (ImpairmentEngine.cpp:55). The entire sequence of jitter values for a run is fully determined by the seed value and the order of `process_outbound()` calls.
-- `m_delay_buf` zeroed via `memset` (line 58). `m_delay_count = 0` (line 59). `m_initialized = true` (line 72).
+**Initialization** (same as UC_15):
 
-**Runtime phase**:
-- Each `process_outbound()` call with jitter enabled advances `m_prng.m_state` once for the jitter `next_range` call (plus once for loss and once for duplication if those are also enabled).
-- The PRNG sequence is shared across all impairment types. Enabling or disabling loss (`loss_probability > 0`) adds or removes a `next_double()` call before the jitter call, shifting the jitter subsequence for all subsequent messages even with the same seed.
-- `m_cfg` is immutable after `init()`. `fixed_latency_ms` and `jitter_variance_ms` cannot change at runtime.
+- `ImpairmentEngine::init(cfg)` seeds `m_prng` with `cfg.prng_seed` (or `42` if zero). The jitter path will produce the identical sequence of `jitter_offset_ms` values given the same seed.
+
+**Steady-state runtime:**
+
+- Every `send_message()` call consumes one PRNG step to generate the jitter offset. The PRNG state advances monotonically; there is no rewind or reset between calls.
+- Messages queued with different jitter values may have different `release_us` timestamps and are therefore released by `collect_deliverable()` in deadline order, not insertion order. This naturally produces reordering even without the explicit reorder window.
 
 ---
 
 ## 14. Known Risks / Observations
 
-1. **`jitter_mean_ms` is not the statistical mean of the jitter distribution**: The mean jitter applied per message is `jitter_variance_ms / 2`, not `jitter_mean_ms`. The field name is misleading. The implementation at ImpairmentEngine.cpp:185–187 uses a uniform draw from `[0, jitter_variance_ms]`, not a Gaussian centered on `jitter_mean_ms`. This is a naming discrepancy — `jitter_mean_ms` functions as an enable flag, not a distribution parameter.
+- **PRNG advance before capacity guard.** `next_range()` is called in step 6f before the `m_delay_count >= IMPAIR_DELAY_BUF_SIZE` guard is checked. If the buffer is full, the PRNG has already advanced but the message was not queued. Retrying will use a different jitter value, breaking reproducibility for that slot.
 
-2. **Jitter can cause unintentional message reordering**: As shown in the sequence diagram, two messages sent at the same `now_us` can arrive at the receiver in reverse order if their jitter values differ. This is an expected side-effect of jitter simulation but may interact unexpectedly with ordered-channel logic at higher layers.
+- **`IMPAIR_DELAY_BUF_SIZE = 32` limit applies.** High jitter variance combined with a fast send rate can fill the 32-slot delay buffer before any messages are released, causing `ERR_FULL`.
 
-3. **PRNG call ordering is configuration-dependent**: Enabling loss (`loss_probability > 0`) inserts a `next_double()` call via `check_loss()` before the jitter `next_range()` call. With the same seed, changing `loss_probability` from 0 to any positive value will change all jitter values for all subsequent messages.
+- **Out-of-order release.** Messages queued with large jitter values may be held while later messages with small jitter values are released first. This produces ordering effects that are independent of the explicit reorder window (`m_reorder_buf`). If the caller does not expect out-of-order delivery, this is a source of confusion.
 
-4. **`next_range` uses modulo reduction**: `raw % range` introduces a slight modulo bias for range values that do not divide `UINT64_MAX + 1` evenly. For jitter simulation this bias is negligible (sub-percent level for small `jitter_variance_ms`), but it is not a perfectly uniform distribution.
+- **Modulo bias in `next_range()`.** `raw % range` introduces a small statistical bias when `range` is not a power of 2. For impairment simulation this is acceptable, but the distribution is not perfectly uniform.
 
-5. **Upper bound is inclusive**: `next_range(0, jitter_variance_ms)` can return exactly `jitter_variance_ms`. The maximum additional delay per message is `jitter_variance_ms` ms, not `jitter_variance_ms - 1`.
+- **Jitter of 0 ms.** If `jitter_variance_ms == 0` but `jitter_mean_ms > 0`, `next_range(0, 0)` returns `0` deterministically, consuming one PRNG step but adding no delay. This is safe but wastes a PRNG call.
 
-6. **Jitter adds to, never subtracts from, the base latency**: `jitter_offset_ms` is drawn from `[0, jitter_variance_ms]` (always non-negative). Symmetric jitter is not implemented.
-
-7. **`jitter_variance_ms == 0` with `jitter_mean_ms > 0` wastes a PRNG call**: The guard `jitter_mean_ms > 0` passes, `next_range(0, 0)` is called, always returns 0, and `jitter_us = 0`. One PRNG step is consumed for no effect on timing.
+- **Large stack frame** in `flush_delayed_to_clients()`: same 132 KB concern as UC_15.
 
 ---
 
 ## 15. Unknowns / Assumptions
 
-- [ASSUMPTION] `jitter_mean_ms` and `jitter_variance_ms` are set to meaningful non-zero values by a higher-level layer before `ImpairmentEngine::init()` is called. `TcpBackend::init()` only populates `enabled` from channel config; jitter fields remain at default (0) unless explicitly set.
-- [ASSUMPTION] The caller accepts that jitter values are drawn from a uniform distribution over `[0, jitter_variance_ms]`, not a Gaussian distribution.
-- [ASSUMPTION] Single-threaded access per `ImpairmentEngine` instance.
-- [UNKNOWN] Whether `jitter_mean_ms` is intended to be used as a true statistical mean in a future implementation (e.g., as the center of a Gaussian). The field name suggests this intent but the current implementation is uniform.
-- [UNKNOWN] The exact PRNG output sequence for a given seed and message sequence cannot be determined statically; the xorshift64 sequence must be computed.
-- [UNKNOWN] Whether `flush_delayed_to_clients()` polling frequency is high enough relative to `jitter_variance_ms` to faithfully represent the configured jitter distribution at the receiver.
+- [ASSUMPTION] `jitter_mean_ms` is used only as a gate condition (`> 0` enables jitter). The actual jitter is drawn from `[0, jitter_variance_ms]` uniformly. The `mean` name suggests a Gaussian distribution, but the implementation uses a uniform distribution via `next_range(0, jitter_variance_ms)`. The mean of this distribution is `jitter_variance_ms / 2`, which may or may not equal `jitter_mean_ms`.
+- [ASSUMPTION] The PRNG is consumed in the order: loss check (if enabled), jitter computation (if enabled), duplication check (if enabled). Changing the evaluation order would change the reproducible sequence for a given seed.
+- [ASSUMPTION] Enabling both fixed latency and jitter results in `release_us = now_us + fixed_latency_ms*1000 + jitter_us`. The two delays are additive, not averaged.
+- [ASSUMPTION] If both loss and jitter are enabled, the loss roll fires first. A message that passes the loss check will then have jitter applied. A dropped message does not consume a PRNG step for jitter.
+- [ASSUMPTION] `timestamp_now_us()` wraps a monotonic POSIX clock. See UC_15 §15 for the same assumption.
+- [ASSUMPTION] Only `config.channels[0U].impairment` is used by `TcpBackend`, as in UC_15.

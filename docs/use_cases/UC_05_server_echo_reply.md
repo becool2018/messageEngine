@@ -1,455 +1,412 @@
-# UC_05 — Server Echo Reply
+# UC_05 — Server echo reply — calls receive_message() then send_message() in sequence
 
-**HL Group:** Application Workflow — combines HL-5 (receive) then HL-1/2/3 (send); spans both receive and send system boundaries
+**HL Group:** Application Workflow (above system boundary) — combines HL-5 (receive) then
+HL-1/2/3 (send); the two-step pattern is above the HL boundary
 **Actor:** User/Application (Server process)
-**Requirement traceability:** REQ-3.1, REQ-3.2.1, REQ-3.2.2, REQ-3.2.4, REQ-3.2.5, REQ-3.2.6, REQ-3.3.2, REQ-3.3.3, REQ-4.1.2, REQ-4.1.3, REQ-7.1.1, REQ-7.1.2
+**Requirement traceability:** REQ-3.1, REQ-3.2.1, REQ-3.2.2, REQ-3.2.4, REQ-3.2.5,
+REQ-3.2.6, REQ-3.3.2, REQ-3.3.3, REQ-4.1.2, REQ-4.1.3, REQ-7.1.1, REQ-7.1.2
 
 ---
 
 ## 1. Use Case Overview
 
-UC_05 is an **Application Workflow** pattern, not a single User→System interaction. It documents how the Server application (src/app/Server.cpp) combines two system calls — HL-5 receive and HL-1/2/3 send — into an echo loop. The User never calls this pattern directly; it is the behavior of the Server binary.
+**Trigger:** The server's main event loop (`run_server_iteration()` in `Server.cpp`) fires
+once per iteration. It calls `DeliveryEngine::receive()` to wait for an inbound data message
+and, if one arrives, calls `DeliveryEngine::send()` with a reply envelope whose payload is
+an exact copy of the received payload (echo semantics).
 
-**Trigger:** The Server's main loop iteration begins. `run_server_iteration()` is called from the outer `for` loop in `main()` (Server.cpp:261). The loop is bounded by `MAX_LOOP_ITERS = 100000` and terminates early when `g_stop_flag != 0` (set by SIGINT handler).
+**Goal:** Receive one data message from the transport and immediately transmit an echo reply
+to the sender, inverting source and destination IDs and preserving payload and reliability
+class. This is an application-layer pattern — it is above the HL system boundary and
+documents a two-step combination of system calls rather than a single system primitive.
 
-**Expected outcome:** If a DATA message is present, the server receives it, logs metadata, swaps source and destination identifiers, copies the payload into a reply envelope, sends the reply, and increments `messages_received` and `messages_sent`. On timeout (no message), only `pump_retries()` and `sweep_ack_timeouts()` run; no echo is sent.
+**Success outcome:** `receive()` returns `OK` with a DATA envelope, `send_echo_reply()`
+returns `OK`, and the echo frame appears on the TCP socket pointing back to the original
+sender.
 
-**Why this is factored as an Application Workflow:** The echo pattern sits entirely above the system boundary. It depends on two separate system capabilities (HL-5 receive, then HL-1/2/3 send) and on application-level policy (swap src/dst, set 10-second expiry, copy payload). The system itself has no "echo" concept; only the application layer does.
+**Error outcomes:**
+- `receive()` returns `ERR_TIMEOUT` — no message arrived within `RECV_TIMEOUT_MS` (100 ms).
+  The echo reply is not sent; the loop continues.
+- `receive()` returns `ERR_EXPIRED` — expired message received; not a DATA message from the
+  application's perspective (the message is dropped). No echo sent.
+- `receive()` returns `ERR_DUPLICATE` — duplicate RELIABLE_RETRY message; dropped. No echo.
+- `send_echo_reply()` returns non-OK — transport error or engine failure; WARNING_LO logged;
+  the receive counter is incremented but the send counter is not.
+- `envelope_valid(received)` check fails in `send_echo_reply()` — defensive assert fires;
+  this should not occur if the transport and dedup logic are correct.
 
 ---
 
 ## 2. Entry Points
 
-| Entry point | File | Line |
-|-------------|------|------|
-| `Server::main()` | `src/app/Server.cpp` | 196 |
-| Outer loop iteration | `src/app/Server.cpp` | 261 |
-| `run_server_iteration()` | `src/app/Server.cpp` | 152 |
-| `send_echo_reply()` | `src/app/Server.cpp` | 90 |
+```
+// src/app/Server.cpp
+static void run_server_iteration(DeliveryEngine& engine,
+                                 uint32_t& messages_received,
+                                 uint32_t& messages_sent);
 
-The application also relies on:
+// Called inside run_server_iteration():
+// src/core/DeliveryEngine.cpp
+Result DeliveryEngine::receive(MessageEnvelope& env,
+                               uint32_t timeout_ms, uint64_t now_us);
 
-| Component | File |
-|-----------|------|
-| `DeliveryEngine::receive()` | `src/core/DeliveryEngine.cpp:149` |
-| `DeliveryEngine::send()` | `src/core/DeliveryEngine.cpp:77` |
-| `TcpBackend::receive_message()` | `src/platform/TcpBackend.cpp:386` |
-| `TcpBackend::send_message()` | `src/platform/TcpBackend.cpp:347` |
+// src/app/Server.cpp
+static Result send_echo_reply(DeliveryEngine& engine,
+                              const MessageEnvelope& received,
+                              uint64_t now_us);
+
+// Called inside send_echo_reply():
+// src/core/DeliveryEngine.cpp
+Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us);
+```
+
+This UC is invoked from the server's main loop: `for (int iter = 0; iter < MAX_LOOP_ITERS
+(100000); ++iter) { run_server_iteration(...); }`. Each iteration calls
+`run_server_iteration()` once.
 
 ---
 
 ## 3. End-to-End Control Flow (Step-by-Step)
 
-### Phase A: Server Initialization (runs once at startup)
+### Phase 1 — Receive
 
-A1. `main()` (Server.cpp:196): `parse_server_port(argc, argv)` → `bind_port = 9000` (default).
-A2. `transport_config_default(cfg)`: zero-fills `TransportConfig`.
-A3. Set fields (Server.cpp:210–218):
-    - `cfg.kind = TransportKind::TCP`, `cfg.is_server = true`, `cfg.bind_port = 9000`
-    - `cfg.local_node_id = LOCAL_SERVER_NODE_ID = 1U`, `cfg.num_channels = 1U`
-    - `strncpy(cfg.bind_ip, "0.0.0.0", ...)` with explicit null-termination
-A4. Channel setup (Server.cpp:221–225):
-    - `channel_config_default(cfg.channels[0], 0U)` — sets `retry_backoff_ms = 100`, etc.
-    - `reliability = RELIABLE_RETRY`, `ordering = ORDERED`, `max_retries = 3U`, `recv_timeout_ms = 100U`
-A5. `TcpBackend transport; transport.init(cfg)`:
-    - `m_recv_queue.init()`, `impairment_config_default(imp_cfg)` (disabled), `m_impairment.init(imp_cfg)`
-    - `m_is_server = true`
-    - `bind_and_listen("0.0.0.0", 9000)`: `socket_create_tcp()`, `socket_set_reuseaddr()`, `socket_bind()`, `socket_listen(m_listen_fd, 8)`, `m_open = true`
-A6. `DeliveryEngine engine; engine.init(&transport, cfg.channels[0], 1)`:
-    - `AckTracker::init()`, `RetryManager::init()`, `DuplicateFilter::init()`
-    - `m_id_gen.init(seed=1)` — `m_next = 1ULL`
-    - `m_initialized = true`
-A7. `signal(SIGINT, signal_handler)` — installs stop mechanism. MISRA deviation documented at line 249: `signal()` requires a function pointer; no alternative POSIX API is available.
+1. `run_server_iteration()` fires its two pre-condition asserts: `RECV_TIMEOUT_MS > 0`,
+   `messages_sent <= messages_received + 1`.
+2. Calls `timestamp_now_us()` → `now_us` (monotonic clock via `CLOCK_MONOTONIC`).
+3. Declares `MessageEnvelope received` on the stack; calls `envelope_init(received)` —
+   zero-initializes via `memset`, sets `message_type = INVALID`.
+4. Calls `engine.receive(received, RECV_TIMEOUT_MS (100), now_us)`.
+5. Inside `DeliveryEngine::receive()`:
+   a. Pre-condition asserts: `m_initialized`, `now_us > 0`.
+   b. Guard: `if (!m_initialized) return ERR_INVALID`.
+   c. Calls `m_transport->receive_message(received, timeout_ms)` via virtual dispatch →
+      `TcpBackend::receive_message()`.
+   d. `TcpBackend::receive_message()` first tries `m_recv_queue.pop(received)`. If the queue
+      has a message, returns `OK` immediately. Otherwise enters the poll loop (up to
+      `poll_count = min(50, ceil(timeout_ms / 100))` iterations), calls
+      `poll_clients_once(100)` which may call `recv_from_client()` and push to the queue,
+      then retries `pop()`. On timeout: returns `ERR_TIMEOUT`.
+   e. If transport returns non-OK: `receive()` returns that code immediately.
+   f. `NEVER_COMPILED_OUT_ASSERT(envelope_valid(received))` — asserts the envelope is valid.
+   g. `timestamp_expired(received.expiry_time_us, now_us)` — if expired, logs WARNING_LO,
+      returns `ERR_EXPIRED`.
+   h. `envelope_is_control(received)` — if ACK/NAK/HEARTBEAT: if ACK, calls
+      `m_ack_tracker.on_ack()` and `m_retry_manager.on_ack()`; returns `OK` (but
+      `envelope_is_data()` will be false, so the outer check in `run_server_iteration()`
+      skips the echo).
+   i. `NEVER_COMPILED_OUT_ASSERT(envelope_is_data(received))` — for the normal DATA case.
+   j. If `reliability_class == RELIABLE_RETRY`: calls `m_dedup.check_and_record(src, id)`.
+      On `ERR_DUPLICATE`: returns `ERR_DUPLICATE`.
+   k. Logs INFO, asserts post-condition, returns `OK`.
+6. Back in `run_server_iteration()`: checks `result_ok(res) && envelope_is_data(received)`.
+   - If not a DATA message or res != OK: no echo sent; continues to retry/sweep calls.
 
-### Phase B: Main Loop
+### Phase 2 — Echo reply
 
-B1. `for (int iter = 0; iter < 100000; ++iter)` (Server.cpp:261):
-    - If `g_stop_flag != 0`: log "Stop flag set; exiting loop"; `break`.
-    - Call `run_server_iteration(engine, messages_received, messages_sent)`.
+7. If Phase 1 succeeded with a DATA message: increments `messages_received`.
+8. Logs INFO: `"Received msg#... from node ..., len ...: "` and prints payload via
+   `print_payload_as_string()`.
+9. Calls `send_echo_reply(engine, received, now_us)`.
+10. Inside `send_echo_reply()`:
+    a. Pre-condition asserts: `envelope_valid(received)`, `now_us > 0`.
+    b. Declares `MessageEnvelope reply` on the stack; calls `envelope_init(reply)`.
+    c. Builds reply envelope:
+       - `reply.message_type = MessageType::DATA`.
+       - `reply.source_id = received.destination_id` — the server's node ID that the
+         original sender targeted.
+       - `reply.destination_id = received.source_id` — the original sender.
+       - `reply.priority = received.priority`.
+       - `reply.reliability_class = received.reliability_class` — echo preserves the
+         sender's reliability class.
+       - `reply.timestamp_us = now_us`.
+       - `reply.expiry_time_us = timestamp_deadline_us(now_us, 10000U)` — 10 second expiry.
+       - `reply.payload_length = received.payload_length`.
+    d. Bounds check: `if (reply.payload_length > MSG_MAX_PAYLOAD_BYTES) return ERR_INVALID`.
+    e. `memcpy(reply.payload, received.payload, reply.payload_length)` — copies payload.
+    f. Calls `engine.send(reply, now_us)`.
+11. Inside `DeliveryEngine::send(reply, now_us)`:
+    - Stamps `reply.source_id = m_local_id` (overwrites the value set above — see §14).
+    - Stamps `reply.message_id = m_id_gen.next()`.
+    - Stamps `reply.timestamp_us = now_us`.
+    - Calls `send_via_transport(reply)` → `TcpBackend::send_message()` → serialize +
+      impairment + flush + `send_frame()` (as in UC_01).
+    - If `reliability_class == RELIABLE_RETRY` (or `RELIABLE_ACK`): calls
+      `AckTracker::track()`.
+    - If `reliability_class == RELIABLE_RETRY`: calls `RetryManager::schedule()`.
+    - Returns `OK` or an error code.
+12. Back in `send_echo_reply()`: checks `result_ok(res)`, logs WARNING_LO on failure, returns
+    `res`.
+13. Back in `run_server_iteration()`: if `result_ok(echo_res)`, increments `messages_sent`.
 
-### Phase C: run_server_iteration() — Receive Attempt
+### Phase 3 — Retry pump and ACK sweep (each iteration)
 
-C1. `run_server_iteration()` (Server.cpp:152):
-    - `NEVER_COMPILED_OUT_ASSERT(RECV_TIMEOUT_MS > 0)` and `NEVER_COMPILED_OUT_ASSERT(messages_sent <= messages_received + 1U)`.
-    - `now_us = timestamp_now_us()` — calls `clock_gettime(CLOCK_MONOTONIC)`.
-
-C2. `engine.receive(received, 100U, now_us)` (Server.cpp:164):
-    - `DeliveryEngine::receive()` calls `m_transport->receive_message(received, 100)`.
-    - `TcpBackend::receive_message()` runs the poll loop: fast-path `pop()`, then up to 1 iteration of `poll_clients_once(100U)` (ceiling of 100/100 = 1, capped at 50).
-    - `poll_clients_once()` calls `accept_clients()` (server mode), then iterates `m_client_fds[0..7]` calling `recv_from_client(fd, 100U)` for each active fd.
-    - `recv_from_client()` calls `tcp_recv_frame()` → `socket_recv_exact()` (poll + recv loop for 4-byte header, then for payload) → `Serializer::deserialize()` → `m_recv_queue.push()`.
-    - After `poll_clients_once()`: `m_recv_queue.pop()`, then `flush_delayed_to_queue(now_us2)`, then `m_recv_queue.pop()` again.
-    - Returns `OK` with envelope populated, or `ERR_TIMEOUT` if no message arrived.
-    - `DeliveryEngine` then checks: `timestamp_expired()` (drop if stale), `envelope_is_control()` (drop if ACK/NAK/HEARTBEAT), dedup via `DuplicateFilter::check_and_record()` for `RELIABLE_RETRY` messages.
-
-C3. Result check (Server.cpp:166): `if (result_ok(res) && envelope_is_data(received))`:
-    - `++messages_received`
-    - `Logger::log(INFO, "Server", "Received msg#N from node M, len L:")`
-    - `print_payload_as_string(received.payload, received.payload_length)` — `snprintf()` into a 256-byte stack buffer, then `printf`.
-    - `send_echo_reply(engine, received, now_us)`
-
-C4. If `res == ERR_TIMEOUT`: no echo sent. `pump_retries()` and `sweep_ack_timeouts()` still run below.
-
-### Phase D: send_echo_reply()
-
-D1. `send_echo_reply(engine, received, now_us)` (Server.cpp:90):
-    - `NEVER_COMPILED_OUT_ASSERT(envelope_valid(received))` and `NEVER_COMPILED_OUT_ASSERT(now_us > 0U)`.
-    - `envelope_init(reply)` — `memset` to 0, `message_type = INVALID`.
-    - Build echo reply:
-      - `reply.message_type = MessageType::DATA`
-      - `reply.source_id = received.destination_id` (server node id = 1)
-      - `reply.destination_id = received.source_id` (client node id = 2)
-      - `reply.priority = received.priority` (= 0)
-      - `reply.reliability_class = received.reliability_class` (= `RELIABLE_RETRY`)
-      - `reply.timestamp_us = now_us`
-      - `reply.expiry_time_us = timestamp_deadline_us(now_us, 10000U)` = `now_us + 10,000,000 µs`
-      - `reply.payload_length = received.payload_length`
-    - Bounds check: if `reply.payload_length > MSG_MAX_PAYLOAD_BYTES (4096)` → return `ERR_INVALID`.
-    - `memcpy(reply.payload, received.payload, reply.payload_length)`
-
-D2. `engine.send(reply, now_us)` (DeliveryEngine.cpp:77):
-    - Stamps: `reply.source_id = m_local_id = 1` (same value, no visible change), `reply.message_id = m_id_gen.next()` (overwrites any pre-set value), `reply.timestamp_us = now_us`.
-    - `send_via_transport(reply)` → `TcpBackend::send_message(reply)`:
-      - `Serializer::serialize()` → 44-byte header + payload into `m_wire_buf`.
-      - `timestamp_now_us()` → `now_us2`.
-      - `m_impairment.process_outbound(reply, now_us2)` — impairments disabled; queues with `release_us = now_us2` (immediate).
-      - `send_to_all_clients(m_wire_buf, wire_len)` → `tcp_send_frame()` per connected fd.
-      - `flush_delayed_to_clients(now_us2)` — drains delay buffer; re-serializes and sends queued message (double-send; see Risk 1).
-    - `AckTracker::track(reply, ack_deadline)` — `ack_deadline = now_us + 100ms`; slot transitions FREE → PENDING.
-    - `RetryManager::schedule(reply, 3, 100, now_us)` — `next_retry_us = now_us` (immediate first retry); slot becomes active.
-    - `Logger::log(INFO, "Sent message_id=..., reliability=2")`. Returns `OK`.
-
-D3. Back in `run_server_iteration()` (Server.cpp:176): if `result_ok(echo_res)`: `++messages_sent`.
-
-### Phase E: pump_retries and sweep_ack_timeouts
-
-E1. `engine.pump_retries(now_us)` (Server.cpp:181):
-    - `RetryManager::collect_due(now_us, retry_buf, 64)`: slot scheduled with `next_retry_us = now_us`; fires immediately. Copies reply to `retry_buf[0]`, increments `retry_count = 1`, doubles backoff to 200ms, sets `next_retry_us = now_us + 200,000µs`.
-    - `send_via_transport(retry_buf[0])` — third send of the echo reply (see Risk 1).
-    - `retried = 1`. Logs INFO "Retried 1 message(s)".
-
-E2. `engine.sweep_ack_timeouts(now_us)` (Server.cpp:186):
-    - `AckTracker::sweep_expired(now_us, timeout_buf, 32)`: PENDING slot has `deadline = now_us + 100ms`; typically not expired in the same iteration.
-    - `ack_timeouts = 0` in this iteration. After ~100ms has elapsed in a subsequent iteration: WARNING_HI for each unresolved slot.
-
-### Phase F: Cleanup
-
-F1. After `MAX_LOOP_ITERS` or `g_stop_flag`:
-    - `transport.close()`: `socket_close(m_listen_fd)`; `socket_close(m_client_fds[i])` for each valid fd; `m_client_count = 0`, `m_open = false`.
-    - `Logger::log(INFO, "Server stopped. Messages received: N, sent: M")`.
-    - `signal(SIGINT, old_handler)` — restores original signal disposition.
-    - `return 0`.
+14. `engine.pump_retries(now_us)` — collects any due retries from `RetryManager` and
+    re-sends them. Logs count if > 0.
+15. `engine.sweep_ack_timeouts(now_us)` — collects any expired PENDING ACK slots from
+    `AckTracker`. Logs count as WARNING_HI if > 0.
 
 ---
 
-## 4. Call Tree (Hierarchical)
+## 4. Call Tree
 
 ```
-Server::main()                                    [Server.cpp:196]
- ├── parse_server_port()
- ├── transport_config_default(cfg)
- ├── channel_config_default(cfg.channels[0], 0)
- ├── TcpBackend::init(cfg)                        [TcpBackend.cpp:88]
- │    ├── m_recv_queue.init()
- │    ├── m_impairment.init(imp_cfg)
- │    └── bind_and_listen("0.0.0.0", 9000)        [TcpBackend.cpp:54]
- │         ├── socket_create_tcp()
- │         ├── socket_set_reuseaddr()
- │         ├── socket_bind()
- │         └── socket_listen()
- ├── engine.init(&transport, cfg.channels[0], 1)  [DeliveryEngine.cpp:17]
- │    ├── AckTracker::init()
- │    ├── RetryManager::init()
- │    ├── DuplicateFilter::init()
- │    └── m_id_gen.init(seed=1)
- ├── signal(SIGINT, signal_handler)
- └── [loop iter=0..99999]
-      ├── g_stop_flag check
-      └── run_server_iteration()                  [Server.cpp:152]
-           ├── timestamp_now_us()
-           ├── engine.receive(received, 100, now_us) [DeliveryEngine.cpp:149]
-           │    └── TcpBackend::receive_message()  [TcpBackend.cpp:386]
-           │         ├── RingBuffer::pop()
-           │         └── poll_clients_once(100)    [TcpBackend.cpp:326]
-           │              ├── accept_clients()     [TcpBackend.cpp:167]
-           │              │    └── socket_accept(m_listen_fd)
-           │              └── recv_from_client(fd, 100) [TcpBackend.cpp:224]
-           │                   ├── tcp_recv_frame()     [SocketUtils.cpp:431]
-           │                   │    └── socket_recv_exact() × 2
-           │                   ├── Serializer::deserialize() [Serializer.cpp:175]
-           │                   └── RingBuffer::push()
-           ├── [if DATA received]:
-           │    ├── print_payload_as_string()      [Server.cpp:64]
-           │    └── send_echo_reply()              [Server.cpp:90]
-           │         ├── envelope_init(reply)
-           │         ├── timestamp_deadline_us()
-           │         ├── memcpy(payload)
-           │         └── engine.send(reply, now_us) [DeliveryEngine.cpp:77]
-           │              └── TcpBackend::send_message() [TcpBackend.cpp:347]
-           │                   ├── Serializer::serialize()
-           │                   ├── m_impairment.process_outbound()
-           │                   ├── send_to_all_clients()
-           │                   │    └── tcp_send_frame() [SocketUtils.cpp:393]
-           │                   └── flush_delayed_to_clients()
-           │                        ├── collect_deliverable()
-           │                        ├── Serializer::serialize()
-           │                        └── send_to_all_clients()
-           ├── engine.pump_retries(now_us)         [DeliveryEngine.cpp:227]
-           │    ├── RetryManager::collect_due()    — first retry fires immediately
-           │    └── send_via_transport(retry_buf[0])
-           └── engine.sweep_ack_timeouts(now_us)   [DeliveryEngine.cpp:267]
-                └── AckTracker::sweep_expired()
+run_server_iteration(engine, messages_received, messages_sent)
+ ├── timestamp_now_us()
+ ├── envelope_init(received)
+ ├── DeliveryEngine::receive(received, 100, now_us)
+ │    ├── TcpBackend::receive_message(received, 100)    [virtual dispatch]
+ │    │    ├── RingBuffer::pop(received)                 [try queue first]
+ │    │    └── [poll loop: poll_clients_once → recv_from_client → push]
+ │    ├── timestamp_expired(expiry_us, now_us)
+ │    ├── envelope_is_control(received)                  [ACK/NAK/HEARTBEAT branch]
+ │    │    ├── AckTracker::on_ack(src, id)               [if ACK]
+ │    │    └── RetryManager::on_ack(src, id)             [if ACK]
+ │    └── DuplicateFilter::check_and_record(src, id)    [if RELIABLE_RETRY]
+ ├── [if DATA] print_payload_as_string(payload, len)
+ ├── [if DATA] send_echo_reply(engine, received, now_us)
+ │    ├── envelope_init(reply)
+ │    ├── [build reply fields + memcpy payload]
+ │    └── DeliveryEngine::send(reply, now_us)
+ │         ├── MessageIdGen::next()
+ │         ├── DeliveryEngine::send_via_transport(reply)
+ │         │    └── TcpBackend::send_message(reply)      [virtual dispatch]
+ │         │         └── [serialize + impairment + flush + send_frame]
+ │         ├── AckTracker::track(reply, deadline)        [if RELIABLE_ACK or RETRY]
+ │         └── RetryManager::schedule(reply, ...)        [if RELIABLE_RETRY]
+ ├── DeliveryEngine::pump_retries(now_us)
+ └── DeliveryEngine::sweep_ack_timeouts(now_us)
 ```
 
 ---
 
 ## 5. Key Components Involved
 
-| Component | File | Role in UC_05 |
-|-----------|------|---------------|
-| `Server::main()` | `src/app/Server.cpp:196` | Orchestrates init, loop bounds, cleanup |
-| `run_server_iteration()` | `src/app/Server.cpp:152` | Per-iteration receive/echo/retry/sweep |
-| `send_echo_reply()` | `src/app/Server.cpp:90` | Builds and sends echo DATA reply |
-| `print_payload_as_string()` | `src/app/Server.cpp:64` | Debug print of received payload (bounded) |
-| `DeliveryEngine::receive()` | `src/core/DeliveryEngine.cpp:149` | Receives, checks expiry, dedup |
-| `DeliveryEngine::send()` | `src/core/DeliveryEngine.cpp:77` | Stamps, sends echo, tracks, schedules retry |
-| `TcpBackend` | `src/platform/TcpBackend.cpp` | Owns all socket I/O; server mode accepts clients |
-| `AckTracker` | `src/core/AckTracker.cpp` | Tracks echo reply for ACK (PENDING→FREE/timeout) |
-| `RetryManager` | `src/core/RetryManager.cpp` | Schedules echo reply retry; first retry fires immediately |
-| `DuplicateFilter` | `src/core/DuplicateFilter.cpp` | Suppresses re-delivery of `RELIABLE_RETRY` client messages |
-| `Serializer` | `src/core/Serializer.cpp` | Encodes on send, decodes on receive |
-| `signal_handler` | `src/app/Server.cpp:55` | Sets `g_stop_flag = 1` on SIGINT |
-| `g_stop_flag` | `src/app/Server.cpp:51` | `volatile sig_atomic_t`; checked per iteration |
+- **`run_server_iteration()`** — Application-level orchestrator in `Server.cpp`. Combines
+  receive and echo-send into one iteration. Not a system API; it is the application's event
+  loop body.
+
+- **`DeliveryEngine::receive()`** — System API. Delegates to `TcpBackend::receive_message()`,
+  then applies expiry check, control-message dispatch (ACK processing), and dedup for
+  RELIABLE_RETRY. Returns the DATA envelope to the application.
+
+- **`TcpBackend::receive_message()`** — Polls the receive ring buffer, runs
+  `poll_clients_once()` if the queue is empty, handles `flush_delayed_to_queue()` for
+  impairment-delayed messages.
+
+- **`send_echo_reply()`** — Application helper in `Server.cpp`. Constructs the reply
+  envelope by inverting source/destination and copying the payload. Calls
+  `DeliveryEngine::send()` which is the same SC function as UC_01–03.
+
+- **`DeliveryEngine::send()`** — System API. Stamps `source_id`, `message_id`,
+  `timestamp_us`, dispatches to transport, and optionally tracks/schedules.
+
+- **`DeliveryEngine::pump_retries()` and `sweep_ack_timeouts()`** — Called each iteration
+  for maintenance. Even though they are part of the loop, they are separate use cases
+  (UC_10 and UC_11).
 
 ---
 
 ## 6. Branching Logic / Decision Points
 
-| Condition | Location | Outcomes |
-|-----------|----------|----------|
-| `g_stop_flag != 0` | Server.cpp:262 | Non-zero → break loop, cleanup |
-| `receive()` result | Server.cpp:166 | `OK+DATA` → echo; `ERR_TIMEOUT` → no echo; `ERR_EXPIRED` → no echo; `ERR_DUPLICATE` → no echo (silently suppressed) |
-| `envelope_is_data(received)` | Server.cpp:166 | false (ACK/control) → no echo |
-| `payload_length > MSG_MAX_PAYLOAD_BYTES` | Server.cpp:111 | → `ERR_INVALID`; no echo |
-| echo send result | Server.cpp:176 | `OK` → `++messages_sent`; non-OK → WARNING_LO, no count |
-| `accept_clients()`: new connection | TcpBackend.cpp:185 | New fd added if `< MAX_TCP_CONNECTIONS (8)` |
-| `recv_from_client()` failure | TcpBackend.cpp:230 | Close and remove fd from array |
-| Dedup check (RELIABLE_RETRY) | DeliveryEngine.cpp:201 | `ERR_DUPLICATE` → drop silently; `OK` → deliver |
-| First retry fires | RetryManager | `next_retry_us <= now_us` → immediate retry in same iteration |
-| AckTracker sweep | AckTracker.cpp:121 | `now_us < deadline` → not swept; after 100ms → WARNING_HI |
+| Condition | True branch | False branch | Next control |
+|---|---|---|---|
+| `receive()` returns non-OK | No echo; continue to pump/sweep | Continue to DATA check | Phase 3 |
+| `envelope_is_data(received)` is false (ACK/control received) | No echo | — | Phase 3 |
+| `timestamp_expired()` in `receive()` returns true | Return `ERR_EXPIRED` to `run_server_iteration()` | Continue | Data/control check |
+| `envelope_is_control()` true (ACK received) | Call `on_ack()`, return `OK`; outer code skips echo (not DATA) | — | dedup check |
+| `check_and_record()` returns `ERR_DUPLICATE` | Return `ERR_DUPLICATE`; no echo | Continue | Return envelope |
+| `reply.payload_length > MSG_MAX_PAYLOAD_BYTES` | Return `ERR_INVALID` | memcpy + send | Return from `send_echo_reply()` |
+| `engine.send(reply)` returns non-OK | Log WARNING_LO; return non-OK | Increment `messages_sent` | Return to `run_server_iteration()` |
 
 ---
 
 ## 7. Concurrency / Threading Behavior
 
-Single-threaded application. No threads are created by Server.cpp.
+- **Single-threaded:** `Server.cpp` uses one main thread. All operations in
+  `run_server_iteration()` — receive, send, pump, sweep — are called sequentially on the
+  same thread. No locks, no condition variables.
 
-Signal handling: `signal_handler()` (Server.cpp:55) sets `g_stop_flag` (`volatile sig_atomic_t`). POSIX guarantees `sig_atomic_t` reads and writes are atomic with respect to signal delivery. The main loop checks `g_stop_flag` at the top of each iteration. No other async activity occurs.
+- **Signal handler interaction:** `g_stop_flag` is a `volatile sig_atomic_t` written by
+  `signal_handler()` (SIGINT) and read by the main loop. This is async-signal-safe. No other
+  shared state is accessed from the signal handler.
 
-All socket operations are sequential within `run_server_iteration()`: `accept_clients()` → `recv_from_client()` → deserialization → delivery engine → `send_echo_reply()` → `pump_retries()` → `sweep_ack_timeouts()`. No concurrent socket access.
+- **`RingBuffer` SPSC contract:** The `TcpBackend`'s `m_recv_queue` is a SPSC ring buffer.
+  In the server, the poll thread and the application thread are the same thread, so the
+  producer path (`recv_from_client()` → `push()`) and the consumer path (`receive_message()`
+  → `pop()`) are both on the main thread. The SPSC contract is trivially satisfied.
 
-`RingBuffer` (`m_recv_queue`): both the producer role (`recv_from_client()` → `push()`) and the consumer role (`receive_message()` → `pop()`) execute on the same thread. The `std::atomic<uint32_t>` head and tail provide the necessary memory ordering. No mutex is required.
-
-`timestamp_now_us()` is called multiple times per iteration. The `now_us` captured at the top of `run_server_iteration()` is reused for the receive call, `send_echo_reply()`, `pump_retries()`, and `sweep_ack_timeouts()`. Additional clock reads happen inside `TcpBackend` independently.
+- **`std::atomic` in `RingBuffer`:** `m_head` and `m_tail` use acquire/release ordering.
+  When both producer and consumer are the same thread, the acquire/release pairs still
+  provide the necessary happens-before relationship but impose no actual synchronization cost.
 
 ---
 
-## 8. Memory & Ownership Semantics (C/C++ Specific)
+## 8. Memory & Ownership Semantics
 
-| Object | Location | Ownership / Lifetime |
-|--------|----------|----------------------|
-| `TransportConfig cfg` | stack (`main`) | POD; values copied into `TcpBackend` at `init()` |
-| `TcpBackend transport` | stack (`main`) | Owns `m_listen_fd`, `m_client_fds[8]`, `m_recv_queue`, `m_impairment`, `m_wire_buf[8192]` |
-| `DeliveryEngine engine` | stack (`main`) | Owns `AckTracker`, `RetryManager`, `DuplicateFilter`, `MessageIdGen`; non-owning pointer to `TcpBackend` |
-| `MessageEnvelope received` | stack (`run_server_iteration`) | Output parameter filled by `receive()`; passed by const-ref to `send_echo_reply()` |
-| `MessageEnvelope reply` | stack (`send_echo_reply`) | Built locally; passed by ref to `engine.send()`; copied into `AckTracker` and `RetryManager` slots |
-| `retry_buf[64]` | stack (`pump_retries`) | ~264 KB stack frame; `MSG_RING_CAPACITY × sizeof(MessageEnvelope)` |
-| `delayed[32]` | stack (`flush_delayed_to_clients/queue`) | ~132 KB per call |
+| Name | Location | Size | Notes |
+|---|---|---|---|
+| `received` envelope | `run_server_iteration()` stack | ≈ 4140 bytes | Populated by `receive()`; read-only after receipt |
+| `reply` envelope | `send_echo_reply()` stack | ≈ 4140 bytes | Built from `received`; payload memcpy'd |
+| `payload_buf[PAYLOAD_PRINT_MAX]` | `print_payload_as_string()` stack | 256 bytes | Used for console output only; does not affect network state |
+| `m_wire_buf` (TcpBackend) | `TcpBackend` member | 8192 bytes | Reused by `send_echo_reply()` → `send_message()` |
+| `delayed[]` in `flush_delayed_to_clients` | Stack of `flush_delayed_to_clients` | 32 × ~4140 ≈ 132 KB | See UC_01 §8 |
+| `timeout_buf[]` in `sweep_ack_timeouts` | Stack of `sweep_ack_timeouts` | `ACK_TRACKER_CAPACITY * sizeof(MessageEnvelope)` = 32 × ~4140 ≈ 132 KB | Allocated only if `sweep_ack_timeouts()` is called with active expired slots |
 
-Key copy chain for echo reply:
-- `received.payload` → `memcpy` → `reply.payload` (Server.cpp:114)
-- `reply` → `envelope_copy` → `AckTracker::m_slots[k].env`
-- `reply` → `envelope_copy` → `RetryManager::m_slots[0].env`
-- If first retry fires: `RetryManager::m_slots[0].env` → `envelope_copy` → `retry_buf[0]`
+**Power of 10 Rule 3 confirmation:** No dynamic allocation. The server loop uses only stack
+and statically-allocated members.
 
-Each `envelope_copy()` is `sizeof(MessageEnvelope)` ≈ 4140 bytes. No heap allocation occurs anywhere on the echo path.
-
-`m_listen_fd` is owned by `TcpBackend`; closed in `close()` and the destructor. `m_client_fds[i]` are closed on receive failure or explicit `close()`.
+**Object lifetimes:** `TcpBackend transport` and `DeliveryEngine engine` are declared as
+locals in `main()`, lifetime = process lifetime. `run_server_iteration()` receives
+references to both; no ownership transfer.
 
 ---
 
 ## 9. Error Handling Flow
 
-| Error | Detection | Response |
-|-------|-----------|----------|
-| `receive()` `ERR_TIMEOUT` | Server.cpp:166 | No echo. `pump_retries()` + `sweep` still run. |
-| `receive()` `ERR_EXPIRED` | DeliveryEngine.cpp:171 | Log WARNING_LO; no echo. |
-| `receive()` `ERR_DUPLICATE` | DeliveryEngine.cpp:207 | Log INFO "Suppressed duplicate"; no echo. Sender's retries arrive until exhausted. |
-| echo `send()` fails | `send_echo_reply()` line 118 | Log WARNING_LO; return `ERR_INVALID`; no echo counted. |
-| `payload_length > 4096` | `send_echo_reply()` line 112 | Return `ERR_INVALID`; no echo. |
-| `snprintf` fails | `print_payload_as_string()` | `printf("[error copying payload]")` |
-| `tcp_recv_frame()` fails | `recv_from_client()` line 230 | Log WARNING_LO; close and remove fd. |
-| `tcp_send_frame()` fails | `send_to_all_clients()` line 270 | Log WARNING_LO; loop continues to next client. |
-| Accept at capacity | `accept_clients()` line 172 | Return `OK` immediately; skip accept. |
-| Accept EAGAIN | `accept_clients()` line 178 | fd < 0 → return `OK` (no pending connection). |
-| Bind fails | `bind_and_listen()` line 71 | Log FATAL; return `ERR_IO`; `main()` returns 1. |
-| SIGINT | `signal_handler` | `g_stop_flag = 1`; loop breaks on next iteration. |
+| Condition | System state after | What `run_server_iteration()` does |
+|---|---|---|
+| `receive()` → `ERR_TIMEOUT` | Queue empty; no socket data arrived in 100 ms | Normal; continue loop iteration |
+| `receive()` → `ERR_EXPIRED` | Expired message consumed from queue; WARNING_LO logged | Skip echo; continue |
+| `receive()` → `ERR_DUPLICATE` | Duplicate dropped; no state change beyond dedup window | Skip echo; continue |
+| `send_echo_reply()` → non-OK | Reply not sent; WARNING_LO logged | `messages_sent` not incremented; continue |
+| `pump_retries()` sends some retries | RetryManager `retry_count` incremented for each due slot | Logged at INFO if count > 0 |
+| `sweep_ack_timeouts()` finds expired slots | AckTracker slots freed; expired envelopes logged at WARNING_HI | Count logged at WARNING_HI |
 
 ---
 
 ## 10. External Interactions
 
-| Interaction | API | Direction | Notes |
-|-------------|-----|-----------|-------|
-| TCP accept | `accept()` via `socket_accept()` | Inbound | `accept_clients()`; non-blocking if no client pending |
-| TCP receive | `tcp_recv_frame()` → `socket_recv_exact()` | Inbound | 100ms timeout per attempt; poll + recv loop |
-| TCP send | `tcp_send_frame()` → `socket_send_all()` | Outbound | 4-byte BE length prefix; blocks up to `send_timeout_ms` |
-| POSIX clock | `clock_gettime(CLOCK_MONOTONIC)` | Read | Multiple calls per iteration |
-| Logger output | `Logger::log()` | Outbound | stdout/stderr |
-| Signal | SIGINT → `signal_handler` | Inbound | Sets `g_stop_flag` |
-| TCP binding | `socket_bind()` / `socket_listen()` | Init only | Binds `0.0.0.0:9000` |
+| API | fd / clock type | Notes |
+|---|---|---|
+| `clock_gettime(CLOCK_MONOTONIC, &ts)` | POSIX monotonic clock | `timestamp_now_us()` called once per iteration at the start of `run_server_iteration()` |
+| `poll(pfds, nfds, 100)` | Listen fd + client fds | Called inside `poll_clients_once()` from `TcpBackend::receive_message()`'s poll loop. Blocks up to 100 ms. |
+| `ISocketOps::recv_frame()` | TCP client fd | Called inside `recv_from_client()` to read a length-prefixed frame |
+| `ISocketOps::send_frame()` | TCP client fd | Called inside `send_to_all_clients()` to write the echo reply frame |
+| `signal(SIGINT, signal_handler)` | Process signal | Installs signal handler before the main loop; `g_stop_flag` is checked each iteration |
+| `printf` (via `print_payload_as_string`) | stdout | Prints received payload as a string; non-critical path |
 
 ---
 
 ## 11. State Changes / Side Effects
 
-**Per receive call (DATA message received):**
-- `messages_received`: +1
-- `DuplicateFilter::m_window`: new `(src, msg_id)` entry recorded; `m_count` incremented (up to 128)
-- `TcpBackend::m_recv_queue`: one `push()` + one `pop()` cycle (net zero)
+**Receive phase:**
+| Object | Member | Before | After |
+|---|---|---|---|
+| `RingBuffer m_recv_queue` | `m_head` | H | H+1 (envelope consumed) |
+| `DuplicateFilter m_dedup` | `m_window[m_next]` | Stale entry | `{src, msg_id, valid=true}` (if RELIABLE_RETRY) |
+| `DuplicateFilter m_dedup` | `m_next` | N | (N+1) % DEDUP_WINDOW_SIZE |
+| `AckTracker m_slots[i]` | `state` | `PENDING` | `ACKED` (if inbound ACK processed) |
 
-**Per echo send call:**
-- `messages_sent`: +1 (if `send_echo_reply()` returns OK)
-- `m_id_gen` (server's `DeliveryEngine`): `m_next` advanced by 1
-- `AckTracker::m_slots`: one slot FREE → PENDING; `m_count++`
-- `RetryManager::m_slots`: one slot inactive → active; `m_count++`
-- `TcpBackend::m_wire_buf`: overwritten with serialized reply bytes
+**Echo send phase:**
+| Object | Member | Before | After |
+|---|---|---|---|
+| `MessageEnvelope reply` | `source_id` | `received.destination_id` | `m_local_id` (overwritten by `send()`) |
+| `MessageEnvelope reply` | `message_id` | 0 | New non-zero monotonic value |
+| `MessageIdGen m_id_gen` | `m_next` | N | N+1 |
+| `TcpBackend m_wire_buf` | bytes | Stale | Echo reply frame |
+| Kernel TCP send buffer | bytes | Previous | Appended with echo reply frame |
+| `AckTracker m_slots[j]` | `state` | `FREE` | `PENDING` (if RELIABLE_ACK or RELIABLE_RETRY) |
+| `RetryManager m_slots[k]` | `active` | `false` | `true` (if RELIABLE_RETRY) |
 
-**Per `pump_retries()` call (immediate first retry):**
-- `RetryManager::m_slots[0].retry_count`: 1 → 2
-- `RetryManager::m_slots[0].backoff_ms`: 100 → 200ms
-- `RetryManager::m_slots[0].next_retry_us`: advanced by 200ms
-
-**Per `sweep_ack_timeouts()` call:**
-- Typically no change in the same iteration as the echo send. After ~100ms: PENDING → FREE, WARNING_HI logged.
-
-**Server lifetime:**
-- `m_listen_fd`: set at init, closed in `transport.close()`
-- `m_client_fds[i]`: set on client connect, closed on recv failure or `transport.close()`
-- `g_stop_flag`: initialized to 0; set to 1 by `signal_handler`
+**Retry/sweep phase:**
+- `pump_retries()`: RetryManager slot `retry_count` incremented, `backoff_ms` doubled, `next_retry_us` updated.
+- `sweep_ack_timeouts()`: Expired PENDING AckTracker slots freed (state → FREE), `m_count` decremented.
 
 ---
 
 ## 12. Sequence Diagram
 
-```mermaid
-sequenceDiagram
-    participant Main as Server::main
-    participant Iter as run_server_iteration
-    participant DE as DeliveryEngine
-    participant TCP as TcpBackend
-    participant Dedup as DuplicateFilter
-    participant Client
-
-    Main->>Iter: iter=0..MAX_LOOP_ITERS
-    Iter->>Iter: timestamp_now_us()
-    Iter->>DE: engine.receive(received, 100ms, now_us)
-    DE->>TCP: receive_message(100ms)
-    TCP->>TCP: accept_clients() [server mode]
-    TCP->>TCP: recv_from_client(fd, 100ms)
-    Client-->>TCP: DATA frame over TCP
-    TCP->>TCP: tcp_recv_frame() + deserialize()
-    TCP->>TCP: recv_queue.push(env)
-    TCP-->>DE: OK + received
-    DE->>DE: timestamp_expired? → false
-    DE->>DE: envelope_is_control? → false (DATA)
-    DE->>Dedup: check_and_record(src, msg_id)
-    Dedup-->>DE: OK (first receipt)
-    DE-->>Iter: OK + received
-    Note over Iter: envelope_is_data: YES → ++messages_received
-    Iter->>Iter: print_payload_as_string()
-    Iter->>Iter: send_echo_reply(engine, received, now_us)
-    Iter->>DE: engine.send(reply, now_us)
-    DE->>TCP: send_message(reply)
-    TCP->>TCP: serialize(reply → m_wire_buf)
-    TCP->>TCP: process_outbound() → OK (impairments disabled)
-    TCP->>Client: tcp_send_frame (direct send)
-    TCP->>Client: flush_delayed_to_clients (double-send)
-    TCP-->>DE: OK
-    DE->>DE: AckTracker::track(reply) → PENDING
-    DE->>DE: RetryManager::schedule(reply) → active
-    DE-->>Iter: OK → ++messages_sent
-    Iter->>DE: engine.pump_retries(now_us)
-    DE->>DE: collect_due: first retry fires immediately
-    DE->>Client: send_via_transport(retry_buf[0]) (third send)
-    DE-->>Iter: retried=1
-    Iter->>DE: engine.sweep_ack_timeouts(now_us)
-    DE->>DE: sweep_expired: PENDING not expired yet
-    DE-->>Iter: ack_timeouts=0
-    Iter-->>Main: done
+```
+Server main loop   DeliveryEngine   TcpBackend         DuplicateFilter  AckTracker
+      |                  |               |                    |               |
+      |--timestamp_now_us()              |                    |               |
+      |--envelope_init(received)         |                    |               |
+      |--receive(received,100,now)------>|                    |               |
+      |                  |--receive_message(received,100)---->|               |
+      |                  |               |  [pop or poll+recv]|               |
+      |                  |               |<--OK, envelope-----|               |
+      |                  |--timestamp_expired()               |               |
+      |                  |--envelope_is_control()?             |               |
+      |                  |--check_and_record(src,id)--------->|               |
+      |                  |<--OK (new message)-----------------|               |
+      |<--OK (DATA env)--|               |                    |               |
+      |                  |               |                    |               |
+      |--print_payload() |               |                    |               |
+      |--send_echo_reply(engine,received,now)                 |               |
+      |    envelope_init(reply)          |                    |               |
+      |    [build reply fields]          |                    |               |
+      |    memcpy(reply.payload,...)     |                    |               |
+      |    engine.send(reply,now)------->|                    |               |
+      |                  |--MessageIdGen::next()              |               |
+      |                  |--send_via_transport(reply)-------->|               |
+      |                  |               |  [serialize+impairment+send_frame] |
+      |                  |<--OK----------|               |    |               |
+      |                  |--track(reply, deadline)---------->  |               |
+      |                  |<--OK (PENDING slot)---------------|               |
+      |<--OK-------------|               |                    |               |
+      |                  |               |                    |               |
+      |--pump_retries(now)               |                    |               |
+      |--sweep_ack_timeouts(now)         |                    |               |
 ```
 
 ---
 
 ## 13. Initialization vs Runtime Flow
 
-**Initialization (runs once, at startup):**
-- `TcpBackend::init()` — socket creation, bind, listen; `ImpairmentEngine` init; PRNG seeded to `42ULL`.
-- `DeliveryEngine::init()` — `AckTracker`, `RetryManager`, `DuplicateFilter` inits; `m_id_gen` seeded to 1.
-- `signal(SIGINT, signal_handler)` — establishes stop mechanism.
+**Initialization:**
+- `main()` in `Server.cpp` calls `transport_config_default(cfg)`, overrides fields for server
+  mode (bind port, `is_server = true`, `reliability = RELIABLE_RETRY`), then calls
+  `transport.init(cfg)` and `engine.init(&transport, cfg.channels[0],
+  LOCAL_SERVER_NODE_ID)`.
+- `signal(SIGINT, signal_handler)` is installed before the loop.
 
-**Runtime (repeats per iteration, up to `MAX_LOOP_ITERS = 100000` times):**
-- When no client is connected: each iteration blocks ~100ms in `poll_clients_once()`.
-- When a client connects: `accept_clients()` adds the fd on the next iteration.
-- After echo send: `pump_retries()` fires the first retry immediately in the same iteration.
-- After ~100ms: `sweep_ack_timeouts()` logs WARNING_HI for unresolved PENDING slots.
-- Retry fires at 100ms → 200ms → 400ms intervals (3 max retries).
+**Steady-state:**
+- The loop runs up to `MAX_LOOP_ITERS = 100000` iterations. Each iteration is one call to
+  `run_server_iteration()`.
+- The server blocks inside `poll_clients_once()` for up to 100 ms waiting for client data.
+  If no data, `receive()` returns `ERR_TIMEOUT` and the iteration ends quickly.
+- `g_stop_flag` is checked at the top of each iteration; SIGINT causes a clean exit.
 
 ---
 
 ## 14. Known Risks / Observations
 
-**R1 — Three sends of the echo reply per `send_echo_reply()` call.**
-When impairments are disabled, `send_message()` queues the message with `release_us = now_us` and then immediately calls `flush_delayed_to_clients()` which re-serializes and re-sends it. Then `pump_retries()` fires the first retry in the same iteration. The client receives three copies. `DuplicateFilter` on the client side suppresses re-deliveries for `RELIABLE_RETRY`. However, the behavior is surprising and constitutes a double-send from the delay buffer design.
+- **`send()` overwrites `reply.source_id` with `m_local_id`.** `send_echo_reply()` sets
+  `reply.source_id = received.destination_id` (the server's own ID as known by the client).
+  Then `DeliveryEngine::send()` immediately overwrites it with `m_local_id`. If
+  `received.destination_id == m_local_id`, these are the same value and there is no
+  discrepancy. If they differ (e.g., multicast destination), the override may produce an
+  unexpected `source_id` in the reply.
 
-**R2 — ACK resolution blocked by source_id mismatch.**
-When the client sends an ACK for the echo reply, `AckTracker::on_ack()` is called with `src = client_id = 2`. The stored slot has `env.source_id = 1` (server's `local_id`). No match occurs. `RetryManager::on_ack()` has the same mismatch. Neither tracker is cleared; both retry and wait until exhausted or expired, generating spurious WARNING_HI log entries.
+- **Echo preserves the sender's `reliability_class`.** If the client sent a RELIABLE_RETRY
+  message, the server also sends the echo as RELIABLE_RETRY. This consumes an AckTracker
+  and RetryManager slot on the server for each echo. The server and client can accumulate
+  in-flight tracked messages simultaneously if the client sends faster than the server
+  receives ACKs.
 
-**R3 — Retry slots accumulate until exhausted.**
-With `max_retries = 3`, each echo reply generates 3 additional sends over ~700ms total. If the server receives many client messages in rapid succession, `RetryManager` and `AckTracker` fill (capacity = `ACK_TRACKER_CAPACITY = 32`). The 33rd echo reply's retry scheduling fails with `ERR_FULL` (WARNING_HI).
+- **`now_us` is captured once at the start of `run_server_iteration()` and reused for
+  receive, echo-send, pump, and sweep.** The actual wall-clock time may drift by up to a
+  few milliseconds across these four calls within a single iteration.
 
-**R4 — Large stack frames on critical path.**
-`retry_buf[MSG_RING_CAPACITY = 64]` in `pump_retries()` ≈ 264 KB on the stack. `delayed[IMPAIR_DELAY_BUF_SIZE = 32]` in `flush_delayed_to_clients/queue()` ≈ 132 KB per call. Both are called every iteration.
-
-**R5 — Server sends DATA reply, not ACK.**
-`send_echo_reply()` sets `reply.message_type = MessageType::DATA`. No ACK envelope is generated. The client's `AckTracker` and `RetryManager` for its original outbound DATA message cannot be resolved by this reply. Client retry continues to exhaustion.
-
-**R6 — DuplicateFilter window exhaustion.**
-`DEDUP_WINDOW_SIZE = 128`. After 128 distinct `(src, msg_id)` pairs, the oldest entry is overwritten. A retransmission of an evicted entry appears as a new message and is delivered and echoed again.
-
-**R7 — Signal handler is async-signal-safe.**
-Only `volatile sig_atomic_t` write occurs in `signal_handler()`. No `Logger::log()` or unsafe operations. The MISRA deviation for `signal()` function pointer usage is documented at Server.cpp:249.
+- **`MAX_LOOP_ITERS = 100000`.** The server loop is bounded by Power of 10 Rule 2 compliance.
+  A production server that must run indefinitely would need a different architecture.
 
 ---
 
 ## 15. Unknowns / Assumptions
 
-All previously tagged `[ASSUMPTION]` items are resolved from source:
+- [ASSUMPTION] The server configures channel 0 with `reliability = RELIABLE_RETRY` and
+  `max_retries = 3`. Therefore the echo reply will be sent as RELIABLE_RETRY, causing both
+  AckTracker and RetryManager slots to be consumed on the server side.
 
-**[CONFIRMED]** Server binds on `"0.0.0.0"` (Server.cpp:46 → Server.cpp:217).
+- [ASSUMPTION] The client and server are both using `LOCAL_SERVER_NODE_ID = 1` for the
+  server and `LOCAL_CLIENT_NODE_ID = 2` for the client. These are file-local constants in
+  their respective .cpp files and are not enforced by the system.
 
-**[CONFIRMED]** `run_server_iteration()` at line 152; `send_echo_reply()` at line 90; receive at line 164; echo at line 175; `pump_retries` at line 181; `sweep_ack_timeouts` at line 186.
+- [ASSUMPTION] `print_payload_as_string()` treats the payload as a null-terminated ASCII
+  string. Binary payloads may produce garbage output but do not affect correctness.
 
-**[CONFIRMED]** `send_echo_reply()` copies `reliability_class` from received message (Server.cpp:105). Client sends `RELIABLE_RETRY`; server echoes `RELIABLE_RETRY`.
-
-**[CONFIRMED]** `send_echo_reply()` sets expiry = +10 seconds (Server.cpp:107: `timestamp_deadline_us(now_us, 10000U)`).
-
-**[CONFIRMED]** `send_echo_reply()` stamps `message_type = DATA` (Server.cpp:101). No ACK envelope is generated.
-
-**[CONFIRMED]** `engine.send()` overrides `source_id` with `m_local_id = 1` (DeliveryEngine.cpp:88). Pre-set value was also 1. No visible change.
-
-**[CONFIRMED]** Server channel: `RELIABLE_RETRY`, `ORDERED`, `max_retries = 3`, `recv_timeout_ms = 100` (Server.cpp:222–225).
-
-**[CONFIRMED]** `DuplicateFilter` applied for `RELIABLE_RETRY` received messages (DeliveryEngine.cpp:201).
-
-**[CONFIRMED]** `pump_retries()` fires first retry immediately in the same iteration as the echo send, because `RetryManager::schedule()` sets `next_retry_us = now_us` and `collect_due()` evaluates on the same `now_us`.
+- [ASSUMPTION] The echo loop terminates due to either `g_stop_flag` (SIGINT) or exhausting
+  `MAX_LOOP_ITERS`. In the demo, `MAX_LOOP_ITERS = 100000` iterations × 100 ms poll
+  timeout per iteration = up to ~10,000 seconds (2.7 hours) of wall time if no messages are
+  received.

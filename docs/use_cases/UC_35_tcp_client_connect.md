@@ -1,6 +1,6 @@
 # UC_35 — TCP client connect
 
-**HL Group:** HL-8 — User starts a client endpoint
+**HL Group:** HL-8 — Start a Client Endpoint
 **Actor:** User
 **Requirement traceability:** REQ-4.1.1, REQ-6.1.1, REQ-6.1.2, REQ-6.3.1, REQ-6.3.3, REQ-7.1.1
 
@@ -341,62 +341,94 @@ No data transfer (send/recv) occurs during init. No TLS hooks are invoked.
 
 ---
 
-## 12. Sequence Diagram using mermaid
+## 12. Sequence Diagram (ASCII)
 
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant TcpBackend
-    participant SocketUtils
-    participant OS_Kernel
+Success path:
 
-    Caller->>TcpBackend: init(cfg [is_server=false])
-    TcpBackend->>TcpBackend: m_recv_queue.init()
-    TcpBackend->>TcpBackend: m_impairment.init(imp_cfg)
-    TcpBackend->>TcpBackend: connect_to_server()
-    TcpBackend->>SocketUtils: socket_create_tcp()
-    SocketUtils->>OS_Kernel: socket(AF_INET, SOCK_STREAM, TCP)
-    OS_Kernel-->>SocketUtils: fd
-    SocketUtils-->>TcpBackend: fd
-    TcpBackend->>SocketUtils: socket_set_reuseaddr(fd)
-    SocketUtils->>OS_Kernel: setsockopt(SO_REUSEADDR)
-    OS_Kernel-->>SocketUtils: 0
-    SocketUtils-->>TcpBackend: true
-    TcpBackend->>SocketUtils: socket_connect_with_timeout(fd, ip, port, timeout_ms)
-    SocketUtils->>OS_Kernel: fcntl(F_GETFL) + fcntl(F_SETFL, O_NONBLOCK)
-    OS_Kernel-->>SocketUtils: 0
-    SocketUtils->>OS_Kernel: connect(fd, &addr, sizeof(addr))
-    OS_Kernel-->>SocketUtils: -1 (errno=EINPROGRESS)
-    SocketUtils->>OS_Kernel: poll(fd, POLLOUT, timeout_ms)
-    Note over OS_Kernel: TCP 3-way handshake completes
-    OS_Kernel-->>SocketUtils: 1 (fd writable)
-    SocketUtils->>OS_Kernel: getsockopt(fd, SO_ERROR, &opt_err)
-    OS_Kernel-->>SocketUtils: 0, opt_err=0
-    SocketUtils-->>TcpBackend: true (connected)
-    Note over TcpBackend: m_client_fds[0]=fd; m_client_count=1; m_open=true
-    Note over TcpBackend: log INFO "Connected to %s:%u"
-    TcpBackend-->>Caller: Result::OK
+```
+  Caller     TcpBackend        SocketUtils              OS Kernel
+    |               |                |                       |
+    |--init(cfg)--->|                |                       |
+    |           m_recv_queue.init()  |                       |
+    |           m_impairment.init()  |                       |
+    |           connect_to_server()  |                       |
+    |               |                |                       |
+    |               |--socket_create_tcp()----------------->|
+    |               |                |--socket(AF_INET,TCP)->|
+    |               |                |<---------fd-----------|
+    |               |<---fd----------|                       |
+    |               |                |                       |
+    |               |--socket_set_reuseaddr(fd)------------>|
+    |               |                |--setsockopt(REUSE)--->|
+    |               |                |<--------0-------------|
+    |               |<---true--------|                       |
+    |               |                |                       |
+    |               |--socket_connect_with_timeout(fd,ip,port,timeout_ms)
+    |               |                |                       |
+    |               |         socket_set_nonblocking(fd)     |
+    |               |                |--fcntl(F_GETFL)------>|
+    |               |                |<--flags---------------|
+    |               |                |--fcntl(F_SETFL,NONBLOCK)->|
+    |               |                |<--0-------------------|
+    |               |                |                       |
+    |               |         inet_aton(ip,&addr)            |
+    |               |                |                       |
+    |               |                |--connect(fd,&addr)--->|
+    |               |                |<--(-1,EINPROGRESS)----|
+    |               |                |                       |
+    |               |                |--poll(fd,POLLOUT,tmo)->
+    |               |                | (blocks up to timeout_ms)
+    |               |                |          [TCP 3-way handshake completes]
+    |               |                |<--1 (POLLOUT set)-----|
+    |               |                |                       |
+    |               |                |--getsockopt(SO_ERROR)->|
+    |               |                |<--0, opt_err=0--------|
+    |               |                | NCOA(ret==0 && err==0)|
+    |               |<---true--------|                       |
+    |               |                |                       |
+    |           m_client_fds[0]=fd   |                       |
+    |           m_client_count=1     |                       |
+    |           m_open=true          |                       |
+    |           log(INFO,"Connected to %s:%u")               |
+    |           NCOA(m_client_fds[0]>=0)                     |
+    |           NCOA(m_client_count==1)                      |
+    |               |                |                       |
+    |           NCOA(m_open)  [back in init()]               |
+    |<--Result::OK--|                |                       |
+
+NCOA = NEVER_COMPILED_OUT_ASSERT
 ```
 
 Failure path (connection refused or timeout):
 
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant TcpBackend
-    participant SocketUtils
-    participant OS_Kernel
+```
+  Caller     TcpBackend        SocketUtils              OS Kernel
+    |               |                |                       |
+    |--init(cfg)--->|                |                       |
+    |           connect_to_server()  |                       |
+    |               |--socket_connect_with_timeout(fd,ip,port,5000)
+    |               |                |--connect(fd,&addr)--->|
+    |               |                |<--(-1,EINPROGRESS)----|
+    |               |                |--poll(POLLOUT,5000)--->
+    |               |                |<--1 (writable,ECONNREFUSED)
+    |               |                |--getsockopt(SO_ERROR)->|
+    |               |                |<--0, opt_err=ECONNREFUSED
+    |               |                | log(WARNING_LO,"connect failed after poll: ECONNREFUSED")
+    |               |<---false-------|                       |
+    |               |                |                       |
+    |           log(WARNING_HI,"Connection to %s:%u failed")|
+    |           socket_close(fd)     |                       |
+    |           [fd set to -1]       |                       |
+    |<--ERR_IO------|                |                       |
 
-    Caller->>TcpBackend: init(cfg [is_server=false])
-    TcpBackend->>TcpBackend: connect_to_server()
-    TcpBackend->>SocketUtils: socket_connect_with_timeout(fd, ip, port, 5000)
-    SocketUtils->>OS_Kernel: connect() → EINPROGRESS
-    SocketUtils->>OS_Kernel: poll(POLLOUT, 5000)
-    OS_Kernel-->>SocketUtils: 1 (writable, but connection refused)
-    SocketUtils->>OS_Kernel: getsockopt(SO_ERROR) → opt_err=ECONNREFUSED
-    SocketUtils-->>TcpBackend: false
-    Note over TcpBackend: log WARNING_HI; socket_close(fd)
-    TcpBackend-->>Caller: Result::ERR_IO
+Alternate failure (timeout at poll):
+    |               |                |--poll(POLLOUT,5000)--->
+    |               |                | (blocks; server not responding)
+    |               |                |<--0 (timeout, poll_result<=0)
+    |               |                | log(WARNING_LO,"connect(%s:%u) timeout")
+    |               |<---false-------|
+    |           log(WARNING_HI,...); socket_close(fd)
+    |<--ERR_IO------|
 ```
 
 ---
