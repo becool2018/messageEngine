@@ -249,6 +249,44 @@ static bool test_recv_timeout()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 5: init with num_channels == 0 → impairment uses default config
+// Covers LocalSimHarness::init() L59 False branch (config.num_channels > 0U == false).
+// Verifies: REQ-4.1.1
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_num_channels_zero()
+{
+    LocalSimHarness side_a;
+    LocalSimHarness side_b;
+
+    TransportConfig cfg_a;
+    TransportConfig cfg_b;
+    create_local_sim_config(cfg_a, 1U);
+    create_local_sim_config(cfg_b, 2U);
+    cfg_a.num_channels = 0U;
+    cfg_b.num_channels = 0U;
+
+    assert(side_a.init(cfg_a) == Result::OK);
+    assert(side_b.init(cfg_b) == Result::OK);
+
+    side_a.link(&side_b);
+    side_b.link(&side_a);
+
+    // Send a message to verify basic operation still works
+    MessageEnvelope send_env;
+    create_test_data_envelope(send_env, 1U, 2U, "nc0");
+    Result r = side_a.send_message(send_env);
+    assert(r == Result::OK);
+
+    MessageEnvelope recv_env;
+    r = side_b.receive_message(recv_env, 0U);
+    assert(r == Result::OK);
+
+    side_a.close();
+    side_b.close();
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -281,6 +319,13 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_recv_timeout\n");
+    }
+
+    if (!test_num_channels_zero()) {
+        printf("FAIL: test_num_channels_zero\n");
+        ++failed;
+    } else {
+        printf("PASS: test_num_channels_zero\n");
     }
 
     return (failed > 0) ? 1 : 0;

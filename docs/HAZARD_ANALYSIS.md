@@ -332,6 +332,26 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 
 `DtlsUdpBackend` is a drop-in replacement for `UdpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `UdpBackend`. The DTLS layer (when enabled) is an init-phase concern (cert/key loading, DTLS handshake, cookie exchange); enabling or disabling TLS does not alter the SC classification of the send/receive path. The MTU enforcement in `send_message()` (returns `ERR_INVALID` for payloads exceeding `DTLS_MAX_DATAGRAM_BYTES`) is part of the HAZ-005 mitigation.
 
+### src/platform/IMbedtlsOps.hpp / src/platform/MbedtlsOpsImpl.hpp
+
+| Function | Class | SC/NSC | HAZ IDs |
+|---|---|---|---|
+| `instance()` | `MbedtlsOpsImpl` | NSC | — |
+| `psa_crypto_init()` | `MbedtlsOpsImpl` | NSC | — |
+| `x509_crt_parse_file()` | `MbedtlsOpsImpl` | NSC | — |
+| `pk_parse_keyfile()` | `MbedtlsOpsImpl` | NSC | — |
+| `ssl_conf_own_cert()` | `MbedtlsOpsImpl` | NSC | — |
+| `ssl_cookie_setup()` | `MbedtlsOpsImpl` | NSC | — |
+| `ssl_setup()` | `MbedtlsOpsImpl` | NSC | — |
+| `ssl_set_client_transport_id()` | `MbedtlsOpsImpl` | NSC | — |
+| `ssl_write()` | `MbedtlsOpsImpl` | SC | HAZ-005, HAZ-006 |
+| `ssl_read()` | `MbedtlsOpsImpl` | SC | HAZ-004, HAZ-005 |
+| `recvfrom_peek()` | `MbedtlsOpsImpl` | SC | HAZ-004, HAZ-005 |
+| `net_connect()` | `MbedtlsOpsImpl` | NSC | — |
+| `inet_pton_ipv4()` | `MbedtlsOpsImpl` | NSC | — |
+
+`MbedtlsOpsImpl` implements `IMbedtlsOps` and is injected into `DtlsUdpBackend` via its `init()` constructor parameter. Only `ssl_write()`, `ssl_read()`, and `recvfrom_peek()` are on the run-time send/receive path and are therefore SC. All other methods are called exclusively during `init()` (handshake and certificate loading) and are NSC. `MbedtlsOpsImpl` is a pure delegation layer — each method is a precondition assertion plus one library call passthrough; no message-delivery policy is encoded here.
+
 ---
 
 *End of HAZARD_ANALYSIS.md — update this document whenever a new HAZ entry, FMEA row, or SC classification change is required per CLAUDE.md §11.*

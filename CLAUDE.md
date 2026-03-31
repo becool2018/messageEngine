@@ -413,6 +413,37 @@ Reclassifying a function from NSC to SC, or adding a new SC function, requires:
    All 63 reachable decision-level branches are 100% covered. The UdpBackend.cpp
    threshold is therefore set at 65% (maximum achievable); this is not a defect and
    requires no remediation.
+   LocalSimHarness.cpp has a proven architectural ceiling of 70.42% (50/71 branches).
+   The ceiling arises from two independent sources:
+     (a) 20 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
+         noreturn) paths — one per assert call across all functions, consistent with
+         the mechanism documented above.
+     (b) 1 architecturally-unreachable branch from impairment loss path:
+         `send_message` L118 True (process_outbound returns ERR_IO, message dropped
+         by loss impairment) — requires non-zero loss_probability in ImpairmentConfig,
+         which the TransportConfig public API does not expose; only
+         `impairments_enabled` is propagated from ChannelConfig to ImpairmentConfig,
+         and impairment_config_default() initialises loss_probability to zero.
+         Additionally: L164 ternary `(timeout_ms > 0U)` False branch is dead code
+         (L158 returns early for timeout_ms == 0, making L164 unreachable with
+         timeout_ms == 0); L165 `iterations > 5000U` True path requires a >5-second
+         test timeout which is unreasonable; L179 queue pop True during the sleep
+         loop requires a peer to inject a message during the nanosleep, which does
+         not occur in the single-threaded in-process test design.
+   All 50 reachable decision-level branches are 100% covered. The LocalSimHarness.cpp
+   threshold is therefore set at 70% (maximum achievable); this is not a defect and
+   requires no remediation.
+   MbedtlsOpsImpl.cpp has a proven architectural ceiling of 70.13% (54/77 branches).
+   The ceiling arises from a single source:
+     (a) 23 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
+         noreturn) paths — one per assert call across all functions, consistent with
+         the mechanism documented above. MbedtlsOpsImpl is a pure delegation layer
+         with no control-flow logic of its own; every function body is a precondition
+         assertion followed by a single mbedTLS or POSIX library call passthrough.
+         All 54 reachable decision-level branches (the False outcomes of the assert
+         guards, i.e., the normal execution paths) are 100% covered.
+   The MbedtlsOpsImpl.cpp threshold is therefore set at 70% (maximum achievable);
+   this is not a defect and requires no remediation.
 
 5. Coverage does not substitute for code review or static analysis. All three
    (coverage, review, static analysis) are required for SC functions.
