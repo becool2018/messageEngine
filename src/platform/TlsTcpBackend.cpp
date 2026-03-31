@@ -19,6 +19,8 @@
 // Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.3.4, REQ-7.1.1
 
 #include "platform/TlsTcpBackend.hpp"
+#include "platform/ISocketOps.hpp"
+#include "platform/SocketOpsImpl.hpp"
 #include "core/Assert.hpp"
 #include "core/Logger.hpp"
 #include "core/Serializer.hpp"
@@ -87,6 +89,26 @@ static void log_mbedtls_err(const char* tag, const char* func, int ret)
 TlsTcpBackend::TlsTcpBackend()
     : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_pkey{},
       m_listen_net{}, m_client_net{}, m_ssl{},
+      m_sock_ops(&SocketOpsImpl::instance()),
+      m_client_count(0U), m_wire_buf{}, m_cfg{},
+      m_open(false), m_is_server(false), m_tls_enabled(false)
+{
+    NEVER_COMPILED_OUT_ASSERT(MAX_TCP_CONNECTIONS > 0U);
+    mbedtls_ssl_config_init(&m_ssl_conf);
+    mbedtls_x509_crt_init(&m_cert);
+    mbedtls_x509_crt_init(&m_ca_cert);
+    mbedtls_pk_init(&m_pkey);
+    mbedtls_net_init(&m_listen_net);
+    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
+        mbedtls_net_init(&m_client_net[i]);
+        mbedtls_ssl_init(&m_ssl[i]);
+    }
+}
+
+TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops)
+    : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_pkey{},
+      m_listen_net{}, m_client_net{}, m_ssl{},
+      m_sock_ops(&sock_ops),
       m_client_count(0U), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false), m_tls_enabled(false)
 {
@@ -426,8 +448,8 @@ bool TlsTcpBackend::tls_send_frame(uint32_t idx,
         return true;
     }
 
-    // Plaintext path: reuse existing SocketUtils framing
-    return tcp_send_frame(m_client_net[idx].fd, buf, len, timeout_ms);
+    // Plaintext path: reuse existing SocketUtils framing via injected ISocketOps
+    return m_sock_ops->send_frame(m_client_net[idx].fd, buf, len, timeout_ms);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -443,9 +465,9 @@ bool TlsTcpBackend::tls_recv_frame(uint32_t idx,
     *out_len = 0U;
 
     if (!m_tls_enabled) {
-        // Plaintext path: reuse existing SocketUtils framing
-        return tcp_recv_frame(m_client_net[idx].fd, buf, buf_cap,
-                              timeout_ms, out_len);
+        // Plaintext path: reuse existing SocketUtils framing via injected ISocketOps
+        return m_sock_ops->recv_frame(m_client_net[idx].fd, buf, buf_cap,
+                                      timeout_ms, out_len);
     }
 
     // TLS path: read 4-byte header first
@@ -642,7 +664,7 @@ Result TlsTcpBackend::init(const TransportConfig& config)
     ImpairmentConfig imp_cfg;
     impairment_config_default(imp_cfg);
     if (config.num_channels > 0U) {
-        imp_cfg.enabled = config.channels[0U].impairments_enabled;
+        imp_cfg = config.channels[0U].impairment;
     }
     m_impairment.init(imp_cfg);
 

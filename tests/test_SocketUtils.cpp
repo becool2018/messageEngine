@@ -1,0 +1,682 @@
+/**
+ * @file test_SocketUtils.cpp
+ * @brief Unit tests for SocketUtils.cpp POSIX socket helpers.
+ *
+ * Tests cover:
+ *   - socket_create_tcp() / socket_create_udp() success paths
+ *   - socket_set_nonblocking() on a valid fd
+ *   - socket_set_reuseaddr() on a valid fd
+ *   - socket_bind() with valid IP+port (success) and invalid IP (failure)
+ *   - socket_listen() after bind
+ *   - socket_accept() with a connecting loopback client
+ *   - socket_close() on a valid fd
+ *   - socket_connect_with_timeout() to a listening server
+ *   - tcp_send_frame() + tcp_recv_frame() round-trip
+ *   - tcp_recv_frame() oversized frame rejection
+ *   - socket_send_to() with invalid IP (failure)
+ *   - socket_send_to() + socket_recv_from() UDP round-trip
+ *
+ * Reachable branches specifically exercised:
+ *   - socket_bind()    L133 True  (inet_aton returns 0 for bad IP)
+ *   - socket_send_to() L500 True  (inet_aton returns 0 for bad IP)
+ *
+ * All other uncovered branches in SocketUtils.cpp are architectural ceilings
+ * (POSIX hard error paths unreachable on loopback: fcntl failure, setsockopt
+ * failure, listen failure, accept failure, close failure, recvfrom failure,
+ * inet_ntop failure, UDP partial send).
+ *
+ * Port range 19200-19250 is reserved for SocketUtils tests.
+ *
+ * Rules applied:
+ *   - Power of 10: fixed buffers, bounded loops, ≥2 assertions per test.
+ *   - Raw assert() permitted in tests/ per CLAUDE.md §9 table.
+ *   - No STL on logic paths.
+ *
+ * Verifies: REQ-6.1.5, REQ-6.1.6, REQ-6.3.1, REQ-6.3.2, REQ-6.3.3
+ */
+// Verifies: REQ-6.1.5, REQ-6.1.6, REQ-6.3.1, REQ-6.3.2, REQ-6.3.3
+
+#include <cstdio>
+#include <cstring>
+#include <cassert>
+#include <cstdint>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <poll.h>
+
+#include "core/Types.hpp"
+#include "core/Serializer.hpp"
+#include "platform/SocketUtils.hpp"
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Loopback address and base port
+// ─────────────────────────────────────────────────────────────────────────────
+
+static const char   LOOPBACK_IP[]   = "127.0.0.1";
+static const char   BAD_IP[]        = "999.999.999.999";
+static const uint32_t TIMEOUT_MS    = 2000U;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper — wait for a listening fd to be readable (accept-ready) with a poll.
+// Returns true if the fd became readable within timeout_ms.
+// Power of 10: no recursion; single poll call.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static bool wait_readable(int fd, uint32_t timeout_ms)
+{
+    assert(fd >= 0);
+    assert(timeout_ms > 0U);
+
+    struct pollfd pfd;
+    pfd.fd      = fd;
+    pfd.events  = POLLIN;
+    pfd.revents = 0;
+
+    int r = poll(&pfd, 1U, static_cast<int>(timeout_ms));
+    assert(r >= 0);
+    return r > 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 1: socket_create_tcp() returns a valid fd
+// Verifies: REQ-6.3.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_create_tcp()
+{
+    int fd = socket_create_tcp();
+    assert(fd >= 0);
+
+    socket_close(fd);
+    printf("PASS: test_create_tcp\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 2: socket_create_udp() returns a valid fd
+// Verifies: REQ-6.3.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_create_udp()
+{
+    int fd = socket_create_udp();
+    assert(fd >= 0);
+
+    socket_close(fd);
+    printf("PASS: test_create_udp\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 3: socket_set_nonblocking() succeeds on a valid fd
+// Verifies: REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_set_nonblocking()
+{
+    int fd = socket_create_tcp();
+    assert(fd >= 0);
+
+    bool ok = socket_set_nonblocking(fd);
+    assert(ok);
+
+    socket_close(fd);
+    printf("PASS: test_set_nonblocking\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 4: socket_set_reuseaddr() succeeds on a valid fd
+// Verifies: REQ-6.3.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_set_reuseaddr()
+{
+    int fd = socket_create_tcp();
+    assert(fd >= 0);
+
+    bool ok = socket_set_reuseaddr(fd);
+    assert(ok);
+
+    socket_close(fd);
+    printf("PASS: test_set_reuseaddr\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 5: socket_bind() with valid IP and port succeeds
+// Verifies: REQ-6.3.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_bind_valid()
+{
+    int fd = socket_create_tcp();
+    assert(fd >= 0);
+
+    bool ra = socket_set_reuseaddr(fd);
+    assert(ra);
+
+    bool ok = socket_bind(fd, LOOPBACK_IP, 19200U);
+    assert(ok);
+
+    socket_close(fd);
+    printf("PASS: test_bind_valid\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 6: socket_bind() with invalid IP returns false
+// Exercises the reachable branch: inet_aton() returns 0 for a bad IP string.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_bind_bad_ip()
+{
+    int fd = socket_create_tcp();
+    assert(fd >= 0);
+
+    bool ok = socket_bind(fd, BAD_IP, 19201U);
+    assert(!ok);
+
+    socket_close(fd);
+    printf("PASS: test_bind_bad_ip\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 7: socket_listen() returns true after a successful bind
+// Verifies: REQ-6.1.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_listen()
+{
+    int fd = socket_create_tcp();
+    assert(fd >= 0);
+
+    bool ra = socket_set_reuseaddr(fd);
+    assert(ra);
+
+    bool bound = socket_bind(fd, LOOPBACK_IP, 19202U);
+    assert(bound);
+
+    bool ok = socket_listen(fd, 1);
+    assert(ok);
+
+    socket_close(fd);
+    printf("PASS: test_listen\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 8: socket_accept() with a connecting loopback client
+// Creates a listening server fd and a non-blocking client fd in the same
+// process; connect() is issued before accept() so the kernel queues the SYN.
+// Verifies: REQ-6.1.1, REQ-6.3.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_accept()
+{
+    // Set up server
+    int srv_fd = socket_create_tcp();
+    assert(srv_fd >= 0);
+
+    bool ra = socket_set_reuseaddr(srv_fd);
+    assert(ra);
+
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19203U);
+    assert(bound);
+
+    bool listening = socket_listen(srv_fd, 1);
+    assert(listening);
+
+    // Client initiates connection (uses timeout helper which sets non-blocking)
+    int cli_fd = socket_create_tcp();
+    assert(cli_fd >= 0);
+
+    bool connected = socket_connect_with_timeout(cli_fd, LOOPBACK_IP,
+                                                  19203U, TIMEOUT_MS);
+    assert(connected);
+
+    // Server-side: wait for the SYN to arrive then accept
+    bool readable = wait_readable(srv_fd, TIMEOUT_MS);
+    assert(readable);
+
+    int accepted_fd = socket_accept(srv_fd);
+    assert(accepted_fd >= 0);
+
+    socket_close(accepted_fd);
+    socket_close(cli_fd);
+    socket_close(srv_fd);
+    printf("PASS: test_accept\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 9: socket_close() on a valid fd (no crash, no error)
+// Verifies: REQ-4.1.4
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_close()
+{
+    int fd = socket_create_tcp();
+    assert(fd >= 0);
+
+    socket_close(fd);  // must not crash
+    printf("PASS: test_close\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 10: socket_connect_with_timeout() to a listening server
+// Verifies: REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_connect_with_timeout()
+{
+    // Set up server
+    int srv_fd = socket_create_tcp();
+    assert(srv_fd >= 0);
+
+    bool ra = socket_set_reuseaddr(srv_fd);
+    assert(ra);
+
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19204U);
+    assert(bound);
+
+    bool listening = socket_listen(srv_fd, 1);
+    assert(listening);
+
+    // Client connects
+    int cli_fd = socket_create_tcp();
+    assert(cli_fd >= 0);
+
+    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19204U,
+                                           TIMEOUT_MS);
+    assert(ok);
+
+    // Accept to complete the handshake (avoids RST on loopback)
+    bool readable = wait_readable(srv_fd, TIMEOUT_MS);
+    assert(readable);
+
+    int acc_fd = socket_accept(srv_fd);
+    assert(acc_fd >= 0);
+
+    socket_close(acc_fd);
+    socket_close(cli_fd);
+    socket_close(srv_fd);
+    printf("PASS: test_connect_with_timeout\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 11: tcp_send_frame() + tcp_recv_frame() round-trip
+// Sends a short payload; verifies length prefix and payload bytes survive.
+// Verifies: REQ-6.1.5, REQ-6.1.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_tcp_frame_round_trip()
+{
+    // Set up server
+    int srv_fd = socket_create_tcp();
+    assert(srv_fd >= 0);
+
+    bool ra = socket_set_reuseaddr(srv_fd);
+    assert(ra);
+
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19205U);
+    assert(bound);
+
+    bool listening = socket_listen(srv_fd, 1);
+    assert(listening);
+
+    // Client connects
+    int cli_fd = socket_create_tcp();
+    assert(cli_fd >= 0);
+
+    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19205U,
+                                           TIMEOUT_MS);
+    assert(ok);
+
+    // Accept on server side
+    bool readable = wait_readable(srv_fd, TIMEOUT_MS);
+    assert(readable);
+
+    int acc_fd = socket_accept(srv_fd);
+    assert(acc_fd >= 0);
+
+    // Send a 6-byte payload from client to server
+    static const uint8_t PAYLOAD[6U] = {0x01U, 0x02U, 0x03U, 0x04U, 0x05U, 0x06U};
+    static const uint32_t PAYLOAD_LEN = 6U;
+
+    bool sent = tcp_send_frame(cli_fd, PAYLOAD, PAYLOAD_LEN, TIMEOUT_MS);
+    assert(sent);
+
+    // Receive on server side
+    // Buffer sized to Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES
+    static const uint32_t BUF_CAP =
+        Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES;
+    uint8_t  recv_buf[BUF_CAP];
+    uint32_t recv_len = 0U;
+
+    (void)memset(recv_buf, 0, BUF_CAP);
+
+    bool received = tcp_recv_frame(acc_fd, recv_buf, BUF_CAP,
+                                   TIMEOUT_MS, &recv_len);
+    assert(received);
+    assert(recv_len == PAYLOAD_LEN);
+    assert(memcmp(recv_buf, PAYLOAD, PAYLOAD_LEN) == 0);
+
+    socket_close(acc_fd);
+    socket_close(cli_fd);
+    socket_close(srv_fd);
+    printf("PASS: test_tcp_frame_round_trip\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 12: tcp_recv_frame() rejects an oversized frame
+// Sends a raw 4-byte length prefix that exceeds max_frame_size; verifies
+// tcp_recv_frame() returns false.
+// Verifies: REQ-6.1.5, REQ-6.1.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_tcp_recv_oversized_frame()
+{
+    // Set up server
+    int srv_fd = socket_create_tcp();
+    assert(srv_fd >= 0);
+
+    bool ra = socket_set_reuseaddr(srv_fd);
+    assert(ra);
+
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19206U);
+    assert(bound);
+
+    bool listening = socket_listen(srv_fd, 1);
+    assert(listening);
+
+    // Client connects
+    int cli_fd = socket_create_tcp();
+    assert(cli_fd >= 0);
+
+    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19206U,
+                                           TIMEOUT_MS);
+    assert(ok);
+
+    // Accept on server side
+    bool readable = wait_readable(srv_fd, TIMEOUT_MS);
+    assert(readable);
+
+    int acc_fd = socket_accept(srv_fd);
+    assert(acc_fd >= 0);
+
+    // Send a raw 4-byte big-endian length of 0xFFFFFFFF from client.
+    // This exceeds max_frame_size, so tcp_recv_frame() must reject it.
+    uint8_t bad_header[4U];
+    bad_header[0] = 0xFFU;
+    bad_header[1] = 0xFFU;
+    bad_header[2] = 0xFFU;
+    bad_header[3] = 0xFFU;
+
+    bool hdr_sent = socket_send_all(cli_fd, bad_header, 4U, TIMEOUT_MS);
+    assert(hdr_sent);
+
+    // Server-side recv must return false (oversized)
+    static const uint32_t BUF_CAP =
+        Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES;
+    uint8_t  recv_buf[BUF_CAP];
+    uint32_t recv_len = 0U;
+
+    (void)memset(recv_buf, 0, BUF_CAP);
+
+    bool received = tcp_recv_frame(acc_fd, recv_buf, BUF_CAP,
+                                   TIMEOUT_MS, &recv_len);
+    assert(!received);
+
+    socket_close(acc_fd);
+    socket_close(cli_fd);
+    socket_close(srv_fd);
+    printf("PASS: test_tcp_recv_oversized_frame\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 13: socket_send_to() with invalid IP returns false
+// Exercises the reachable branch: inet_aton() returns 0 for a bad IP string.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_send_to_bad_ip()
+{
+    int fd = socket_create_udp();
+    assert(fd >= 0);
+
+    static const uint8_t DATA[4U] = {0x01U, 0x02U, 0x03U, 0x04U};
+
+    bool ok = socket_send_to(fd, DATA, 4U, BAD_IP, 19207U);
+    assert(!ok);
+
+    socket_close(fd);
+    printf("PASS: test_send_to_bad_ip\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 14: socket_send_to() + socket_recv_from() UDP round-trip
+// Verifies: REQ-6.2.1, REQ-6.2.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_udp_send_recv_round_trip()
+{
+    // Receiver binds to 19208; sender uses 19209 as an ephemeral source.
+    int recv_fd = socket_create_udp();
+    assert(recv_fd >= 0);
+
+    bool ra = socket_set_reuseaddr(recv_fd);
+    assert(ra);
+
+    bool bound = socket_bind(recv_fd, LOOPBACK_IP, 19208U);
+    assert(bound);
+
+    int send_fd = socket_create_udp();
+    assert(send_fd >= 0);
+
+    static const uint8_t PAYLOAD[8U] =
+        {0xAAU, 0xBBU, 0xCCU, 0xDDU, 0x11U, 0x22U, 0x33U, 0x44U};
+    static const uint32_t PAYLOAD_LEN = 8U;
+
+    bool sent = socket_send_to(send_fd, PAYLOAD, PAYLOAD_LEN,
+                                LOOPBACK_IP, 19208U);
+    assert(sent);
+
+    // Receive on recv_fd
+    uint8_t  recv_buf[1500U];
+    uint32_t recv_len   = 0U;
+    char     src_ip[48U];
+    uint16_t src_port   = 0U;
+
+    (void)memset(recv_buf, 0, sizeof(recv_buf));
+    (void)memset(src_ip, 0, sizeof(src_ip));
+
+    bool ok = socket_recv_from(recv_fd, recv_buf, static_cast<uint32_t>(sizeof(recv_buf)),
+                                TIMEOUT_MS, &recv_len, src_ip, &src_port);
+    assert(ok);
+    assert(recv_len == PAYLOAD_LEN);
+    assert(memcmp(recv_buf, PAYLOAD, PAYLOAD_LEN) == 0);
+    assert(src_ip[0] != '\0');
+
+    socket_close(send_fd);
+    socket_close(recv_fd);
+    printf("PASS: test_udp_send_recv_round_trip\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 15: socket_recv_from() timeout with no sender
+// Verifies: REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_udp_recv_timeout()
+{
+    int fd = socket_create_udp();
+    assert(fd >= 0);
+
+    bool ra = socket_set_reuseaddr(fd);
+    assert(ra);
+
+    bool bound = socket_bind(fd, LOOPBACK_IP, 19209U);
+    assert(bound);
+
+    uint8_t  recv_buf[256U];
+    uint32_t recv_len = 0U;
+    char     src_ip[48U];
+    uint16_t src_port = 0U;
+
+    (void)memset(recv_buf, 0, sizeof(recv_buf));
+    (void)memset(src_ip, 0, sizeof(src_ip));
+
+    // 200 ms timeout; no sender; expect false
+    bool ok = socket_recv_from(fd, recv_buf,
+                                static_cast<uint32_t>(sizeof(recv_buf)),
+                                200U, &recv_len, src_ip, &src_port);
+    assert(!ok);
+
+    socket_close(fd);
+    printf("PASS: test_udp_recv_timeout\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 16: socket_send_all() + socket_recv_exact() round-trip over TCP
+// Verifies: REQ-6.1.5, REQ-6.1.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_tcp_send_recv_exact()
+{
+    // Set up server
+    int srv_fd = socket_create_tcp();
+    assert(srv_fd >= 0);
+
+    bool ra = socket_set_reuseaddr(srv_fd);
+    assert(ra);
+
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19210U);
+    assert(bound);
+
+    bool listening = socket_listen(srv_fd, 1);
+    assert(listening);
+
+    // Client connects
+    int cli_fd = socket_create_tcp();
+    assert(cli_fd >= 0);
+
+    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19210U,
+                                           TIMEOUT_MS);
+    assert(ok);
+
+    // Accept
+    bool readable = wait_readable(srv_fd, TIMEOUT_MS);
+    assert(readable);
+
+    int acc_fd = socket_accept(srv_fd);
+    assert(acc_fd >= 0);
+
+    // Send exactly 10 bytes
+    static const uint8_t SEND_DATA[10U] =
+        {0x10U, 0x20U, 0x30U, 0x40U, 0x50U,
+         0x60U, 0x70U, 0x80U, 0x90U, 0xA0U};
+    static const uint32_t DATA_LEN = 10U;
+
+    bool sent = socket_send_all(cli_fd, SEND_DATA, DATA_LEN, TIMEOUT_MS);
+    assert(sent);
+
+    // Receive exactly 10 bytes on server side
+    uint8_t recv_buf[10U];
+    (void)memset(recv_buf, 0, sizeof(recv_buf));
+
+    bool received = socket_recv_exact(acc_fd, recv_buf, DATA_LEN, TIMEOUT_MS);
+    assert(received);
+    assert(memcmp(recv_buf, SEND_DATA, DATA_LEN) == 0);
+
+    socket_close(acc_fd);
+    socket_close(cli_fd);
+    socket_close(srv_fd);
+    printf("PASS: test_tcp_send_recv_exact\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 17: tcp_send_frame() with zero-length payload (len == 0)
+// Exercises the len == 0 branch in tcp_send_frame(): only header is sent.
+// Verifies: REQ-6.1.5
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_tcp_frame_zero_payload()
+{
+    // Set up server
+    int srv_fd = socket_create_tcp();
+    assert(srv_fd >= 0);
+
+    bool ra = socket_set_reuseaddr(srv_fd);
+    assert(ra);
+
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19211U);
+    assert(bound);
+
+    bool listening = socket_listen(srv_fd, 1);
+    assert(listening);
+
+    // Client connects
+    int cli_fd = socket_create_tcp();
+    assert(cli_fd >= 0);
+
+    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19211U,
+                                           TIMEOUT_MS);
+    assert(ok);
+
+    // Accept on server side
+    bool readable = wait_readable(srv_fd, TIMEOUT_MS);
+    assert(readable);
+
+    int acc_fd = socket_accept(srv_fd);
+    assert(acc_fd >= 0);
+
+    // Send a zero-length frame (len == 0: only the 4-byte header is transmitted)
+    static const uint8_t DUMMY[1U] = {0x00U};
+    bool sent = tcp_send_frame(cli_fd, DUMMY, 0U, TIMEOUT_MS);
+    assert(sent);
+
+    // Receive: out_len must be 0
+    static const uint32_t BUF_CAP =
+        Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES;
+    uint8_t  recv_buf[BUF_CAP];
+    uint32_t recv_len = 0xDEADU;   // poison to detect non-write
+
+    (void)memset(recv_buf, 0, BUF_CAP);
+
+    bool received = tcp_recv_frame(acc_fd, recv_buf, BUF_CAP,
+                                   TIMEOUT_MS, &recv_len);
+    assert(received);
+    assert(recv_len == 0U);
+
+    socket_close(acc_fd);
+    socket_close(cli_fd);
+    socket_close(srv_fd);
+    printf("PASS: test_tcp_frame_zero_payload\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// main — run all tests in sequence
+// ─────────────────────────────────────────────────────────────────────────────
+
+int main()
+{
+    printf("=== test_SocketUtils ===\n");
+
+    test_create_tcp();
+    test_create_udp();
+    test_set_nonblocking();
+    test_set_reuseaddr();
+    test_bind_valid();
+    test_bind_bad_ip();
+    test_listen();
+    test_accept();
+    test_close();
+    test_connect_with_timeout();
+    test_tcp_frame_round_trip();
+    test_tcp_recv_oversized_frame();
+    test_send_to_bad_ip();
+    test_udp_send_recv_round_trip();
+    test_udp_recv_timeout();
+    test_tcp_send_recv_exact();
+    test_tcp_frame_zero_payload();
+
+    printf("=== ALL PASSED ===\n");
+    return 0;
+}

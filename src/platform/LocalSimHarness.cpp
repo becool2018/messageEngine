@@ -57,7 +57,7 @@ Result LocalSimHarness::init(const TransportConfig& config)
     ImpairmentConfig imp_cfg;
     impairment_config_default(imp_cfg);
     if (config.num_channels > 0U) {
-        imp_cfg.enabled = config.channels[0U].impairments_enabled;
+        imp_cfg = config.channels[0U].impairment;
     }
     m_impairment.init(imp_cfg);
 
@@ -161,7 +161,7 @@ Result LocalSimHarness::receive_message(MessageEnvelope& envelope, uint32_t time
 
     // Poll with nanosleep: bounded iterations (Power of 10 rule 2)
     // Each iteration sleeps ~1ms, so timeout_ms iterations gives ~timeout_ms delay
-    uint32_t iterations = (timeout_ms > 0U) ? timeout_ms : 1U;
+    uint32_t iterations = timeout_ms;  // timeout_ms > 0U guaranteed by early return at L158
     if (iterations > 5000U) {
         iterations = 5000U;  // Cap at 5 seconds
     }
@@ -202,6 +202,6 @@ void LocalSimHarness::close()
 
 bool LocalSimHarness::is_open() const
 {
-    NEVER_COMPILED_OUT_ASSERT(m_open == true || m_open == false);  // Invariant: valid bool
+    NEVER_COMPILED_OUT_ASSERT(m_open || (m_peer == nullptr));  // Invariant: when closed, peer is null
     return m_open;
 }

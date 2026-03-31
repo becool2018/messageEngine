@@ -40,6 +40,7 @@
 #include "core/ChannelConfig.hpp"
 #include "core/MessageEnvelope.hpp"
 #include "platform/UdpBackend.hpp"
+#include "MockSocketOps.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — build a UDP TransportConfig for loopback
@@ -384,6 +385,298 @@ static void test_udp_recv_garbage_datagram()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Mock fault-injection tests (VVP-001 M5 — dependency-injected ISocketOps)
+// Cover POSIX error paths unreachable in a loopback environment.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_mock_udp_create_fail()
+{
+    // Verifies: REQ-6.2.1, REQ-6.3.2
+    MockSocketOps mock;
+    mock.fail_create_udp = true;
+
+    UdpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19650U, 19651U);
+
+    Result r = backend.init(cfg);
+    assert(r == Result::ERR_IO);
+    assert(!backend.is_open());
+
+    printf("PASS: test_mock_udp_create_fail\n");
+}
+
+static void test_mock_udp_reuseaddr_fail()
+{
+    // Verifies: REQ-6.2.1, REQ-6.3.2
+    MockSocketOps mock;
+    mock.fail_set_reuseaddr = true;
+
+    UdpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19652U, 19653U);
+
+    Result r = backend.init(cfg);
+    assert(r == Result::ERR_IO);
+    assert(!backend.is_open());
+    assert(mock.n_do_close >= 1);  // do_close called after reuseaddr failure
+
+    printf("PASS: test_mock_udp_reuseaddr_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 14: impairment delay paths (Option A — fixed_latency_ms via ChannelConfig)
+// Covers:
+//   (a) send_message delayed-message loop (UdpBackend.cpp L153-L165):
+//       second send triggers flush of first delayed message.
+//   (b) flush_delayed_to_queue() loop body (UdpBackend.cpp L220-L223):
+//       receive_message flushes second delayed message from impairment buffer.
+//   (c) receive_message post-flush pop True branch (L259-L261):
+//       pop succeeds after flush delivers the delayed envelope.
+// Uses MockSocketOps: recv_from returns true/0 → deserialize fails → no socket data.
+// Verifies: REQ-5.1.1, REQ-4.1.2, REQ-4.1.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_udp_impairment_delay_paths()
+{
+    MockSocketOps mock;
+    UdpBackend backend(mock);
+
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19620U, 19621U);
+    cfg.channels[0U].impairment.enabled          = true;
+    cfg.channels[0U].impairment.fixed_latency_ms = 1U;  // 1 ms delay
+
+    assert(backend.init(cfg) == Result::OK);
+    assert(backend.is_open());
+
+    MessageEnvelope env1;
+    make_test_envelope(env1, 0xDE100001ULL);
+
+    // First send: process_outbound queues env1 (release = now_us + 1 ms).
+    // collect_deliverable returns 0 (not yet due) — delayed loop does NOT run.
+    assert(backend.send_message(env1) == Result::OK);
+
+    usleep(10000U);  // 10 ms >> 1 ms: env1 is now past its release time
+
+    MessageEnvelope env2;
+    make_test_envelope(env2, 0xDE100002ULL);
+
+    // Second send: process_outbound queues env2; collect_deliverable returns 1
+    // (env1 past its release time) — delayed-message loop runs once.
+    // Covers: send_message delayed-message loop body (path (a) above).
+    assert(backend.send_message(env2) == Result::OK);
+
+    usleep(10000U);  // 10 ms >> 1 ms: env2 is now past its release time
+
+    // receive_message: recv_one_datagram returns false (mock: out_len=0 → deserialize
+    // fails). flush_delayed_to_queue finds env2 and pushes it to recv_queue.
+    // Covers: flush_delayed_to_queue loop body (path (b)) and post-flush pop (path (c)).
+    MessageEnvelope recv_env;
+    Result r = backend.receive_message(recv_env, 500U);
+    assert(r == Result::OK);
+    assert(recv_env.message_id == 0xDE100002ULL);
+
+    backend.close();
+    printf("PASS: test_udp_impairment_delay_paths\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 15: send_message loss-impairment path — ERR_IO from process_outbound
+//
+// Covers send_message() L132 True branch:
+//   `if (res == Result::ERR_IO) { return Result::OK; }`
+// process_outbound() returns ERR_IO when check_loss() fires (loss_probability=1.0
+// guarantees loss on every message).  send_message must silently drop the message
+// and return OK.  A subsequent receive_message with 0-ms timeout must return
+// ERR_TIMEOUT (nothing was delivered).
+//
+// Verifies: REQ-4.1.2, REQ-5.1.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-4.1.2, REQ-5.1.3
+static void test_udp_send_loss_impairment()
+{
+    UdpBackend backend;
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19625U, 19626U);  // peer 19626: nothing listens there
+
+    // Configure 100 % loss so check_loss() always fires → process_outbound
+    // returns ERR_IO.
+    cfg.channels[0U].impairment.enabled          = true;
+    cfg.channels[0U].impairment.loss_probability = 1.0;
+
+    Result r = backend.init(cfg);
+    assert(r == Result::OK);
+    assert(backend.is_open());
+
+    MessageEnvelope env;
+    make_test_envelope(env, 0xD5A1D5A1ULL);
+
+    // send_message must hit the ERR_IO silent-drop path and return OK.
+    r = backend.send_message(env);
+    assert(r == Result::OK);
+
+    // Nothing was delivered: receive with 0 ms timeout (poll_count = 0, loop
+    // does not run) → ERR_TIMEOUT.
+    MessageEnvelope recv_env;
+    r = backend.receive_message(recv_env, 0U);
+    assert(r == Result::ERR_TIMEOUT);
+
+    backend.close();
+    printf("PASS: test_udp_send_loss_impairment\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 16: send_message send_to() failure path
+//
+// Covers send_message() L144 True branch:
+//   `if (!m_sock_ops->send_to(...)) { return Result::ERR_IO; }`
+// Uses MockSocketOps with fail_send_to=true.  init() succeeds (mock create_udp /
+// set_reuseaddr / do_bind all succeed).  send_message serializes the envelope,
+// calls process_outbound (impairment disabled → queued then collected
+// immediately with release_us == now_us), then calls send_to which the mock
+// rejects → ERR_IO must be returned.
+//
+// Verifies: REQ-4.1.2, REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-4.1.2, REQ-6.3.2
+static void test_mock_send_to_fail()
+{
+    MockSocketOps mock;
+    mock.fail_send_to = true;  // inject failure into the socket-layer send path
+
+    UdpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19660U, 19661U);
+
+    Result r = backend.init(cfg);
+    assert(r == Result::OK);
+    assert(backend.is_open());
+
+    MessageEnvelope env;
+    make_test_envelope(env, 0xFA115E1DULL);
+
+    // send_to fails → send_message must propagate ERR_IO.
+    r = backend.send_message(env);
+    assert(r == Result::ERR_IO);
+
+    // Backend remains open after a send failure.
+    assert(backend.is_open());
+
+    backend.close();
+    printf("PASS: test_mock_send_to_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 17: receive_message() initial-queue-pop True path
+//
+// Covers receive_message() L238 True branch:
+//   the initial `m_recv_queue.pop()` that returns OK before the poll loop runs.
+//
+// Strategy (achievable via the public API):
+//   1. Use MockSocketOps so recv_from always returns true with out_len=0.
+//      Serializer::deserialize on 0 bytes always fails → recv_one_datagram
+//      returns false on every call (nothing is pushed to recv_queue from the
+//      socket path).
+//   2. Configure impairment with fixed_latency_ms=1 (enabled=true) so that
+//      each send_message call queues the envelope in the impairment delay buffer
+//      rather than transmitting it immediately.
+//   3. Send MSG_RING_CAPACITY / 2 = 32 messages → fills the delay buffer.
+//   4. Wait 10 ms so all items expire.
+//   5. First receive_message(500 ms):
+//        - recv_one_datagram returns false (mock, 0 bytes).
+//        - Both pops fail (queue still empty).
+//        - flush_delayed_to_queue collects all 32 expired items → queue = 32.
+//        - Second pop (post-flush) succeeds → queue = 31, returns OK.
+//   6. Second receive_message(0 ms):
+//        - poll_count = (0 + 99) / 100 = 0 → loop does NOT run.
+//        - Initial pop: queue = 31 → succeeds immediately → L238 True covered.
+//        - Returns OK.
+//
+// NOTE on Branch 3 (recv_queue_full at L199):
+//   The `if (!result_ok(m_recv_queue.push(env)))` True branch in recv_one_datagram
+//   requires the ring buffer to contain MSG_RING_CAPACITY = 64 items at push time.
+//   The maximum queue occupancy achievable through the public UdpBackend API in
+//   single-threaded use is IMPAIR_DELAY_BUF_SIZE - 1 = 31, because:
+//     (a) flush_delayed_to_queue can inject at most IMPAIR_DELAY_BUF_SIZE = 32
+//         items in one receive_message iteration, and
+//     (b) receive_message pops one item immediately after every flush, leaving
+//         at most 31 items in the queue.
+//   Since 31 < MSG_RING_CAPACITY (64), the push in recv_one_datagram never fails
+//   in single-threaded use.  This branch is an architectural ceiling: reachable
+//   only if a second producer thread bypasses the SPSC contract of RingBuffer,
+//   which would be a contract violation.  It is documented here as unreachable
+//   via the public API.  The ceiling threshold accounts for this.
+//
+// Verifies: REQ-4.1.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-4.1.3
+static void test_udp_recv_queue_initial_pop()
+{
+    // Power of 10 rule 2: loop bound is compile-time constant IMPAIR_DELAY_BUF_SIZE.
+    static const uint32_t N_SEND = IMPAIR_DELAY_BUF_SIZE;  // 32
+
+    MockSocketOps mock;
+    // Default MockSocketOps: recv_from returns true with out_len=0.
+    // Serializer::deserialize on 0 bytes → ERR_INVALID → recv_one_datagram
+    // returns false on every call (nothing pushed from the socket path).
+
+    UdpBackend backend(mock);
+
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19662U, 19663U);
+    // Impairment with 1 ms delay: each send_message queues to delay buffer;
+    // collect_deliverable in send_message finds nothing expired yet (same now_us).
+    cfg.channels[0U].impairment.enabled          = true;
+    cfg.channels[0U].impairment.fixed_latency_ms = 1U;
+
+    Result r = backend.init(cfg);
+    assert(r == Result::OK);
+    assert(backend.is_open());
+
+    // Send N_SEND messages → fills delay buffer; collect_deliverable in
+    // send_message finds nothing expired (release_us = now_us + 1 ms > now_us).
+    // Power of 10 rule 2: fixed loop bound (N_SEND = IMPAIR_DELAY_BUF_SIZE).
+    for (uint32_t i = 0U; i < N_SEND; ++i) {
+        MessageEnvelope env;
+        make_test_envelope(env, static_cast<uint64_t>(0xBEEF0000ULL + i));
+        Result rs = backend.send_message(env);
+        assert(rs == Result::OK);
+    }
+
+    // Wait 10 ms >> 1 ms: all N_SEND items in the delay buffer have expired.
+    usleep(10000U);
+
+    // First receive_message: recv_one_datagram fails (mock), flush collects all
+    // N_SEND expired items → queue = N_SEND; post-flush pop succeeds → returns
+    // first item with queue = N_SEND - 1 remaining.
+    MessageEnvelope env_a;
+    r = backend.receive_message(env_a, 500U);
+    assert(r == Result::OK);
+    assert(env_a.message_type == MessageType::DATA);
+
+    // Second receive_message with 0 ms timeout: poll_count = 0; loop does NOT
+    // run.  The initial queue pop finds N_SEND - 1 items → pops one → returns
+    // OK immediately.  This exercises the L238 True branch of receive_message.
+    MessageEnvelope env_b;
+    r = backend.receive_message(env_b, 0U);
+    assert(r == Result::OK);
+    assert(env_b.message_type == MessageType::DATA);
+
+    backend.close();
+    printf("PASS: test_udp_recv_queue_initial_pop\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -402,6 +695,18 @@ int main()
     test_udp_bind_bad_ip();
     test_udp_num_channels_zero();
     test_udp_recv_garbage_datagram();
+
+    // Mock fault-injection tests (VVP-001 M5)
+    test_mock_udp_create_fail();
+    test_mock_udp_reuseaddr_fail();
+
+    // Impairment delay-path tests (Option A — full ImpairmentConfig in ChannelConfig)
+    test_udp_impairment_delay_paths();
+
+    // Branch coverage: loss impairment, send_to failure, initial recv_queue pop
+    test_udp_send_loss_impairment();
+    test_mock_send_to_fail();
+    test_udp_recv_queue_initial_pop();
 
     printf("=== ALL PASSED ===\n");
     return 0;

@@ -24,7 +24,7 @@
 #include "core/Types.hpp"
 #include "core/MessageEnvelope.hpp"
 #include "platform/PrngEngine.hpp"
-#include "platform/ImpairmentConfig.hpp"
+#include "core/ImpairmentConfig.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ImpairmentEngine: applies network impairments to messages

@@ -38,7 +38,7 @@
 #ifndef PLATFORM_IMPAIRMENT_CONFIG_LOADER_HPP
 #define PLATFORM_IMPAIRMENT_CONFIG_LOADER_HPP
 
-#include "ImpairmentConfig.hpp"
+#include "core/ImpairmentConfig.hpp"
 #include "core/Types.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────

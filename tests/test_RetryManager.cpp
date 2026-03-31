@@ -338,7 +338,93 @@ static void test_backoff_cap()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 12: schedule with expiry_time_us=0 (never expires); message is never
+// Test 12: on_ack with active slot present but wrong source_id
+// Covers RetryManager::on_ack() L131 False branch:
+//   active slot found, but env.source_id != src → compound short-circuits False.
+// Verifies: REQ-3.2.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_on_ack_wrong_src_active()
+{
+    RetryManager mgr;
+    mgr.init();
+
+    // Schedule a message from src=1
+    MessageEnvelope env;
+    make_test_envelope(env, 200ULL, 6000000ULL, 1U, 2U);  // src=1, msg_id=200
+    Result sched = mgr.schedule(env, 5U, 100U, 1000000ULL);
+    assert(sched == Result::OK);
+
+    // Call on_ack with wrong source: slot is active (L130 True), source_id=1 != 3 (L131 False)
+    Result res = mgr.on_ack(3U, 200ULL);
+
+    assert(res == Result::ERR_INVALID);
+    assert(res != Result::OK);
+
+    printf("PASS: test_on_ack_wrong_src_active\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 13: on_ack with active slot, matching source_id but wrong message_id
+// Covers RetryManager::on_ack() L132 False branch:
+//   active slot found, source_id matches, but env.message_id != msg_id → False.
+// Verifies: REQ-3.2.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_on_ack_wrong_id_active()
+{
+    RetryManager mgr;
+    mgr.init();
+
+    // Schedule a message from src=1, msg_id=300
+    MessageEnvelope env;
+    make_test_envelope(env, 300ULL, 6000000ULL, 1U, 2U);  // src=1, msg_id=300
+    Result sched = mgr.schedule(env, 5U, 100U, 1000000ULL);
+    assert(sched == Result::OK);
+
+    // Call on_ack: slot is active (L130 True), source_id=1==1 (L131 True),
+    // but msg_id=999!=300 (L132 False)
+    Result res = mgr.on_ack(1U, 999ULL);
+
+    assert(res == Result::ERR_INVALID);
+    assert(res != Result::OK);
+
+    printf("PASS: test_on_ack_wrong_id_active\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 14: collect_due with buf_cap smaller than number of due entries
+// Covers RetryManager::collect_due() L171 False branch:
+//   collected == buf_cap while i < ACK_TRACKER_CAPACITY → loop exits early.
+// Verifies: REQ-3.2.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_collect_due_buf_cap_limits()
+{
+    RetryManager mgr;
+    mgr.init();
+
+    const uint64_t T = 1000000ULL;
+
+    // Schedule 3 messages all immediately due; use large expiry
+    for (uint32_t i = 1U; i <= 3U; ++i) {
+        MessageEnvelope env;
+        make_test_envelope(env,
+                           static_cast<uint64_t>(400U + i),
+                           T + 60000000ULL);
+        Result r = mgr.schedule(env, 5U, 100U, T);
+        assert(r == Result::OK);
+    }
+
+    // Collect with buf_cap=2: loop must exit when collected==2 (L171 False)
+    MessageEnvelope buf[2U];
+    uint32_t count = mgr.collect_due(T + 1ULL, buf, 2U);
+
+    assert(count == 2U);
+    assert(count <= 2U);
+
+    printf("PASS: test_collect_due_buf_cap_limits\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 15: schedule with expiry_time_us=0 (never expires); message is never
 // silently dropped by slot_has_expired; covers the False branch of
 // (expiry_us != 0ULL) in slot_has_expired
 // ─────────────────────────────────────────────────────────────────────────────
@@ -384,6 +470,9 @@ int main()
     test_collect_exhausted();
     test_backoff_doubles();
     test_backoff_cap();
+    test_on_ack_wrong_src_active();
+    test_on_ack_wrong_id_active();
+    test_collect_due_buf_cap_limits();
     test_collect_never_expires();
 
     printf("ALL RetryManager tests passed.\n");

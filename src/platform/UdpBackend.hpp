@@ -30,13 +30,24 @@
 #include "core/RingBuffer.hpp"
 #include "platform/ImpairmentEngine.hpp"
 
+class ISocketOps;  // forward declaration — see platform/ISocketOps.hpp
+
 // ─────────────────────────────────────────────────────────────────────────────
 // UdpBackend: UDP-based transport implementation
 // ─────────────────────────────────────────────────────────────────────────────
 
 class UdpBackend : public TransportInterface {
 public:
+    /// Default constructor — uses the process-wide SocketOpsImpl singleton.
+    /// Production code always calls this form.
     UdpBackend();
+
+    /// Injection constructor — accepts any ISocketOps implementation.
+    /// Used by tests to inject a mock and exercise error paths that cannot
+    /// be triggered in a loopback environment.
+    /// @p ops must outlive this UdpBackend instance.
+    explicit UdpBackend(ISocketOps& ops);
+
     ~UdpBackend() override;
 
     // TransportInterface implementation
@@ -52,6 +63,7 @@ private:
     // ───────────────────────────────────────────────────────────────────────
     // Member state (Power of 10 rule 3: fixed allocation, no heap after init)
     // ───────────────────────────────────────────────────────────────────────
+    ISocketOps*       m_sock_ops;                         ///< Non-owning; never null after ctor
     int               m_fd;                              ///< UDP socket FD
     uint8_t           m_wire_buf[SOCKET_RECV_BUF_BYTES]; ///< Serialization buffer
     TransportConfig   m_cfg;                             ///< Transport configuration

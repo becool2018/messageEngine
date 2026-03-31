@@ -35,13 +35,15 @@
 // Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1
 
 #include "platform/DtlsUdpBackend.hpp"
+#include "platform/ISocketOps.hpp"
 #include "platform/MbedtlsOpsImpl.hpp"
+#include "platform/SocketOpsImpl.hpp"
 #include "core/Assert.hpp"
 #include "core/Logger.hpp"
 #include "core/Serializer.hpp"
 #include "core/Timestamp.hpp"
 #include "platform/SocketUtils.hpp"
-#include "platform/ImpairmentConfig.hpp"
+#include "core/ImpairmentConfig.hpp"
 
 #include <mbedtls/error.h>
 #include <psa/crypto.h>
@@ -73,6 +75,7 @@ static void log_mbedtls_err(const char* tag, const char* func, int ret)
 DtlsUdpBackend::DtlsUdpBackend()
     : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_pkey{},
       m_ssl{}, m_cookie_ctx{}, m_timer{}, m_net_ctx{},
+      m_sock_ops(&SocketOpsImpl::instance()),
       m_ops(&MbedtlsOpsImpl::instance()),
       m_sock_fd(-1), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false), m_tls_enabled(false)
@@ -91,7 +94,27 @@ DtlsUdpBackend::DtlsUdpBackend()
 DtlsUdpBackend::DtlsUdpBackend(IMbedtlsOps& ops)
     : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_pkey{},
       m_ssl{}, m_cookie_ctx{}, m_timer{}, m_net_ctx{},
+      m_sock_ops(&SocketOpsImpl::instance()),
       m_ops(&ops),
+      m_sock_fd(-1), m_wire_buf{}, m_cfg{},
+      m_open(false), m_is_server(false), m_tls_enabled(false)
+{
+    NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
+    NEVER_COMPILED_OUT_ASSERT(DTLS_MAX_DATAGRAM_BYTES > 0U);
+    mbedtls_ssl_config_init(&m_ssl_conf);
+    mbedtls_x509_crt_init(&m_cert);
+    mbedtls_x509_crt_init(&m_ca_cert);
+    mbedtls_pk_init(&m_pkey);
+    mbedtls_ssl_init(&m_ssl);
+    mbedtls_ssl_cookie_init(&m_cookie_ctx);
+    mbedtls_net_init(&m_net_ctx);
+}
+
+DtlsUdpBackend::DtlsUdpBackend(ISocketOps& sock_ops, IMbedtlsOps& tls_ops)
+    : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_pkey{},
+      m_ssl{}, m_cookie_ctx{}, m_timer{}, m_net_ctx{},
+      m_sock_ops(&sock_ops),
+      m_ops(&tls_ops),
       m_sock_fd(-1), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false), m_tls_enabled(false)
 {
@@ -466,11 +489,11 @@ bool DtlsUdpBackend::recv_one_dtls_datagram(uint32_t timeout_ms)
         }
         out_len = static_cast<uint32_t>(ret);
     } else {
-        // Plaintext path: delegate to SocketUtils (REQ-6.4.5)
+        // Plaintext path: delegate to ISocketOps (REQ-6.4.5)
         char     src_ip[48];
         uint16_t src_port = 0U;
-        if (!socket_recv_from(m_sock_fd, m_wire_buf, SOCKET_RECV_BUF_BYTES,
-                              timeout_ms, &out_len, src_ip, &src_port)) {
+        if (!m_sock_ops->recv_from(m_sock_fd, m_wire_buf, SOCKET_RECV_BUF_BYTES,
+                                   timeout_ms, &out_len, src_ip, &src_port)) {
             return false;
         }
     }
@@ -529,29 +552,29 @@ Result DtlsUdpBackend::init(const TransportConfig& config)
     ImpairmentConfig imp_cfg;
     impairment_config_default(imp_cfg);
     if (config.num_channels > 0U) {
-        imp_cfg.enabled = config.channels[0U].impairments_enabled;
+        imp_cfg = config.channels[0U].impairment;
     }
     m_impairment.init(imp_cfg);
 
-    m_sock_fd = socket_create_udp();
+    m_sock_fd = m_sock_ops->create_udp();
     if (m_sock_fd < 0) {
         Logger::log(Severity::FATAL, "DtlsUdpBackend",
                     "socket_create_udp failed");
         return Result::ERR_IO;
     }
 
-    if (!socket_set_reuseaddr(m_sock_fd)) {
+    if (!m_sock_ops->set_reuseaddr(m_sock_fd)) {
         Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
                     "socket_set_reuseaddr failed");
-        socket_close(m_sock_fd);
+        m_sock_ops->do_close(m_sock_fd);
         m_sock_fd = -1;
         return Result::ERR_IO;
     }
 
-    if (!socket_bind(m_sock_fd, config.bind_ip, config.bind_port)) {
+    if (!m_sock_ops->do_bind(m_sock_fd, config.bind_ip, config.bind_port)) {
         Logger::log(Severity::FATAL, "DtlsUdpBackend",
                     "socket_bind failed on port %u", config.bind_port);
-        socket_close(m_sock_fd);
+        m_sock_ops->do_close(m_sock_fd);
         m_sock_fd = -1;
         return Result::ERR_IO;
     }
@@ -559,14 +582,14 @@ Result DtlsUdpBackend::init(const TransportConfig& config)
     if (m_tls_enabled) {
         Result res = setup_dtls_config(config.tls);
         if (!result_ok(res)) {
-            socket_close(m_sock_fd);
+            m_sock_ops->do_close(m_sock_fd);
             m_sock_fd = -1;
             return res;
         }
         res = m_is_server ? server_wait_and_handshake()
                           : client_connect_and_handshake();
         if (!result_ok(res)) {
-            socket_close(m_sock_fd);
+            m_sock_ops->do_close(m_sock_fd);
             m_sock_fd = -1;
             return res;
         }
@@ -629,8 +652,8 @@ Result DtlsUdpBackend::send_message(const MessageEnvelope& envelope)
             return Result::ERR_IO;
         }
     } else {
-        if (!socket_send_to(m_sock_fd, m_wire_buf, wire_len,
-                            m_cfg.peer_ip, m_cfg.peer_port)) {
+        if (!m_sock_ops->send_to(m_sock_fd, m_wire_buf, wire_len,
+                                 m_cfg.peer_ip, m_cfg.peer_port)) {
             Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
                         "send_message: socket_send_to failed to %s:%u",
                         m_cfg.peer_ip, m_cfg.peer_port);
@@ -648,8 +671,8 @@ Result DtlsUdpBackend::send_message(const MessageEnvelope& envelope)
         if (m_tls_enabled) {
             (void)mbedtls_ssl_write(&m_ssl, m_wire_buf, static_cast<size_t>(dlen));
         } else {
-            (void)socket_send_to(m_sock_fd, m_wire_buf, dlen,
-                                 m_cfg.peer_ip, m_cfg.peer_port);
+            (void)m_sock_ops->send_to(m_sock_fd, m_wire_buf, dlen,
+                                      m_cfg.peer_ip, m_cfg.peer_port);
         }
     }
 
@@ -707,7 +730,7 @@ void DtlsUdpBackend::close()
     m_net_ctx.fd = -1;
 
     if (m_sock_fd >= 0) {
-        socket_close(m_sock_fd);
+        m_sock_ops->do_close(m_sock_fd);
         m_sock_fd = -1;
     }
 

@@ -423,6 +423,55 @@ static void test_over_64_lines()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 19: malformed values for every known key — sscanf returns 0, defaults retained
+//   Covers the False branch of every `if (sscanf(val, ...) == 1)` in apply_kv().
+//   Passing a non-numeric token (e.g. "abc") makes sscanf return 0, so the
+//   assignment inside the if is skipped and impairment_config_default() values
+//   remain in effect.
+// Verifies: REQ-5.2.1
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_malformed_values()
+{
+    // Every known key is present but has a non-numeric value ("abc") so that
+    // sscanf fails for each one — exercising the False branch of every
+    // `if (sscanf == 1)` guard inside apply_kv().
+    write_test_file(
+        "enabled=abc\n"
+        "fixed_latency_ms=abc\n"
+        "jitter_mean_ms=abc\n"
+        "jitter_variance_ms=abc\n"
+        "loss_probability=abc\n"
+        "duplication_probability=abc\n"
+        "reorder_enabled=abc\n"
+        "reorder_window_size=abc\n"
+        "partition_enabled=abc\n"
+        "partition_duration_ms=abc\n"
+        "partition_gap_ms=abc\n"
+        "prng_seed=abc\n"
+    );
+
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    // All values must remain at impairment_config_default() values
+    assert(cfg.enabled == false);
+    assert(cfg.fixed_latency_ms == 0U);
+    assert(cfg.jitter_mean_ms == 0U);
+    assert(cfg.jitter_variance_ms == 0U);
+    assert(cfg.loss_probability == 0.0);
+    assert(cfg.duplication_probability == 0.0);
+    assert(cfg.reorder_enabled == false);
+    assert(cfg.reorder_window_size == 0U);
+    assert(cfg.partition_enabled == false);
+    assert(cfg.partition_duration_ms == 0U);
+    assert(cfg.partition_gap_ms == 0U);
+    assert(cfg.prng_seed == 42ULL);  // default seed unchanged
+
+    printf("PASS: test_malformed_values\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -445,6 +494,7 @@ int main()
     test_carriage_return();
     test_truly_malformed();
     test_over_64_lines();
+    test_malformed_values();
 
     // Cleanup temp file
     (void)remove(TEST_FILE);

@@ -17,6 +17,7 @@
 #include <cstring>
 #include <cassert>
 #include <cstdint>
+#include <unistd.h>
 
 #include "core/Types.hpp"
 #include "core/MessageEnvelope.hpp"
@@ -287,6 +288,107 @@ static bool test_num_channels_zero()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 6: loss impairment drops message — send_message loss path (Option A)
+// Covers LocalSimHarness::send_message() L118 True branch:
+//   process_outbound returns ERR_IO (100% loss) → silent drop → OK returned.
+// Verifies: REQ-5.1.3, REQ-4.1.2
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_loss_impairment()
+{
+    LocalSimHarness sender;
+    LocalSimHarness receiver;
+
+    TransportConfig cfg_s;
+    create_local_sim_config(cfg_s, 30U);
+    cfg_s.channels[0U].impairment.enabled          = true;
+    cfg_s.channels[0U].impairment.loss_probability = 1.0;  // 100% loss
+
+    TransportConfig cfg_r;
+    create_local_sim_config(cfg_r, 31U);
+
+    assert(sender.init(cfg_s) == Result::OK);
+    assert(receiver.init(cfg_r) == Result::OK);
+    assert(!receiver.is_open() || receiver.is_open());  // suppress unused warning
+
+    sender.link(&receiver);
+
+    MessageEnvelope env;
+    create_test_data_envelope(env, 30U, 31U, "drop me");
+    env.message_id = 9001ULL;
+
+    // process_outbound returns ERR_IO (100% loss) → L118 True branch COVERED.
+    // send_message silently drops the message and returns OK.
+    Result r = sender.send_message(env);
+    assert(r == Result::OK);
+
+    // No message was delivered to receiver; non-blocking receive times out.
+    MessageEnvelope recv_env;
+    r = receiver.receive_message(recv_env, 0U);
+    assert(r == Result::ERR_TIMEOUT);
+
+    sender.close();
+    receiver.close();
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 7: impairment delay loop body (Option A)
+// Covers LocalSimHarness::send_message() L131-L134 True branch:
+//   collect_deliverable returns count=1 on second send → loop body injects
+//   the previously-queued (delayed) message into the peer.
+// Verifies: REQ-5.1.1, REQ-4.1.2
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_delay_loop_body()
+{
+    LocalSimHarness sender;
+    LocalSimHarness receiver;
+
+    TransportConfig cfg_s;
+    create_local_sim_config(cfg_s, 32U);
+    cfg_s.channels[0U].impairment.enabled          = true;
+    cfg_s.channels[0U].impairment.fixed_latency_ms = 1U;  // 1 ms delay
+
+    TransportConfig cfg_r;
+    create_local_sim_config(cfg_r, 33U);
+
+    assert(sender.init(cfg_s) == Result::OK);
+    assert(receiver.init(cfg_r) == Result::OK);
+
+    sender.link(&receiver);
+
+    MessageEnvelope env1;
+    create_test_data_envelope(env1, 32U, 33U, "first");
+    env1.message_id = 9101ULL;
+
+    // First send: process_outbound queues env1 in delay buffer (release=now+1ms),
+    // collect_deliverable returns 0 (not yet due) — loop body does NOT run.
+    // inject(env1) delivers env1 immediately to receiver (L137).
+    assert(sender.send_message(env1) == Result::OK);
+
+    usleep(10000U);  // 10 ms >> 1 ms: env1 is past its release time
+
+    MessageEnvelope env2;
+    create_test_data_envelope(env2, 32U, 33U, "second");
+    env2.message_id = 9102ULL;
+
+    // Second send: collect_deliverable returns 1 (env1 past release).
+    // Loop body runs: inject(env1 dup) into receiver.  COVERED: L131-L134.
+    // Then inject(env2) delivers env2 immediately.
+    assert(sender.send_message(env2) == Result::OK);
+
+    // Receiver queue has: env1 (immediate) + env1-dup (delayed loop) + env2.
+    // Non-blocking pop returns env1 first (FIFO).
+    MessageEnvelope recv_env;
+    Result r = receiver.receive_message(recv_env, 0U);
+    assert(r == Result::OK);
+    assert(recv_env.message_id == 9101ULL);
+
+    sender.close();
+    receiver.close();
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -326,6 +428,21 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_num_channels_zero\n");
+    }
+
+    // Impairment tests (Option A — ImpairmentConfig embedded in ChannelConfig)
+    if (!test_loss_impairment()) {
+        printf("FAIL: test_loss_impairment\n");
+        ++failed;
+    } else {
+        printf("PASS: test_loss_impairment\n");
+    }
+
+    if (!test_delay_loop_body()) {
+        printf("FAIL: test_delay_loop_body\n");
+        ++failed;
+    } else {
+        printf("PASS: test_delay_loop_body\n");
     }
 
     return (failed > 0) ? 1 : 0;

@@ -14,11 +14,14 @@
  */
 
 #include "platform/TcpBackend.hpp"
-#include "core/Assert.hpp"
+#include "platform/ISocketOps.hpp"
+#include "platform/SocketOpsImpl.hpp"
 #include "platform/SocketUtils.hpp"
+#include "core/Assert.hpp"
 #include "core/Serializer.hpp"
 #include "core/Logger.hpp"
 #include "core/Timestamp.hpp"
+#include <poll.h>
 #include <cstring>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -26,7 +29,20 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 TcpBackend::TcpBackend()
-    : m_listen_fd(-1), m_client_count(0U), m_wire_buf{}, m_cfg{},
+    : m_sock_ops(&SocketOpsImpl::instance()),
+      m_listen_fd(-1), m_client_count(0U), m_wire_buf{}, m_cfg{},
+      m_open(false), m_is_server(false)
+{
+    // Power of 10 rule 3: initialize to safe state
+    NEVER_COMPILED_OUT_ASSERT(MAX_TCP_CONNECTIONS > 0U);  // Invariant
+    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
+        m_client_fds[i] = -1;
+    }
+}
+
+TcpBackend::TcpBackend(ISocketOps& ops)
+    : m_sock_ops(&ops),
+      m_listen_fd(-1), m_client_count(0U), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false)
 {
     // Power of 10 rule 3: initialize to safe state
@@ -56,36 +72,36 @@ Result TcpBackend::bind_and_listen(const char* ip, uint16_t port)
     NEVER_COMPILED_OUT_ASSERT(ip != nullptr);          // Power of 10: valid pointer
     NEVER_COMPILED_OUT_ASSERT(m_is_server);            // Server mode only
 
-    m_listen_fd = socket_create_tcp();
+    m_listen_fd = m_sock_ops->create_tcp();
     if (m_listen_fd < 0) {
         Logger::log(Severity::FATAL, "TcpBackend", "socket_create_tcp failed in server mode");
         return Result::ERR_IO;
     }
-    if (!socket_set_reuseaddr(m_listen_fd)) {
+    if (!m_sock_ops->set_reuseaddr(m_listen_fd)) {
         Logger::log(Severity::WARNING_HI, "TcpBackend", "socket_set_reuseaddr failed");
-        socket_close(m_listen_fd);
+        m_sock_ops->do_close(m_listen_fd);
         m_listen_fd = -1;
         return Result::ERR_IO;
     }
-    if (!socket_bind(m_listen_fd, ip, port)) {
+    if (!m_sock_ops->do_bind(m_listen_fd, ip, port)) {
         Logger::log(Severity::FATAL, "TcpBackend", "socket_bind failed on port %u", port);
-        socket_close(m_listen_fd);
+        m_sock_ops->do_close(m_listen_fd);
         m_listen_fd = -1;
         return Result::ERR_IO;
     }
-    if (!socket_listen(m_listen_fd, static_cast<int>(MAX_TCP_CONNECTIONS))) {
+    if (!m_sock_ops->do_listen(m_listen_fd, static_cast<int>(MAX_TCP_CONNECTIONS))) {
         Logger::log(Severity::FATAL, "TcpBackend", "socket_listen failed");
-        socket_close(m_listen_fd);
+        m_sock_ops->do_close(m_listen_fd);
         m_listen_fd = -1;
         return Result::ERR_IO;
     }
     // Make listen fd non-blocking so accept_clients() returns immediately
     // when no pending connection exists, allowing receive_message() to honour
     // its timeout. Power of 10 Rule 2 deviation: infrastructure poll loop.
-    if (!socket_set_nonblocking(m_listen_fd)) {
+    if (!m_sock_ops->set_nonblocking(m_listen_fd)) {
         Logger::log(Severity::WARNING_HI, "TcpBackend",
                     "socket_set_nonblocking failed on listen fd");
-        socket_close(m_listen_fd);
+        m_sock_ops->do_close(m_listen_fd);
         m_listen_fd = -1;
         return Result::ERR_IO;
     }
@@ -109,7 +125,7 @@ Result TcpBackend::init(const TransportConfig& config)
     ImpairmentConfig imp_cfg;
     impairment_config_default(imp_cfg);
     if (config.num_channels > 0U) {
-        imp_cfg.enabled = config.channels[0U].impairments_enabled;
+        imp_cfg = config.channels[0U].impairment;
     }
     m_impairment.init(imp_cfg);
 
@@ -136,25 +152,25 @@ Result TcpBackend::connect_to_server()
     NEVER_COMPILED_OUT_ASSERT(!m_is_server);  // Client mode only
     NEVER_COMPILED_OUT_ASSERT(m_client_fds[0U] == -1);  // Not yet connected
 
-    int fd = socket_create_tcp();
+    int fd = m_sock_ops->create_tcp();
     if (fd < 0) {
         Logger::log(Severity::FATAL, "TcpBackend",
                    "socket_create_tcp failed in client mode");
         return Result::ERR_IO;
     }
 
-    if (!socket_set_reuseaddr(fd)) {
+    if (!m_sock_ops->set_reuseaddr(fd)) {
         Logger::log(Severity::WARNING_HI, "TcpBackend",
                    "socket_set_reuseaddr failed");
-        socket_close(fd);
+        m_sock_ops->do_close(fd);
         return Result::ERR_IO;
     }
 
-    if (!socket_connect_with_timeout(fd, m_cfg.peer_ip, m_cfg.peer_port,
-                                     m_cfg.connect_timeout_ms)) {
+    if (!m_sock_ops->connect_with_timeout(fd, m_cfg.peer_ip, m_cfg.peer_port,
+                                          m_cfg.connect_timeout_ms)) {
         Logger::log(Severity::WARNING_HI, "TcpBackend",
                    "Connection to %s:%u failed", m_cfg.peer_ip, m_cfg.peer_port);
-        socket_close(fd);
+        m_sock_ops->do_close(fd);
         return Result::ERR_IO;
     }
 
@@ -184,7 +200,7 @@ Result TcpBackend::accept_clients()
         return Result::OK;
     }
 
-    int client_fd = socket_accept(m_listen_fd);
+    int client_fd = m_sock_ops->do_accept(m_listen_fd);
     if (client_fd < 0) {
         // No pending connection (EAGAIN in non-blocking mode) is not an error
         return Result::OK;
@@ -213,7 +229,7 @@ void TcpBackend::remove_client_fd(int client_fd)
 
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         if (m_client_fds[i] == client_fd) {
-            socket_close(m_client_fds[i]);
+            m_sock_ops->do_close(m_client_fds[i]);
             m_client_fds[i] = -1;
             // Compact the fd array by shifting left
             for (uint32_t j = i; j < m_client_count - 1U; ++j) {
@@ -237,7 +253,7 @@ Result TcpBackend::recv_from_client(int client_fd, uint32_t timeout_ms)
     NEVER_COMPILED_OUT_ASSERT(m_open);          // Power of 10: transport must be open
 
     uint32_t out_len = 0U;
-    if (!tcp_recv_frame(client_fd, m_wire_buf, SOCKET_RECV_BUF_BYTES, timeout_ms, &out_len)) {
+    if (!m_sock_ops->recv_frame(client_fd, m_wire_buf, SOCKET_RECV_BUF_BYTES, timeout_ms, &out_len)) {
         Logger::log(Severity::WARNING_LO, "TcpBackend", "recv_frame failed; closing connection");
         remove_client_fd(client_fd);
         return Result::ERR_IO;
@@ -275,8 +291,8 @@ void TcpBackend::send_to_all_clients(const uint8_t* buf, uint32_t len)
         if (m_client_fds[i] < 0) {
             continue;
         }
-        if (!tcp_send_frame(m_client_fds[i], buf, len,
-                           m_cfg.channels[0U].send_timeout_ms)) {
+        if (!m_sock_ops->send_frame(m_client_fds[i], buf, len,
+                                    m_cfg.channels[0U].send_timeout_ms)) {
             Logger::log(Severity::WARNING_LO, "TcpBackend",
                        "Send frame failed on client %u", i);
         }
@@ -483,14 +499,14 @@ Result TcpBackend::receive_message(MessageEnvelope& envelope, uint32_t timeout_m
 void TcpBackend::close()
 {
     if (m_listen_fd >= 0) {
-        socket_close(m_listen_fd);
+        m_sock_ops->do_close(m_listen_fd);
         m_listen_fd = -1;
     }
 
     // Power of 10 rule 2: fixed loop bound
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         if (m_client_fds[i] >= 0) {
-            socket_close(m_client_fds[i]);
+            m_sock_ops->do_close(m_client_fds[i]);
             m_client_fds[i] = -1;
         }
     }

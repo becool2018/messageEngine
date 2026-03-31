@@ -20,7 +20,7 @@
 
 #include "core/Types.hpp"
 #include "core/MessageEnvelope.hpp"
-#include "platform/ImpairmentConfig.hpp"
+#include "core/ImpairmentConfig.hpp"
 #include "platform/ImpairmentEngine.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────

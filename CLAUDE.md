@@ -353,94 +353,99 @@ Reclassifying a function from NSC to SC, or adding a new SC function, requires:
    All reachable decision-level branches are 100% covered. The ImpairmentEngine.cpp
    threshold is therefore set at 74% (maximum achievable); this is not a defect
    and requires no remediation.
-   TlsTcpBackend.cpp meets the ≥ 76% target at 76.24% (231/303 branches).
+   TlsTcpBackend.cpp meets the ≥ 76% target at 76.87% (236/307 branches).
+   Five previously-missed branches are now covered: the DI constructor
+   `TlsTcpBackend(ISocketOps&)` body and its `MAX_TCP_CONNECTIONS` init loop
+   (test_di_constructor_executes), recv_from_client queue-overflow path
+   (test_recv_queue_overflow with 8 simultaneous clients), and
+   send_message loss-impairment ERR_IO drop (test_send_impairment_loss_drop).
    AckTracker, RetryManager, and DeliveryEngine unit tests have been added
    (tests/test_AckTracker.cpp, tests/test_RetryManager.cpp,
    tests/test_DeliveryEngine.cpp) and all meet the ≥ 75% branch coverage floor.
-   DtlsUdpBackend.cpp has a proven architectural ceiling of 72.84% (169/232 branches).
-   The ceiling arises from three independent sources:
+   DtlsUdpBackend.cpp has a proven architectural ceiling of 81.25% (195/240 branches).
+   The ceiling arises from two independent sources:
      (a) 24 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
          noreturn) paths — one per assert call across all functions, consistent with
          the mechanism documented for Serializer.cpp and ImpairmentEngine.cpp above.
-     (b) 10 architecturally-unreachable branches from impairment delay paths:
-         `flush_delayed_to_queue` loop body, `send_message` delayed-message loop,
-         `receive_message` pre-loop queue pop (early return, L651), and post-flush
-         queue pop (L667-668) — all require non-zero fixed_latency_ms or similar
-         ImpairmentConfig parameters that the TransportConfig public API does not
-         expose; only `impairments_enabled` is propagated from ChannelConfig to
-         ImpairmentConfig, and impairment_config_default() initialises all delay
-         and loss parameters to zero.
-     (c) Approximately 14 hard mbedTLS and POSIX error paths that cannot be triggered
-         in a non-mocked loopback test environment: psa_crypto_init failure,
-         ssl_config_defaults failure, ssl_conf_own_cert failure, ssl_cookie_setup
-         failure, ssl_setup failure (server and client), ssl_set_client_transport_id
-         failure, ssl_write failure, recvfrom(MSG_PEEK) failure, server/client UDP
-         connect() failure (UDP connect() rarely fails in loopback), DTLS handshake
-         iteration limit (32 rounds), socket_create_udp failure, socket_set_reuseaddr
-         failure, and Serializer::serialize failure (the wire buffer is always large
-         enough for any valid envelope).
-   All 169 reachable decision-level branches are 100% covered. The DtlsUdpBackend.cpp
-   threshold is therefore set at 72% (maximum achievable); this is not a defect and
+     (b) Approximately 21 remaining hard mbedTLS and structural error paths:
+         ssl_write failure, recvfrom(MSG_PEEK) failure, server/client UDP connect()
+         failure, DTLS handshake iteration limit (32 rounds), Serializer::serialize
+         failure (wire buffer always large enough), recv_queue full (max injectable
+         depth via IMPAIR_DELAY_BUF_SIZE is below MSG_RING_CAPACITY), and
+         WANT_READ retry paths not triggered in fast loopback.
+   The 10 IMbedtlsOps paths (psa_crypto_init, ssl_config_defaults, ssl_conf_own_cert,
+   ssl_cookie_setup, ssl_setup ×2, ssl_set_client_transport_id, recvfrom_peek,
+   net_connect ×2) are covered by DtlsMockOps fault-injection tests. The 2 ISocketOps
+   POSIX paths are covered by MockSocketOps tests. The impairment delay paths
+   (flush_delayed_to_queue loop body, post-flush pop) are now covered by
+   test_delay_impairment_flush_and_recv(). The loss path (send_message ERR_IO) is
+   covered by test_loss_impairment_drops_send(). The num_channels==0 init branch is
+   covered by test_init_num_channels_zero().
+   All 195 reachable decision-level branches are 100% covered. The DtlsUdpBackend.cpp
+   threshold is therefore set at 81% (maximum achievable); this is not a defect and
    requires no remediation.
-   TcpBackend.cpp has a proven architectural ceiling of 70.91% (156/220 branches).
-   The ceiling arises from three independent sources:
+   TcpBackend.cpp has a proven architectural ceiling of 78.12% (175/224 branches).
+   The ceiling arises from two independent sources:
      (a) 39 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
          noreturn) paths — one per assert call across all functions, consistent with
          the mechanism documented for Serializer.cpp, ImpairmentEngine.cpp, and
          DtlsUdpBackend.cpp above.
-     (b) 6 hard POSIX error paths that cannot be triggered in a loopback test
-         environment without fault injection: socket_create_tcp failure (server and
-         client init paths), socket_set_reuseaddr failure (server and client),
-         socket_listen failure, and socket_set_nonblocking failure on the listen fd.
-         These POSIX calls succeed unconditionally for loopback sockets on macOS/Linux.
-     (c) Approximately 19 additional architecturally-unreachable and impairment-delay
-         branches: flush_delayed_to_clients loop body and send_message delayed-message
-         loop (require non-zero fixed_latency_ms not configurable via TransportConfig
-         public API); poll_clients_once POLLIN True for accept fd when no client
-         connects during the test window; recv_from_client partial-read loop body
-         (tcp_recv_frame inner loop for messages split across multiple TCP segments,
-         which does not occur with loopback localhost); and Serializer::serialize
-         failure (wire buffer is always large enough for any valid envelope).
-   All 156 reachable decision-level branches are 100% covered. The TcpBackend.cpp
-   threshold is therefore set at 70% (maximum achievable); this is not a defect and
+     (b) Approximately 10 additional architecturally-unreachable branches:
+         poll_clients_once POLLIN True for accept fd when no client connects during
+         the test window; recv_from_client partial-read loop body (tcp_recv_frame
+         inner loop for messages split across multiple TCP segments, which does not
+         occur with loopback localhost); and Serializer::serialize failure (wire
+         buffer is always large enough for any valid envelope).
+   The 6 previously-uncovered POSIX error paths are covered by ISocketOps mock
+   fault-injection tests. The impairment delay paths are covered by
+   test_tcp_impairment_delay_paths(). Four additional branches are now covered:
+   remove_client_fd False at index 0 (test_remove_client_fd_false_at_index0),
+   recv_queue overflow (test_recv_queue_overflow), send_frame failure
+   (test_send_to_all_clients_send_frame_fail), and loss-impairment ERR_IO drop
+   (test_send_message_loss_impairment_drop).
+   All 175 reachable decision-level branches are 100% covered. The TcpBackend.cpp
+   threshold is therefore set at 78% (maximum achievable); this is not a defect and
    requires no remediation.
-   UdpBackend.cpp has a proven architectural ceiling of 65.62% (63/96 branches).
-   The ceiling arises from three independent sources:
+   UdpBackend.cpp has a proven architectural ceiling of 75.51% (74/98 branches).
+   The ceiling arises from two independent sources:
      (a) 19 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
          noreturn) paths — one per assert call across all functions, consistent with
          the mechanism documented above.
-     (b) 2 hard POSIX error paths that cannot be triggered in a loopback test
-         environment: socket_create_udp failure and socket_set_reuseaddr failure.
-         These POSIX calls succeed unconditionally for loopback UDP sockets on
-         macOS/Linux.
-     (c) Approximately 12 additional architecturally-unreachable and impairment-delay
-         branches: flush_delayed_to_queue loop body and receive_message delayed-message
-         loop (require non-zero fixed_latency_ms not configurable via TransportConfig
-         public API); recv_one_datagram inner poll True branch for a second datagram
-         (single-datagram-per-call design); and Serializer::serialize failure (wire
-         buffer is always large enough for any valid envelope).
-   All 63 reachable decision-level branches are 100% covered. The UdpBackend.cpp
-   threshold is therefore set at 65% (maximum achievable); this is not a defect and
+     (b) Approximately 5 additional architecturally-unreachable branches:
+         recv_one_datagram inner poll True branch for a second datagram
+         (single-datagram-per-call design); Serializer::serialize failure (wire
+         buffer always large enough); and recv_queue full in recv_one_datagram
+         (max injectable depth via IMPAIR_DELAY_BUF_SIZE - 1 = 31 is below
+         MSG_RING_CAPACITY = 64, making overflow unreachable through the public API).
+   The 2 POSIX error paths are covered by MockSocketOps tests. The impairment delay
+   paths are covered by test_udp_impairment_delay_paths(). Three additional branches
+   are now covered: loss-impairment ERR_IO drop (test_udp_send_loss_impairment),
+   send_to failure (test_mock_send_to_fail), and initial recv_queue pop True
+   (test_udp_recv_queue_initial_pop).
+   All 74 reachable decision-level branches are 100% covered. The UdpBackend.cpp
+   threshold is therefore set at 75% (maximum achievable); this is not a defect and
    requires no remediation.
-   LocalSimHarness.cpp has a proven architectural ceiling of 70.42% (50/71 branches).
+   LocalSimHarness.cpp has a proven architectural ceiling of 72.46% (50/69 branches).
    The ceiling arises from two independent sources:
-     (a) 20 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
-         noreturn) paths — one per assert call across all functions, consistent with
-         the mechanism documented above.
-     (b) 1 architecturally-unreachable branch from impairment loss path:
-         `send_message` L118 True (process_outbound returns ERR_IO, message dropped
-         by loss impairment) — requires non-zero loss_probability in ImpairmentConfig,
-         which the TransportConfig public API does not expose; only
-         `impairments_enabled` is propagated from ChannelConfig to ImpairmentConfig,
-         and impairment_config_default() initialises loss_probability to zero.
-         Additionally: L164 ternary `(timeout_ms > 0U)` False branch is dead code
-         (L158 returns early for timeout_ms == 0, making L164 unreachable with
-         timeout_ms == 0); L165 `iterations > 5000U` True path requires a >5-second
-         test timeout which is unreasonable; L179 queue pop True during the sleep
-         loop requires a peer to inject a message during the nanosleep, which does
-         not occur in the single-threaded in-process test design.
+     (a) 17 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
+         noreturn) paths across all functions, consistent with the mechanism
+         documented above.
+     (b) 2 structurally-unreachable decision branches: L165 `iterations > 5000U`
+         True requires a >5-second test timeout which is unreasonable; L179 queue
+         pop True during the sleep loop requires a peer to inject a message during
+         nanosleep, which does not occur in the single-threaded in-process test
+         design.
+         The previously-unreachable loss path (send_message L118 True) and delay
+         loop body (L131–L134) are now covered by test_loss_impairment() and
+         test_delay_loop_body() in tests/test_LocalSim.cpp — both paths became
+         testable after Option A replaced impairments_enabled with a full
+         ImpairmentConfig field in ChannelConfig (VVP-001 M5).
+         The previously-dead ternary `(timeout_ms > 0U) ? timeout_ms : 1U` has
+         been eliminated (P2 dead-code removal); the expression is now
+         `uint32_t iterations = timeout_ms;`, reducing total branches from 71 to
+         69 and missed count from 20 to 19.
    All 50 reachable decision-level branches are 100% covered. The LocalSimHarness.cpp
-   threshold is therefore set at 70% (maximum achievable); this is not a defect and
+   threshold is therefore set at 72% (maximum achievable); this is not a defect and
    requires no remediation.
    MbedtlsOpsImpl.cpp has a proven architectural ceiling of 70.13% (54/77 branches).
    The ceiling arises from a single source:
@@ -453,6 +458,47 @@ Reclassifying a function from NSC to SC, or adding a new SC function, requires:
          guards, i.e., the normal execution paths) are 100% covered.
    The MbedtlsOpsImpl.cpp threshold is therefore set at 70% (maximum achievable);
    this is not a defect and requires no remediation.
+   ImpairmentConfigLoader.cpp has a proven architectural ceiling of 90.83% (99/109 branches).
+   The ceiling arises from three independent sources:
+     (a) 5 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/noreturn)
+         paths — one per assert call: apply_kv (2 asserts: key != nullptr, val != nullptr),
+         parse_config_line (2 asserts: line != nullptr, key[0] != '\0'), and
+         impairment_config_load (1 assert: path != nullptr).
+     (b) 4 branches from the two compound-condition postcondition assertions in
+         impairment_config_load: NEVER_COMPILED_OUT_ASSERT(cfg.loss_probability >= 0.0
+         && cfg.loss_probability <= 1.0) and the analogous duplication_probability
+         assert each expand to `if (!(a && b))`, whose short-circuit False sub-branches
+         (a is False, or a is True but b is False) are permanently unreachable because
+         the clamping logic immediately before the asserts guarantees both inequalities.
+     (c) 1 fclose() return-value error path: fclose() succeeds unconditionally for
+         regular files in a non-adversarial test environment; triggering this path would
+         require filesystem corruption or resource-limit injection not available in unit
+         tests without fault-injection infrastructure.
+   All 99 reachable decision-level branches are 100% covered. The
+   ImpairmentConfigLoader.cpp threshold is therefore set at 90% (maximum achievable);
+   this is not a defect and requires no remediation.
+   SocketUtils.cpp has a proven architectural ceiling of 64.07% (148/231 branches).
+   SocketUtils is NSC (raw POSIX I/O primitives; no message-delivery policy), so branch
+   coverage is not policy-enforced. The ceiling is documented here for Class A/B readiness.
+   The ceiling arises from two independent sources:
+     (a) ~19 hard POSIX error paths that cannot be triggered in a loopback test environment:
+         fcntl(F_GETFL) failure, fcntl(F_SETFL) failure, setsockopt(SO_REUSEADDR) failure,
+         listen() failure, accept() failure, close() failure (after valid open), recvfrom()
+         failure on an open UDP socket, and inet_ntop() failure on a valid loopback address.
+         These POSIX calls succeed unconditionally on loopback sockets on macOS/Linux.
+     (b) UDP partial-send atomicity: socket_send_to() checks `send_result != len` (partial
+         send), which cannot occur for UDP datagrams on loopback — UDP is atomic at the
+         datagram level; either the full datagram is sent or sendto() returns an error.
+   All 2 newly-reachable branches are covered (inet_aton failure in socket_bind() and
+   socket_send_to() via invalid-IP unit tests in test_SocketUtils.cpp). All 17 direct unit
+   tests covering every SocketUtils function's success path pass cleanly.
+   The SocketUtils.cpp threshold is therefore set at 64% (maximum achievable for NSC);
+   this is not a defect and requires no remediation.
+   AssertState.cpp achieves 100% line coverage (7/7 lines, 1/1 functions). LLVM reports
+   0 branch points for AssertState.cpp because check_and_clear() uses only
+   compare_exchange_strong() — an atomic intrinsic with no LLVM-visible branch structure.
+   Both logical outcomes (flag was true, flag was false) are exercised by test_AssertState.cpp.
+   AssertState is NSC-infrastructure (CLAUDE.md §10 assertion policy).
 
 5. Coverage does not substitute for code review or static analysis. All three
    (coverage, review, static analysis) are required for SC functions.
@@ -527,7 +573,21 @@ Reclassifying a function from NSC to SC, or adding a new SC function, requires:
    It does not directly command actuators or safety barriers. The application
    embedding it is responsible for Class A/B assurance if required.
 
-2. Current formal specification: docs/STATE_MACHINES.md
+2. Current verification baseline (per .claude/VERIFICATION_POLICY.md VVP-001 §4.1):
+   - SC functions:  M1 (inspection) + M2 (static analysis) + M4 (branch coverage)
+   - NSC functions: M1 (inspection) + M2 (static analysis) + M3 (line coverage)
+   This baseline satisfies Class C and is insufficient for Class B or Class A.
+   Reclassification to Class B requires M5 (fault injection) for all functions;
+   reclassification to Class A additionally requires M6 (MC/DC) for SC functions
+   and M7 (formal verification) for SC state machines. See VVP-001 §6 for the
+   full reclassification process.
+
+   Although the software classification is Class C, all verification activity
+   shall meet the method requirements of Class B (M1 + M2 + M4 + M5 for all
+   functions). This is a voluntary elevation of testing rigor, not a
+   reclassification.
+
+3. Current formal specification: docs/STATE_MACHINES.md
    Explicit state-transition tables for the three safety-critical state
    machines: AckTracker (§1), RetryManager (§2), ImpairmentEngine (§3).
    This lightweight specification satisfies Class C review requirements.

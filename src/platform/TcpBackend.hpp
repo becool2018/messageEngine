@@ -31,13 +31,21 @@
 #include "core/RingBuffer.hpp"
 #include "platform/ImpairmentEngine.hpp"
 
+class ISocketOps;  // forward declaration — see platform/ISocketOps.hpp
+
 // ─────────────────────────────────────────────────────────────────────────────
 // TcpBackend: TCP-based transport implementation
 // ─────────────────────────────────────────────────────────────────────────────
 
 class TcpBackend : public TransportInterface {
 public:
+    /// Default constructor — uses the process-wide SocketOpsImpl singleton.
+    /// Production code always calls this form.
     TcpBackend();
+
+    /// Injection constructor — accepts any ISocketOps implementation.
+    /// Used in tests to inject a mock. @p ops must outlive this instance.
+    explicit TcpBackend(ISocketOps& ops);
     ~TcpBackend() override;
 
     // TransportInterface implementation
@@ -53,6 +61,7 @@ private:
     // ───────────────────────────────────────────────────────────────────────
     // Member state (Power of 10 rule 3: fixed allocation, no heap after init)
     // ───────────────────────────────────────────────────────────────────────
+    ISocketOps*        m_sock_ops;                            ///< Non-owning; never null after ctor
     int                m_listen_fd;                           ///< Server listening socket
     int                m_client_fds[MAX_TCP_CONNECTIONS];     ///< Connected client FDs
     uint32_t           m_client_count;                        ///< Number of active clients

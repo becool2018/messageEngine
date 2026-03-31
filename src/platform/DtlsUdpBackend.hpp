@@ -73,6 +73,7 @@
 #include "platform/ImpairmentEngine.hpp"
 
 class IMbedtlsOps;  // forward declaration — see platform/IMbedtlsOps.hpp
+class ISocketOps;   // forward declaration — see platform/ISocketOps.hpp
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DtlsUdpBackend
@@ -89,6 +90,12 @@ public:
     /// be triggered in a loopback environment.
     /// @p ops must outlive this DtlsUdpBackend instance.
     explicit DtlsUdpBackend(IMbedtlsOps& ops);
+
+    /// Dual injection constructor — accepts both ISocketOps and IMbedtlsOps.
+    /// Allows tests to inject mocks for both socket and TLS operations,
+    /// enabling fault injection on POSIX socket error paths.
+    /// @p sock_ops and @p tls_ops must both outlive this DtlsUdpBackend instance.
+    explicit DtlsUdpBackend(ISocketOps& sock_ops, IMbedtlsOps& tls_ops);
 
     ~DtlsUdpBackend() override;
 
@@ -112,7 +119,8 @@ private:
     mbedtls_timing_delay_context m_timer;       ///< DTLS retransmission timer (REQ-6.4.3)
     mbedtls_net_context          m_net_ctx;     ///< Wraps m_sock_fd for BIO callbacks
 
-    // ── Injected mbedTLS/POSIX operations interface ──────────────────────────
+    // ── Injected socket and mbedTLS/POSIX operations interfaces ─────────────
+    ISocketOps*     m_sock_ops;                       ///< Non-owning; never null after ctor
     IMbedtlsOps*    m_ops;                            ///< Non-owning; never null after ctor
 
     // ── Socket and transport state ───────────────────────────────────────────

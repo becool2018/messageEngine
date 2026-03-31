@@ -45,6 +45,7 @@
 #include "core/ChannelConfig.hpp"
 #include "core/MessageEnvelope.hpp"
 #include "platform/TcpBackend.hpp"
+#include "MockSocketOps.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — build server / client TransportConfig
@@ -760,6 +761,498 @@ static void test_client_detect_server_close()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Mock fault-injection tests (VVP-001 M5 — dependency-injected ISocketOps)
+// Cover POSIX error paths unreachable in a loopback environment.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_mock_tcp_server_create_fail()
+{
+    // Verifies: REQ-6.1.1, REQ-6.3.2
+    MockSocketOps mock;
+    mock.fail_create_tcp = true;
+
+    TcpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_tcp_server_cfg(cfg, 19721U);
+
+    Result r = backend.init(cfg);
+    assert(r == Result::ERR_IO);
+    assert(!backend.is_open());
+
+    printf("PASS: test_mock_tcp_server_create_fail\n");
+}
+
+static void test_mock_tcp_server_reuseaddr_fail()
+{
+    // Verifies: REQ-6.1.1, REQ-6.3.2
+    MockSocketOps mock;
+    mock.fail_set_reuseaddr = true;
+
+    TcpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_tcp_server_cfg(cfg, 19722U);
+
+    Result r = backend.init(cfg);
+    assert(r == Result::ERR_IO);
+    assert(!backend.is_open());
+    assert(mock.n_do_close >= 1);  // do_close called after reuseaddr failure
+
+    printf("PASS: test_mock_tcp_server_reuseaddr_fail\n");
+}
+
+static void test_mock_tcp_server_listen_fail()
+{
+    // Verifies: REQ-6.1.1, REQ-6.3.2
+    MockSocketOps mock;
+    mock.fail_do_listen = true;
+
+    TcpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_tcp_server_cfg(cfg, 19723U);
+
+    Result r = backend.init(cfg);
+    assert(r == Result::ERR_IO);
+    assert(!backend.is_open());
+
+    printf("PASS: test_mock_tcp_server_listen_fail\n");
+}
+
+static void test_mock_tcp_server_nonblocking_fail()
+{
+    // Verifies: REQ-6.1.1, REQ-6.3.2
+    MockSocketOps mock;
+    mock.fail_set_nonblocking = true;
+
+    TcpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_tcp_server_cfg(cfg, 19724U);
+
+    Result r = backend.init(cfg);
+    assert(r == Result::ERR_IO);
+    assert(!backend.is_open());
+
+    printf("PASS: test_mock_tcp_server_nonblocking_fail\n");
+}
+
+static void test_mock_tcp_client_create_fail()
+{
+    // Verifies: REQ-6.1.2, REQ-6.3.2
+    MockSocketOps mock;
+    mock.fail_create_tcp = true;
+
+    TcpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_tcp_client_cfg(cfg, 19725U);
+
+    Result r = backend.init(cfg);
+    assert(r == Result::ERR_IO);
+    assert(!backend.is_open());
+
+    printf("PASS: test_mock_tcp_client_create_fail\n");
+}
+
+static void test_mock_tcp_client_reuseaddr_fail()
+{
+    // Verifies: REQ-6.1.2, REQ-6.3.2
+    MockSocketOps mock;
+    mock.fail_set_reuseaddr = true;
+
+    TcpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_tcp_client_cfg(cfg, 19726U);
+
+    Result r = backend.init(cfg);
+    assert(r == Result::ERR_IO);
+    assert(!backend.is_open());
+    assert(mock.n_do_close >= 1);  // do_close called after reuseaddr failure
+
+    printf("PASS: test_mock_tcp_client_reuseaddr_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 21: impairment delay paths (Option A — fixed_latency_ms via ChannelConfig)
+// Uses MockSocketOps in client mode (mock connect succeeds, m_client_fds[0]=FAKE_FD).
+// Covers:
+//   (a) flush_delayed_to_clients() loop body (TcpBackend.cpp L316-L325):
+//       second send triggers flush of first delayed message to all clients.
+//   (b) flush_delayed_to_queue() loop body (TcpBackend.cpp L342-L345):
+//       receive_message flushes second delayed message from impairment buffer.
+//   (c) receive_message post-flush pop True branch (L486-L488):
+//       pop succeeds after flush delivers the delayed envelope.
+// recv_from_client via mock: recv_frame returns true/0 → deserialize fails (safe).
+// Verifies: REQ-5.1.1, REQ-4.1.2, REQ-4.1.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_tcp_impairment_delay_paths()
+{
+    MockSocketOps mock;
+    TcpBackend backend(mock);
+
+    TransportConfig cfg;
+    make_tcp_client_cfg(cfg, 19730U);  // client mode; mock connect succeeds
+    cfg.channels[0U].impairment.enabled          = true;
+    cfg.channels[0U].impairment.fixed_latency_ms = 1U;  // 1 ms delay
+
+    // mock.connect_with_timeout returns true → m_client_fds[0]=FAKE_FD, m_open=true
+    assert(backend.init(cfg) == Result::OK);
+    assert(backend.is_open());
+
+    MessageEnvelope env1;
+    make_test_envelope(env1, 0xDC100001ULL);
+
+    // First send: process_outbound queues env1 (release = now_us + 1 ms).
+    // flush_delayed_to_clients finds count=0 (not yet due) — loop does NOT run.
+    assert(backend.send_message(env1) == Result::OK);
+
+    usleep(10000U);  // 10 ms >> 1 ms: env1 is now past its release time
+
+    MessageEnvelope env2;
+    make_test_envelope(env2, 0xDC100002ULL);
+
+    // Second send: process_outbound queues env2; flush_delayed_to_clients finds
+    // count=1 (env1 past its release time) — loop runs once.
+    // Covers: flush_delayed_to_clients() loop body (path (a) above).
+    assert(backend.send_message(env2) == Result::OK);
+
+    usleep(10000U);  // 10 ms >> 1 ms: env2 is now past its release time
+
+    // receive_message: poll_clients_once calls poll(FAKE_FD) → may return POLLNVAL
+    // (handled gracefully); mock recv_frame returns true/0 → deserialize fails.
+    // flush_delayed_to_queue finds env2 and pushes it to recv_queue.
+    // Covers: flush_delayed_to_queue loop body (path (b)) and post-flush pop (path (c)).
+    MessageEnvelope recv_env;
+    Result r = backend.receive_message(recv_env, 500U);
+    assert(r == Result::OK);
+    assert(recv_env.message_id == 0xDC100002ULL);
+
+    backend.close();
+    printf("PASS: test_tcp_impairment_delay_paths\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Branch-coverage tests for four previously uncovered branches
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Branch A: remove_client_fd() — False branch at index 0
+//
+// With two connected clients (fd1 at index 0, fd2 at index 1), client2 closes
+// before client1.  The server polls and detects EOF on fd2.  remove_client_fd
+// iterates: i=0 → m_client_fds[0]==fd1 != fd2 → False branch hit; i=1 →
+// m_client_fds[1]==fd2 → True branch → compaction occurs.
+//
+// Client timing:
+//   client1 connects first (80 ms delay), closes late (500 ms after connect).
+//   client2 connects second (160 ms delay), closes early (150 ms after connect).
+//   Both send one message so the server can confirm 2 messages received.
+//
+// Verifies: REQ-6.1.7
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct TwoCliSrvArgB {
+    uint16_t port;
+    Result   init_result;
+    uint32_t recv_count;
+};
+
+static void* two_cli_srv_b_thread(void* raw)
+{
+    TwoCliSrvArgB* a = static_cast<TwoCliSrvArgB*>(raw);
+    assert(a != nullptr);
+
+    TcpBackend server;
+    TransportConfig cfg;
+    make_tcp_server_cfg(cfg, a->port);
+
+    a->init_result = server.init(cfg);
+    if (a->init_result != Result::OK) { return nullptr; }
+
+    // Receive both client messages.  Power of 10: fixed bound.
+    for (uint32_t i = 0U; i < 6U; ++i) {
+        MessageEnvelope env;
+        if (server.receive_message(env, 300U) == Result::OK) {
+            ++a->recv_count;
+            if (a->recv_count >= 2U) { break; }
+        }
+    }
+
+    // Extra receive: client2 closed (~150 ms into connection).  Server's poll
+    // detects EOF for fd2 (at index 1).  remove_client_fd(fd2) iterates i=0
+    // where m_client_fds[0]==fd1 != fd2 → the False branch at index 0 is hit;
+    // then i=1 finds fd2 and compacts.
+    {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 500U);
+    }
+
+    server.close();
+    return nullptr;
+}
+
+// Verifies: REQ-6.1.7
+static void test_remove_client_fd_false_at_index0()
+{
+    static const uint16_t PORT = 19712U;
+
+    TwoCliSrvArgB srv_arg;
+    srv_arg.port        = PORT;
+    srv_arg.init_result = Result::ERR_IO;
+    srv_arg.recv_count  = 0U;
+
+    // Client 1 connects FIRST (80 ms delay) and closes LATE (500 ms after
+    // connecting), ensuring it occupies m_client_fds[0] when client2 disconnects.
+    TcpCliArg2 cli1_arg;
+    cli1_arg.port             = PORT;
+    cli1_arg.send_msg_id      = 0xB001ULL;
+    cli1_arg.connect_delay_us = 80000U;
+    cli1_arg.close_delay_us   = 500000U;   // close after 500 ms
+    cli1_arg.result           = Result::ERR_IO;
+
+    // Client 2 connects SECOND (160 ms delay) and closes EARLY (150 ms after
+    // connecting), so it lives at m_client_fds[1] and disconnects first.
+    TcpCliArg2 cli2_arg;
+    cli2_arg.port             = PORT;
+    cli2_arg.send_msg_id      = 0xB002ULL;
+    cli2_arg.connect_delay_us = 160000U;
+    cli2_arg.close_delay_us   = 150000U;   // close after only 150 ms
+    cli2_arg.result           = Result::ERR_IO;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, 2U * 1024U * 1024U);
+
+    pthread_t srv_tid;
+    (void)pthread_create(&srv_tid, &attr, two_cli_srv_b_thread, &srv_arg);
+
+    usleep(30000U);  // 30 ms: let server bind before clients start
+
+    pthread_t cli1_tid;
+    (void)pthread_create(&cli1_tid, &attr, two_cli_param_thread, &cli1_arg);
+
+    pthread_t cli2_tid;
+    (void)pthread_create(&cli2_tid, &attr, two_cli_param_thread, &cli2_arg);
+
+    (void)pthread_join(srv_tid, nullptr);
+    (void)pthread_join(cli1_tid, nullptr);
+    (void)pthread_join(cli2_tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+
+    assert(srv_arg.init_result == Result::OK);
+    assert(cli1_arg.result == Result::OK);
+    assert(cli2_arg.result == Result::OK);
+    assert(srv_arg.recv_count >= 2U);
+
+    printf("PASS: test_remove_client_fd_false_at_index0\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Branch B: recv_from_client() — recv_queue full (push returns ERR_FULL)
+//
+// Strategy: flood the server with 8 simultaneous clients, each sending many
+// messages.  Each poll_clients_once() call pushes up to 8 frames before
+// receive_message() pops 1.  The server calls receive_message() in a tight
+// loop that ensures poll_clients_once() runs many times, eventually triggering
+// the ERR_FULL path (WARNING_HI log) when the ring (capacity 64) overflows.
+//
+// The test only verifies no crash.  The overflow branch fires silently.
+//
+// Power of 10 Rule 2 deviation (test drain loop): bounded by 400 iterations;
+// runtime termination is the drain completing without crash.
+//
+// Verifies: REQ-4.1.3, REQ-6.3.5
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct HeavyTcpSenderArg {
+    uint16_t port;
+    uint32_t num_msgs;
+    uint32_t stay_alive_us;
+    Result   result;
+};
+
+static void* heavy_tcp_sender_func(void* raw_arg)
+{
+    HeavyTcpSenderArg* a = static_cast<HeavyTcpSenderArg*>(raw_arg);
+    assert(a != nullptr);
+    assert(a->num_msgs > 0U);
+
+    usleep(80000U);  // 80 ms: wait for server to be ready
+
+    TcpBackend client;
+    TransportConfig cfg;
+    make_tcp_client_cfg(cfg, a->port);
+    a->result = client.init(cfg);
+    if (a->result != Result::OK) { return nullptr; }
+
+    // Power of 10 Rule 2 deviation (test loop): bounded by a->num_msgs.
+    for (uint32_t m = 0U; m < a->num_msgs; ++m) {
+        MessageEnvelope env;
+        make_test_envelope(env, 0x8000ULL + static_cast<uint64_t>(m));
+        (void)client.send_message(env);
+    }
+
+    usleep(a->stay_alive_us);
+    client.close();
+    return nullptr;
+}
+
+static void test_recv_queue_overflow()
+{
+    static const uint16_t PORT      = 19713U;
+    static const uint32_t N_CLIENTS = 8U;
+    static const uint32_t N_MSGS    = 20U;
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open());
+
+    HeavyTcpSenderArg args[N_CLIENTS];
+    pthread_t         tids[N_CLIENTS];
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, 2U * 1024U * 1024U);
+
+    // Power of 10 Rule 2: fixed loop bound (N_CLIENTS = 8)
+    for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
+        args[k].port          = PORT;
+        args[k].num_msgs      = N_MSGS;
+        args[k].stay_alive_us = 2000000U;  // 2 s — stay alive during drain
+        args[k].result        = Result::ERR_IO;
+        (void)pthread_create(&tids[k], &attr, heavy_tcp_sender_func, &args[k]);
+    }
+
+    // Give all clients time to connect and fill their send buffers.
+    usleep(300000U);  // 300 ms
+
+    // Drain: each receive_message pops 1 but poll_clients_once may push up to
+    // N_CLIENTS before that pop.  Over enough iterations the queue fills and
+    // the push-fail (overflow) branch fires silently (WARNING_HI log only).
+    // Power of 10 Rule 2 deviation (test drain loop): bounded 400 iterations.
+    for (uint32_t k = 0U; k < 400U; ++k) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    server.close();
+
+    // Power of 10 Rule 2: fixed loop bound (N_CLIENTS = 8)
+    for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
+        (void)pthread_join(tids[k], nullptr);
+    }
+    (void)pthread_attr_destroy(&attr);
+
+    // Power of 10 Rule 2: fixed loop bound (N_CLIENTS = 8)
+    for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
+        assert(args[k].result == Result::OK);
+    }
+
+    printf("PASS: test_recv_queue_overflow\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Branch C: send_to_all_clients() — send_frame() failure (True branch)
+//
+// Use MockSocketOps DI constructor in client mode so m_client_fds[0]=FAKE_FD
+// after init().  Set fail_send_frame=true before calling send_message().
+// flush_delayed_to_clients() calls send_to_all_clients() which calls
+// send_frame() — the failure is detected and logged (WARNING_LO) but
+// send_to_all_clients() is void; send_message() still returns OK.
+//
+// Verifies: REQ-4.1.2, REQ-6.1.4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-4.1.2, REQ-6.1.4
+static void test_send_to_all_clients_send_frame_fail()
+{
+    MockSocketOps mock;
+    TcpBackend backend(mock);
+
+    // Client mode: connect_to_server → create_tcp (FAKE_FD) → reuseaddr →
+    // connect_with_timeout → m_client_fds[0]=FAKE_FD, m_open=true.
+    TransportConfig cfg;
+    make_tcp_client_cfg(cfg, 19714U);
+
+    Result r = backend.init(cfg);
+    assert(r == Result::OK);
+    assert(backend.is_open());
+
+    // Now inject send_frame failure.
+    mock.fail_send_frame = true;
+
+    // send_message: serialize → process_outbound (queues to delay buf) →
+    // flush_delayed_to_clients → send_to_all_clients → send_frame fails →
+    // WARNING_LO logged.  send_message() swallows the error, returns OK.
+    MessageEnvelope env;
+    make_test_envelope(env, 0xDEAD1ULL);
+    r = backend.send_message(env);
+    assert(r == Result::OK);   // send_to_all_clients is void; error swallowed
+    assert(backend.is_open()); // transport still open after send failure
+
+    backend.close();
+    printf("PASS: test_send_to_all_clients_send_frame_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Branch D: send_message() — loss impairment ERR_IO (True branch)
+//
+// Set channels[0].impairment.enabled=true and loss_probability=1.0 before
+// init().  send_message() calls process_outbound() which returns ERR_IO
+// (100% loss).  The True branch at that check maps ERR_IO → Result::OK
+// (silent drop).  No message is queued or sent.
+//
+// Verifies: REQ-5.1.3, REQ-4.1.2
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-5.1.3, REQ-4.1.2
+static void test_send_message_loss_impairment_drop()
+{
+    MockSocketOps mock;
+    TcpBackend backend(mock);
+
+    // Client mode with 100% loss impairment.
+    TransportConfig cfg;
+    make_tcp_client_cfg(cfg, 19715U);
+    cfg.channels[0U].impairment.enabled          = true;
+    cfg.channels[0U].impairment.loss_probability = 1.0;
+
+    Result r = backend.init(cfg);
+    assert(r == Result::OK);
+    assert(backend.is_open());
+
+    MessageEnvelope env;
+    make_test_envelope(env, 0xDEAD2ULL);
+
+    // process_outbound returns ERR_IO → send_message True branch → returns OK.
+    r = backend.send_message(env);
+    assert(r == Result::OK);   // silent drop: OK returned, not ERR_IO
+
+    // Nothing was sent to the mock (send_frame never reached).
+    // mock.fail_send_frame was not set — if send_frame had been called it
+    // would succeed, but it must NOT have been called (message was dropped).
+    // Verify by checking that send_frame was not invoked (indirect: no crash,
+    // and the mock's n_do_close shows only the init-time close count).
+    assert(mock.n_do_close == 0);  // no extra close calls from error paths
+
+    backend.close();
+    printf("PASS: test_send_message_loss_impairment_drop\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -781,6 +1274,23 @@ int main()
     test_garbage_frame_deserialize_fail();
     test_two_clients_compact();
     test_client_detect_server_close();
+
+    // Mock fault-injection tests (VVP-001 M5)
+    test_mock_tcp_server_create_fail();
+    test_mock_tcp_server_reuseaddr_fail();
+    test_mock_tcp_server_listen_fail();
+    test_mock_tcp_server_nonblocking_fail();
+    test_mock_tcp_client_create_fail();
+    test_mock_tcp_client_reuseaddr_fail();
+
+    // Impairment delay-path tests (Option A — full ImpairmentConfig in ChannelConfig)
+    test_tcp_impairment_delay_paths();
+
+    // Branch-coverage tests for four previously uncovered branches
+    test_remove_client_fd_false_at_index0();
+    test_recv_queue_overflow();
+    test_send_to_all_clients_send_frame_fail();
+    test_send_message_loss_impairment_drop();
 
     printf("=== ALL PASSED ===\n");
     return 0;

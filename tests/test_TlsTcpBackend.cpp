@@ -38,6 +38,7 @@
 #include "core/ChannelConfig.hpp"
 #include "core/MessageEnvelope.hpp"
 #include "platform/TlsTcpBackend.hpp"
+#include "MockSocketOps.hpp"
 #include <psa/crypto.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1549,6 +1550,218 @@ static void test_tls_zero_length_frame()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Thread helper: client connects then sends a configurable number of messages
+// (no hard cap).  Used only by test_recv_queue_overflow.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct HeavySenderArg {
+    uint16_t port;
+    uint32_t num_msgs;      // how many messages to send
+    uint32_t stay_alive_us; // how long to stay alive after sending
+    Result   result;
+};
+
+static void* heavy_sender_func(void* raw_arg)
+{
+    HeavySenderArg* a = static_cast<HeavySenderArg*>(raw_arg);
+    assert(a != nullptr);
+    assert(a->num_msgs > 0U);
+
+    usleep(80000U);  // 80 ms: wait for server to be ready
+
+    TlsTcpBackend client;
+    TransportConfig cfg;
+    make_transport_config(cfg, false, a->port, false);  // plaintext client
+    a->result = client.init(cfg);
+    if (a->result != Result::OK) { return nullptr; }
+
+    // Power of 10 Rule 2 deviation (test loop): bounded by a->num_msgs;
+    // runtime count controlled by test fixture.
+    for (uint32_t m = 0U; m < a->num_msgs; ++m) {
+        MessageEnvelope env;
+        envelope_init(env);
+        env.message_type      = MessageType::DATA;
+        env.message_id        = 0x7000ULL + static_cast<uint64_t>(m);
+        env.source_id         = 2U;
+        env.destination_id    = 1U;
+        env.reliability_class = ReliabilityClass::BEST_EFFORT;
+        env.timestamp_us      = 1U;
+        env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+        (void)client.send_message(env);
+    }
+
+    usleep(a->stay_alive_us);
+    client.close();
+    return nullptr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 28: DI constructor TlsTcpBackend(ISocketOps&) — exercises the
+//          injection-constructor loop (lines ~108-125) and verifies that
+//          normal init() succeeds when the injected mock is not on the
+//          mbedTLS socket path (plaintext server bind uses mbedtls_net_bind
+//          directly; mock is only consulted on the plaintext send/recv path).
+//
+// Covers: DI constructor body including the MAX_TCP_CONNECTIONS loop.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-4.1.1
+static void test_di_constructor_executes()
+{
+    MockSocketOps mock;
+
+    // Construct using the DI constructor — this is the branch that was never
+    // called; it exercises the constructor loop (i < MAX_TCP_CONNECTIONS).
+    TlsTcpBackend backend(mock);
+
+    assert(!backend.is_open());  // precondition: not yet initialised
+
+    // Plain server bind: mbedtls_net_bind uses POSIX sockets directly, so
+    // the mock is not involved here and the bind should succeed.
+    TransportConfig cfg;
+    make_transport_config(cfg, true, 19894U, false);
+
+    Result res = backend.init(cfg);
+    assert(res == Result::OK);
+    assert(backend.is_open() == true);
+
+    backend.close();
+    assert(backend.is_open() == false);
+
+    printf("PASS: test_di_constructor_executes\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 29: recv_queue full — recv_from_client() push fails (line ~551 True)
+//
+// Strategy: connect MAX_TCP_CONNECTIONS clients so that each poll_clients_once
+// call pushes up to 8 messages before receive_message pops 1.  After enough
+// iterations the queue overflows (capacity = MSG_RING_CAPACITY = 64) and
+// recv_queue.push() returns ERR_FULL, triggering the WARNING_HI log path.
+//
+// Each client sends 20 messages.  With 8 clients, net queue growth per
+// receive_message call is ≈ 7 (push 8, pop 1).  After ~10 calls the ring
+// is full and the 65th push fires the overflow branch.
+//
+// The test only verifies that the server drains all available messages
+// without crashing — the overflow path is silent (WARNING_HI log only).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-4.1.3
+static void test_recv_queue_overflow()
+{
+    static const uint16_t PORT      = 19895U;
+    static const uint32_t N_CLIENTS = 8U;    // fill all TCP slots
+    // Each client sends 20 messages.  send_message() also calls
+    // flush_delayed_to_clients() which re-sends from the delay buffer, so
+    // each logical send_message produces 2 wire frames.  Total frames per
+    // client = 40.  With 8 clients, each poll_clients_once pushes up to 8
+    // frames per iteration; receive_message pops 1.  After ~10 iterations
+    // the queue (capacity MSG_RING_CAPACITY = 64) overflows, triggering the
+    // push-fail WARNING_HI branch in recv_from_client().
+    static const uint32_t N_MSGS    = 20U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    // Launch N_CLIENTS concurrently; each sends N_MSGS messages then stays alive
+    // long enough for the server to flood its recv_queue.
+    HeavySenderArg args[N_CLIENTS];
+    pthread_t      tids[N_CLIENTS];
+
+    for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
+        args[k].port          = PORT;
+        args[k].num_msgs      = N_MSGS;
+        args[k].stay_alive_us = 2000000U;  // 2 s — stay alive during drain
+        args[k].result        = Result::ERR_IO;
+        tids[k] = create_thread_4mb(heavy_sender_func, &args[k]);
+    }
+
+    // Give all clients time to connect and fill their TCP send buffers.
+    usleep(300000U);  // 300 ms
+
+    // Drain: each receive_message pops 1 but poll_clients_once may push up to
+    // N_CLIENTS before that pop.  After enough iterations the queue fills and
+    // the push-fail (overflow) branch is hit.  We drain with a large iteration
+    // count to ensure the overflow path fires and the server handles it cleanly.
+    // Power of 10 Rule 2 deviation (test loop): bounded by 400 iterations;
+    // runtime termination after all messages consumed.
+    for (uint32_t k = 0U; k < 400U; ++k) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    server.close();
+
+    for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
+        (void)pthread_join(tids[k], nullptr);
+    }
+
+    for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
+        assert(args[k].result == Result::OK);
+    }
+
+    printf("PASS: test_recv_queue_overflow\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 30: send_message() ERR_IO loss-impairment path (line ~709 True)
+//
+// Configure channel 0 with loss_probability=1.0 and enabled=true.
+// After init(), send_message() calls process_outbound() which returns ERR_IO
+// (message dropped by loss impairment).  send_message() maps ERR_IO to OK
+// (silent drop).  The receiver gets nothing → ERR_TIMEOUT.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-5.1.3
+static void test_send_impairment_loss_drop()
+{
+    static const uint16_t PORT = 19896U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);
+
+    // Enable loss impairment at 100% on channel 0.
+    // ImpairmentEngine::init() is called with this config in
+    // TlsTcpBackend::init() at line ~644-647.
+    srv_cfg.channels[0].impairment.enabled          = true;
+    srv_cfg.channels[0].impairment.loss_probability = 1.0;
+
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    // Build a valid envelope to send.
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.message_id        = 0x5000ULL;
+    env.source_id         = 1U;
+    env.destination_id    = 2U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    env.timestamp_us      = 1U;
+    env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+
+    // send_message: process_outbound returns ERR_IO (loss) → L709 True →
+    // returns Result::OK (silent drop).
+    Result send_res = server.send_message(env);
+    assert(send_res == Result::OK);  // OK means "silently dropped"
+
+    // Verify nothing was queued: receive_message must timeout.
+    MessageEnvelope received;
+    Result recv_res = server.receive_message(received, 300U);
+    assert(recv_res == Result::ERR_TIMEOUT);
+
+    server.close();
+    printf("PASS: test_send_impairment_loss_drop\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1584,6 +1797,10 @@ int main()
     test_server_send_before_client_connects();
     test_max_connections_exceeded();
     test_tls_zero_length_frame();
+    // New coverage tests (28-30):
+    test_di_constructor_executes();
+    test_recv_queue_overflow();
+    test_send_impairment_loss_drop();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);

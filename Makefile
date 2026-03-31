@@ -37,7 +37,8 @@ PLATFORM_SRC := \
     src/platform/UdpBackend.cpp \
     src/platform/DtlsUdpBackend.cpp \
     src/platform/LocalSimHarness.cpp \
-    src/platform/MbedtlsOpsImpl.cpp
+    src/platform/MbedtlsOpsImpl.cpp \
+    src/platform/SocketOpsImpl.cpp
 
 ALL_LIB_SRC := $(CORE_SRC) $(PLATFORM_SRC)
 
@@ -77,7 +78,9 @@ tests: \
     build/test_TlsTcpBackend \
     build/test_DtlsUdpBackend \
     build/test_TcpBackend \
-    build/test_UdpBackend
+    build/test_UdpBackend \
+    build/test_SocketUtils \
+    build/test_AssertState
 
 build/test_%: $(ALL_LIB_OBJS) build/objs/tests/test_%.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
@@ -204,7 +207,7 @@ COV_CXXFLAGS  := $(filter-out -Werror,$(CXXFLAGS)) \
                  -fprofile-instr-generate -fcoverage-mapping -O0
 COV_LDFLAGS   := -fprofile-instr-generate $(LDFLAGS)
 COV_LIB_OBJS  := $(patsubst src/%.cpp,$(COV_OBJ_DIR)/%.o,$(ALL_LIB_SRC))
-TEST_NAMES    := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader TlsTcpBackend DtlsUdpBackend TcpBackend UdpBackend
+TEST_NAMES    := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader TlsTcpBackend DtlsUdpBackend TcpBackend UdpBackend SocketUtils AssertState
 COV_TESTS     := $(patsubst %,build/cov_test_%,$(TEST_NAMES))
 
 $(COV_OBJ_DIR)/core/%.o: src/core/%.cpp
@@ -238,6 +241,8 @@ coverage: $(COV_TESTS)
 	@LLVM_PROFILE_FILE="build/cov/DtlsUdpBackend.profraw" build/cov_test_DtlsUdpBackend >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/TcpBackend.profraw"    build/cov_test_TcpBackend    >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/UdpBackend.profraw"    build/cov_test_UdpBackend    >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/SocketUtils.profraw"  build/cov_test_SocketUtils   >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/AssertState.profraw"  build/cov_test_AssertState   >/dev/null 2>&1
 	@$(LLVM_PROFDATA) merge -sparse \
 	    build/cov/MessageEnvelope.profraw \
 	    build/cov/Serializer.profraw \
@@ -252,6 +257,8 @@ coverage: $(COV_TESTS)
 	    build/cov/DtlsUdpBackend.profraw \
 	    build/cov/TcpBackend.profraw \
 	    build/cov/UdpBackend.profraw \
+	    build/cov/SocketUtils.profraw \
+	    build/cov/AssertState.profraw \
 	    -o build/cov/merged.profdata
 	@echo "=== Coverage Report (src/ only) ==="
 	@$(LLVM_COV) report \
@@ -269,6 +276,8 @@ coverage: $(COV_TESTS)
 	    -object build/cov_test_DtlsUdpBackend \
 	    -object build/cov_test_TcpBackend \
 	    -object build/cov_test_UdpBackend \
+	    -object build/cov_test_SocketUtils \
+	    -object build/cov_test_AssertState \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "Policy (CLAUDE.md §12): SC functions require >= branch coverage."
@@ -292,6 +301,8 @@ coverage_show:
 	    -object build/cov_test_DtlsUdpBackend \
 	    -object build/cov_test_TcpBackend \
 	    -object build/cov_test_UdpBackend \
+	    -object build/cov_test_SocketUtils \
+	    -object build/cov_test_AssertState \
 	    -format=text \
 	    -show-branches=count \
 	    $(CORE_SRC) $(PLATFORM_SRC)
@@ -322,6 +333,8 @@ coverage_report: coverage
 	    -object build/cov_test_DtlsUdpBackend \
 	    -object build/cov_test_TcpBackend \
 	    -object build/cov_test_UdpBackend \
+	    -object build/cov_test_SocketUtils \
+	    -object build/cov_test_AssertState \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "--- Per-function detail ---"
@@ -341,6 +354,8 @@ coverage_report: coverage
 	    -object build/cov_test_DtlsUdpBackend \
 	    -object build/cov_test_TcpBackend \
 	    -object build/cov_test_UdpBackend \
+	    -object build/cov_test_SocketUtils \
+	    -object build/cov_test_AssertState \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "--- Policy compliance (CLAUDE.md §14) ---"
@@ -354,16 +369,52 @@ coverage_report: coverage
 	@echo "      48 missed: 40 assert branches + 8 architecturally-impossible"
 	@echo "      logic branches (assert-protected or mathematically unreachable)."
 	@echo ""
-	@echo "    platform/DtlsUdpBackend.cpp     72% ceiling"
-	@echo "      63 missed: 24 assert True branches + 10 impairment-delay paths"
-	@echo "      (fixed_latency_ms not configurable via TransportConfig public API)"
-	@echo "      + ~14 hard mbedTLS/POSIX error paths (ssl_write requires open"
-	@echo "      DTLS session; remaining paths covered by IMbedtlsOps mock tests)."
-	@echo "      Ceiling updated: 10 mock tests added via DI (items 1-4, 5-8, 9-10)."
+	@echo "    platform/TcpBackend.cpp         78% ceiling"
+	@echo "      49 missed: 39 assert True branches + ~10 architecturally-unreachable"
+	@echo "      branches (poll_clients_once POLLIN accept, partial-read loop,"
+	@echo "      serialize fail). 4 new branches covered: remove_client_fd False@idx0,"
+	@echo "      recv_queue overflow, send_frame fail, loss-impairment ERR_IO drop."
+	@echo ""
+	@echo "    platform/UdpBackend.cpp         75% ceiling"
+	@echo "      24 missed: 19 assert True branches + ~5 architecturally-unreachable"
+	@echo "      branches (recv_one_datagram second-datagram poll, serialize fail,"
+	@echo "      recv_queue full unreachable: max depth 31 < MSG_RING_CAPACITY 64)."
+	@echo "      3 new branches covered: loss impairment, send_to fail, initial pop."
+	@echo ""
+	@echo "    platform/DtlsUdpBackend.cpp     81% ceiling"
+	@echo "      45 missed: 24 assert True branches + ~21 hard mbedTLS/structural"
+	@echo "      paths (ssl_write, DTLS handshake limit, recv_queue full, WANT_READ)."
+	@echo "      6 new branches covered: flush_delayed loop, post-flush pop,"
+	@echo "      loss-impairment ERR_IO, num_channels==0 init (via new Option A tests)."
+	@echo ""
+	@echo "    platform/ImpairmentConfigLoader.cpp 90% ceiling"
+	@echo "      10 missed: 5 assert True branches (apply_kv ×2, parse_config_line ×2,"
+	@echo "      impairment_config_load ×1) + 4 compound-assert sub-branches (loss/"
+	@echo "      dup probability postcondition &&-guards, always-True after clamping)"
+	@echo "      + 1 fclose() failure path (unreachable in non-adversarial test env)."
+	@echo ""
+	@echo "    platform/SocketUtils.cpp    64% ceiling"
+	@echo "      83 missed: ~19 POSIX hard error paths unreachable on loopback"
+	@echo "      (fcntl F_GETFL/F_SETFL, setsockopt, listen, accept, close,"
+	@echo "      recvfrom, inet_ntop) + UDP partial-send atomicity assumption"
+	@echo "      (send_result != len never occurs for loopback datagrams)."
+	@echo "      All 2 newly-reachable branches covered (inet_aton failure in"
+	@echo "      socket_bind and socket_send_to via invalid-IP unit tests)."
+	@echo ""
+	@echo "    core/AssertState.cpp        100% (no branches to instrument;"
+	@echo "      check_and_clear atomic op has no LLVM branch points; all"
+	@echo "      7 lines covered by test_AssertState.cpp)."
+	@echo ""
+	@echo "    platform/LocalSimHarness.cpp    72% ceiling"
+	@echo "      19 missed: 17 assert True branches + 2 structurally-unreachable"
+	@echo "      (L165 True >5s cap, L179 True single-thread). Dead ternary at"
+	@echo "      old L164 eliminated by P2 dead-code removal (71→69 branches)."
+	@echo "      Loss path and delay loop now covered via Option A (VVP-001 M5)."
 	@echo ""
 	@echo "  NSC files (line coverage sufficient, branch floor not enforced):"
-	@echo "    platform/LocalSimHarness.cpp"
-	@echo "    platform/SocketUtils.cpp   (UDP socket helpers untested)"
+	@echo "    platform/LocalSimHarness.cpp   (NSC — ceiling documented above)"
+	@echo "    platform/SocketUtils.cpp    (NSC — ceiling documented above)"
+	@echo "    core/AssertState.cpp        (NSC — 100% lines covered)"
 	@echo ""
 	@echo "  See CLAUDE.md §14 for full policy and ceiling justifications."
 	@echo "================================================================"
@@ -385,4 +436,6 @@ run_tests: tests
 	@echo "=== test_DtlsUdpBackend ==="; build/test_DtlsUdpBackend
 	@echo "=== test_TcpBackend ==="; build/test_TcpBackend
 	@echo "=== test_UdpBackend ==="; build/test_UdpBackend
+	@echo "=== test_SocketUtils ==="; build/test_SocketUtils
+	@echo "=== test_AssertState ==="; build/test_AssertState
 	@echo "=== ALL TESTS PASSED ==="

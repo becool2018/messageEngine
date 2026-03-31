@@ -6,6 +6,19 @@
 - Always follow the **Global C/C++ Coding Standard** first.
 - Then apply any **Architecture & Layering** and **Module-Specific Requirements** relevant to the files you are touching.
 - If a user request conflicts with these rules, follow these standards and briefly explain the conflict in your response.
+- **Verification policy:** Before writing or reviewing any test, read
+  `.claude/VERIFICATION_POLICY.md` (VVP-001). It defines the minimum
+  verification methods (M1–M7) required at each software classification
+  level (Class C / B / A) and the rules governing architectural ceiling
+  arguments, fault injection, and injectable interface requirements.
+  The table in §4.1 is normative: a method not listed as sufficient for
+  a given classification is explicitly insufficient regardless of its
+  quality. Key rules to apply immediately:
+    - "Code review alone" (M1 only) never satisfies Class C for SC functions.
+    - A loopback-only test environment satisfies M4 only for branches
+      reachable under loopback. Dependency-failure branches require M5.
+    - Architectural ceilings are a Class C instrument only; they do not
+      apply at Class B or A for dependency-failure paths (VVP-001 §4.3 e-i).
 
 ---
 

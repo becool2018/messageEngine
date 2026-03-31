@@ -52,13 +52,24 @@
 #include "core/RingBuffer.hpp"
 #include "platform/ImpairmentEngine.hpp"
 
+class ISocketOps;   // forward declaration — see platform/ISocketOps.hpp
+
 // ─────────────────────────────────────────────────────────────────────────────
 // TlsTcpBackend
 // ─────────────────────────────────────────────────────────────────────────────
 
 class TlsTcpBackend : public TransportInterface {
 public:
+    /// Default constructor — uses the process-wide SocketOpsImpl singleton.
+    /// Production code always calls this form.
     TlsTcpBackend();
+
+    /// Injection constructor — accepts any ISocketOps implementation.
+    /// Used by tests to inject a mock and exercise error paths that cannot
+    /// be triggered in a loopback environment.
+    /// @p sock_ops must outlive this TlsTcpBackend instance.
+    explicit TlsTcpBackend(ISocketOps& sock_ops);
+
     ~TlsTcpBackend() override;
 
     // ── TransportInterface implementation ────────────────────────────────────
@@ -79,6 +90,9 @@ private:
     mbedtls_net_context m_listen_net;                      ///< Server listen socket
     mbedtls_net_context m_client_net[MAX_TCP_CONNECTIONS]; ///< Per-client net contexts
     mbedtls_ssl_context m_ssl[MAX_TCP_CONNECTIONS];        ///< Per-client TLS sessions
+
+    // ── Injected socket operations interface ─────────────────────────────────
+    ISocketOps*       m_sock_ops;                          ///< Non-owning; never null after ctor
 
     // ── Transport state ──────────────────────────────────────────────────────
     uint32_t          m_client_count;

@@ -17,6 +17,7 @@
 #include <cstdint>
 #include "Types.hpp"
 #include "TlsConfig.hpp"
+#include "ImpairmentConfig.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ChannelConfig
@@ -31,7 +32,7 @@ struct ChannelConfig {
     uint32_t         recv_timeout_ms;
     uint32_t         max_retries;          ///< ignored when best-effort
     uint32_t         retry_backoff_ms;     ///< initial retry interval; doubled each attempt
-    bool             impairments_enabled;  ///< gate the impairment engine for this channel
+    ImpairmentConfig impairment;           ///< full impairment configuration for this channel
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,7 +64,7 @@ inline void channel_config_default(ChannelConfig& cfg, uint8_t id)
     cfg.recv_timeout_ms    = 1000U;
     cfg.max_retries        = MAX_RETRY_COUNT;
     cfg.retry_backoff_ms   = 100U;
-    cfg.impairments_enabled = false;
+    impairment_config_default(cfg.impairment);
 }
 
 /// Default-fill a TransportConfig for local loopback TCP.

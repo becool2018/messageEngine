@@ -42,6 +42,7 @@
 #include "core/MessageEnvelope.hpp"
 #include "platform/DtlsUdpBackend.hpp"
 #include "platform/IMbedtlsOps.hpp"
+#include "MockSocketOps.hpp"
 #include <psa/crypto.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1420,6 +1421,215 @@ static void test_mock_client_ssl_setup_fail()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ISocketOps mock test 1: socket_create_udp failure → init → ERR_IO
+// Covers: DtlsUdpBackend::init() L559-564 (create_udp < 0)
+// Verifies: REQ-6.4.5, REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_mock_sock_create_udp_fail()
+{
+    // Verifies: REQ-6.4.5, REQ-6.3.2
+    MockSocketOps sock_mock;
+    sock_mock.fail_create_udp = true;
+
+    DtlsMockOps tls_mock;  // all TLS ops succeed (not called in plaintext mode)
+
+    DtlsUdpBackend backend(sock_mock, tls_mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_dtls_config(cfg, true, 14620U, false);  // plaintext server
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!backend.is_open());
+
+    printf("PASS: test_mock_sock_create_udp_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ISocketOps mock test 2: socket_set_reuseaddr failure → init → ERR_IO
+// Covers: DtlsUdpBackend::init() L566-572 (set_reuseaddr false)
+// Verifies: REQ-6.4.5, REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_mock_sock_reuseaddr_fail()
+{
+    // Verifies: REQ-6.4.5, REQ-6.3.2
+    MockSocketOps sock_mock;
+    sock_mock.fail_set_reuseaddr = true;
+
+    DtlsMockOps tls_mock;  // all TLS ops succeed (not called in plaintext mode)
+
+    DtlsUdpBackend backend(sock_mock, tls_mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_dtls_config(cfg, true, 14621U, false);  // plaintext server
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!backend.is_open());
+    assert(sock_mock.n_do_close >= 1);  // do_close called after reuseaddr failure
+
+    printf("PASS: test_mock_sock_reuseaddr_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 20: init() with num_channels == 0 → impairment_config_default used
+// Covers: init() L554 `if (config.num_channels > 0U)` False branch
+// Verifies: REQ-4.1.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-4.1.1
+static void test_init_num_channels_zero()
+{
+    // Verifies: REQ-4.1.1
+    // With num_channels == 0 the False branch of `if (config.num_channels > 0U)`
+    // is taken and impairment_config_default() provides the ImpairmentConfig.
+    DtlsUdpBackend backend;
+    TransportConfig cfg;
+    make_dtls_config(cfg, true, 14622U, false);
+    cfg.num_channels = 0U;  // force False branch at L554
+
+    Result init_res = backend.init(cfg);
+    assert(init_res == Result::OK);
+    assert(backend.is_open() == true);
+
+    backend.close();
+    assert(backend.is_open() == false);
+
+    printf("PASS: test_init_num_channels_zero\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 21: send_message() with loss_probability == 1.0 → silent drop → OK
+// Covers: send_message() L637 `if (res == Result::ERR_IO)` True branch
+//         (impairment engine drops all outbound messages)
+// Verifies: REQ-5.1.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-5.1.3
+static void test_loss_impairment_drops_send()
+{
+    // Verifies: REQ-5.1.3
+    // With loss_probability == 1.0 every outbound message is silently dropped
+    // by the impairment engine.  send_message() should return OK (silent drop)
+    // and a subsequent receive_message() with 0 ms timeout should return
+    // ERR_TIMEOUT (nothing was actually transmitted).
+    static const uint16_t SRV_PORT = 14623U;
+
+    // Server (receiver): bind plaintext UDP, no impairment
+    DtlsUdpBackend server;
+    TransportConfig srv_cfg;
+    make_dtls_config(srv_cfg, true, SRV_PORT, false);
+    Result srv_init = server.init(srv_cfg);
+    assert(srv_init == Result::OK);
+    assert(server.is_open() == true);
+
+    // Client (sender): loss_probability = 1.0 → every outbound message dropped
+    DtlsUdpBackend client;
+    TransportConfig cli_cfg;
+    make_dtls_config(cli_cfg, false, SRV_PORT, false);
+    cli_cfg.num_channels = 1U;
+    cli_cfg.channels[0U].impairment.enabled          = true;
+    cli_cfg.channels[0U].impairment.loss_probability = 1.0;
+
+    Result cli_init = client.init(cli_cfg);
+    assert(cli_init == Result::OK);
+    assert(client.is_open() == true);
+
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.message_id        = 0xAB01ULL;
+    env.source_id         = 2U;
+    env.destination_id    = 1U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    // send_message returns OK (ERR_IO from impairment → silently converted to OK)
+    Result send_res = client.send_message(env);
+    assert(send_res == Result::OK);
+
+    // Nothing was transmitted; server must time out immediately
+    MessageEnvelope received;
+    Result recv_res = server.receive_message(received, 0U);
+    assert(recv_res == Result::ERR_TIMEOUT);
+
+    client.close();
+    server.close();
+
+    printf("PASS: test_loss_impairment_drops_send\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 22: fixed_latency_ms impairment → flush_delayed_to_queue loop body
+//          and post-flush recv_queue.pop() succeed
+// Covers: flush_delayed_to_queue() L531 loop body True branch (Branch 2)
+//         receive_message() L711 `if (result_ok(res))` True branch (Branch 4)
+// Verifies: REQ-5.1.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-5.1.1
+static void test_delay_impairment_flush_and_recv()
+{
+    // Verifies: REQ-5.1.1
+    // With fixed_latency_ms == 1 the impairment engine buffers the outbound
+    // message in the delay buffer.  After sleeping 10 ms the release time has
+    // passed.  When the receiver calls receive_message(), flush_delayed_to_queue()
+    // iterates over the deliverable entries (loop body True, Branch 2), pushes
+    // the message into recv_queue, and the post-flush pop succeeds (Branch 4).
+    static const uint16_t SRV_PORT = 14624U;
+
+    // Server (receiver): no impairment — just receives
+    DtlsUdpBackend server;
+    TransportConfig srv_cfg;
+    make_dtls_config(srv_cfg, true, SRV_PORT, false);
+    Result srv_init = server.init(srv_cfg);
+    assert(srv_init == Result::OK);
+    assert(server.is_open() == true);
+
+    // Client (sender): 1 ms fixed latency → message goes into delay buffer
+    DtlsUdpBackend client;
+    TransportConfig cli_cfg;
+    make_dtls_config(cli_cfg, false, SRV_PORT, false);
+    cli_cfg.num_channels = 1U;
+    cli_cfg.channels[0U].impairment.enabled        = true;
+    cli_cfg.channels[0U].impairment.fixed_latency_ms = 1U;
+
+    Result cli_init = client.init(cli_cfg);
+    assert(cli_init == Result::OK);
+    assert(client.is_open() == true);
+
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.message_id        = 0xAB02ULL;
+    env.source_id         = 2U;
+    env.destination_id    = 1U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    // Send: goes into delay buffer (not sent to socket yet)
+    Result send_res = client.send_message(env);
+    assert(send_res == Result::OK);
+
+    // Wait for the 1 ms latency to expire so the message is deliverable
+    usleep(10000U);  // 10 ms
+
+    // receive_message calls flush_delayed_to_queue which iterates loop body
+    // (Branch 2) and pushes the message; then the post-flush pop succeeds (Branch 4)
+    MessageEnvelope received;
+    Result recv_res = client.receive_message(received, 500U);
+    assert(recv_res == Result::OK);
+    assert(received.message_id == 0xAB02ULL);
+
+    client.close();
+    server.close();
+
+    printf("PASS: test_delay_impairment_flush_and_recv\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1458,6 +1668,15 @@ int main()
     test_mock_server_ssl_set_transport_id_fail();
     test_mock_client_net_connect_fail();
     test_mock_client_ssl_setup_fail();
+
+    // ISocketOps mock tests
+    test_mock_sock_create_udp_fail();
+    test_mock_sock_reuseaddr_fail();
+
+    // New branch-coverage tests
+    test_init_num_channels_zero();
+    test_loss_impairment_drops_send();
+    test_delay_impairment_flush_and_recv();
 
     printf("=== test_DtlsUdpBackend: ALL TESTS PASSED ===\n");
     return 0;

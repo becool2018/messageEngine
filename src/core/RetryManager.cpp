@@ -32,7 +32,7 @@ static uint32_t advance_backoff(uint32_t current_ms)
     NEVER_COMPILED_OUT_ASSERT(current_ms <= 60000U);  // Power of 10: pre-condition
     const uint64_t doubled = static_cast<uint64_t>(current_ms) * 2U;
     if (doubled > 60000U) {
-        NEVER_COMPILED_OUT_ASSERT(doubled > 60000U);  // Power of 10: confirms we entered the cap branch
+        // Cap reached; the surrounding if already proves doubled > 60000U
         return 60000U;
     }
     NEVER_COMPILED_OUT_ASSERT(doubled <= 60000U);  // Power of 10: post-condition

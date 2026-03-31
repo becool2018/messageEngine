@@ -1,0 +1,216 @@
+# Verification and Validation Policy
+
+**Document ID:** VVP-001
+**Authority:** NPR 7150.2D, NASA-STD-8739.8A, NASA-STD-8719.13C
+**Applicability:** All software products developed under this policy
+
+---
+
+## 1. Purpose
+
+This document defines the minimum verification evidence required to
+assert correctness of software at each classification level. It is
+normative. A verification method not listed as sufficient for a given
+classification is explicitly insufficient, regardless of the quality
+of its execution.
+
+Although the software classification is Class C, all verification
+activity shall meet the method requirements of Class B (M1 + M2 + M4
++ M5 for all functions). This is a voluntary elevation of testing
+rigor, not a reclassification.
+
+---
+
+## 2. Definitions
+
+**2.1 Safety-Critical (SC) function**
+A function whose incorrect behavior directly contributes to a hazard
+identified in the project Software Safety Hazard Analysis. SC functions
+are identified per project in the Hazard Analysis (§3 of that document).
+
+**2.2 Non-Safety-Critical (NSC) function**
+A function with no direct effect on safety-critical behavior.
+Observability, configuration, initialization, and lifecycle functions
+are typically NSC unless analysis shows otherwise.
+
+**2.3 Reachable branch**
+A branch outcome (True or False of a decision) for which there exists
+at least one input or system state that causes execution to follow
+that path. A branch is unreachable only when a written architectural
+argument demonstrates no such input or state can exist.
+
+**2.4 Fault injection**
+A test technique in which the behavior of an underlying dependency
+(operating system call, hardware driver, communication library) is
+programmatically controlled to return error values that cannot be
+induced in a nominal test environment. Fault injection requires an
+injectable interface — a seam in the design that allows the real
+dependency to be replaced with a test-controlled substitute.
+
+**2.5 Architectural ceiling**
+A documented, reviewed justification that one or more branch outcomes
+are permanently unreachable due to an architectural property of the
+implementation (e.g., a `[[noreturn]]` assertion path, a platform
+endianness constant, a mathematically-provable invariant).
+Architectural ceiling justifications are subject to the constraints
+in §4.3.
+
+---
+
+## 3. Verification Methods
+
+| ID | Name | Description | Evidence |
+|----|------|-------------|----------|
+| M1 | Code review / inspection | Structured examination of source code by a reviewer independent of the author. | Signed inspection record per project inspection process. |
+| M2 | Static analysis | Automated tool analysis of source code without execution. Includes compiler warnings (zero-warnings policy), linting, and MISRA compliance checking. | Tool output with zero unresolved findings on the exact source revision under review. |
+| M3 | Dynamic test, line coverage | Test execution in which every source line of the function under test is reached at least once. | Instrumented coverage report showing 100% line coverage, or documented justification for any uncovered line. |
+| M4 | Dynamic test, branch coverage | Test execution in which every reachable branch outcome of every decision in the function under test is reached at least once. | Instrumented branch coverage report showing 100% coverage of reachable branches. Any branch claimed unreachable must be supported by a written architectural ceiling argument (§4.3). |
+| M5 | Dynamic test, fault injection | Test execution that exercises error-handling paths unreachable in a nominal environment by substituting real dependencies with test-controlled implementations. | Branch coverage of error-handling paths confirmed by instrumented coverage report; injectable interface and substitute implementation under version control and subject to the same review requirements as production code. |
+| M6 | MC/DC coverage | Test execution demonstrating that every condition in every decision independently affects the decision outcome. | Test-case review matrix demonstrating independence for each condition. |
+| M7 | Formal verification | Model checking or theorem proving of correctness properties. | Model or proof artifact under version control with no unresolved counterexamples or proof obligations. |
+
+---
+
+## 4. Minimum Verification Requirements by Classification
+
+### 4.1 Required methods
+
+| Classification | SC functions | NSC functions |
+|----------------|-------------|---------------|
+| Class C | M1 + M2 + M4 | M1 + M2 + M3 |
+| Class B | M1 + M2 + M4 + M5 | M1 + M2 + M4 |
+| Class A | M1 + M2 + M4 + M5 + M6 + M7 (for SC state machines) | M1 + M2 + M4 + M5 |
+
+Methods are cumulative. Class B requires M4 **and** M5, not M4 **or** M5.
+
+### 4.2 Constraint on loopback-only test environments
+
+A test environment that exercises only nominal operating conditions
+(e.g., loopback network, no resource exhaustion, no injected faults)
+satisfies M4 only for branches reachable under those conditions.
+
+Branches reachable exclusively via dependency failure (operating
+system errors, library errors, hardware faults) require M5 to satisfy
+M4. Documenting such branches as an architectural ceiling is valid
+only at Class C. It is **not** valid at Class B or Class A.
+
+**Consequence:** any module containing error-handling paths that depend
+on an underlying dependency that cannot fail in the nominal test
+environment MUST provide an injectable interface before it can be
+verified to Class B or Class A standard.
+
+### 4.3 Architectural ceiling constraints
+
+An architectural ceiling argument is valid only when **all** of the
+following are true:
+
+a) The unreachable branch is identified precisely by file, line,
+   and branch direction (True or False).
+
+b) A written argument is provided explaining why no input or system
+   state can cause the branch to be taken.
+
+c) The argument is reviewed and signed off by a reviewer independent
+   of the author.
+
+d) The argument is limited to one of the following categories:
+
+   - **i. `[[noreturn]]` assertion abort paths** — the True (fires)
+     branch of an assertion macro backed by `abort()` or equivalent;
+     LLVM source-based coverage cannot instrument this path.
+
+   - **ii. Platform architecture constants** — branch outcomes
+     determined entirely at compile time by target architecture
+     (e.g., byte-order conditionals in system macros on a
+     known-endian platform).
+
+   - **iii. Mathematically-provable invariants** — branch outcomes
+     excluded by a class invariant or loop invariant that can be
+     stated as a formal postcondition and verified by inspection
+     or proof.
+
+e) The ceiling argument does **not** include:
+
+   - **i. Dependency failure paths** (operating system, library,
+     hardware) that are unreachable only because the test environment
+     does not induce failures. These require M5, not a ceiling.
+
+   - **ii. Paths unreachable only because no test was written.**
+     These are test gaps, not architectural ceilings.
+
+At Class B and Class A, categories d-i and d-ii remain valid.
+Category d-iii requires written proof, not inspection alone.
+Category e-i is never valid at any classification level as a
+permanent ceiling; it is a temporary gap requiring M5.
+
+### 4.4 Injectable interface requirement
+
+Any module whose correctness verification at Class B or Class A
+requires M5 MUST be designed with an injectable interface that
+allows every underlying dependency to be replaced with a
+test-controlled substitute. This is an **architectural requirement**
+on the module design, not merely a testing requirement.
+
+An injectable interface must:
+
+a) Cover every external dependency call whose failure constitutes
+   an error-handling path in the module.
+
+b) Be itself subject to M1 + M2 + M3 verification.
+
+c) Have at least one production implementation and at least one
+   test substitute implementation, both under version control.
+
+d) Not introduce dynamic allocation, function pointers visible at
+   the call site, or other constructs prohibited by the applicable
+   coding standard.
+
+---
+
+## 5. Verification Evidence Traceability
+
+Every test file must carry a comment identifying the verification
+methods applied to the functions under test:
+
+```cpp
+// Verification: M1 + M2 + M4
+// Verification: M1 + M2 + M4 + M5 (fault injection via <InterfaceName>)
+```
+
+Every SC function declaration must carry a comment identifying the
+highest verification method achieved:
+
+```cpp
+// Safety-critical (SC): HAZ-NNN — verified to M4
+// Safety-critical (SC): HAZ-NNN — verified to M5
+```
+
+A mismatch between the declared method and the evidence in the
+coverage report or inspection record is a **MAJOR** defect per the
+project inspection checklist.
+
+---
+
+## 6. Classification Change Process
+
+Reclassifying a software product or module from Class C to Class B
+or Class A requires, before any new verification activity begins:
+
+a) Identification of all modules containing error-handling paths
+   that depend on dependencies that cannot fail in the nominal
+   test environment.
+
+b) Design and implementation of injectable interfaces for all such
+   modules, reviewed to M1 + M2 + M3.
+
+c) Implementation of fault-injection test suites achieving M4 on
+   the previously-uncovered error-handling paths.
+
+d) Update of all SC function declarations and test file headers to
+   reflect the achieved verification method.
+
+e) Update of the Hazard Analysis and FMEA to reflect any new hazards
+   identified during the injectable interface design.
+
+Reclassification is not complete until all items above are done and
+signed off in the project inspection record.

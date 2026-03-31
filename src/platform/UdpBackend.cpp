@@ -14,8 +14,9 @@
  */
 
 #include "platform/UdpBackend.hpp"
+#include "platform/ISocketOps.hpp"
+#include "platform/SocketOpsImpl.hpp"
 #include "core/Assert.hpp"
-#include "platform/SocketUtils.hpp"
 #include "core/Serializer.hpp"
 #include "core/Logger.hpp"
 #include "core/Timestamp.hpp"
@@ -26,7 +27,16 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 UdpBackend::UdpBackend()
-    : m_fd(-1), m_wire_buf{}, m_cfg{}, m_open(false)
+    : m_sock_ops(&SocketOpsImpl::instance()),
+      m_fd(-1), m_wire_buf{}, m_cfg{}, m_open(false)
+{
+    // Power of 10 rule 3: initialize to safe state
+    NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);  // Invariant
+}
+
+UdpBackend::UdpBackend(ISocketOps& ops)
+    : m_sock_ops(&ops),
+      m_fd(-1), m_wire_buf{}, m_cfg{}, m_open(false)
 {
     // Power of 10 rule 3: initialize to safe state
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);  // Invariant
@@ -54,26 +64,26 @@ Result UdpBackend::init(const TransportConfig& config)
     m_cfg = config;
 
     // Create UDP socket
-    m_fd = socket_create_udp();
+    m_fd = m_sock_ops->create_udp();
     if (m_fd < 0) {
         Logger::log(Severity::FATAL, "UdpBackend", "socket_create_udp failed");
         return Result::ERR_IO;
     }
 
     // Set SO_REUSEADDR
-    if (!socket_set_reuseaddr(m_fd)) {
+    if (!m_sock_ops->set_reuseaddr(m_fd)) {
         Logger::log(Severity::WARNING_HI, "UdpBackend",
                    "socket_set_reuseaddr failed");
-        socket_close(m_fd);
+        m_sock_ops->do_close(m_fd);
         m_fd = -1;
         return Result::ERR_IO;
     }
 
     // Bind to local address
-    if (!socket_bind(m_fd, config.bind_ip, config.bind_port)) {
+    if (!m_sock_ops->do_bind(m_fd, config.bind_ip, config.bind_port)) {
         Logger::log(Severity::FATAL, "UdpBackend",
                    "socket_bind failed on port %u", config.bind_port);
-        socket_close(m_fd);
+        m_sock_ops->do_close(m_fd);
         m_fd = -1;
         return Result::ERR_IO;
     }
@@ -84,7 +94,7 @@ Result UdpBackend::init(const TransportConfig& config)
     ImpairmentConfig imp_cfg;
     impairment_config_default(imp_cfg);
     if (config.num_channels > 0U) {
-        imp_cfg.enabled = config.channels[0U].impairments_enabled;
+        imp_cfg = config.channels[0U].impairment;
     }
     m_impairment.init(imp_cfg);
 
@@ -131,8 +141,8 @@ Result UdpBackend::send_message(const MessageEnvelope& envelope)
                                                               IMPAIR_DELAY_BUF_SIZE);
 
     // Send main message
-    if (!socket_send_to(m_fd, m_wire_buf, wire_len,
-                       m_cfg.peer_ip, m_cfg.peer_port)) {
+    if (!m_sock_ops->send_to(m_fd, m_wire_buf, wire_len,
+                             m_cfg.peer_ip, m_cfg.peer_port)) {
         Logger::log(Severity::WARNING_LO, "UdpBackend",
                    "socket_send_to failed to %s:%u",
                    m_cfg.peer_ip, m_cfg.peer_port);
@@ -150,8 +160,8 @@ Result UdpBackend::send_message(const MessageEnvelope& envelope)
             continue;
         }
 
-        (void)socket_send_to(m_fd, m_wire_buf, delayed_len,
-                            m_cfg.peer_ip, m_cfg.peer_port);
+        (void)m_sock_ops->send_to(m_fd, m_wire_buf, delayed_len,
+                                  m_cfg.peer_ip, m_cfg.peer_port);
     }
 
     NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);  // Post-condition
@@ -171,8 +181,8 @@ bool UdpBackend::recv_one_datagram(uint32_t timeout_ms)
     char     src_ip[48];
     uint16_t src_port = 0U;
 
-    if (!socket_recv_from(m_fd, m_wire_buf, SOCKET_RECV_BUF_BYTES,
-                         timeout_ms, &out_len, src_ip, &src_port)) {
+    if (!m_sock_ops->recv_from(m_fd, m_wire_buf, SOCKET_RECV_BUF_BYTES,
+                               timeout_ms, &out_len, src_ip, &src_port)) {
         return false;  // Timeout or error on this poll
     }
 
@@ -262,7 +272,7 @@ Result UdpBackend::receive_message(MessageEnvelope& envelope, uint32_t timeout_m
 void UdpBackend::close()
 {
     if (m_fd >= 0) {
-        socket_close(m_fd);
+        m_sock_ops->do_close(m_fd);
         m_fd = -1;
     }
 
