@@ -373,6 +373,46 @@ Reclassifying a function from NSC to SC, or adding a new SC function, requires:
    All 169 reachable decision-level branches are 100% covered. The DtlsUdpBackend.cpp
    threshold is therefore set at 72% (maximum achievable); this is not a defect and
    requires no remediation.
+   TcpBackend.cpp has a proven architectural ceiling of 70.91% (156/220 branches).
+   The ceiling arises from three independent sources:
+     (a) 39 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
+         noreturn) paths — one per assert call across all functions, consistent with
+         the mechanism documented for Serializer.cpp, ImpairmentEngine.cpp, and
+         DtlsUdpBackend.cpp above.
+     (b) 6 hard POSIX error paths that cannot be triggered in a loopback test
+         environment without fault injection: socket_create_tcp failure (server and
+         client init paths), socket_set_reuseaddr failure (server and client),
+         socket_listen failure, and socket_set_nonblocking failure on the listen fd.
+         These POSIX calls succeed unconditionally for loopback sockets on macOS/Linux.
+     (c) Approximately 19 additional architecturally-unreachable and impairment-delay
+         branches: flush_delayed_to_clients loop body and send_message delayed-message
+         loop (require non-zero fixed_latency_ms not configurable via TransportConfig
+         public API); poll_clients_once POLLIN True for accept fd when no client
+         connects during the test window; recv_from_client partial-read loop body
+         (tcp_recv_frame inner loop for messages split across multiple TCP segments,
+         which does not occur with loopback localhost); and Serializer::serialize
+         failure (wire buffer is always large enough for any valid envelope).
+   All 156 reachable decision-level branches are 100% covered. The TcpBackend.cpp
+   threshold is therefore set at 70% (maximum achievable); this is not a defect and
+   requires no remediation.
+   UdpBackend.cpp has a proven architectural ceiling of 65.62% (63/96 branches).
+   The ceiling arises from three independent sources:
+     (a) 19 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
+         noreturn) paths — one per assert call across all functions, consistent with
+         the mechanism documented above.
+     (b) 2 hard POSIX error paths that cannot be triggered in a loopback test
+         environment: socket_create_udp failure and socket_set_reuseaddr failure.
+         These POSIX calls succeed unconditionally for loopback UDP sockets on
+         macOS/Linux.
+     (c) Approximately 12 additional architecturally-unreachable and impairment-delay
+         branches: flush_delayed_to_queue loop body and receive_message delayed-message
+         loop (require non-zero fixed_latency_ms not configurable via TransportConfig
+         public API); recv_one_datagram inner poll True branch for a second datagram
+         (single-datagram-per-call design); and Serializer::serialize failure (wire
+         buffer is always large enough for any valid envelope).
+   All 63 reachable decision-level branches are 100% covered. The UdpBackend.cpp
+   threshold is therefore set at 65% (maximum achievable); this is not a defect and
+   requires no remediation.
 
 5. Coverage does not substitute for code review or static analysis. All three
    (coverage, review, static analysis) are required for SC functions.

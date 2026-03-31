@@ -32,6 +32,9 @@
 #include <cassert>
 #include <cstdint>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 #include "core/Types.hpp"
 #include "core/ChannelConfig.hpp"
@@ -290,6 +293,97 @@ static void test_udp_send_to_unreachable()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 9: init with bad bind IP → ERR_IO
+// Covers UdpBackend::init() L73 True branch (socket_bind returns false).
+// Verifies: REQ-4.1.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_udp_bind_bad_ip()
+{
+    UdpBackend backend;
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19613U, 19614U);
+
+    const char bad_ip[] = "999.999.999.999";
+    (void)memcpy(cfg.bind_ip, bad_ip, sizeof(bad_ip));
+
+    Result r = backend.init(cfg);
+    assert(r != Result::OK);
+    assert(!backend.is_open());
+
+    printf("PASS: test_udp_bind_bad_ip\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 10: init with num_channels == 0 → impairment uses default config
+// Covers UdpBackend::init() L86 False branch (config.num_channels > 0U == false).
+// Verifies: REQ-4.1.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_udp_num_channels_zero()
+{
+    UdpBackend backend;
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19615U, 19616U);
+    cfg.num_channels = 0U;
+
+    Result r = backend.init(cfg);
+    assert(r == Result::OK);
+    assert(backend.is_open());
+
+    backend.close();
+    printf("PASS: test_udp_num_channels_zero\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 11: raw garbage UDP datagram → Serializer::deserialize fails
+// Covers recv_one_datagram L181 True branch (!result_ok after deserialize).
+// Verifies: REQ-6.2.4
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_udp_recv_garbage_datagram()
+{
+    static const uint16_t BIND_PORT = 19617U;
+
+    UdpBackend backend;
+    TransportConfig cfg;
+    make_udp_cfg(cfg, BIND_PORT, 19618U);
+
+    assert(backend.init(cfg) == Result::OK);
+
+    // Send 5 garbage bytes to the backend's bind port via a raw POSIX socket.
+    // recv_one_datagram calls Serializer::deserialize(5 bytes) which rejects
+    // them (5 < WIRE_HEADER_SIZE=44) → ERR_INVALID → True branch covered.
+    int raw_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    assert(raw_fd >= 0);
+
+    struct sockaddr_in dst;
+    (void)memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port   = htons(BIND_PORT);
+    (void)inet_pton(AF_INET, "127.0.0.1", &dst.sin_addr);
+
+    const uint8_t garbage[5U] = {0xDEU, 0xADU, 0xBEU, 0xEFU, 0x00U};
+    // MISRA C++:2023 5.2.4: reinterpret_cast required by POSIX sendto() API
+    ssize_t sent = sendto(raw_fd,
+                          static_cast<const void*>(garbage),
+                          sizeof(garbage), 0,
+                          reinterpret_cast<const struct sockaddr*>(&dst),
+                          static_cast<socklen_t>(sizeof(dst)));
+    assert(sent == static_cast<ssize_t>(sizeof(garbage)));
+    (void)close(raw_fd);
+
+    // receive_message: garbage fails deserialize; no valid message is queued.
+    // Loop times out → ERR_TIMEOUT.
+    MessageEnvelope env;
+    Result r = backend.receive_message(env, 300U);
+    assert(r == Result::ERR_TIMEOUT);
+
+    backend.close();
+    printf("PASS: test_udp_recv_garbage_datagram\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -305,6 +399,9 @@ int main()
     test_udp_close_before_init();
     test_udp_is_open_lifecycle();
     test_udp_send_to_unreachable();
+    test_udp_bind_bad_ip();
+    test_udp_num_channels_zero();
+    test_udp_recv_garbage_datagram();
 
     printf("=== ALL PASSED ===\n");
     return 0;
