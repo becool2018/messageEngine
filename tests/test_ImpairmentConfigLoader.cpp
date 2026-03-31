@@ -301,6 +301,128 @@ static void test_large_prng_seed()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 13: duplication_probability negative → clamped to 0.0 (L73 True)
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_neg_dup_probability()
+{
+    write_test_file("duplication_probability=-0.5\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.duplication_probability == 0.0);  // L73 True: clamped from -0.5
+    assert(cfg.duplication_probability >= 0.0);
+
+    printf("PASS: test_neg_dup_probability\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 14: leading spaces on line — stripped before parsing (L134 ' ' True)
+//          Also includes an all-whitespace line at EOF (L137 '\0' True)
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_leading_space()
+{
+    // Third "line" is "  " (spaces, no trailing newline) → '\0' True after stripping
+    write_test_file("  enabled=1\n  fixed_latency_ms=50\n  ");
+
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.enabled == true);           // L134 ' ' True: leading spaces stripped
+    assert(cfg.fixed_latency_ms == 50U);
+
+    printf("PASS: test_leading_space\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 15: leading tab on line — stripped before parsing (L134 '\t' True)
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_leading_tab()
+{
+    write_test_file("\tenabled=1\n\tfixed_latency_ms=75\n");
+
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.enabled == true);
+    assert(cfg.fixed_latency_ms == 75U);
+
+    printf("PASS: test_leading_tab\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 16: CRLF line ending — '\r' treated as skip (L137 '\r' True)
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_carriage_return()
+{
+    // The blank line is "\r\n": fgets returns "\r\n"; after stripping no spaces,
+    // *p == '\r' → L137 '\r' True → line is skipped.
+    write_test_file("enabled=1\n\r\nfixed_latency_ms=10\n");
+
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.enabled == true);
+    assert(cfg.fixed_latency_ms == 10U);
+
+    printf("PASS: test_carriage_return\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 17: truly malformed line — sscanf parses only 1 token (L154 True)
+//   "keyonly" has no separator (space, tab, or '='), so sscanf returns 1 not 2.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_truly_malformed()
+{
+    write_test_file("keyonly\nfixed_latency_ms=30\n");
+
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    // "keyonly" line skipped (L154 True: n != 2); next line parses correctly
+    assert(cfg.fixed_latency_ms == 30U);
+    assert(cfg.enabled == false);
+
+    printf("PASS: test_truly_malformed\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 18: file with > MAX_CONFIG_LINES lines — loop exits at bound (L192 False)
+//          and a warning is logged for remaining lines (L201 True)
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_over_64_lines()
+{
+    // Generate 65 lines (one more than MAX_CONFIG_LINES = 64)
+    // Power of 10: stack buffer sized for 65 × 11 bytes + null
+    char content[65 * 11 + 2];
+    int pos = 0;
+    // Power of 10: fixed loop bound
+    for (int i = 0; i < 65; ++i) {
+        int n = snprintf(content + pos,
+                         static_cast<size_t>(static_cast<int>(sizeof(content)) - pos),
+                         "enabled=0\n");
+        assert(n > 0 && n < static_cast<int>(sizeof(content)) - pos);
+        pos += n;
+    }
+
+    write_test_file(content);
+
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    // L192 False: loop hit MAX_CONFIG_LINES limit before EOF
+    // L201 True:  !eof_reached → warning logged
+    assert(res == Result::OK);
+    assert(cfg.enabled == false);   // all 64 parsed lines say enabled=0
+
+    printf("PASS: test_over_64_lines\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -317,6 +439,12 @@ int main()
     test_duplication_probability_clamp();
     test_reorder_window_size_clamp();
     test_large_prng_seed();
+    test_neg_dup_probability();
+    test_leading_space();
+    test_leading_tab();
+    test_carriage_return();
+    test_truly_malformed();
+    test_over_64_lines();
 
     // Cleanup temp file
     (void)remove(TEST_FILE);

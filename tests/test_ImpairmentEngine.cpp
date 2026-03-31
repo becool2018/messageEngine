@@ -459,6 +459,294 @@ static bool test_delay_buf_full_disabled()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 13: PRNG seed=0 — engine substitutes seed=42 internally (L54 False)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.2.4
+static bool test_prng_seed_zero()
+{
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.prng_seed = 0ULL;  // L54: ternary uses 42 instead → L54 False branch
+    cfg.enabled = true;
+    cfg.loss_probability = 0.0;
+
+    engine.init(cfg);
+
+    MessageEnvelope env;
+    create_test_envelope(env, 1U, 2U, 1100ULL);
+    uint64_t now_us = 1000000ULL;
+    Result r = engine.process_outbound(env, now_us);
+    assert(r == Result::OK);  // engine functional after seed substitution
+
+    MessageEnvelope out_buf[4];
+    uint32_t count = engine.collect_deliverable(now_us, out_buf, 4U);
+    assert(count == 1U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 14: Partial loss — some messages pass (L120 False: rand >= probability)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.1.3
+static bool test_loss_partial()
+{
+    // With loss_probability=0.5 and seed=42, the PRNG will produce values
+    // both below and above 0.5 across 20 messages; L120 False is exercised
+    // whenever rand_val >= loss_probability.
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled = true;
+    cfg.loss_probability = 0.5;
+    cfg.prng_seed = 42ULL;
+
+    engine.init(cfg);
+
+    uint32_t passed = 0U;
+    uint32_t dropped = 0U;
+    uint64_t now_us = 2000000ULL;
+
+    // Power of 10: fixed loop bound
+    for (uint32_t i = 0U; i < 20U; ++i) {
+        MessageEnvelope env;
+        create_test_envelope(env, 1U, 2U, 2000ULL + static_cast<uint64_t>(i));
+        Result r = engine.process_outbound(env, now_us + i);
+        if (r == Result::OK) {
+            ++passed;
+        } else {
+            ++dropped;
+        }
+    }
+
+    assert(passed > 0U);   // L120 False: at least one not dropped
+    assert(dropped > 0U);  // L120 True:  at least one dropped
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 15: Duplication with tiny probability — dup_rand > threshold (L136 False)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.1.4
+static bool test_duplication_no_fire()
+{
+    // duplication_probability=1e-15 > 0 → apply_duplication() is called (L203 True),
+    // but with seed=42 the first next_double() ≈ 2.4e-9 >> 1e-15, so dup_rand is
+    // above the threshold → L136 False: no duplicate is queued.
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled = true;
+    cfg.loss_probability = 0.0;
+    cfg.duplication_probability = 1e-15;  // positive but negligible: always > PRNG output
+    cfg.fixed_latency_ms = 0U;
+    cfg.prng_seed = 42ULL;
+
+    engine.init(cfg);
+
+    MessageEnvelope env;
+    create_test_envelope(env, 1U, 2U, 3000ULL);
+    uint64_t now_us = 3000000ULL;
+    Result r = engine.process_outbound(env, now_us);
+    assert(r == Result::OK);
+
+    // Only the original should appear; no duplicate (L136 False path taken)
+    MessageEnvelope out_buf[4];
+    uint32_t count = engine.collect_deliverable(now_us + 200ULL, out_buf, 4U);
+    assert(count == 1U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 16: collect_deliverable with buf_cap < available — loop exits early
+//          (L228 compound condition: out_count < buf_cap becomes False)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.2.1
+static bool test_collect_small_buf()
+{
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled = false;  // passthrough: immediate release (release_us = now_us)
+
+    engine.init(cfg);
+
+    uint64_t now_us = 4000000ULL;
+
+    // Queue 3 messages with immediate release
+    for (uint32_t i = 0U; i < 3U; ++i) {
+        MessageEnvelope env;
+        create_test_envelope(env, 1U, 2U, 4000ULL + static_cast<uint64_t>(i));
+        Result r = engine.process_outbound(env, now_us);
+        assert(r == Result::OK);
+    }
+
+    // Collect with buf_cap=2: loop must exit when out_count reaches 2
+    // L228: out_count < buf_cap → False (early exit, not all 3 slots scanned)
+    MessageEnvelope out_buf[3];
+    uint32_t count = engine.collect_deliverable(now_us, out_buf, 2U);
+    assert(count == 2U);  // L228 False branch covered
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 17: Reorder enabled but window_size=0 → passthrough (L269 True)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.1.5
+static bool test_reorder_window_zero_enabled()
+{
+    // L269: !reorder_enabled || window_size==0
+    // Second sub-condition True (window_size==0) → passthrough despite reorder_enabled=true
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.reorder_enabled = true;
+    cfg.reorder_window_size = 0U;  // L269: window_size==0 True → passthrough
+
+    engine.init(cfg);
+
+    MessageEnvelope env;
+    create_test_envelope(env, 1U, 2U, 5000ULL);
+
+    MessageEnvelope out_buf[4];
+    uint32_t out_count = 0U;
+    Result r = engine.process_inbound(env, 0ULL, out_buf, 4U, out_count);
+    assert(r == Result::OK);
+    assert(out_count == 1U);
+    assert(out_buf[0].message_id == env.message_id);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 18: Partition — all is_partition_active() branch pairs exercised
+//   Phase 1:   first call (L333 True): initialises event timer; not active
+//   Phase 1.5: waiting (L342 second sub-cond False; L354 first sub-cond False)
+//   Phase 2:   partition starts (L342 both True)
+//   Phase 2.5: still active (L354 first True, second False)
+//   Phase 3:   partition ends (L354 both True)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.1.6
+static bool test_partition_waiting_and_active()
+{
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled               = true;
+    cfg.partition_enabled     = true;
+    cfg.partition_gap_ms      = 10U;   // 10 ms gap  = 10 000 µs
+    cfg.partition_duration_ms = 20U;   // 20 ms active = 20 000 µs
+    cfg.loss_probability      = 0.0;
+
+    engine.init(cfg);
+
+    // Phase 1: first call → initialises m_next_event = now1+10000; not active
+    uint64_t now1 = 5000000ULL;
+    MessageEnvelope env1;
+    create_test_envelope(env1, 1U, 2U, 6000ULL);
+    Result r1 = engine.process_outbound(env1, now1);
+    assert(r1 == Result::OK);  // L333 True: not yet active
+
+    // Phase 1.5: "waiting" — now < m_next_event (L342 second sub-cond False)
+    //            Covers: L342 `now>=event` False; L354 `m_partition_active` False
+    uint64_t now1_5 = now1 + 5000ULL;  // 5 ms < 10 ms gap
+    MessageEnvelope env1_5;
+    create_test_envelope(env1_5, 1U, 2U, 6001ULL);
+    Result r1_5 = engine.process_outbound(env1_5, now1_5);
+    assert(r1_5 == Result::OK);  // still waiting; not active
+
+    // Phase 2: now > gap → partition starts (L342 both sub-conditions True)
+    uint64_t now2 = now1 + 10001ULL;  // just past 10 ms gap
+    MessageEnvelope env2;
+    create_test_envelope(env2, 1U, 2U, 6002ULL);
+    Result r2 = engine.process_outbound(env2, now2);
+    assert(r2 == Result::ERR_IO);  // partition active; dropped
+
+    // Phase 2.5: inside partition (L342 first sub-cond False; L354 second False)
+    //            m_next_event = now2 + 20000; now2_5 = now2 + 10000 < now2+20000
+    uint64_t now2_5 = now2 + 10000ULL;  // 10 ms into 20 ms partition
+    MessageEnvelope env2_5;
+    create_test_envelope(env2_5, 1U, 2U, 6003ULL);
+    Result r2_5 = engine.process_outbound(env2_5, now2_5);
+    assert(r2_5 == Result::ERR_IO);  // still in partition; dropped
+
+    // Phase 3: past duration → partition ends (L354 both True)
+    uint64_t now3 = now2 + 20001ULL;  // just past 20 ms partition
+    MessageEnvelope env3;
+    create_test_envelope(env3, 1U, 2U, 6004ULL);
+    Result r3 = engine.process_outbound(env3, now3);
+    assert(r3 == Result::OK);  // partition ended; passes
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 19: apply_duplication skips when delay buffer is already full
+// Covers: L137:13 False (m_delay_count < IMPAIR_DELAY_BUF_SIZE evaluates False
+//         inside apply_duplication — buffer is full at the time duplication runs)
+//
+// Strategy:
+//   Phase 1: Fill all 32 slots with prob=1.0 (16 calls × 2 items = 32).
+//   Phase 2: Drain exactly 1 item via collect_deliverable(future_now, buf, 1)
+//            so m_delay_count=31.
+//   Phase 3: One more process_outbound: L192 False (31<32) → queue → count=32;
+//            apply_duplication: roll fires (prob=1.0) → L137:13: 32<32 = False.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.1.4
+static bool test_duplication_buffer_full_skip()
+{
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled                 = true;
+    cfg.fixed_latency_ms        = 1000U;  // 1 s latency
+    cfg.loss_probability        = 0.0;
+    cfg.duplication_probability = 1.0;    // always duplicate
+
+    engine.init(cfg);
+
+    uint64_t now_us = 1000000ULL;  // t = 1 s
+    // release_us = now_us + 1000*1000 = 2 000 000 us (2 s)
+
+    // Phase 1: 16 calls; each adds original + duplicate = 2 items.
+    // After 16 calls m_delay_count = 32 (buffer full).
+    // (Power of 10: bounded loop)
+    for (uint32_t i = 0U; i < 16U; ++i) {
+        MessageEnvelope env;
+        create_test_envelope(env, 1U, 2U, static_cast<uint64_t>(100U + i));
+        Result r = engine.process_outbound(env, now_us);
+        assert(r == Result::OK);
+    }
+
+    // Phase 2: drain exactly 1 item by using a future timestamp that makes all
+    // items deliverable, but limiting buf_cap to 1 → m_delay_count goes 32→31.
+    MessageEnvelope drained[1U];
+    uint64_t future_us = now_us + 2000000ULL;  // t = 3 s > release_us (2 s)
+    uint32_t drained_count = engine.collect_deliverable(future_us, drained, 1U);
+    assert(drained_count == 1U);
+
+    // Phase 3: one more process_outbound: L192 False (31<32) → queue → count=32;
+    // apply_duplication: roll fires (prob=1.0) → L137:13: 32 < 32 = False → skip.
+    MessageEnvelope env_last;
+    create_test_envelope(env_last, 1U, 2U, 9999ULL);
+    Result r_last = engine.process_outbound(env_last, now_us);
+    assert(r_last == Result::OK);
+
+    // Buffer is full again (31 remaining + 1 just queued = 32).
+    // Verify: next process_outbound returns ERR_FULL.
+    MessageEnvelope env_overflow;
+    create_test_envelope(env_overflow, 1U, 2U, 99999ULL);
+    Result r_overflow = engine.process_outbound(env_overflow, now_us);
+    assert(r_overflow == Result::ERR_FULL);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -547,6 +835,55 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_delay_buf_full_disabled\n");
+    }
+
+    if (!test_prng_seed_zero()) {
+        printf("FAIL: test_prng_seed_zero\n");
+        ++failed;
+    } else {
+        printf("PASS: test_prng_seed_zero\n");
+    }
+
+    if (!test_loss_partial()) {
+        printf("FAIL: test_loss_partial\n");
+        ++failed;
+    } else {
+        printf("PASS: test_loss_partial\n");
+    }
+
+    if (!test_duplication_no_fire()) {
+        printf("FAIL: test_duplication_no_fire\n");
+        ++failed;
+    } else {
+        printf("PASS: test_duplication_no_fire\n");
+    }
+
+    if (!test_collect_small_buf()) {
+        printf("FAIL: test_collect_small_buf\n");
+        ++failed;
+    } else {
+        printf("PASS: test_collect_small_buf\n");
+    }
+
+    if (!test_reorder_window_zero_enabled()) {
+        printf("FAIL: test_reorder_window_zero_enabled\n");
+        ++failed;
+    } else {
+        printf("PASS: test_reorder_window_zero_enabled\n");
+    }
+
+    if (!test_partition_waiting_and_active()) {
+        printf("FAIL: test_partition_waiting_and_active\n");
+        ++failed;
+    } else {
+        printf("PASS: test_partition_waiting_and_active\n");
+    }
+
+    if (!test_duplication_buffer_full_skip()) {
+        printf("FAIL: test_duplication_buffer_full_skip\n");
+        ++failed;
+    } else {
+        printf("PASS: test_duplication_buffer_full_skip\n");
     }
 
     return (failed > 0) ? 1 : 0;

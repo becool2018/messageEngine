@@ -309,6 +309,24 @@ Reclassifying a function from NSC to SC, or adding a new SC function, requires:
    and deserialization logic) are 100% covered. The Serializer.cpp threshold
    is therefore set at 74% (maximum achievable); this is not a defect and
    requires no remediation.
+   ImpairmentEngine.cpp has a proven architectural ceiling of 74.19% (138/186
+   branches). The ceiling arises from two sources: (a) 40 permanently-missed
+   branches from NEVER_COMPILED_OUT_ASSERT calls (one per assertion, [[noreturn]]
+   True path); and (b) 8 architecturally-impossible logic branches:
+     - queue_to_delay_buf L90:27 False: loop always exits early via return (the
+       assert at L87 guarantees a free slot exists, so the bound is never hit).
+     - process_outbound L198:9 True: queue_to_delay_buf always succeeds when
+       called because L192 already checked m_delay_count < IMPAIR_DELAY_BUF_SIZE.
+     - apply_duplication L139:17 False: queue_to_delay_buf always succeeds when
+       called from L138 (L137:13 True guarantees a free slot).
+     - process_inbound L292:9 False: the entry assert requires buf_cap > 0U.
+     - process_inbound L305:13 False: after decrement, m_reorder_count is always
+       < m_cfg.reorder_window_size (mathematically guaranteed post-decrement).
+     - Three additional branches within NEVER_COMPILED_OUT_ASSERT macro expansion.
+   All reachable decision-level branches are 100% covered. The ImpairmentEngine.cpp
+   threshold is therefore set at 74% (maximum achievable); this is not a defect
+   and requires no remediation.
+   TlsTcpBackend.cpp meets the ≥ 76% target at 76.24% (231/303 branches).
    AckTracker, RetryManager, and DeliveryEngine unit tests have been added
    (tests/test_AckTracker.cpp, tests/test_RetryManager.cpp,
    tests/test_DeliveryEngine.cpp) and all meet the ≥ 75% branch coverage floor.

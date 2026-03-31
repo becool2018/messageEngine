@@ -51,7 +51,7 @@ ALL_LIB_OBJS := $(CORE_OBJS) $(PLATFORM_OBJS)
 # ─────────────────────────────────────────────────────────────────────────────
 .PHONY: all clean tests server client check_traceability \
         lint cppcheck pclint scan_build static_analysis \
-        coverage coverage_show
+        coverage coverage_show coverage_report
 
 all: server client tests
 
@@ -277,6 +277,69 @@ coverage_show:
 	    -format=text \
 	    -show-branches=count \
 	    $(CORE_SRC) $(PLATFORM_SRC)
+
+# coverage_report: formatted per-file + per-function report with policy compliance notes.
+# Depends on 'coverage' so profiles are always up to date before reporting.
+# Per-file percentages come live from llvm-cov; policy annotations are fixed facts.
+coverage_report: coverage
+	@echo ""
+	@echo "================================================================"
+	@echo "   messageEngine — Test Coverage Report"
+	@echo "   $$(date '+%Y-%m-%d %H:%M') | LLVM source-based coverage"
+	@echo "================================================================"
+	@echo ""
+	@echo "--- Per-file summary (functions / lines / branches) ---"
+	@$(LLVM_COV) report \
+	    -instr-profile=build/cov/merged.profdata \
+	    build/cov_test_MessageEnvelope \
+	    -object build/cov_test_Serializer \
+	    -object build/cov_test_DuplicateFilter \
+	    -object build/cov_test_ImpairmentEngine \
+	    -object build/cov_test_LocalSim \
+	    -object build/cov_test_AckTracker \
+	    -object build/cov_test_RetryManager \
+	    -object build/cov_test_DeliveryEngine \
+	    -object build/cov_test_ImpairmentConfigLoader \
+	    -object build/cov_test_TlsTcpBackend \
+	    $(CORE_SRC) $(PLATFORM_SRC)
+	@echo ""
+	@echo "--- Per-function detail ---"
+	@$(LLVM_COV) report \
+	    --show-functions \
+	    -instr-profile=build/cov/merged.profdata \
+	    build/cov_test_MessageEnvelope \
+	    -object build/cov_test_Serializer \
+	    -object build/cov_test_DuplicateFilter \
+	    -object build/cov_test_ImpairmentEngine \
+	    -object build/cov_test_LocalSim \
+	    -object build/cov_test_AckTracker \
+	    -object build/cov_test_RetryManager \
+	    -object build/cov_test_DeliveryEngine \
+	    -object build/cov_test_ImpairmentConfigLoader \
+	    -object build/cov_test_TlsTcpBackend \
+	    $(CORE_SRC) $(PLATFORM_SRC)
+	@echo ""
+	@echo "--- Policy compliance (CLAUDE.md §14) ---"
+	@echo "  Floor: >= 75% branch coverage for all SC function files."
+	@echo ""
+	@echo "  Documented ceilings (max achievable -- not defects):"
+	@echo "    core/Serializer.cpp              74% ceiling"
+	@echo "      20 permanently-missed branches: 1 per NEVER_COMPILED_OUT_ASSERT"
+	@echo "      ([[noreturn]] abort path; LLVM skips its profile counter)."
+	@echo "    platform/ImpairmentEngine.cpp    74% ceiling"
+	@echo "      48 missed: 40 assert branches + 8 architecturally-impossible"
+	@echo "      logic branches (assert-protected or mathematically unreachable)."
+	@echo ""
+	@echo "  Known gaps (SC files with no test suite -- blocking defects):"
+	@echo "    platform/TcpBackend.cpp          0%  no test suite"
+	@echo "    platform/UdpBackend.cpp          0%  no test suite"
+	@echo ""
+	@echo "  NSC files (line coverage sufficient, branch floor not enforced):"
+	@echo "    platform/LocalSimHarness.cpp"
+	@echo "    platform/SocketUtils.cpp   (UDP socket helpers untested)"
+	@echo ""
+	@echo "  See CLAUDE.md §14 for full policy and ceiling justifications."
+	@echo "================================================================"
 
 clean:
 	rm -rf build/

@@ -251,23 +251,34 @@ build/test_LocalSim
 Uses LLVM source-based coverage (`clang++ -fprofile-instr-generate -fcoverage-mapping`).
 
 ```bash
-# Build instrumented binaries, run all tests, and print branch coverage report
+# Build instrumented binaries, run all tests, print per-file summary
 make coverage
 
-# Print annotated line-level output (requires make coverage first)
+# Full report: per-file summary + per-function breakdown + policy compliance table
+make coverage_report
+
+# Annotated line-level output with branch hit counts (requires make coverage first)
 make coverage_show
 ```
 
-Current branch coverage for key modules:
+Policy floor: ≥ 75% branch coverage for all safety-critical (SC) files (CLAUDE.md §14).
 
-| Module | Branch Coverage |
-|---|---|
-| `Serializer.cpp` | 74.36% *(architectural ceiling — 20 NEVER_COMPILED_OUT_ASSERT fire-branches)* |
-| `AckTracker.cpp` | 76.71% |
-| `RetryManager.cpp` | 75.53% |
-| `DeliveryEngine.cpp` | 75.22% |
-| `ImpairmentEngine.cpp` | 68.82% |
-| `LocalSimHarness.cpp` | 69.01% |
+| File | Branch % | SC? | Status |
+|---|---|---|---|
+| `core/Serializer.cpp` | 74.36% | SC | Ceiling — 20 missed assert branches (`[[noreturn]]`) |
+| `core/DuplicateFilter.cpp` | 76.19% | SC | Pass |
+| `core/AckTracker.cpp` | 76.71% | SC | Pass |
+| `core/RetryManager.cpp` | 75.53% | SC | Pass |
+| `core/DeliveryEngine.cpp` | 75.22% | SC | Pass |
+| `platform/ImpairmentEngine.cpp` | 74.19% | SC | Ceiling — 40 assert + 8 unreachable branches |
+| `platform/ImpairmentConfigLoader.cpp` | 79.82% | SC | Pass |
+| `platform/TlsTcpBackend.cpp` | 76.24% | SC | Pass |
+| `platform/LocalSimHarness.cpp` | 69.01% | NSC | Line coverage sufficient |
+| `platform/SocketUtils.cpp` | 22.51% | NSC | UDP helpers untested |
+| `platform/TcpBackend.cpp` | 0% | SC | **Gap — no test suite** |
+| `platform/UdpBackend.cpp` | 0% | SC | **Gap — no test suite** |
+
+Ceiling files are at the maximum achievable coverage given that `NEVER_COMPILED_OUT_ASSERT` generates one permanently-missed branch per call (the `abort()` path is `[[noreturn]]`; LLVM does not insert a profile counter for it). These are documented deviations, not defects.
 
 ---
 
