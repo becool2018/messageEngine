@@ -232,395 +232,6 @@ The impairment engine must be able to apply, per channel or globally:
 
 ---
 
-13. Software Safety Requirements (NASA-STD-8719.13C / NASA-STD-8739.8A)
-
-```xml
-<software_safety_requirements>
-This section implements the software safety analysis obligations of NASA-STD-8719.13C
-(Software Safety) and NASA-STD-8739.8A (Software Assurance) for this project.
-
-1. Mandatory artifacts
-The following artifacts must exist, be kept under version control, and be updated
-whenever the software changes in a way that affects safety properties:
-
-  a) Software Safety Hazard Analysis — docs/HAZARD_ANALYSIS.md §1
-     A table of software-induced hazards, each with:
-       - Unique hazard ID (HAZ-NNN)
-       - Description of the hazardous condition
-       - Severity category (Cat I–IV per NASA-STD-8719.13C §4.3)
-       - Triggering condition (what software state produces the hazard)
-       - Detection mechanism (how it is caught)
-       - Mitigation (the code-level defense)
-     Update trigger: any new message path, new reliability mode, or new transport.
-
-  b) Failure Mode and Effects Analysis (FMEA) — docs/HAZARD_ANALYSIS.md §2
-     Per major component: failure mode, system-level effect, severity, detection,
-     and mitigation. Components in scope: DeliveryEngine, RetryManager, AckTracker,
-     DuplicateFilter, Serializer, TcpBackend, UdpBackend, ImpairmentEngine.
-     Update trigger: any new component or modification to an existing component's
-     public interface or state machine.
-
-  c) Safety-Critical Function Classification — docs/HAZARD_ANALYSIS.md §3
-     Every public function/method in src/ is classified as either:
-       - Safety-Critical (SC): on the send/receive/expiry/dedup/retry/impairment path;
-         directly mitigates one or more HAZ-NNN entries.
-       - Non-Safety-Critical (NSC): observability, configuration, lifecycle init,
-         or test-only; no direct effect on message delivery semantics.
-     SC functions must also carry a source annotation in their header declaration
-     (see rule 2 below).
-     Update trigger: any new public function or change to an existing function's role.
-
-2. Source annotation for SC functions
-Every function classified SC in docs/HAZARD_ANALYSIS.md §3 must carry the following
-comment on its declaration in the corresponding .hpp file:
-    // Safety-critical (SC): HAZ-NNN[, HAZ-NNN...]
-The HAZ IDs must match entries in docs/HAZARD_ANALYSIS.md §1. Unannotated SC
-declarations are a defect; annotated NSC declarations are a documentation error.
-
-3. Review obligations
-- SC functions require mandatory peer review before merge (no self-merge).
-- SC functions must have 100% branch coverage of all reachable branches in tests;
-  MC/DC coverage is the target for the five highest-hazard functions (§14).
-- Any change to an SC function triggers a re-review of all FMEA entries that
-  reference that function.
-
-4. Classification change process
-Reclassifying a function from NSC to SC, or adding a new SC function, requires:
-  1. A new or updated HAZ-NNN entry in docs/HAZARD_ANALYSIS.md §1.
-  2. Updated FMEA rows in §2.
-  3. Source annotation added to the .hpp declaration.
-  4. Reviewer sign-off before merge.
-</software_safety_requirements>
-```
-
----
-
-14. Coverage Requirements (NASA-STD-8739.8A / NPR 7150.2D)
-
-```xml
-<coverage_requirements>
-1. Mandatory floor — all SC functions (docs/HAZARD_ANALYSIS.md §3):
-   - Branch coverage (true/false for every decision) is the CI-enforced minimum.
-   - Measure with: make coverage  (LLVM source-based coverage via clang++).
-   - A branch coverage regression on any SC function is a blocking defect.
-
-2. MC/DC goal — the five highest-hazard SC functions:
-   - DeliveryEngine::send         (HAZ-001, HAZ-002, HAZ-006)
-   - DeliveryEngine::receive      (HAZ-001, HAZ-003, HAZ-004, HAZ-005)
-   - DuplicateFilter::check_and_record  (HAZ-003)
-   - Serializer::serialize        (HAZ-005)
-   - Serializer::deserialize      (HAZ-001, HAZ-005)
-   MC/DC requires every condition in each decision to independently affect the
-   outcome. Demonstrate MC/DC by test-case review, not tooling alone.
-
-3. NSC functions: line coverage is sufficient; no branch-coverage enforcement.
-
-4. Per-file branch coverage thresholds and known ceilings:
-   The policy floor is 100% branch coverage of all reachable branches for every SC
-   function file. The per-file numeric thresholds below are NOT relaxations of this
-   floor — they represent what 100% reachable looks like after excluding
-   architecturally-unreachable branches (NEVER_COMPILED_OUT_ASSERT [[noreturn]] True
-   paths, hard POSIX error paths unreachable in loopback, impairment-delay paths not
-   configurable via the TransportConfig public API, and proven dead-code paths). Every
-   branch that CAN be exercised by a test MUST be exercised. A numeric threshold below
-   100% is only valid when accompanied by a documented architectural ceiling that
-   accounts for every single missed branch.
-   Serializer.cpp has a proven architectural ceiling of 74.36% (58/78 branches).
-   This ceiling arises because NEVER_COMPILED_OUT_ASSERT expands to
-   `if (!(cond)) { ...; abort(); }`, and LLVM source-based coverage counts
-   the True (fires) branch as a branch but does not insert a profile counter
-   for it (the path is [[noreturn]] via abort()). The result is 20 permanently-
-   missed branches — one per NEVER_COMPILED_OUT_ASSERT call across the 8
-   functions in Serializer.cpp (6 helpers × 2 asserts + serialize × 4 +
-   deserialize × 4). All 18 decision-level branches (the actual serialization
-   and deserialization logic) are 100% covered. The Serializer.cpp threshold
-   is therefore set at 74% (maximum achievable); this is not a defect and
-   requires no remediation.
-   ImpairmentEngine.cpp has a proven architectural ceiling of 74.19% (138/186
-   branches). The ceiling arises from two sources: (a) 40 permanently-missed
-   branches from NEVER_COMPILED_OUT_ASSERT calls (one per assertion, [[noreturn]]
-   True path); and (b) 8 architecturally-impossible logic branches:
-     - queue_to_delay_buf L90:27 False: loop always exits early via return (the
-       assert at L87 guarantees a free slot exists, so the bound is never hit).
-     - process_outbound L198:9 True: queue_to_delay_buf always succeeds when
-       called because L192 already checked m_delay_count < IMPAIR_DELAY_BUF_SIZE.
-     - apply_duplication L139:17 False: queue_to_delay_buf always succeeds when
-       called from L138 (L137:13 True guarantees a free slot).
-     - process_inbound L292:9 False: the entry assert requires buf_cap > 0U.
-     - process_inbound L305:13 False: after decrement, m_reorder_count is always
-       < m_cfg.reorder_window_size (mathematically guaranteed post-decrement).
-     - Three additional branches within NEVER_COMPILED_OUT_ASSERT macro expansion.
-   All reachable decision-level branches are 100% covered. The ImpairmentEngine.cpp
-   threshold is therefore set at 74% (maximum achievable); this is not a defect
-   and requires no remediation.
-   TlsTcpBackend.cpp meets the ≥ 76% target at 76.87% (236/307 branches).
-   Five previously-missed branches are now covered: the DI constructor
-   `TlsTcpBackend(ISocketOps&)` body and its `MAX_TCP_CONNECTIONS` init loop
-   (test_di_constructor_executes), recv_from_client queue-overflow path
-   (test_recv_queue_overflow with 8 simultaneous clients), and
-   send_message loss-impairment ERR_IO drop (test_send_impairment_loss_drop).
-   AckTracker, RetryManager, and DeliveryEngine unit tests have been added
-   (tests/test_AckTracker.cpp, tests/test_RetryManager.cpp,
-   tests/test_DeliveryEngine.cpp) and all meet the ≥ 75% branch coverage floor.
-   DtlsUdpBackend.cpp has a proven architectural ceiling of 83.33% (200/240 branches).
-   The ceiling arises from two independent sources:
-     (a) 26 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
-         noreturn) paths — one per assert call across all functions, consistent with
-         the mechanism documented for Serializer.cpp and ImpairmentEngine.cpp above.
-         (Count increased from 24 to 26 when ssl_handshake and ssl_read were added to
-         IMbedtlsOps and routed through m_ops, adding 2 new assert call sites in
-         DtlsUdpBackend.cpp's handshake and read paths.)
-     (b) Approximately 14 remaining hard mbedTLS and structural error paths:
-         recvfrom(MSG_PEEK) failure, server/client UDP connect() failure,
-         Serializer::serialize failure (wire buffer always large enough), recv_queue
-         full (max injectable depth via IMPAIR_DELAY_BUF_SIZE is below
-         MSG_RING_CAPACITY), and WANT_READ retry paths not triggered in fast loopback.
-   The 10 IMbedtlsOps paths (psa_crypto_init, ssl_config_defaults, ssl_conf_own_cert,
-   ssl_cookie_setup, ssl_setup ×2, ssl_set_client_transport_id, recvfrom_peek,
-   net_connect ×2) are covered by DtlsMockOps fault-injection tests. The ssl_write
-   failure path is covered by test_mock_dtls_ssl_write_fail(). The DTLS handshake
-   iteration limit (32 rounds exhausted) is covered by
-   test_mock_dtls_handshake_iteration_limit(). The ssl_read fatal error path is
-   covered by test_mock_dtls_ssl_read_error(). The 2 ISocketOps POSIX paths are
-   covered by MockSocketOps tests. The impairment delay paths (flush_delayed_to_queue
-   loop body, post-flush pop) are covered by test_delay_impairment_flush_and_recv().
-   The loss path (send_message ERR_IO) is covered by test_loss_impairment_drops_send().
-   The num_channels==0 init branch is covered by test_init_num_channels_zero().
-   All 200 reachable decision-level branches are 100% covered. The DtlsUdpBackend.cpp
-   threshold is therefore set at 83% (maximum achievable); this is not a defect and
-   requires no remediation.
-   TcpBackend.cpp has a proven architectural ceiling of 78.12% (175/224 branches).
-   The ceiling arises from two independent sources:
-     (a) 39 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
-         noreturn) paths — one per assert call across all functions, consistent with
-         the mechanism documented for Serializer.cpp, ImpairmentEngine.cpp, and
-         DtlsUdpBackend.cpp above.
-     (b) Approximately 10 additional architecturally-unreachable branches:
-         poll_clients_once POLLIN True for accept fd when no client connects during
-         the test window; recv_from_client partial-read loop body (tcp_recv_frame
-         inner loop for messages split across multiple TCP segments, which does not
-         occur with loopback localhost); and Serializer::serialize failure (wire
-         buffer is always large enough for any valid envelope).
-   The 6 previously-uncovered POSIX error paths are covered by ISocketOps mock
-   fault-injection tests. The impairment delay paths are covered by
-   test_tcp_impairment_delay_paths(). Four additional branches are now covered:
-   remove_client_fd False at index 0 (test_remove_client_fd_false_at_index0),
-   recv_queue overflow (test_recv_queue_overflow), send_frame failure
-   (test_send_to_all_clients_send_frame_fail), and loss-impairment ERR_IO drop
-   (test_send_message_loss_impairment_drop).
-   All 175 reachable decision-level branches are 100% covered. The TcpBackend.cpp
-   threshold is therefore set at 78% (maximum achievable); this is not a defect and
-   requires no remediation.
-   UdpBackend.cpp has a proven architectural ceiling of 75.51% (74/98 branches).
-   The ceiling arises from two independent sources:
-     (a) 19 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
-         noreturn) paths — one per assert call across all functions, consistent with
-         the mechanism documented above.
-     (b) Approximately 5 additional architecturally-unreachable branches:
-         recv_one_datagram inner poll True branch for a second datagram
-         (single-datagram-per-call design); Serializer::serialize failure (wire
-         buffer always large enough); and recv_queue full in recv_one_datagram
-         (max injectable depth via IMPAIR_DELAY_BUF_SIZE - 1 = 31 is below
-         MSG_RING_CAPACITY = 64, making overflow unreachable through the public API).
-   The 2 POSIX error paths are covered by MockSocketOps tests. The impairment delay
-   paths are covered by test_udp_impairment_delay_paths(). Three additional branches
-   are now covered: loss-impairment ERR_IO drop (test_udp_send_loss_impairment),
-   send_to failure (test_mock_send_to_fail), and initial recv_queue pop True
-   (test_udp_recv_queue_initial_pop).
-   All 74 reachable decision-level branches are 100% covered. The UdpBackend.cpp
-   threshold is therefore set at 75% (maximum achievable); this is not a defect and
-   requires no remediation.
-   LocalSimHarness.cpp has a proven architectural ceiling of 72.46% (50/69 branches).
-   The ceiling arises from two independent sources:
-     (a) 17 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
-         noreturn) paths across all functions, consistent with the mechanism
-         documented above.
-     (b) 2 structurally-unreachable decision branches: L165 `iterations > 5000U`
-         True requires a >5-second test timeout which is unreasonable; L179 queue
-         pop True during the sleep loop requires a peer to inject a message during
-         nanosleep, which does not occur in the single-threaded in-process test
-         design.
-         The previously-unreachable loss path (send_message L118 True) and delay
-         loop body (L131–L134) are now covered by test_loss_impairment() and
-         test_delay_loop_body() in tests/test_LocalSim.cpp — both paths became
-         testable after Option A replaced impairments_enabled with a full
-         ImpairmentConfig field in ChannelConfig (VVP-001 M5).
-         The previously-dead ternary `(timeout_ms > 0U) ? timeout_ms : 1U` has
-         been eliminated (P2 dead-code removal); the expression is now
-         `uint32_t iterations = timeout_ms;`, reducing total branches from 71 to
-         69 and missed count from 20 to 19.
-   All 50 reachable decision-level branches are 100% covered. The LocalSimHarness.cpp
-   threshold is therefore set at 72% (maximum achievable); this is not a defect and
-   requires no remediation.
-   MbedtlsOpsImpl.cpp has a proven architectural ceiling of 69.77% (60/86 branches).
-   The ceiling arises from a single source:
-     (a) 26 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
-         noreturn) paths — one per assert call across all 15 functions, consistent with
-         the mechanism documented above. (Count increased from 23 to 26 when
-         ssl_handshake (1 assert) and ssl_read (2 asserts) were added to the interface.)
-         MbedtlsOpsImpl is a pure delegation layer with no control-flow logic of its
-         own; every function body is a precondition assertion followed by a single
-         mbedTLS or POSIX library call passthrough.
-         All 60 reachable decision-level branches (the False outcomes of the assert
-         guards, i.e., the normal execution paths) are 100% covered.
-   The MbedtlsOpsImpl.cpp threshold is therefore set at 69% (maximum achievable);
-   this is not a defect and requires no remediation.
-   ImpairmentConfigLoader.cpp has a proven architectural ceiling of 90.83% (99/109 branches).
-   The ceiling arises from three independent sources:
-     (a) 5 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/noreturn)
-         paths — one per assert call: apply_kv (2 asserts: key != nullptr, val != nullptr),
-         parse_config_line (2 asserts: line != nullptr, key[0] != '\0'), and
-         impairment_config_load (1 assert: path != nullptr).
-     (b) 4 branches from the two compound-condition postcondition assertions in
-         impairment_config_load: NEVER_COMPILED_OUT_ASSERT(cfg.loss_probability >= 0.0
-         && cfg.loss_probability <= 1.0) and the analogous duplication_probability
-         assert each expand to `if (!(a && b))`, whose short-circuit False sub-branches
-         (a is False, or a is True but b is False) are permanently unreachable because
-         the clamping logic immediately before the asserts guarantees both inequalities.
-     (c) 1 fclose() return-value error path: fclose() succeeds unconditionally for
-         regular files in a non-adversarial test environment; triggering this path would
-         require filesystem corruption or resource-limit injection not available in unit
-         tests without fault-injection infrastructure.
-   All 99 reachable decision-level branches are 100% covered. The
-   ImpairmentConfigLoader.cpp threshold is therefore set at 90% (maximum achievable);
-   this is not a defect and requires no remediation.
-   SocketUtils.cpp has a proven architectural ceiling of 64.07% (148/231 branches).
-   SocketUtils is NSC (raw POSIX I/O primitives; no message-delivery policy), so branch
-   coverage is not policy-enforced. The ceiling is documented here for Class A/B readiness.
-   The ceiling arises from two independent sources:
-     (a) ~19 hard POSIX error paths that cannot be triggered in a loopback test environment:
-         fcntl(F_GETFL) failure, fcntl(F_SETFL) failure, setsockopt(SO_REUSEADDR) failure,
-         listen() failure, accept() failure, close() failure (after valid open), recvfrom()
-         failure on an open UDP socket, and inet_ntop() failure on a valid loopback address.
-         These POSIX calls succeed unconditionally on loopback sockets on macOS/Linux.
-     (b) UDP partial-send atomicity: socket_send_to() checks `send_result != len` (partial
-         send), which cannot occur for UDP datagrams on loopback — UDP is atomic at the
-         datagram level; either the full datagram is sent or sendto() returns an error.
-   All 2 newly-reachable branches are covered (inet_aton failure in socket_bind() and
-   socket_send_to() via invalid-IP unit tests in test_SocketUtils.cpp). All 17 direct unit
-   tests covering every SocketUtils function's success path pass cleanly.
-   The SocketUtils.cpp threshold is therefore set at 64% (maximum achievable for NSC);
-   this is not a defect and requires no remediation.
-   AssertState.cpp has a proven architectural ceiling of 50.00% (1/2 branches).
-   LLVM now reports 2 branch points: the `if (s_handler != nullptr)` decision inside
-   `trigger_handler_for_test()`. The True branch (handler registered → virtual dispatch
-   called) is covered by test_trigger_dispatches_to_handler and test_trigger_sets_fatal_flag.
-   The False branch (no handler registered → `::abort()`) cannot be tested without
-   aborting the test process; it is verified by code inspection (same rationale as the
-   NEVER_COMPILED_OUT_ASSERT no-handler fallback in Assert.hpp). Line coverage remains
-   100% (21/21 lines), and all 4 functions are covered. The branch coverage ceiling of
-   50% (maximum achievable) is not a defect and requires no remediation.
-   AssertState is NSC-infrastructure (CLAUDE.md §10 assertion policy).
-
-5. Coverage does not substitute for code review or static analysis. All three
-   (coverage, review, static analysis) are required for SC functions.
-</coverage_requirements>
-```
-
----
-
-15. Stack Depth Analysis (NASA-STD-8719.13C)
-
-```xml
-<stack_depth_requirements>
-1. Basis: Power of 10 Rule 1 (no recursion) makes the call graph a DAG.
-   Worst-case stack depth is the longest path in the DAG and can be determined
-   by static inspection without instrumentation tools.
-
-2. Analysis artifact: docs/STACK_ANALYSIS.md
-   Contains the four worst-case call chains, per-frame size estimates, and
-   platform headroom calculations.
-
-3. Current worst case: 9 frames, ~748 bytes peak (Chain 1 — outbound send).
-   Platform headroom: > 700× on macOS/Linux. No stack overflow risk.
-
-4. Update trigger: this document must be updated when:
-   - Any function introduces a stack-allocated buffer larger than 256 bytes.
-   - A new call chain extends depth beyond 9 frames.
-   - A new thread entry point is added.
-
-5. Embedded porting: on targets with ≤ 64 KB stack, re-derive estimates using
-   a stack-analysis tool (avstack, StackAnalyzer, or linker map inspection).
-   The no-recursion guarantee remains the primary protection.
-</stack_depth_requirements>
-```
-
----
-
-16. Worst-Case Execution Time Analysis (NASA-STD-8719.13C)
-
-```xml
-<wcet_requirements>
-1. Basis: Power of 10 Rule 2 (all loops have statically provable bounds) means
-   every SC function's execution time is expressible as a closed-form formula
-   in the compile-time capacity constants from src/core/Types.hpp.
-
-2. Analysis artifact: docs/WCET_ANALYSIS.md
-   Contains per-SC-function worst-case operation counts and guidance for
-   converting to actual cycle counts on deterministic embedded targets.
-
-3. Classical WCET measurement (aiT, Rapita, etc.) is not applicable on a
-   POSIX host with non-deterministic scheduling. On a deterministic embedded
-   target, use the operation counts in docs/WCET_ANALYSIS.md × target
-   cycles-per-operation to derive a true WCET bound.
-
-4. Dominant cost paths (see docs/WCET_ANALYSIS.md for full table):
-   - DeliveryEngine::pump_retries()  O(ACK_TRACKER_CAPACITY × MSG_MAX_PAYLOAD_BYTES)
-   - Serializer::serialize/deserialize  O(MSG_MAX_PAYLOAD_BYTES)
-   - DuplicateFilter::check_and_record  O(DEDUP_WINDOW_SIZE)
-
-5. Update trigger: this document must be updated when any capacity constant
-   in src/core/Types.hpp changes, or when a new SC function is added.
-</wcet_requirements>
-```
-
----
-
-17. Formal Methods and Software Classification (NASA-STD-8719.13C / NPR 7150.2D)
-
-```xml
-<formal_methods_requirements>
-1. Software classification: Class C (NPR 7150.2D Appendix D)
-   Rationale: messageEngine is infrastructure software — a networking library.
-   It does not directly command actuators or safety barriers. The application
-   embedding it is responsible for Class A/B assurance if required.
-
-2. Current verification baseline (per .claude/VERIFICATION_POLICY.md VVP-001 §4.1):
-   - SC functions:  M1 (inspection) + M2 (static analysis) + M4 (branch coverage)
-   - NSC functions: M1 (inspection) + M2 (static analysis) + M3 (line coverage)
-   This baseline satisfies Class C and is insufficient for Class B or Class A.
-   Reclassification to Class B requires M5 (fault injection) for all functions;
-   reclassification to Class A additionally requires M6 (MC/DC) for SC functions
-   and M7 (formal verification) for SC state machines. See VVP-001 §6 for the
-   full reclassification process.
-
-   Although the software classification is Class C, all verification activity
-   shall meet the method requirements of Class B (M1 + M2 + M4 + M5 for all
-   functions). This is a voluntary elevation of testing rigor, not a
-   reclassification.
-
-3. Current formal specification: docs/STATE_MACHINES.md
-   Explicit state-transition tables for the three safety-critical state
-   machines: AckTracker (§1), RetryManager (§2), ImpairmentEngine (§3).
-   This lightweight specification satisfies Class C review requirements.
-
-3. Reclassification trigger — if this library is reclassified to Class A or B
-   (e.g., embedded directly in a flight computer as the sole comm layer without
-   an overlying application safety barrier), the following obligations apply:
-   - Model checking of AckTracker, RetryManager, ImpairmentEngine state machines
-     using TLA+ or SPIN, verifying all invariants in docs/STATE_MACHINES.md.
-   - Theorem proving of Serializer bounds using Frama-C (WP plugin) or Coq.
-   - Proof of retry termination (every WAITING slot eventually reaches INACTIVE).
-   - Independent V&V of all SC functions (NPR 7150.2D §3.11).
-
-4. State machine update trigger: docs/STATE_MACHINES.md must be updated when
-   any state, transition, guard, or invariant changes in AckTracker,
-   RetryManager, or ImpairmentEngine source code.
-</formal_methods_requirements>
-```
-
----
-
 9. Power of 10 / MISRA compliance table by directory
 
 This table resolves the conflict between .claude/CLAUDE.md §1 ("all code must obey Power of 10")
@@ -653,6 +264,14 @@ MISRA C++:2023                         | FULL     | FULL         | FULL    | ADV
       to framework integration points, not test logic itself.
 ***** STL containers and algorithms are permitted in tests/ for test data setup only.
 
+9.1 Named static analysis toolchain
+See docs/STATIC_ANALYSIS_TOOLCHAIN.md for the full toolchain definition (tiers, tool
+configs, and TODO status). Summary: Tier 1 (compiler -Wall/-Werror) ACTIVE; Tier 2
+(Clang-Tidy `make lint`, Cppcheck `make cppcheck`) ACTIVE; Tier 3 (PC-lint Plus
+`make pclint`) PENDING licence purchase.
+
+---
+
 10. NEVER_COMPILED_OUT_ASSERT — assertion policy (resolves Conflict #4)
 
 This section resolves the conflict between .claude/CLAUDE.md §8 ("fail fast in debug builds
@@ -669,9 +288,11 @@ use the project macro NEVER_COMPILED_OUT_ASSERT(cond), which is never compiled o
   -------------|---------------------------------------------------------------
   Debug / test | Logs condition + file + line, then calls abort().
                | Produces immediate crash and a full stack trace for debugging.
-  Production   | Logs FATAL with condition + file + line, then triggers a
-               | controlled component reset. Does not call abort() or terminate
-               | the process. Allows the system to recover at the component level.
+  Production   | Logs FATAL with condition + file + line, then calls the
+               | registered IResetHandler::on_fatal_assert() via virtual dispatch
+               | (Power of 10 Rule 9 vtable exception). Falls back to ::abort()
+               | if no handler is registered. Sets g_fatal_fired if the handler
+               | returns (embedded soft-reset path).
 
 10.2 Usage rules
 
@@ -679,119 +300,12 @@ use the project macro NEVER_COMPILED_OUT_ASSERT(cond), which is never compiled o
   production code (src/core, src/platform, src/app).
 - Raw assert() is permitted in tests/ only, where abort()-on-failure is acceptable.
 - The macro must log at minimum: condition text, file name, line number, severity FATAL.
-- The production reset path must be defined before the macro is used in any module;
+- Register a handler via assert_state::set_reset_handler() before using any component;
   a default no-op reset is not acceptable for safety-critical components.
-
-10.3 TODO: implement NEVER_COMPILED_OUT_ASSERT
-
-- [x] Define NEVER_COMPILED_OUT_ASSERT in src/core/Assert.hpp.
-- [x] Define and register the production component-reset handler
-      (assert_set_reset_handler() / assert_get_reset_handler() in src/core/Assert.hpp;
-       production handler registered in src/core/AssertState.cpp).
-- [x] Replace all existing raw assert() calls in src/ with NEVER_COMPILED_OUT_ASSERT.
-- [ ] Add Clang-Tidy or cppcheck rule to flag any remaining assert() in src/.
+- For POSIX builds register AbortResetHandler::instance() (src/core/AbortResetHandler.hpp).
+- See src/core/Assert.hpp, src/core/AssertState.hpp, src/core/IResetHandler.hpp.
 
 ---
-
-9.1 Named static analysis toolchain (NPR 7150.2D / NASA-STD-8739.8)
-
-NASA projects must identify static analysis tools explicitly because different tools have
-different rule sets, MISRA coverage levels, and false-positive rates (NPR 7150.2D §3).
-"Static analysis runs regularly" is not sufficient — the specific tools, their roles, and
-their configurations must be named. This section is the authoritative toolchain definition
-for messageEngine.
-
-Tools are organised into three tiers by when they run and what they enforce.
-
-────────────────────────────────────────────────────────────────────────────────
-Tier 1 — Build-time (every compile, already active)
-────────────────────────────────────────────────────────────────────────────────
-
-Tool: GCC / Clang compiler warnings
-  Flags: -Wall -Wextra -Wpedantic -Werror -Wshadow -Wconversion -Wsign-conversion
-         -Wcast-align -Wformat=2 -Wnull-dereference -Wdouble-promotion
-  Role:  First line of defence. Zero-warnings policy (Power of 10 Rule 10) means
-         any warning is a build failure. Already enforced in Makefile.
-  Status: ACTIVE
-
-────────────────────────────────────────────────────────────────────────────────
-Tier 2 — Fast CI pass (run on every change, before merge)
-────────────────────────────────────────────────────────────────────────────────
-
-Tool: Clang-Tidy  (free — https://clang.llvm.org/extra/clang-tidy/)
-  Makefile target: make lint
-  Role:  Day-to-day enforcement of Power of 10 patterns, MISRA-adjacent checks,
-         complexity limits, and the per-directory compliance table (§9).
-  Config: src/.clang-tidy  — strict profile (full rule set)
-          tests/.clang-tidy — relaxed profile (STL and dynamic alloc permitted)
-  Key checks to enable:
-    - readability-function-cognitive-complexity (threshold: 10, per Rule 4/§4)
-    - cppcoreguidelines-no-malloc (Rule 3)
-    - fuchsia-restrict-system-includes (no STL in src/)
-    - misc-no-recursion (Rule 1)
-    - bugprone-*, performance-*, portability-*
-  Status: TODO — see §9.2
-
-Tool: Cppcheck  (free — https://cppcheck.sourceforge.io/)
-  Makefile target: make cppcheck
-  Role:  Second-pass analysis; catches patterns Clang-Tidy misses — integer overflow,
-         uninitialised variables, out-of-bounds array access, and MISRA C++:2023
-         rules via the bundled misra.py addon.
-  Config: Run with --addon=misra --misra-c++-version=2023 on src/ only.
-          Use --suppress-file=.cppcheck-suppress for documented deviations.
-  Status: TODO — see §9.2
-
-────────────────────────────────────────────────────────────────────────────────
-Tier 3 — MISRA compliance pass (run before any release or external review)
-────────────────────────────────────────────────────────────────────────────────
-
-Primary MISRA checker:
-Tool: PC-lint Plus  (commercial — https://gimpel.com)
-  Makefile target: make pclint
-  Role:  Authoritative MISRA C++:2023 compliance checker. Produces the compliance
-         report required for NPR 7150.2D formal assurance reviews. PC-lint Plus is
-         the most widely accepted MISRA C++ checker in NASA and DO-178C contexts.
-         Covers all Required and Advisory rules; generates per-rule deviation reports.
-  Config: pclint/co-gcc.lnt + pclint/misra_cpp_2023.lnt (to be created).
-         Separate .lnt option files for src/ (strict) and tests/ (relaxed).
-  Status: TODO — requires licence purchase; see §9.2
-
-Alternative MISRA checker (if PC-lint Plus is not available):
-Tool: Cppcheck with MISRA C++:2023 addon  (free, partial coverage)
-  Role:  Covers a subset of MISRA C++:2023 rules. Acceptable for development-time
-         checking but does not produce a full compliance report suitable for formal
-         audit. Use as a stand-in until PC-lint Plus is procured.
-  Status: TODO — same Cppcheck install as Tier 2; add --addon=misra flag.
-
-────────────────────────────────────────────────────────────────────────────────
-Optional Tier 4 — Deep formal analysis (pre-release or on CRITICAL changes)
-────────────────────────────────────────────────────────────────────────────────
-
-Tool: Polyspace Bug Finder / Code Prover  (commercial — MathWorks)
-  Role:  Formal proof of absence of runtime errors (null deref, overflow, data races).
-         Required for Class A software under NPR 7150.2D. Optional for this project
-         unless safety classification is raised. Produces green/red/orange proof results
-         per code region.
-  Status: NOT REQUIRED at current classification; revisit if classification changes.
-
-Tool: Coverity Static Analysis  (commercial — Synopsys)
-  Role:  Deep interprocedural analysis; excellent at finding concurrency defects and
-         subtle memory errors. Widely used by NASA and DoD projects.
-  Status: NOT REQUIRED at current classification; revisit if classification changes.
-
-────────────────────────────────────────────────────────────────────────────────
-
-9.2 TODO: configure and integrate Tier 2 and Tier 3 tools
-
-- [x] Install Clang-Tidy; create src/.clang-tidy (strict) and tests/.clang-tidy (relaxed).
-- [x] Add `make lint` target invoking Clang-Tidy on src/ and tests/.
-- [x] Install Cppcheck; create .cppcheck-suppress deviation file.
-- [x] Add `make cppcheck` target invoking Cppcheck + MISRA addon on src/.
-- [ ] Procure PC-lint Plus licence; create pclint/ config directory.
-- [ ] Add `make pclint` target for formal MISRA C++:2023 compliance report.
-- [ ] Add `make static_analysis` umbrella target running lint + cppcheck in sequence.
-- [ ] Document all tool-reported deviations in docs/DEFECT_LOG.md with WAIVE disposition
-      and the specific MISRA rule reference.
 
 11. Traceability policy (NPR 7150.2D — bidirectional traceability)
 
@@ -819,9 +333,8 @@ Do not edit the matrix by hand; regenerate it by running the script.
 
 12. Formal inspection and peer review process (NPR 7150.2D §3 / NASA-STD-8739.8)
 
-This section replaces the prior placeholder ("assume formal inspections") with a defined,
-lightweight structured review process satisfying NPR 7150.2D intent without full Fagan
-overhead. Every non-trivial change to src/ or tests/ requires a completed inspection record.
+Every non-trivial change to src/ or tests/ requires a completed inspection record in
+docs/DEFECT_LOG.md. Full procedure and moderator checklist: docs/INSPECTION_CHECKLIST.md.
 
 12.1 Reviewer roles
 
@@ -844,37 +357,139 @@ overhead. Every non-trivial change to src/ or tests/ requires a completed inspec
   [ ] Author has self-reviewed against docs/INSPECTION_CHECKLIST.md before
       requesting a moderator-led review.
 
-12.3 Review execution
+12.3 Exit criteria summary
+All CRITICAL and MAJOR defects dispositioned; checklist complete; make + run_tests +
+check_traceability all pass; moderator signed off in docs/DEFECT_LOG.md.
+Full exit criteria, waiver policy, and severity definitions: docs/INSPECTION_CHECKLIST.md.
 
-  - Author walks through each changed file, explaining intent and design decisions.
-  - Moderator works through docs/INSPECTION_CHECKLIST.md line by line.
-  - Every defect found is logged immediately in docs/DEFECT_LOG.md with:
-      date, file:line, defect description, severity (MINOR / MAJOR / CRITICAL),
-      disposition (FIX / WAIVE / DEFER), and resolution notes.
-  - Severity definitions:
-      CRITICAL — safety, correctness, or security issue; must be fixed before exit.
-      MAJOR    — standards violation or logic error; must be fixed or waived with
-                 written justification before exit.
-      MINOR    — style, clarity, or advisory; may be deferred with a tracked note.
+---
 
-12.4 Exit criteria (all must be true before change is accepted)
+13. Software Safety Requirements (NASA-STD-8719.13C / NASA-STD-8739.8A)
 
-  [ ] All CRITICAL and MAJOR defects are dispositioned (fixed or waived in DEFECT_LOG.md).
-  [ ] Checklist is fully completed — no items left blank.
-  [ ] make, make run_tests, and make check_traceability all still pass after fixes.
-  [ ] Moderator signs off in DEFECT_LOG.md with name/alias and date.
+```xml
+<software_safety_requirements>
+Mandatory safety artifacts (keep under version control; update on any safety-relevant change):
+  a) Software Safety Hazard Analysis  — docs/HAZARD_ANALYSIS.md §1
+  b) Failure Mode and Effects Analysis (FMEA)  — docs/HAZARD_ANALYSIS.md §2
+  c) Safety-Critical Function Classification  — docs/HAZARD_ANALYSIS.md §3
 
-12.5 Waiver policy
+Update triggers:
+  - Artifact (a): any new message path, reliability mode, or transport.
+  - Artifact (b): any new component or change to a component's public interface or state machine.
+  - Artifact (c): any new public function or change to an existing function's role.
 
-  A defect may be waived (not fixed) only if:
-  - The waiver is logged in DEFECT_LOG.md with explicit written justification.
-  - The waiver references the specific rule being deviated from.
-  - The moderator and at least one reviewer agree.
-  CRITICAL defects may not be waived; they must be fixed.
+1. Source annotation for SC functions
+Every function classified SC in docs/HAZARD_ANALYSIS.md §3 must carry the following
+comment on its declaration in the corresponding .hpp file:
+    // Safety-critical (SC): HAZ-NNN[, HAZ-NNN...]
+The HAZ IDs must match entries in docs/HAZARD_ANALYSIS.md §1. Unannotated SC
+declarations are a defect; annotated NSC declarations are a documentation error.
 
-12.6 Records retention
+2. Review obligations
+- SC functions require mandatory peer review before merge (no self-merge).
+- SC functions must have 100% branch coverage of all reachable branches in tests;
+  MC/DC coverage is the target for the five highest-hazard functions (§14).
+- Any change to an SC function triggers a re-review of all FMEA entries that
+  reference that function.
 
-  docs/DEFECT_LOG.md is a permanent project record. Entries must never be deleted.
-  Entries may be updated to record resolution but the original finding must remain visible.
+3. Classification change process
+Reclassifying a function from NSC to SC, or adding a new SC function, requires:
+  1. A new or updated HAZ-NNN entry in docs/HAZARD_ANALYSIS.md §1.
+  2. Updated FMEA rows in §2.
+  3. Source annotation added to the .hpp declaration.
+  4. Reviewer sign-off before merge.
+</software_safety_requirements>
+```
+
+---
+
+14. Coverage Requirements (NASA-STD-8739.8A / NPR 7150.2D)
+
+```xml
+<coverage_requirements>
+1. Mandatory floor — all SC functions (docs/HAZARD_ANALYSIS.md §3):
+   - Branch coverage (true/false for every decision) is the CI-enforced minimum.
+   - Measure with: make coverage  (LLVM source-based coverage via clang++).
+   - A branch coverage regression on any SC function is a blocking defect.
+
+2. MC/DC goal — the five highest-hazard SC functions:
+   - DeliveryEngine::send         (HAZ-001, HAZ-002, HAZ-006)
+   - DeliveryEngine::receive      (HAZ-001, HAZ-003, HAZ-004, HAZ-005)
+   - DuplicateFilter::check_and_record  (HAZ-003)
+   - Serializer::serialize        (HAZ-005)
+   - Serializer::deserialize      (HAZ-001, HAZ-005)
+   MC/DC requires every condition in each decision to independently affect the
+   outcome. Demonstrate MC/DC by test-case review, not tooling alone.
+
+3. NSC functions: line coverage is sufficient; no branch-coverage enforcement.
+
+4. Per-file branch coverage thresholds and known ceilings:
+   The policy floor is 100% branch coverage of all reachable branches for every SC
+   function file. Per-file architectural ceilings (where the maximum achievable is
+   below 100% due to NEVER_COMPILED_OUT_ASSERT [[noreturn]] True paths or proven
+   dead code) are documented in docs/COVERAGE_CEILINGS.md.
+   A numeric threshold below 100% is only valid when accompanied by a documented
+   architectural ceiling in docs/COVERAGE_CEILINGS.md that accounts for every
+   single missed branch. Every branch that CAN be exercised by a test MUST be
+   exercised.
+
+5. Coverage does not substitute for code review or static analysis. All three
+   (coverage, review, static analysis) are required for SC functions.
+</coverage_requirements>
+```
+
+---
+
+15. Stack Depth Analysis (NASA-STD-8719.13C)
+
+Analysis artifact and current worst-case call chains: docs/STACK_ANALYSIS.md.
+Current worst case: 9 frames, ~748 bytes (Chain 1 — outbound send). Platform
+headroom: >700× on macOS/Linux.
+
+Update trigger: update docs/STACK_ANALYSIS.md when any function introduces a
+stack-allocated buffer >256 bytes, a new call chain exceeds 9 frames, or a new
+thread entry point is added.
+
+---
+
+16. Worst-Case Execution Time Analysis (NASA-STD-8719.13C)
+
+Analysis artifact and per-SC-function operation counts: docs/WCET_ANALYSIS.md.
+Dominant paths: DeliveryEngine::pump_retries() O(ACK_TRACKER_CAPACITY ×
+MSG_MAX_PAYLOAD_BYTES), Serializer::serialize/deserialize O(MSG_MAX_PAYLOAD_BYTES),
+DuplicateFilter::check_and_record O(DEDUP_WINDOW_SIZE).
+
+Update trigger: update docs/WCET_ANALYSIS.md when any capacity constant in
+src/core/Types.hpp changes or a new SC function is added.
+
+---
+
+17. Formal Methods and Software Classification (NASA-STD-8719.13C / NPR 7150.2D)
+
+```xml
+<formal_methods_requirements>
+1. Software classification: Class C (NPR 7150.2D Appendix D)
+   Rationale: messageEngine is infrastructure software — a networking library.
+   It does not directly command actuators or safety barriers. The application
+   embedding it is responsible for Class A/B assurance if required.
+
+2. Current verification baseline (per .claude/VERIFICATION_POLICY.md VVP-001 §4.1):
+   - SC functions:  M1 (inspection) + M2 (static analysis) + M4 (branch coverage)
+   - NSC functions: M1 (inspection) + M2 (static analysis) + M3 (line coverage)
+   Although the software classification is Class C, all verification activity
+   voluntarily meets Class B requirements (M1 + M2 + M4 + M5 for all functions).
+
+3. Current formal specification: docs/STATE_MACHINES.md
+   Explicit state-transition tables for: AckTracker (§1), RetryManager (§2),
+   ImpairmentEngine (§3). Update when any state, transition, guard, or invariant
+   changes in those components.
+
+4. Reclassification trigger — if reclassified to Class A or B, the following
+   obligations apply: TLA+/SPIN model checking of the three state machines;
+   Frama-C WP theorem proving of Serializer bounds; proof of retry termination;
+   independent V&V of all SC functions (NPR 7150.2D §3.11).
+   See TODO_FOR_CLASS_B_CERT.txt for the full gap list.
+</formal_methods_requirements>
+```
 
 </application_requirements>
