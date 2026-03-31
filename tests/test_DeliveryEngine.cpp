@@ -12,6 +12,7 @@
  *
  * Verifies: REQ-3.3.1, REQ-3.3.2, REQ-3.3.3
  */
+// Verification: M1 + M2 + M4 + M5 (fault injection via ITransportBackend mock)
 
 #include <cstdio>
 #include <cstring>

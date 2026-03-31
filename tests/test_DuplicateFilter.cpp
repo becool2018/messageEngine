@@ -12,6 +12,7 @@
  */
 
 // Verifies: REQ-3.2.6
+// Verification: M1 + M2 + M4 + M5 (fault injection not required — pure logic, no external dependency)
 
 #include <cstdio>
 #include <cstring>

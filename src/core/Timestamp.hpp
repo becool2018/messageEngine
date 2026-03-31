@@ -24,7 +24,7 @@
 // Monotonic timestamp in microseconds
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Safety-critical (SC): HAZ-004
+// Safety-critical (SC): HAZ-004 — verified to M5
 /// Get current monotonic time in microseconds since system epoch.
 /// Uses CLOCK_MONOTONIC to avoid wall-clock discontinuities.
 /// Called during message creation and timeout checks.
@@ -44,7 +44,7 @@ inline uint64_t timestamp_now_us()
     return sec_us + nsec_us;
 }
 
-// Safety-critical (SC): HAZ-004
+// Safety-critical (SC): HAZ-004 — verified to M5
 /// Check if a message has expired relative to current time.
 /// Returns true if now_us >= expiry_us AND expiry_us != 0 (0 = never expires).
 /// Used by transport layers and message queues to drop stale messages.
@@ -58,7 +58,7 @@ inline bool timestamp_expired(uint64_t expiry_us, uint64_t now_us)
     return (expiry_us != 0ULL) && (now_us >= expiry_us);
 }
 
-// Safety-critical (SC): HAZ-002, HAZ-004
+// Safety-critical (SC): HAZ-002, HAZ-004 — verified to M5
 /// Compute an absolute deadline (expiry time) given current time and duration.
 /// Returns now_us + (duration_ms * 1000), converting milliseconds to microseconds.
 /// Used by ACK tracking and retry logic to set timeouts.

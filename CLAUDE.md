@@ -362,27 +362,32 @@ Reclassifying a function from NSC to SC, or adding a new SC function, requires:
    AckTracker, RetryManager, and DeliveryEngine unit tests have been added
    (tests/test_AckTracker.cpp, tests/test_RetryManager.cpp,
    tests/test_DeliveryEngine.cpp) and all meet the ≥ 75% branch coverage floor.
-   DtlsUdpBackend.cpp has a proven architectural ceiling of 81.25% (195/240 branches).
+   DtlsUdpBackend.cpp has a proven architectural ceiling of 83.33% (200/240 branches).
    The ceiling arises from two independent sources:
-     (a) 24 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
+     (a) 26 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
          noreturn) paths — one per assert call across all functions, consistent with
          the mechanism documented for Serializer.cpp and ImpairmentEngine.cpp above.
-     (b) Approximately 21 remaining hard mbedTLS and structural error paths:
-         ssl_write failure, recvfrom(MSG_PEEK) failure, server/client UDP connect()
-         failure, DTLS handshake iteration limit (32 rounds), Serializer::serialize
-         failure (wire buffer always large enough), recv_queue full (max injectable
-         depth via IMPAIR_DELAY_BUF_SIZE is below MSG_RING_CAPACITY), and
-         WANT_READ retry paths not triggered in fast loopback.
+         (Count increased from 24 to 26 when ssl_handshake and ssl_read were added to
+         IMbedtlsOps and routed through m_ops, adding 2 new assert call sites in
+         DtlsUdpBackend.cpp's handshake and read paths.)
+     (b) Approximately 14 remaining hard mbedTLS and structural error paths:
+         recvfrom(MSG_PEEK) failure, server/client UDP connect() failure,
+         Serializer::serialize failure (wire buffer always large enough), recv_queue
+         full (max injectable depth via IMPAIR_DELAY_BUF_SIZE is below
+         MSG_RING_CAPACITY), and WANT_READ retry paths not triggered in fast loopback.
    The 10 IMbedtlsOps paths (psa_crypto_init, ssl_config_defaults, ssl_conf_own_cert,
    ssl_cookie_setup, ssl_setup ×2, ssl_set_client_transport_id, recvfrom_peek,
-   net_connect ×2) are covered by DtlsMockOps fault-injection tests. The 2 ISocketOps
-   POSIX paths are covered by MockSocketOps tests. The impairment delay paths
-   (flush_delayed_to_queue loop body, post-flush pop) are now covered by
-   test_delay_impairment_flush_and_recv(). The loss path (send_message ERR_IO) is
-   covered by test_loss_impairment_drops_send(). The num_channels==0 init branch is
-   covered by test_init_num_channels_zero().
-   All 195 reachable decision-level branches are 100% covered. The DtlsUdpBackend.cpp
-   threshold is therefore set at 81% (maximum achievable); this is not a defect and
+   net_connect ×2) are covered by DtlsMockOps fault-injection tests. The ssl_write
+   failure path is covered by test_mock_dtls_ssl_write_fail(). The DTLS handshake
+   iteration limit (32 rounds exhausted) is covered by
+   test_mock_dtls_handshake_iteration_limit(). The ssl_read fatal error path is
+   covered by test_mock_dtls_ssl_read_error(). The 2 ISocketOps POSIX paths are
+   covered by MockSocketOps tests. The impairment delay paths (flush_delayed_to_queue
+   loop body, post-flush pop) are covered by test_delay_impairment_flush_and_recv().
+   The loss path (send_message ERR_IO) is covered by test_loss_impairment_drops_send().
+   The num_channels==0 init branch is covered by test_init_num_channels_zero().
+   All 200 reachable decision-level branches are 100% covered. The DtlsUdpBackend.cpp
+   threshold is therefore set at 83% (maximum achievable); this is not a defect and
    requires no remediation.
    TcpBackend.cpp has a proven architectural ceiling of 78.12% (175/224 branches).
    The ceiling arises from two independent sources:
@@ -447,16 +452,18 @@ Reclassifying a function from NSC to SC, or adding a new SC function, requires:
    All 50 reachable decision-level branches are 100% covered. The LocalSimHarness.cpp
    threshold is therefore set at 72% (maximum achievable); this is not a defect and
    requires no remediation.
-   MbedtlsOpsImpl.cpp has a proven architectural ceiling of 70.13% (54/77 branches).
+   MbedtlsOpsImpl.cpp has a proven architectural ceiling of 69.77% (60/86 branches).
    The ceiling arises from a single source:
-     (a) 23 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
-         noreturn) paths — one per assert call across all functions, consistent with
-         the mechanism documented above. MbedtlsOpsImpl is a pure delegation layer
-         with no control-flow logic of its own; every function body is a precondition
-         assertion followed by a single mbedTLS or POSIX library call passthrough.
-         All 54 reachable decision-level branches (the False outcomes of the assert
+     (a) 26 permanently-missed branches from NEVER_COMPILED_OUT_ASSERT True (abort/
+         noreturn) paths — one per assert call across all 15 functions, consistent with
+         the mechanism documented above. (Count increased from 23 to 26 when
+         ssl_handshake (1 assert) and ssl_read (2 asserts) were added to the interface.)
+         MbedtlsOpsImpl is a pure delegation layer with no control-flow logic of its
+         own; every function body is a precondition assertion followed by a single
+         mbedTLS or POSIX library call passthrough.
+         All 60 reachable decision-level branches (the False outcomes of the assert
          guards, i.e., the normal execution paths) are 100% covered.
-   The MbedtlsOpsImpl.cpp threshold is therefore set at 70% (maximum achievable);
+   The MbedtlsOpsImpl.cpp threshold is therefore set at 69% (maximum achievable);
    this is not a defect and requires no remediation.
    ImpairmentConfigLoader.cpp has a proven architectural ceiling of 90.83% (99/109 branches).
    The ceiling arises from three independent sources:

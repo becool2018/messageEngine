@@ -36,7 +36,7 @@ public:
     /// Initialize the retry manager. Called once at system startup.
     void init();
 
-    // Safety-critical (SC): HAZ-002
+    // Safety-critical (SC): HAZ-002 — verified to M5
     /**
      * @brief Schedule a message for retry.
      *
@@ -54,7 +54,7 @@ public:
                     uint32_t               backoff_ms,
                     uint64_t               now_us);
 
-    // Safety-critical (SC): HAZ-002
+    // Safety-critical (SC): HAZ-002 — verified to M5
     /**
      * @brief Cancel a scheduled retry when an ACK is received.
      *
@@ -67,7 +67,7 @@ public:
      */
     Result on_ack(NodeId src, uint64_t msg_id);
 
-    // Safety-critical (SC): HAZ-002
+    // Safety-critical (SC): HAZ-002 — verified to M5
     /**
      * @brief Collect messages due for retry and apply exponential backoff.
      *

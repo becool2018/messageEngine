@@ -29,7 +29,7 @@
 
 class MessageIdGen {
 public:
-    // Safety-critical (SC): HAZ-003
+    // Safety-critical (SC): HAZ-003 — verified to M5
     /// Initialize the generator with a seed value.
     /// Seed must be non-zero (0 is reserved for invalid messages).
     /// Called once during system initialization.
@@ -44,7 +44,7 @@ public:
         NEVER_COMPILED_OUT_ASSERT(m_next == seed);  // Assert: initialization succeeded
     }
 
-    // Safety-critical (SC): HAZ-003
+    // Safety-critical (SC): HAZ-003 — verified to M5
     /// Generate and return the next unique message ID.
     /// Returns a non-zero value; increments internal counter.
     /// Called for each outgoing message that requires a unique ID.

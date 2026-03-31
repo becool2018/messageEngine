@@ -20,6 +20,7 @@
  * g_fatal_fired is manipulated directly to exercise both branches of
  * check_and_clear() without triggering abort().
  */
+// Verification: M1 + M2 + M3 (NSC infrastructure)
 // NSC-infrastructure: CLAUDE.md §10 assertion policy; no REQ-x.x applies
 
 #include <cstdio>

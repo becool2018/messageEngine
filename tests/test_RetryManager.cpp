@@ -342,6 +342,7 @@ static void test_backoff_cap()
 // Covers RetryManager::on_ack() L131 False branch:
 //   active slot found, but env.source_id != src → compound short-circuits False.
 // Verifies: REQ-3.2.5
+// Verification: M1 + M2 + M4 + M5 (fault injection not required — no injectable dependency)
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_on_ack_wrong_src_active()
 {

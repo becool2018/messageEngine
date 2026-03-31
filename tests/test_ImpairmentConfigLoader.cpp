@@ -429,6 +429,7 @@ static void test_over_64_lines()
 //   assignment inside the if is skipped and impairment_config_default() values
 //   remain in effect.
 // Verifies: REQ-5.2.1
+// Verification: M1 + M2 + M4 + M5 (fault injection not required — file I/O tested via tmp files)
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_malformed_values()
 {

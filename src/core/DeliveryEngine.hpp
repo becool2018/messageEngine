@@ -50,7 +50,7 @@ public:
      */
     void init(TransportInterface* transport, const ChannelConfig& cfg, NodeId local_id);
 
-    // Safety-critical (SC): HAZ-001, HAZ-002, HAZ-006
+    // Safety-critical (SC): HAZ-001, HAZ-002, HAZ-006 — verified to M5
     /**
      * @brief Send a message through the delivery engine.
      *
@@ -66,7 +66,7 @@ public:
      */
     Result send(MessageEnvelope& env, uint64_t now_us);
 
-    // Safety-critical (SC): HAZ-001, HAZ-003, HAZ-004, HAZ-005
+    // Safety-critical (SC): HAZ-001, HAZ-003, HAZ-004, HAZ-005 — verified to M5
     /**
      * @brief Receive a message through the delivery engine.
      *
@@ -83,7 +83,7 @@ public:
      */
     Result receive(MessageEnvelope& env, uint32_t timeout_ms, uint64_t now_us);
 
-    // Safety-critical (SC): HAZ-002
+    // Safety-critical (SC): HAZ-002 — verified to M5
     /**
      * @brief Process outstanding retries.
      *
@@ -95,7 +95,7 @@ public:
      */
     uint32_t pump_retries(uint64_t now_us);
 
-    // Safety-critical (SC): HAZ-002, HAZ-006
+    // Safety-critical (SC): HAZ-002, HAZ-006 — verified to M5
     /**
      * @brief Check for ACK timeouts and process them.
      *

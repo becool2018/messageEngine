@@ -35,6 +35,7 @@
  * Verifies: REQ-6.1.5, REQ-6.1.6, REQ-6.3.1, REQ-6.3.2, REQ-6.3.3
  */
 // Verifies: REQ-6.1.5, REQ-6.1.6, REQ-6.3.1, REQ-6.3.2, REQ-6.3.3
+// Verification: M1 + M2 + M3 (NSC — raw POSIX adapter; no message-delivery policy)
 
 #include <cstdio>
 #include <cstring>

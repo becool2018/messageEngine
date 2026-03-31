@@ -12,6 +12,7 @@
  */
 
 // Verifies: REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.3.3
+// Verification: M1 + M2 + M4 + M5 (fault injection via impairment config)
 
 #include <cstdio>
 #include <cstring>

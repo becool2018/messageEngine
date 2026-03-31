@@ -64,7 +64,7 @@ static const uint32_t MAX_CONFIG_LINES = 64U;
  * @return Result::OK      — file opened and parsed (zero or more keys loaded).
  * @return Result::ERR_IO  — file could not be opened; cfg contains defaults.
  *
- * Safety-critical (SC): HAZ-002, HAZ-007
+ * Safety-critical (SC): HAZ-002, HAZ-007 — verified to M5
  */
 Result impairment_config_load(const char* path, ImpairmentConfig& cfg);
 

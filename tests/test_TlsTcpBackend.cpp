@@ -1606,6 +1606,7 @@ static void* heavy_sender_func(void* raw_arg)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Verifies: REQ-4.1.1
+// Verification: M1 + M2 + M4 + M5 (fault injection via ISocketOps)
 static void test_di_constructor_executes()
 {
     MockSocketOps mock;

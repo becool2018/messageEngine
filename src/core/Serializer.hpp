@@ -46,7 +46,7 @@ public:
     /// Total: 1+1+1+1+8+8+4+4+8+4+4 = 44 bytes
     static const uint32_t WIRE_HEADER_SIZE = 44U;
 
-    // Safety-critical (SC): HAZ-005
+    // Safety-critical (SC): HAZ-005 — verified to M5
     /// Serialize a MessageEnvelope to a buffer in big-endian wire format.
     /// @param env        [in] envelope to serialize
     /// @param buf        [out] destination buffer
@@ -58,7 +58,7 @@ public:
                            uint32_t               buf_len,
                            uint32_t&              out_len);
 
-    // Safety-critical (SC): HAZ-001, HAZ-005
+    // Safety-critical (SC): HAZ-001, HAZ-005 — verified to M5
     /// Deserialize a MessageEnvelope from a buffer.
     /// @param buf        [in] source buffer
     /// @param buf_len    [in] available bytes in buf

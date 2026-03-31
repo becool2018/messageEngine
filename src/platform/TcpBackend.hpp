@@ -50,9 +50,9 @@ public:
 
     // TransportInterface implementation
     Result init(const TransportConfig& config) override;
-    // Safety-critical (SC): HAZ-005, HAZ-006
+    // Safety-critical (SC): HAZ-005, HAZ-006 — verified to M5
     Result send_message(const MessageEnvelope& envelope) override;
-    // Safety-critical (SC): HAZ-004, HAZ-005
+    // Safety-critical (SC): HAZ-004, HAZ-005 — verified to M5
     Result receive_message(MessageEnvelope& envelope, uint32_t timeout_ms) override;
     void close() override;
     bool is_open() const override;

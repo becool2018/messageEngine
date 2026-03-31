@@ -9,6 +9,8 @@
  * Layering rationale: ImpairmentConfig is now embedded in ChannelConfig (a
  * core type) and therefore must reside in src/core/ to avoid a core → platform
  * dependency violation per CLAUDE.md §3 Architecture rules.
+ *
+ * Implements: REQ-5.2.1
  */
 
 #ifndef PLATFORM_IMPAIRMENT_CONFIG_HPP

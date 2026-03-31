@@ -259,7 +259,7 @@ Result DtlsUdpBackend::run_dtls_handshake(const void* peer_addr, uint32_t addr_l
     bool done = false;
 
     for (uint32_t iter = 0U; iter < DTLS_HANDSHAKE_MAX_ITER && !done; ++iter) {
-        int ret = mbedtls_ssl_handshake(&m_ssl);
+        int ret = m_ops->ssl_handshake(&m_ssl);
         if (ret == 0) {
             done = true;
         } else if (ret == MBEDTLS_ERR_SSL_HELLO_VERIFY_REQUIRED) {
@@ -478,8 +478,8 @@ bool DtlsUdpBackend::recv_one_dtls_datagram(uint32_t timeout_ms)
     if (m_tls_enabled) {
         // mbedtls_ssl_conf_read_timeout() is set to 100 ms; ssl_read returns
         // MBEDTLS_ERR_SSL_TIMEOUT when no record arrives within that window.
-        int ret = mbedtls_ssl_read(&m_ssl, m_wire_buf,
-                                   static_cast<size_t>(SOCKET_RECV_BUF_BYTES));
+        int ret = m_ops->ssl_read(&m_ssl, m_wire_buf,
+                                  static_cast<size_t>(SOCKET_RECV_BUF_BYTES));
         if (ret <= 0) {
             if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
                 ret != MBEDTLS_ERR_SSL_TIMEOUT) {

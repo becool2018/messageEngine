@@ -344,13 +344,14 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `ssl_cookie_setup()` | `MbedtlsOpsImpl` | NSC | — |
 | `ssl_setup()` | `MbedtlsOpsImpl` | NSC | — |
 | `ssl_set_client_transport_id()` | `MbedtlsOpsImpl` | NSC | — |
+| `ssl_handshake()` | `MbedtlsOpsImpl` | SC | HAZ-004, HAZ-005, HAZ-006 |
 | `ssl_write()` | `MbedtlsOpsImpl` | SC | HAZ-005, HAZ-006 |
 | `ssl_read()` | `MbedtlsOpsImpl` | SC | HAZ-004, HAZ-005 |
 | `recvfrom_peek()` | `MbedtlsOpsImpl` | SC | HAZ-004, HAZ-005 |
 | `net_connect()` | `MbedtlsOpsImpl` | NSC | — |
 | `inet_pton_ipv4()` | `MbedtlsOpsImpl` | NSC | — |
 
-`MbedtlsOpsImpl` implements `IMbedtlsOps` and is injected into `DtlsUdpBackend` via its `init()` constructor parameter. Only `ssl_write()`, `ssl_read()`, and `recvfrom_peek()` are on the run-time send/receive path and are therefore SC. All other methods are called exclusively during `init()` (handshake and certificate loading) and are NSC. `MbedtlsOpsImpl` is a pure delegation layer — each method is a precondition assertion plus one library call passthrough; no message-delivery policy is encoded here.
+`MbedtlsOpsImpl` implements `IMbedtlsOps` and is injected into `DtlsUdpBackend` via its `init()` constructor parameter. `ssl_handshake()`, `ssl_write()`, `ssl_read()`, and `recvfrom_peek()` are SC: `ssl_handshake()` establishes the DTLS session — failure to complete the handshake (or silent success without proper certificate validation) directly enables HAZ-005 (data delivered without encryption integrity) and HAZ-004/HAZ-006 (connection not established → stale/dropped delivery); `ssl_write()` and `ssl_read()` are on the run-time send/receive path; `recvfrom_peek()` determines the peer address for DTLS cookie binding. All other methods are called exclusively during `init()` (certificate loading, cookie setup, session configuration) and are NSC. `MbedtlsOpsImpl` is a pure delegation layer — each method is a precondition assertion plus one library call passthrough; no message-delivery policy is encoded here.
 
 ---
 

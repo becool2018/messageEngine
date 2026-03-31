@@ -32,17 +32,17 @@ public:
     /// Must be called once during system initialization.
     void init();
 
-    // Safety-critical (SC): HAZ-003
+    // Safety-critical (SC): HAZ-003 — verified to M5
     /// Check if a message (by source_id, message_id) is already in the window.
     /// Returns true if duplicate, false if new.
     bool is_duplicate(NodeId src, uint64_t msg_id) const;
 
-    // Safety-critical (SC): HAZ-003
+    // Safety-critical (SC): HAZ-003 — verified to M5
     /// Record a message in the dedup window.
     /// If window is full (m_count == DEDUP_WINDOW_SIZE), evicts the oldest entry.
     void record(NodeId src, uint64_t msg_id);
 
-    // Safety-critical (SC): HAZ-003
+    // Safety-critical (SC): HAZ-003 — verified to M5
     /// Combined check-and-record in one call.
     /// Returns ERR_DUPLICATE if message is already known, OK otherwise.
     /// On OK, also records the message.

@@ -40,7 +40,7 @@ public:
      */
     virtual Result init(const TransportConfig& config) = 0;
 
-    // Safety-critical (SC): HAZ-001, HAZ-005, HAZ-006
+    // Safety-critical (SC): HAZ-001, HAZ-005, HAZ-006 — verified to M5
     /**
      * @brief Queue / send a single message envelope.
      * @return OK if accepted; ERR_FULL if channel queue is full;
@@ -48,7 +48,7 @@ public:
      */
     virtual Result send_message(const MessageEnvelope& envelope) = 0;
 
-    // Safety-critical (SC): HAZ-001, HAZ-004, HAZ-005
+    // Safety-critical (SC): HAZ-001, HAZ-004, HAZ-005 — verified to M5
     /**
      * @brief Block until a message is received or @p timeout_ms elapses.
      * @param[out] envelope  Populated on success.

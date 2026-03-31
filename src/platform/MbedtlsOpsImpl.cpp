@@ -116,6 +116,12 @@ int MbedtlsOpsImpl::ssl_set_client_transport_id(mbedtls_ssl_context*  ssl,
     return mbedtls_ssl_set_client_transport_id(ssl, info, ilen);
 }
 
+int MbedtlsOpsImpl::ssl_handshake(mbedtls_ssl_context* ssl)
+{
+    NEVER_COMPILED_OUT_ASSERT(ssl != nullptr);
+    return mbedtls_ssl_handshake(ssl);
+}
+
 int MbedtlsOpsImpl::ssl_write(mbedtls_ssl_context*  ssl,
                                const unsigned char*  buf,
                                size_t                len)
@@ -123,6 +129,15 @@ int MbedtlsOpsImpl::ssl_write(mbedtls_ssl_context*  ssl,
     NEVER_COMPILED_OUT_ASSERT(ssl != nullptr);
     NEVER_COMPILED_OUT_ASSERT(buf != nullptr);
     return mbedtls_ssl_write(ssl, buf, len);
+}
+
+int MbedtlsOpsImpl::ssl_read(mbedtls_ssl_context* ssl,
+                               unsigned char*       buf,
+                               size_t               len)
+{
+    NEVER_COMPILED_OUT_ASSERT(ssl != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(buf != nullptr);
+    return mbedtls_ssl_read(ssl, buf, len);
 }
 
 ssize_t MbedtlsOpsImpl::recvfrom_peek(int              sockfd,

@@ -48,7 +48,7 @@ public:
      */
     void init(const ImpairmentConfig& cfg);
 
-    // Safety-critical (SC): HAZ-002, HAZ-007
+    // Safety-critical (SC): HAZ-002, HAZ-007 — verified to M5
     /**
      * @brief Process an outbound message through the impairment engine.
      *
@@ -65,7 +65,7 @@ public:
      */
     Result process_outbound(const MessageEnvelope& in_env, uint64_t now_us);
 
-    // Safety-critical (SC): HAZ-004, HAZ-006
+    // Safety-critical (SC): HAZ-004, HAZ-006 — verified to M5
     /**
      * @brief Collect messages ready for delivery from the delay buffer.
      *
@@ -83,7 +83,7 @@ public:
                                   MessageEnvelope* out_buf,
                                   uint32_t buf_cap);
 
-    // Safety-critical (SC): HAZ-003, HAZ-007
+    // Safety-critical (SC): HAZ-003, HAZ-007 — verified to M5
     /**
      * @brief Process an inbound message through reordering simulation.
      *
@@ -106,7 +106,7 @@ public:
                           uint32_t buf_cap,
                           uint32_t& out_count);
 
-    // Safety-critical (SC): HAZ-007
+    // Safety-critical (SC): HAZ-007 — verified to M5
     /**
      * @brief Check if a partition (outage) is currently active.
      *

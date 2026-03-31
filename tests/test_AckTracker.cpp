@@ -11,6 +11,7 @@
  *
  * Verifies: REQ-3.2.4, REQ-3.3.2
  */
+// Verification: M1 + M2 + M4 + M5 (fault injection not required — no injectable dependency)
 
 #include <cstdio>
 #include <cstring>

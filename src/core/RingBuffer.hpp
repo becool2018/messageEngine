@@ -85,7 +85,7 @@ public:
     }
 
 
-    // Safety-critical (SC): HAZ-006
+    // Safety-critical (SC): HAZ-006 — verified to M5
     /**
      * @brief Push one envelope to the tail.
      * @return OK on success; ERR_FULL if capacity exhausted.
@@ -116,7 +116,7 @@ public:
         return Result::OK;
     }
 
-    // Safety-critical (SC): HAZ-001, HAZ-004
+    // Safety-critical (SC): HAZ-001, HAZ-004 — verified to M5
     /**
      * @brief Pop one envelope from the head.
      * @param[out] env  Filled on success.

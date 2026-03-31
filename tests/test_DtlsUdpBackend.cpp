@@ -25,6 +25,7 @@
  *           REQ-6.4.5, REQ-7.1.1
  */
 // Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1
+// Verification: M1 + M2 + M4 + M5 (fault injection via IMbedtlsOps / ISocketOps)
 
 #include <cstdio>
 #include <cstring>
@@ -981,6 +982,8 @@ struct DtlsMockOps : public IMbedtlsOps {
     int          r_ssl_set_client_transport_id    = 0;
     int          r_inet_pton                      = 1;  ///< 1 = success
     int          r_ssl_write                      = 1;  ///< > 0 = success
+    int          r_ssl_handshake                  = 0;  ///< 0 = immediate success; WANT_READ = iterate
+    int          r_ssl_read                       = MBEDTLS_ERR_SSL_TIMEOUT;  ///< default: timeout
 
     int x509_call_count = 0;  ///< tracks x509_crt_parse_file invocation index
 
@@ -1036,6 +1039,17 @@ struct DtlsMockOps : public IMbedtlsOps {
                   size_t /*len*/) override
     {
         return r_ssl_write;
+    }
+
+    int ssl_handshake(mbedtls_ssl_context* /*ssl*/) override
+    {
+        return r_ssl_handshake;
+    }
+
+    int ssl_read(mbedtls_ssl_context* /*ssl*/, unsigned char* /*buf*/,
+                 size_t /*len*/) override
+    {
+        return r_ssl_read;
     }
 
     ssize_t recvfrom_peek(int /*sockfd*/, void* /*buf*/, size_t /*len*/,
@@ -1630,6 +1644,124 @@ static void test_delay_impairment_flush_and_recv()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Mock test: ssl_write failure → send_message returns ERR_IO
+//
+// Client mode.  All init calls return success (crypto_init, ssl_config_defaults,
+// x509_crt_parse_file ×2, pk_parse_keyfile, ssl_conf_own_cert, ssl_setup all
+// return 0; ssl_handshake returns 0 = immediate success).
+// After init(), set r_ssl_write = -1 so the next send_message() injects the
+// ssl_write error path.
+//
+// Covers: DtlsUdpBackend::send_message() ssl_write < 0 → ERR_IO branch
+// Verifies: REQ-6.4.1, REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.4.1, REQ-6.3.2
+static void test_mock_dtls_ssl_write_fail()
+{
+    // Verifies: REQ-6.4.1, REQ-6.3.2
+    DtlsMockOps mock;
+    // All init paths succeed; handshake completes in one call
+    mock.r_ssl_handshake = 0;
+
+    DtlsUdpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_mock_client_cfg(cfg, 14630U);
+
+    Result res = backend.init(cfg);
+    assert(res == Result::OK);
+    assert(backend.is_open());
+
+    // Inject ssl_write failure for the send call
+    mock.r_ssl_write = -1;
+
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.message_id        = 0xC001ULL;
+    env.source_id         = 1U;
+    env.destination_id    = 2U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    Result send_res = backend.send_message(env);
+    assert(send_res == Result::ERR_IO);
+
+    backend.close();
+    printf("PASS: test_mock_dtls_ssl_write_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock test: ssl_handshake iteration limit exceeded → ERR_IO
+//
+// Client mode.  ssl_handshake always returns MBEDTLS_ERR_SSL_WANT_READ so the
+// retry loop exhausts all 32 iterations and returns ERR_IO.
+//
+// Covers: run_dtls_handshake() L290 `if (!done)` True → ERR_IO branch
+// Verifies: REQ-6.4.1, REQ-6.4.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.4.1, REQ-6.4.3
+static void test_mock_dtls_handshake_iteration_limit()
+{
+    // Verifies: REQ-6.4.1, REQ-6.4.3
+    DtlsMockOps mock;
+    // Always return WANT_READ so the 32-iteration limit is hit
+    mock.r_ssl_handshake = MBEDTLS_ERR_SSL_WANT_READ;
+
+    DtlsUdpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_mock_client_cfg(cfg, 14631U);
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!backend.is_open());
+
+    printf("PASS: test_mock_dtls_handshake_iteration_limit\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock test: ssl_read returns a fatal error → recv_one_dtls_datagram returns false
+//            → receive_message returns ERR_TIMEOUT
+//
+// Client mode.  ssl_handshake succeeds (0); ssl_read returns
+// MBEDTLS_ERR_SSL_INTERNAL_ERROR (fatal, not WANT_READ / TIMEOUT) triggering the
+// log_mbedtls_err() path and early return false from recv_one_dtls_datagram.
+//
+// Covers: recv_one_dtls_datagram() L483 `ret <= 0` True + L484 inner False branch
+// Verifies: REQ-6.4.1, REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.4.1, REQ-6.3.2
+static void test_mock_dtls_ssl_read_error()
+{
+    // Verifies: REQ-6.4.1, REQ-6.3.2
+    DtlsMockOps mock;
+    mock.r_ssl_handshake = 0;                              // init succeeds
+    mock.r_ssl_read      = MBEDTLS_ERR_SSL_INTERNAL_ERROR; // fatal read error
+
+    DtlsUdpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_mock_client_cfg(cfg, 14632U);
+
+    Result init_res = backend.init(cfg);
+    assert(init_res == Result::OK);
+    assert(backend.is_open());
+
+    MessageEnvelope received;
+    Result recv_res = backend.receive_message(received, 200U);
+    assert(recv_res == Result::ERR_TIMEOUT);
+
+    backend.close();
+    printf("PASS: test_mock_dtls_ssl_read_error\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1668,6 +1800,9 @@ int main()
     test_mock_server_ssl_set_transport_id_fail();
     test_mock_client_net_connect_fail();
     test_mock_client_ssl_setup_fail();
+    test_mock_dtls_ssl_write_fail();
+    test_mock_dtls_handshake_iteration_limit();
+    test_mock_dtls_ssl_read_error();
 
     // ISocketOps mock tests
     test_mock_sock_create_udp_fail();

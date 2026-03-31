@@ -30,6 +30,7 @@
  *           REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.3.5, REQ-7.1.1
  */
 // Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.3.5, REQ-7.1.1
+// Verification: M1 + M2 + M4 + M5 (fault injection via ISocketOps)
 
 #include <cstdio>
 #include <cstring>

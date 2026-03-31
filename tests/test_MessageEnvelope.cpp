@@ -12,6 +12,7 @@
  */
 
 // Verifies: REQ-3.1, REQ-3.2.4
+// Verification: M1 + M2 + M4 + M5 (fault injection not required — pure data structure)
 
 #include <cstdio>
 #include <cstring>

@@ -677,6 +677,52 @@ static void test_udp_recv_queue_initial_pop()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 18: recv_from() OS failure in recv_one_datagram (VVP-001 M5)
+//
+// Covers recv_one_datagram() L184 False branch:
+//   `if (!m_sock_ops->recv_from(...)) { return false; }`
+// Uses MockSocketOps with fail_recv_from=true.  Every poll iteration calls
+// recv_from which immediately returns false; the loop exhausts poll_count
+// without queuing any message → receive_message returns ERR_TIMEOUT.
+// This branch is exclusively reachable via OS-level recvfrom() failure;
+// it cannot occur in a nominal loopback environment where the socket is open.
+//
+// Verifies: REQ-4.1.3, REQ-6.3.2
+// Verification: M1 + M2 + M4 + M5 (fault injection via ISocketOps)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-4.1.3, REQ-6.3.2
+static void test_mock_udp_recv_from_fail()
+{
+    MockSocketOps mock;
+    mock.fail_recv_from = true;   // inject recvfrom() OS failure
+
+    UdpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19670U, 19671U);
+
+    // init must succeed: create_udp / set_reuseaddr / do_bind all unblocked
+    Result r = backend.init(cfg);
+    assert(r == Result::OK);
+    assert(backend.is_open());
+
+    // Every recv_one_datagram call returns false (recv_from injected failure).
+    // receive_message exhausts poll_count (timeout_ms=200 → 2 iterations) and
+    // returns ERR_TIMEOUT — the recv_from False branch is covered.
+    MessageEnvelope env;
+    r = backend.receive_message(env, 200U);
+    assert(r == Result::ERR_TIMEOUT);
+
+    // Backend remains open after a receive failure.
+    assert(backend.is_open());
+
+    backend.close();
+    printf("PASS: test_mock_udp_recv_from_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -707,6 +753,9 @@ int main()
     test_udp_send_loss_impairment();
     test_mock_send_to_fail();
     test_udp_recv_queue_initial_pop();
+
+    // M5 fault injection: recv_from OS failure path
+    test_mock_udp_recv_from_fail();
 
     printf("=== ALL PASSED ===\n");
     return 0;

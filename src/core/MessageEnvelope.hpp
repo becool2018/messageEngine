@@ -42,7 +42,7 @@ struct MessageEnvelope {
 // Helpers (no heap, no function pointers – Power of 10 rules 3, 9)
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Safety-critical (SC): HAZ-005
+// Safety-critical (SC): HAZ-005 — verified to M5
 /// Zero-initialise an envelope.  Called during init phase.
 inline void envelope_init(MessageEnvelope& env)
 {
@@ -51,14 +51,14 @@ inline void envelope_init(MessageEnvelope& env)
     env.message_type = MessageType::INVALID;
 }
 
-// Safety-critical (SC): HAZ-002, HAZ-003
+// Safety-critical (SC): HAZ-002, HAZ-003 — verified to M5
 /// Shallow copy src → dst.
 inline void envelope_copy(MessageEnvelope& dst, const MessageEnvelope& src)
 {
     (void)memcpy(&dst, &src, sizeof(MessageEnvelope));
 }
 
-// Safety-critical (SC): HAZ-001, HAZ-005
+// Safety-critical (SC): HAZ-001, HAZ-005 — verified to M5
 /// Return true when the envelope has a valid message type.
 inline bool envelope_valid(const MessageEnvelope& env)
 {
@@ -67,14 +67,14 @@ inline bool envelope_valid(const MessageEnvelope& env)
            (env.source_id      != NODE_ID_INVALID);
 }
 
-// Safety-critical (SC): HAZ-001, HAZ-004
+// Safety-critical (SC): HAZ-001, HAZ-004 — verified to M5
 /// Return true when the envelope carries application data (not control).
 inline bool envelope_is_data(const MessageEnvelope& env)
 {
     return env.message_type == MessageType::DATA;
 }
 
-// Safety-critical (SC): HAZ-001
+// Safety-critical (SC): HAZ-001 — verified to M5
 /// Return true for in-band control messages (ACK / NAK / HEARTBEAT).
 inline bool envelope_is_control(const MessageEnvelope& env)
 {
@@ -83,7 +83,7 @@ inline bool envelope_is_control(const MessageEnvelope& env)
            (env.message_type == MessageType::HEARTBEAT);
 }
 
-// Safety-critical (SC): HAZ-002
+// Safety-critical (SC): HAZ-002 — verified to M5
 /// Build a minimal ACK envelope targeting the source of @p original.
 inline void envelope_make_ack(MessageEnvelope&       ack,
                                const MessageEnvelope& original,

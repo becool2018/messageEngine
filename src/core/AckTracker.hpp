@@ -33,21 +33,21 @@ public:
     /// Must be called once during system initialization.
     void init();
 
-    // Safety-critical (SC): HAZ-002, HAZ-006
+    // Safety-critical (SC): HAZ-002, HAZ-006 — verified to M5
     /// Add a message to be tracked for ACK receipt.
     /// @param env         [in] message being tracked
     /// @param deadline_us [in] absolute time after which message is considered timed out
     /// @return OK on success; ERR_FULL if ACK_TRACKER_CAPACITY is reached
     Result track(const MessageEnvelope& env, uint64_t deadline_us);
 
-    // Safety-critical (SC): HAZ-002
+    // Safety-critical (SC): HAZ-002 — verified to M5
     /// Mark a message as ACKed.
     /// @param src    [in] source (sender) of the message
     /// @param msg_id [in] message ID that was ACKed
     /// @return OK on success; ERR_INVALID if no matching pending message found
     Result on_ack(NodeId src, uint64_t msg_id);
 
-    // Safety-critical (SC): HAZ-002, HAZ-006
+    // Safety-critical (SC): HAZ-002, HAZ-006 — verified to M5
     /// Remove all expired entries and return them for retry/failure handling.
     /// @param now_us      [in] current time
     /// @param expired_buf [out] buffer to store expired envelopes

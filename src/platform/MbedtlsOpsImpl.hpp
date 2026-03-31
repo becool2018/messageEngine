@@ -46,8 +46,11 @@ public:
     int ssl_set_client_transport_id(mbedtls_ssl_context* ssl,
                                     const unsigned char* info,
                                     size_t ilen) override;
+    int ssl_handshake(mbedtls_ssl_context* ssl) override;
     int ssl_write(mbedtls_ssl_context* ssl,
                   const unsigned char* buf, size_t len) override;
+    int ssl_read(mbedtls_ssl_context* ssl,
+                 unsigned char* buf, size_t len) override;
     ssize_t recvfrom_peek(int sockfd, void* buf, size_t len,
                           struct sockaddr* src_addr,
                           socklen_t* addrlen) override;

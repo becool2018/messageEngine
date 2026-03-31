@@ -31,7 +31,7 @@
 
 class PrngEngine {
 public:
-    // Safety-critical (SC): HAZ-002, HAZ-007
+    // Safety-critical (SC): HAZ-002, HAZ-007 — verified to M5
     /**
      * @brief Seed the PRNG.
      *
@@ -53,7 +53,7 @@ public:
         NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL);  // Assert: state is non-zero
     }
 
-    // Safety-critical (SC): HAZ-002, HAZ-007
+    // Safety-critical (SC): HAZ-002, HAZ-007 — verified to M5
     /**
      * @brief Generate next pseudorandom number (64-bit).
      *
@@ -80,7 +80,7 @@ public:
         return m_state;
     }
 
-    // Safety-critical (SC): HAZ-002, HAZ-007
+    // Safety-critical (SC): HAZ-002, HAZ-007 — verified to M5
     /**
      * @brief Generate a floating-point value in [0.0, 1.0).
      *
@@ -105,7 +105,7 @@ public:
         return result;
     }
 
-    // Safety-critical (SC): HAZ-002, HAZ-007
+    // Safety-critical (SC): HAZ-002, HAZ-007 — verified to M5
     /**
      * @brief Generate a pseudorandom integer in [lo, hi].
      *
