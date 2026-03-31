@@ -279,7 +279,8 @@ declarations are a defect; annotated NSC declarations are a documentation error.
 
 3. Review obligations
 - SC functions require mandatory peer review before merge (no self-merge).
-- SC functions must have ≥ branch coverage in tests; MC/DC coverage is the target.
+- SC functions must have 100% branch coverage of all reachable branches in tests;
+  MC/DC coverage is the target for the five highest-hazard functions (§14).
 - Any change to an SC function triggers a re-review of all FMEA entries that
   reference that function.
 
@@ -315,7 +316,15 @@ Reclassifying a function from NSC to SC, or adding a new SC function, requires:
 3. NSC functions: line coverage is sufficient; no branch-coverage enforcement.
 
 4. Per-file branch coverage thresholds and known ceilings:
-   The policy floor is ≥ 75% branch coverage for all SC function files.
+   The policy floor is 100% branch coverage of all reachable branches for every SC
+   function file. The per-file numeric thresholds below are NOT relaxations of this
+   floor — they represent what 100% reachable looks like after excluding
+   architecturally-unreachable branches (NEVER_COMPILED_OUT_ASSERT [[noreturn]] True
+   paths, hard POSIX error paths unreachable in loopback, impairment-delay paths not
+   configurable via the TransportConfig public API, and proven dead-code paths). Every
+   branch that CAN be exercised by a test MUST be exercised. A numeric threshold below
+   100% is only valid when accompanied by a documented architectural ceiling that
+   accounts for every single missed branch.
    Serializer.cpp has a proven architectural ceiling of 74.36% (58/78 branches).
    This ceiling arises because NEVER_COMPILED_OUT_ASSERT expands to
    `if (!(cond)) { ...; abort(); }`, and LLVM source-based coverage counts
