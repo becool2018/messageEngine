@@ -4,135 +4,163 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 
 ---
 
-## HL-1: User sends a fire-and-forget message
-> User sends a fire-and-forget message; System delivers it to the network with no acknowledgement or tracking.
+## HL-1: Fire-and-Forget Message Send
+> User submits a best-effort envelope; System transmits it once with no acknowledgement or retry tracking.
 
-- UC_01 — Best-effort send over TCP
-
----
-
-## HL-2: User sends a message requiring confirmation
-> User sends a message requiring confirmation; System transmits it and notifies User whether the remote peer acknowledged receipt.
-
-- UC_02 — Reliable-with-ACK send
-- UC_08 — ACK resolution (completion event for HL-2: System resolves the pending tracker entry when the ACK arrives)
+- UC_01 — Best-effort send over TCP (no ACK, no retry, no dedup)
 
 ---
 
-## HL-3: User sends a message requiring guaranteed delivery
-> User sends a message requiring guaranteed delivery; System retransmits it automatically until acknowledged or expired, transparently deduplicating on the receiver side.
+## HL-2: Send with Acknowledgement
+> User sends a reliable-ACK envelope; System transmits once and tracks the pending ACK until resolved or timed out.
 
-- UC_03 — Reliable-with-retry send with exponential backoff
-
----
-
-## HL-4: User sends a message with a deadline
-> User sends a message with a deadline; System discards it silently if the deadline passes before delivery.
-
-- UC_04 — Expired message dropped on send path
+- UC_02 — RELIABLE_ACK send: single transmission, ACK slot allocated in AckTracker
+- UC_08 — ACK received: AckTracker slot transitions from PENDING → ACKED and is freed
 
 ---
 
-## HL-5: User waits for an incoming message
-> User waits for an incoming message; System returns the next available message, or discards it and returns ERR_EXPIRED if the message's deadline has passed before delivery.
+## HL-3: Send with Automatic Retry
+> User sends a reliable-retry envelope; System retransmits until ACK received, expiry reached, or retry budget exhausted, with deduplication on the receiver side.
 
-- UC_09 — Expired message dropped on receive path
-
----
-
-## HL-6: System suppresses duplicate messages
-> User receives a message; System silently suppresses delivery if the message is a duplicate already seen in the sliding window.
-
-- UC_07 — Duplicate message drop
-- UC_33 — Dedup sliding-window eviction test
+- UC_03 — RELIABLE_RETRY send: message scheduled in RetryManager with exponential backoff
+- UC_10 — RetryManager fires a scheduled retry (backoff interval elapsed)
+- UC_12 — Retry cancelled on ACK receipt (RetryManager slot freed)
 
 ---
 
-## HL-7: User starts a server endpoint
-> User starts a server endpoint; System binds a listen socket, accepts incoming client connections, and stores their file descriptors.
+## HL-4: Send with Expiry Deadline
+> User sets expiry_time_us on an envelope; System drops the message on the send path if the deadline has passed.
 
-- UC_19 — TCP server accept
-
----
-
-## HL-8: User starts a client endpoint
-> User starts a client endpoint; System establishes a TCP connection to the configured peer.
-
-- UC_35 — TCP client connect
+- UC_04 — Expired message detected and dropped at send time
 
 ---
 
-## HL-9: User closes a transport
-> User closes a transport; System flushes pending messages and releases all socket resources.
+## HL-5: Receive a Message
+> User calls receive_message(); System returns the next available envelope, applying deduplication and expiry filtering.
 
-- UC_34 — Transport teardown: TcpBackend::close(), DeliveryEngine shutdown, and in-flight message handling
-
----
-
-## HL-10: User pumps the retry loop
-> User pumps the retry loop; System retransmits any messages whose backoff interval has elapsed, doubling the interval on each attempt.
-
-- UC_10 — RetryManager fires scheduled retry
-- UC_12 — Retry cancelled on ACK receipt (termination path of the retry cycle)
+- UC_09 — Incoming message dropped at receive because expiry_time_us has passed
 
 ---
 
-## HL-11: User sweeps ACK timeouts
-> User sweeps ACK timeouts; System identifies unacknowledged messages past their deadline and logs them as failures.
+## HL-6: Duplicate Message Suppression
+> System silently drops any message whose (source_id, message_id) pair has already been seen within the sliding dedup window.
 
-- UC_11 — AckTracker timeout sweep
-
----
-
-## HL-12: User configures network impairments
-> User configures network impairments (loss, latency, jitter, duplication, reordering, partition); System applies those faults to all traffic for simulation or testing.
-
-- UC_13 — Impairment: packet loss
-- UC_14 — Impairment: duplication
-- UC_15 — Impairment: fixed latency
-- UC_16 — Impairment: jitter
-- UC_17 — Impairment: reordering
-- UC_18 — Impairment: partition
-- UC_32 — 100% loss configuration test
+- UC_07 — Duplicate detected and dropped by DuplicateFilter::check_and_record()
+- UC_33 — Sliding-window eviction: oldest entry evicted when DEDUP_WINDOW_SIZE entries are full
 
 ---
 
-## HL-13: User seeds the impairment engine for deterministic replay
-> User seeds the impairment engine with a fixed value; System produces a deterministic, reproducible fault sequence for test replay.
+## HL-7: Start a Server Endpoint
+> User initialises a transport in server mode; System binds to the configured IP/port and begins accepting connections.
 
-- UC_29 — PRNG deterministic seed
-- UC_31 — PRNG reproducibility test
-
----
-
-## HL-14: User links two in-process endpoints
-> User links two in-process endpoints; System routes messages between them locally without any real network, enabling fully deterministic integration testing.
-
-- UC_24 — LocalSimHarness in-process delivery
-- UC_30 — LocalSimHarness round-trip test
+- UC_19 — TCP server bind, listen, and non-blocking accept loop
+- UC_35 — (See HL-8) Client connects; server accept fd becomes a client slot
 
 ---
 
-## HL-15: User monitors the system
-> User monitors the System; System emits structured log events (INFO / WARNING_LO / WARNING_HI / FATAL) for every significant state change, error, and message lifecycle event.
+## HL-8: Start a Client Endpoint
+> User initialises a transport in client mode; System connects to the configured peer IP/port within the configured timeout.
 
-- No dedicated detailed UC document. Logging behavior is observable as a side effect across all other use cases.
-
----
-
-## HL-16: User initializes the system
-> User creates a transport and delivery engine with a configuration; System prepares all components and establishes the connection ready for operation.
-
-- UC_27 — Config defaults and overrides
-- UC_28 — DeliveryEngine initialization
+- UC_35 — TCP client connect with configurable timeout
 
 ---
 
-## HL-17: User sends or receives over UDP
-> User sends or receives a message over a connectionless transport; System handles datagram framing without TCP connection state.
+## HL-9: Close a Transport
+> User calls close(); System flushes any pending delayed messages and releases all socket file descriptors and TLS contexts.
 
-- UC_22 — UDP send datagram
-- UC_23 — UDP receive datagram
+- UC_34 — Transport teardown: flush impairment delay buffer, close all fds, reset state
+
+---
+
+## HL-10: Pump the Retry Loop
+> User calls DeliveryEngine::pump_retries() in the application event loop; System collects all RetryManager entries whose backoff interval has elapsed and retransmits them.
+
+- UC_10 — Scheduled retry fires: message retransmitted; backoff interval doubled for next attempt
+- UC_12 — Retry entry removed when corresponding ACK is received
+
+---
+
+## HL-11: Sweep ACK Timeouts
+> User calls DeliveryEngine::sweep_ack_timeouts() in the application event loop; System identifies AckTracker entries whose deadline has passed and returns them as unacknowledged.
+
+- UC_11 — AckTracker sweep: PENDING entries past deadline_us collected as expired
+
+---
+
+## HL-12: Configure Network Impairments
+> User provides an ImpairmentConfig with one or more impairments enabled; System applies them to outbound and/or inbound message flows.
+
+- UC_13 — Packet loss: outbound message dropped with configured probability
+- UC_14 — Packet duplication: additional copy queued for delayed delivery
+- UC_15 — Fixed latency: message held in delay buffer until release_us elapses
+- UC_16 — Jitter: per-message delay drawn from uniform distribution around mean
+- UC_17 — Reordering: inbound messages buffered and released out of arrival order
+- UC_18 — Partition: all traffic blocked for partition_duration_ms, then released for partition_gap_ms
+- UC_32 — 100% loss configuration: every outbound message dropped, none delivered
+
+---
+
+## HL-13: Deterministic Impairment Replay
+> User seeds the PrngEngine with a fixed value; System produces the identical sequence of loss/jitter/duplication decisions for any given input stream.
+
+- UC_29 — PRNG seeded with known value before test run
+- UC_31 — Two runs with identical seed and message stream produce identical impairment outcomes
+
+---
+
+## HL-14: In-Process Simulation
+> User creates two LocalSimHarness instances and links them; System delivers messages between them in-process without any real sockets, respecting all configured impairments.
+
+- UC_24 — LocalSimHarness: send on one harness, receive on linked peer
+- UC_30 — LocalSimHarness round-trip: message sent, impaired, and received in one process
+- UC_42 — LocalSimHarness inject(): test code directly injects an envelope without going through send_message()
+
+---
+
+## HL-15: Observability (Logging)
+> System emits structured log entries at INFO / WARNING_LO / WARNING_HI / FATAL severity for all connection events, state changes, and errors; User reads log output to diagnose issues.
+
+- UC_27 — Configuration defaults applied and logged at init time
+
+---
+
+## HL-16: System Initialization
+> User constructs a DeliveryEngine, wires it to a TransportInterface, and calls init(); System allocates fixed internal state and validates configuration.
+
+- UC_27 — TransportConfig defaults and per-channel ChannelConfig overrides applied
+- UC_28 — DeliveryEngine::init(): DuplicateFilter, AckTracker, RetryManager all reset
+
+---
+
+## HL-17: UDP Plaintext Transport
+> User initialises a UdpBackend; System sends and receives discrete UDP datagrams with no connection management, applying any configured impairments.
+
+- UC_22 — UDP send: envelope serialised, impairments applied, datagram sent via sendto()
+- UC_23 — UDP receive: datagram received via recvfrom(), deserialised, enqueued for delivery
+
+---
+
+## HL-18: TLS-Encrypted TCP Transport
+> User initialises a TlsTcpBackend with a TlsConfig (cert/key/CA paths, verify_peer); System performs a TLS handshake on each connection before sending or receiving framed envelopes. When tls_enabled == false the backend falls back to plaintext TCP, allowing the same code path in test mode.
+
+- UC_36 — TLS server: bind, listen, accept, and complete TLS handshake with each client
+- UC_37 — TLS client: connect to peer and complete TLS handshake before first message
+
+---
+
+## HL-19: DTLS-Encrypted UDP Transport
+> User initialises a DtlsUdpBackend with a TlsConfig; System performs a DTLS handshake (including cookie exchange on the server) before sending and receiving encrypted datagrams. Oversized messages are rejected before encryption. When tls_enabled == false, plaintext UDP is used without any handshake.
+
+- UC_38 — DTLS server: bind, receive ClientHello, perform cookie exchange, complete DTLS handshake
+- UC_39 — DTLS client: connect UDP socket to peer, complete DTLS handshake
+- UC_40 — MTU enforcement: outbound message whose serialised size exceeds DTLS_MAX_DATAGRAM_BYTES is rejected with ERR_INVALID before any encryption attempt
+
+---
+
+## HL-20: Load Impairment Config from File
+> User provides a path to a key=value text file; System parses it into an ImpairmentConfig, clamping probability values to [0.0, 1.0], and returns ERR_INVALID on malformed input.
+
+- UC_41 — impairment_config_load(): read file, parse all recognised keys, clamp probabilities, return populated ImpairmentConfig
 
 ---
 
@@ -142,7 +170,7 @@ These use cases document patterns that combine multiple system calls and sit at
 the application layer rather than at the system boundary. They are not single
 User → System interactions.
 
-- UC_05 — Server echo reply — Application pattern: receive a DATA message (HL-5) then send a reply (HL-1/2/3). Spans the receive and send boundaries; not a single system capability.
+- UC_05 — Server echo reply — calls receive_message() then send_message() in sequence; the two-step pattern is above the HL boundary
 
 ---
 
@@ -152,8 +180,8 @@ These use cases document mechanisms that are invoked internally by the System on
 behalf of other use cases. The User never calls them directly; they are invisible
 at the User → System boundary.
 
-- UC_06 — TCP inbound deserialization — Internal implementation of HL-5 (receive). Framing and deserialization are hidden inside `receive_message()`.
-- UC_20 — TCP send framed message — Internal implementation of HL-1/2/3 (send). Length-prefix framing is hidden inside `send_message()`.
-- UC_21 — TCP poll and receive — Internal implementation of HL-5 (receive). Polling multiple file descriptors is a system detail.
-- UC_25 — Serializer encode — Sub-function of every send path. No direct user-visible action.
-- UC_26 — Serializer decode — Sub-function of every receive path. No direct user-visible action.
+- UC_06 — TCP inbound deserialisation — recv_from_client() called internally by TcpBackend::receive_message(); never by the user
+- UC_20 — TCP send framed message — send_frame() / send_to_all_clients() called internally by TcpBackend::send_message()
+- UC_21 — TCP poll and receive — poll_clients_once() called internally by TcpBackend::receive_message()
+- UC_25 — Serializer encode — Serializer::serialize() called internally by all backends; never directly by the user
+- UC_26 — Serializer decode — Serializer::deserialize() called internally by all backends; never directly by the user
