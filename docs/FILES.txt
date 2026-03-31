@@ -27,10 +27,6 @@ tests/.clang-tidy
   Clang-Tidy configuration for test code (tests/); slightly relaxed relative
   to src/ to accommodate test-framework idioms (see CLAUDE.md §3).
 
-check_requirements.txt
-  Checklist used to verify that all numbered requirements ([REQ-x.x]) are
-  implemented and tested; cross-referenced against TRACEABILITY_MATRIX.md.
-
 PROJECT DOCS
 ------------
 README.md
@@ -83,7 +79,7 @@ docs/TRACEABILITY_MATRIX.md
   tests. Updated after every change.
 
 docs/HAZARD_ANALYSIS.md
-  Software Safety Hazard Analysis and FMEA: hazard IDs (HAZ-001 … HAZ-006),
+  Software Safety Hazard Analysis and FMEA: hazard IDs (HAZ-001 … HAZ-007),
   failure modes, effects, detection mechanisms, and safety-critical (SC)
   function classification.
 
@@ -95,8 +91,9 @@ docs/STATE_MACHINES.md
 
 docs/STACK_ANALYSIS.md
   Worst-case stack depth analysis: identifies the deepest call chains
-  (outbound send, inbound receive, retry pump) and the maximum stack frame
-  for each function; confirms the 9-frame worst-case ceiling.
+  (outbound send, inbound receive, retry pump, DTLS send/receive) and the
+  maximum stack frame for each function; confirms the 10-frame worst-case
+  ceiling (~764 B peak, Chain 5 — DTLS outbound send).
 
 docs/WCET_ANALYSIS.md
   Worst-Case Execution Time (WCET) analysis: per-function operation counts
@@ -111,19 +108,16 @@ docs/DEFECT_LOG.md
   Defect and inspection log; records all formal code inspections (INSP-xxx),
   deviations, and cppcheck suppressions with justification and resolution.
 
-docs/generate_use_cases.txt
-  Prompt template used to generate Flow-of-Control documents for each use case.
-
-docs/user_case_list.txt
-  Master list of all 35 use cases used as input to the document generation
-  process.
+docs/use_cases/use_case_format.txt
+  15-section flow-of-control document template used to generate individual
+  UC_*.md documents; defines the quality bar and output format requirements.
 
 docs/use_cases/HIGH_LEVEL_USE_CASES.md
-  Index of 18 high-level use cases (HL-1 through HL-18) with links to the 35
+  Index of 20 high-level use cases (HL-1 through HL-20) with links to the 42
   detailed Flow-of-Control documents.
 
-docs/use_cases/UC_01 … UC_35
-  35 Flow-of-Control documents, one per use case. Each document has 15
+docs/use_cases/UC_01 … UC_42
+  42 Flow-of-Control documents, one per use case. Each document has 15
   sections: overview, entry points, step-by-step control flow, call tree, key
   components, branching logic, concurrency, memory/ownership, error handling,
   external interactions, state changes, sequence diagram (ASCII), init vs
@@ -231,6 +225,17 @@ SocketUtils.hpp / SocketUtils.cpp
   send_all (retry on EINTR/short write), recv_exact, sendto/recvfrom wrappers,
   and length-prefixed TCP framing helpers (write_framed / read_framed).
 
+ISocketOps.hpp
+  Pure-virtual injectable interface for all POSIX socket operations used by
+  TcpBackend and UdpBackend (create_tcp, create_udp, do_bind, do_listen,
+  do_accept, send_frame, recv_frame, send_to, recv_from, etc.).
+  Enables fault-injection testing without modifying production code.
+
+SocketOpsImpl.hpp / SocketOpsImpl.cpp
+  Singleton implementation of ISocketOps that delegates every call to the
+  real POSIX socket API. Used by production TcpBackend and UdpBackend
+  instances; swapped for MockSocketOps in tests.
+
 TcpBackend.hpp / TcpBackend.cpp
   TransportInterface over TCP; server mode supports up to 8 simultaneous
   clients via a dedicated accept thread and per-connection receive threads;
@@ -246,7 +251,51 @@ LocalSimHarness.hpp / LocalSimHarness.cpp
   In-process simulation transport; two instances are linked via link(). Messages
   sent from one are injected directly into the peer's RingBuffer via inject()
   after passing through the ImpairmentEngine — no sockets or threads involved.
-  Used for all unit tests and deterministic simulation scenarios.
+  inject() is also public so tests can push envelopes directly into the receive
+  queue bypassing the impairment engine entirely (UC_42).
+
+TlsTcpBackend.hpp / TlsTcpBackend.cpp
+  Drop-in TransportInterface replacement for TcpBackend that adds optional
+  mbedTLS 4.0 TLS encryption (STREAM transport). When tls_enabled=false,
+  operates as plaintext TCP identical to TcpBackend (REQ-6.3.4 swappable).
+  When tls_enabled=true: loads PEM cert/key via PSA Crypto, performs TLS 1.2+
+  handshake on each accepted or initiated connection, and framing is preserved
+  via tls_send_frame/tls_recv_frame. Supports per-client ssl_context array
+  (up to MAX_TCP_CONNECTIONS=8). SC functions: send_message (HAZ-005,006),
+  receive_message (HAZ-004,005).
+
+DtlsUdpBackend.hpp / DtlsUdpBackend.cpp
+  TransportInterface over DTLS-encrypted UDP (DATAGRAM transport, REQ-6.4.1).
+  Server: binds UDP socket, waits for first client datagram, performs DTLS
+  cookie anti-replay exchange (REQ-6.4.2), and completes handshake in init().
+  Client: connects UDP socket to peer and performs handshake in init().
+  MTU enforcement: rejects serialised messages exceeding DTLS_MAX_DATAGRAM_BYTES
+  (1400) before encryption (REQ-6.4.4). DTLS retransmission timer via
+  mbedtls_timing_delay_context (REQ-6.4.3). Plaintext UDP fallback when
+  tls_enabled=false (REQ-6.4.5). SC functions: send_message (HAZ-005,006),
+  receive_message (HAZ-004,005).
+
+IMbedtlsOps.hpp
+  Pure-virtual injectable interface for all mbedTLS library calls used by
+  DtlsUdpBackend (crypto_init, ssl_config_defaults, x509_crt_parse_file,
+  pk_parse_keyfile, ssl_conf_own_cert, ssl_cookie_setup, ssl_setup,
+  ssl_handshake, ssl_read, ssl_write, ssl_set_client_transport_id, etc.).
+  Enables M5 fault-injection testing of DTLS error paths without real
+  certificates or network. SC functions: ssl_handshake (HAZ-004,005,006),
+  ssl_write (HAZ-005,006), ssl_read (HAZ-004,005).
+
+MbedtlsOpsImpl.hpp / MbedtlsOpsImpl.cpp
+  Singleton implementation of IMbedtlsOps that delegates every call to the
+  real mbedTLS 4.0 PSA Crypto library. Used by production DtlsUdpBackend
+  instances; swapped for mock in tests.
+
+ImpairmentConfigLoader.hpp / ImpairmentConfigLoader.cpp
+  Free function impairment_config_load(path, cfg): reads an INI-style
+  key=value text file (at most MAX_CONFIG_LINES=64 lines, 128 bytes/line)
+  and populates an ImpairmentConfig struct. Always initialises cfg to safe
+  defaults before parsing; probability fields clamped to [0.0, 1.0];
+  unknown keys logged at WARNING_LO and ignored; returns ERR_IO only on
+  fopen() failure. Implements REQ-5.2.1. SC: HAZ-002, HAZ-007.
 
 SOURCE — src/app/   (application orchestration)
 ------------------------------------------------
@@ -311,3 +360,74 @@ test_LocalSim.cpp
   4 tests: basic send/receive round-trip, bidirectional messaging (both
   directions simultaneously), queue-full overflow (ERR_FULL when ring buffer
   capacity is exceeded), and receive timeout on empty queue (ERR_TIMEOUT).
+
+test_AssertState.cpp
+  8 tests: get_handler_initially_null, set_and_get_handler,
+  trigger_dispatches_to_handler, trigger_sets_fatal_flag,
+  abort_handler_is_ireset_handler, check_and_clear_false,
+  check_and_clear_true, and check_and_clear_idempotent.
+
+test_TcpBackend.cpp
+  25 tests covering the TcpBackend via MockSocketOps injection: config
+  defaults, server bind/close, client connect failure, receive timeout, send
+  with no clients, close-before-init, is_open lifecycle, loopback roundtrip,
+  large-timeout cap, bad bind IP, num_channels_zero, garbage-frame
+  deserialize failure, two-client compaction, client detects server close,
+  and 7 mock-injection fault tests (socket create, reuseaddr, listen,
+  nonblocking, impairment delay paths, recv queue overflow, send_frame fail,
+  loss impairment drop).
+
+test_UdpBackend.cpp
+  18 tests covering the UdpBackend via MockSocketOps injection: config
+  defaults, bind/close, receive timeout, loopback send/receive, multiple
+  messages, close-before-init, is_open lifecycle, unreachable peer, bad
+  bind IP, num_channels_zero, garbage datagram, and 5 mock-injection fault
+  tests (create fail, reuseaddr fail, impairment delay paths, send loss
+  impairment, send_to fail, recv_from fail, recv queue initial pop).
+
+test_SocketUtils.cpp
+  17 tests covering raw POSIX helpers in SocketUtils: create_tcp,
+  create_udp, set_nonblocking, set_reuseaddr, bind_valid, bind_bad_ip,
+  listen, accept, close, connect_with_timeout, tcp_frame_round_trip,
+  tcp_recv_oversized_frame, send_to_bad_ip, udp_send_recv_round_trip,
+  udp_recv_timeout, tcp_send_recv_exact, and tcp_frame_zero_payload.
+
+MockSocketOps.hpp
+  Test-only mock implementation of ISocketOps used by TcpBackend,
+  UdpBackend, and TlsTcpBackend tests to inject POSIX socket failures
+  (socket create, bind, listen, accept, send, recv) without real network I/O.
+
+test_TlsTcpBackend.cpp
+  30 tests covering TlsTcpBackend via ISocketOps injection: TlsConfig
+  defaults, transport_config includes TLS fields, server bind plaintext,
+  bad cert/key path, server bind TLS, plaintext loopback, TLS loopback,
+  connect bad host, receive timeout, send no clients, echo loopback
+  plaintext, post-echo remove_client, TLS verify-peer with/without CA,
+  num_channels_zero, client close long timeout, server bind port zero,
+  raw socket no TLS handshake, garbage frame deserialize fail, two-client
+  queue prefill, two-client compact loop, bad CA file, bind port in use,
+  server send before client connects, max_connections_exceeded,
+  TLS zero-length frame, DI constructor, and recv queue overflow.
+
+test_DtlsUdpBackend.cpp
+  37 tests covering DtlsUdpBackend via IMbedtlsOps/ISocketOps injection:
+  plaintext server bind, DTLS bad cert, plaintext loopback, DTLS loopback,
+  oversized payload rejected (ERR_INVALID), receive timeout, bad key path,
+  bad CA cert file, server init timeout (ERR_TIMEOUT), client bad peer IP,
+  bad bind IP, server recv after client close, plaintext recv garbage
+  datagram, DTLS server handshake garbage, plaintext send bad peer IP,
+  receive long timeout clamp, DTLS server verify-peer without CA, valid CA
+  cert load, server zero connect timeout, and 18 IMbedtlsOps mock-injection
+  fault tests (crypto_init fail, ssl_config_defaults fail, ssl_conf_own_cert
+  fail, ssl_cookie_setup fail, server recvfrom_peek fail, server net_connect
+  fail, server ssl_setup fail, server ssl_set_transport_id fail, client
+  net_connect fail, client ssl_setup fail, and more).
+
+test_ImpairmentConfigLoader.cpp
+  19 tests: file not found (ERR_IO), empty file, all fields parsed, partial
+  file retains defaults, comment and blank lines skipped, whitespace around
+  equals, malformed line skipped, unknown key logged, loss_probability
+  clamp (>1.0 → 1.0), duplication_probability clamp, reorder_window_size
+  clamp (>32 → 32), large prng_seed, negative duplication probability
+  clamp (<0.0 → 0.0), leading space, leading tab, carriage return in line,
+  truly malformed line, over-64-lines truncation, and malformed values.
