@@ -501,10 +501,15 @@ Reclassifying a function from NSC to SC, or adding a new SC function, requires:
    tests covering every SocketUtils function's success path pass cleanly.
    The SocketUtils.cpp threshold is therefore set at 64% (maximum achievable for NSC);
    this is not a defect and requires no remediation.
-   AssertState.cpp achieves 100% line coverage (7/7 lines, 1/1 functions). LLVM reports
-   0 branch points for AssertState.cpp because check_and_clear() uses only
-   compare_exchange_strong() — an atomic intrinsic with no LLVM-visible branch structure.
-   Both logical outcomes (flag was true, flag was false) are exercised by test_AssertState.cpp.
+   AssertState.cpp has a proven architectural ceiling of 50.00% (1/2 branches).
+   LLVM now reports 2 branch points: the `if (s_handler != nullptr)` decision inside
+   `trigger_handler_for_test()`. The True branch (handler registered → virtual dispatch
+   called) is covered by test_trigger_dispatches_to_handler and test_trigger_sets_fatal_flag.
+   The False branch (no handler registered → `::abort()`) cannot be tested without
+   aborting the test process; it is verified by code inspection (same rationale as the
+   NEVER_COMPILED_OUT_ASSERT no-handler fallback in Assert.hpp). Line coverage remains
+   100% (21/21 lines), and all 4 functions are covered. The branch coverage ceiling of
+   50% (maximum achievable) is not a defect and requires no remediation.
    AssertState is NSC-infrastructure (CLAUDE.md §10 assertion policy).
 
 5. Coverage does not substitute for code review or static analysis. All three
