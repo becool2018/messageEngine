@@ -4,7 +4,7 @@
 
 A safety-critical C++ networking library that models realistic communication problems — latency, jitter, packet loss, duplication, reordering, and link partitions — while providing consistent, reusable messaging utilities across three transport backends (TCP, UDP, and an in-process simulation harness).
 
-All production code complies with **JPL Power of 10**, **MISRA C++:2023**, and an **F-Prime style subset**: no exceptions, no templates, no RTTI, and no dynamic allocation on critical paths after initialization. STL is excluded with three documented exceptions: `std::atomic<uint32_t>` (`RingBuffer`), `std::atomic<bool>` (`AssertState`), and `std::memory_order_*` (`Assert`) — all in `src/core/` and justified in `.claude/CLAUDE.md` §3.
+All production code complies with **JPL Power of 10**, **MISRA C++:2023**, and an **F-Prime style subset**: no exceptions, no templates, no RTTI, no STL, and no dynamic allocation on critical paths after initialization. There are minor STL exceptions; these are listed in the [Coding Standards](#coding-standards) section and justified in `.claude/CLAUDE.md`.
 
 The library is maintained to **NASA-STD-8719.13C** and **NASA-STD-8739.8A** software assurance standards at **Class C** classification (infrastructure / networking library). Testing discipline voluntarily targets **Class B** rigor: all safety-critical functions require branch coverage, mandatory peer inspection (M1), and static analysis (M2), with MC/DC coverage as the goal for the five highest-hazard functions.
 
@@ -624,7 +624,15 @@ All production code (`src/`) is written to the following standards. Deviations r
 |---|---|
 | **JPL Power of 10** | No goto, no recursion; fixed loop bounds; no dynamic allocation after init; cyclomatic complexity ≤ 10 per function (enforced by `make lint`); ≥ 2 assertions per function; minimal variable scope; all return values checked; minimal preprocessor use; ≤ 1 pointer indirection; zero compiler warnings |
 | **MISRA C++:2023** | Required rules enforced; advisory rules followed; all deviations documented |
-| **F-Prime subset** | ISO C++17; `-fno-exceptions`; `-fno-rtti`; no templates; no explicit function pointers (vtable-backed virtual dispatch is a documented exception); no STL — with three documented exceptions: `std::atomic<uint32_t>` in `src/core/RingBuffer.hpp` (lock-free head/tail), `std::atomic<bool>` in `src/core/AssertState.hpp/cpp` (`g_fatal_fired`), and `std::memory_order_*` in `src/core/Assert.hpp`. All justified in `.claude/CLAUDE.md` §3. |
+| **F-Prime subset** | ISO C++17; `-fno-exceptions`; `-fno-rtti`; no templates; no explicit function pointers (vtable-backed virtual dispatch is a documented exception); no STL, with the following justified exceptions (see `.claude/CLAUDE.md` §3): |
+
+**STL exceptions:**
+
+| File | Exception | Justification |
+|---|---|---|
+| `src/core/RingBuffer.hpp` | `std::atomic<uint32_t>` | Lock-free head/tail indices; no dynamic allocation; maps directly to a hardware primitive |
+| `src/core/AssertState.hpp/cpp` | `std::atomic<bool>` | `g_fatal_fired` flag must be visible across threads without a mutex |
+| `src/core/Assert.hpp` | `std::memory_order_*` | Required by `std::atomic` store in the assert macro |
 | **Error handling** | All errors returned via `Result` enum (`OK`, `ERR_TIMEOUT`, `ERR_FULL`, `ERR_IO`, …); no exceptions |
 | **Assertions** | `NEVER_COMPILED_OUT_ASSERT(cond)` — always compiled in; in debug/test builds calls `abort()`; in production logs FATAL and triggers a controlled reset |
 | **Layering** | App → Core → Platform → OS; no upward dependencies; no cyclic dependencies |
