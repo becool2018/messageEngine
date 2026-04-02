@@ -179,6 +179,7 @@ cppcheck:
 	@echo "=== Cppcheck: src/ ==="
 	@grep -v '^#' .cppcheck-suppress | grep -v '^$$' | \
 	    cppcheck --enable=all --error-exitcode=1 \
+	    --suppress=checkersReport \
 	    --suppressions-list=/dev/stdin \
 	    --std=c++17 -I src \
 	    src/ 2>&1
