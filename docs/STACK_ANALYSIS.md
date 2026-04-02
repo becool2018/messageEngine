@@ -64,7 +64,7 @@ main()  [~64 B]
 main()  [~64 B]
   └─ run_client_iteration()  [~80 B]
        └─ wait_for_echo()  [~64 B]
-            └─ DeliveryEngine::pump_retries()  [~96 B]  ← retry_buf[32] on stack
+            └─ DeliveryEngine::pump_retries()  [~64 B]  ← m_retry_buf is a static member; stack frame is loop variables only
                  └─ RetryManager::collect_due()  [~48 B]
                       └─ DeliveryEngine::send_via_transport()  [~48 B]
                            └─ TcpBackend::send_message()  [~48 B]
@@ -73,8 +73,8 @@ main()  [~64 B]
                                           └─ ImpairmentEngine::queue_to_delay_buf()  [~32 B]
 ```
 
-**Depth:** 10 frames  ← **worst case across all chains**
-**Estimated peak stack:** ~572 B
+**Depth:** 10 frames  ← **worst-case frame depth across all chains**
+**Estimated peak stack:** ~668 B
 
 ---
 
@@ -84,13 +84,13 @@ main()  [~64 B]
 main()  [~64 B]
   └─ run_client_iteration()  [~80 B]
        └─ wait_for_echo()  [~64 B]
-            └─ DeliveryEngine::sweep_ack_timeouts()  [~96 B]  ← expired_buf[32] on stack
+            └─ DeliveryEngine::sweep_ack_timeouts()  [~48 B]  ← m_timeout_buf is a static member; stack frame is loop variables only
                  └─ AckTracker::sweep_expired()  [~48 B]
                       └─ AckTracker::sweep_one_slot()  [~32 B]
 ```
 
 **Depth:** 6 frames
-**Estimated peak stack:** ~384 B
+**Estimated peak stack:** ~352 B
 
 ---
 
@@ -146,26 +146,26 @@ main()  [~64 B]
 
 ## Summary
 
+---
+
+## Summary
+
 | Chain | Depth (frames) | Peak stack estimate |
 |-------|---------------|---------------------|
 | 1 — Outbound send (TCP/UDP) | 9 | ~748 B |
 | 2 — Inbound receive (TCP/UDP) | 8 | ~480 B |
-| 3 — Retry pump | **10** | ~572 B |
-| 4 — ACK timeout sweep | 6 | ~384 B |
+| 3 — Retry pump | **10** | ~668 B |
+| 4 — ACK timeout sweep | 6 | ~352 B |
 | 5 — DTLS outbound send | **10** | ~764 B |
 | 6 — DTLS inbound receive | 8 | ~504 B |
-| **Worst case** | **10 (Chains 3 and 5)** | **~764 B (Chain 5, dominated by payload_buf[256] + IMbedtlsOps wrapper)** |
+| **Worst case** | **10 (Chains 3 and 5)** | **~764 B (Chain 5, dominated by payload_buf[256])** |
 
-The worst-case **frame depth** is **10 frames** (Chain 3 — retry pump), which extends
-Chain 1's path by appending the `Serializer::serialize()` →
-`ImpairmentEngine::process_outbound()` → `queue_to_delay_buf()` tail that
-`TcpBackend::send_message()` always invokes. DtlsUdpBackend chains (5, 6) do not
-exceed existing worst cases.
+The worst-case **frame depth** is **10 frames** (Chains 3 and 5). The worst-case **stack
+size** is **~764 B** (Chain 5), dominated by `payload_buf[256]` in `send_test_message()`.
 
-The worst-case **stack size** remains **~748 bytes** (Chains 1 and 5), dominated by
-the `payload_buf[256]` local array in `send_test_message()`. Chain 3 reaches only
-~572 B because it lacks that large local buffer; the extra three frames add
-approximately 144 B of frame overhead. Chain 5 equals Chain 1 in depth and size.
+DEF-002-1 resolved (2026-04-02): `m_retry_buf` and `m_timeout_buf` moved from stack-local
+arrays to private member arrays in `DeliveryEngine`, zero-initialized in `init()`. Chains 3
+and 4 no longer carry oversized stack allocations.
 
 ---
 
@@ -173,7 +173,7 @@ approximately 144 B of frame overhead. Chain 5 equals Chain 1 in depth and size.
 
 | Platform | Default per-thread stack | Headroom vs. worst case |
 |----------|--------------------------|-------------------------|
-| macOS | 8 MB (main), 512 KB (pthreads) | > 700× |
+| macOS | 8 MB (main), 512 KB (pthreads) | > 10 000× |
 | Linux | 8 MB (main), 8 MB (pthreads) | > 10 000× |
 
 No stack overflow risk exists on either supported platform at current code structure.

@@ -102,7 +102,7 @@ ALL_LIB_OBJS := $(CORE_OBJS) $(PLATFORM_OBJS)
 # ─────────────────────────────────────────────────────────────────────────────
 # Targets
 # ─────────────────────────────────────────────────────────────────────────────
-.PHONY: all clean tests server client check_traceability \
+.PHONY: all clean tests stress_tests run_stress_tests server client check_traceability \
         lint cppcheck pclint scan_build static_analysis \
         coverage coverage_show coverage_report
 
@@ -133,6 +133,28 @@ tests: \
 
 build/test_%: $(ALL_LIB_OBJS) build/objs/tests/test_%.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stress tests (separate target — NOT part of run_tests)
+#
+# Stress tests exercise capacity-exhaustion and slot-recycling paths with
+# thousands of consecutive fill/drain cycles.  They are intentionally kept
+# separate from the fast unit-test suite (run_tests) because:
+#   • They take several seconds; CI fast-path should not be delayed.
+#   • They target a different failure class (sustained-load slot leaks,
+#     index-wrap arithmetic) that unit tests do not cover.
+#
+# Usage:
+#   make stress_tests        — build only
+#   make run_stress_tests    — build and run
+# ─────────────────────────────────────────────────────────────────────────────
+stress_tests: build/test_stress_capacity
+
+run_stress_tests: stress_tests
+	@echo "=== Stress tests: capacity exhaustion and slot recycling ==="
+	@echo "    (may take several seconds on slow hardware)"
+	@build/test_stress_capacity
+	@echo "=== STRESS TESTS PASSED ==="
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Compile rules

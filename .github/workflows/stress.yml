@@ -1,0 +1,86 @@
+name: Stress Tests
+
+# ─────────────────────────────────────────────────────────────────────────────
+# When this workflow runs
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Nightly (2 AM UTC) — catches any accumulated drift even when no
+#    capacity-relevant file was touched recently.
+#
+# 2. Push / PR to main when a capacity-relevant file changes — ensures that
+#    any edit to a compile-time constant, a loop-bound, or a slot-management
+#    algorithm is immediately stress-tested (per CLAUDE.md §1c).
+#    Covered files:
+#      • src/core/Types.hpp          — capacity constants
+#      • src/core/AckTracker.*       — slot fill/drain/sweep logic
+#      • src/core/RetryManager.*     — retry slot scheduling/exhaustion
+#      • src/core/RingBuffer.hpp     — SPSC ring index arithmetic
+#      • src/core/DuplicateFilter.*  — sliding-window eviction
+#      • tests/test_stress_capacity.cpp — the stress tests themselves
+#
+# 3. workflow_dispatch — manual trigger from the GitHub Actions tab for
+#    on-demand runs (e.g., before a release, after a platform port).
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # nightly, 2 AM UTC
+
+  push:
+    branches: [ "main" ]
+    paths:
+      - 'src/core/Types.hpp'
+      - 'src/core/AckTracker.cpp'
+      - 'src/core/AckTracker.hpp'
+      - 'src/core/RetryManager.cpp'
+      - 'src/core/RetryManager.hpp'
+      - 'src/core/RingBuffer.hpp'
+      - 'src/core/DuplicateFilter.cpp'
+      - 'src/core/DuplicateFilter.hpp'
+      - 'tests/test_stress_capacity.cpp'
+
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - 'src/core/Types.hpp'
+      - 'src/core/AckTracker.cpp'
+      - 'src/core/AckTracker.hpp'
+      - 'src/core/RetryManager.cpp'
+      - 'src/core/RetryManager.hpp'
+      - 'src/core/RingBuffer.hpp'
+      - 'src/core/DuplicateFilter.cpp'
+      - 'src/core/DuplicateFilter.hpp'
+      - 'tests/test_stress_capacity.cpp'
+
+  workflow_dispatch:   # manual trigger from the Actions tab
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  stress_tests:
+    name: Stress Tests — Capacity Exhaustion and Slot Recycling
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install toolchain
+        # Only the compiler and mbedTLS are needed — no static-analysis tools.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libmbedtls-dev
+
+      - name: Build stress tests
+        run: make stress_tests
+
+      - name: Run stress tests
+        # Suppress INFO-level logger output so only PASS/FAIL lines are visible
+        # in the Actions log.  Failures still abort via non-zero exit from assert().
+        run: make run_stress_tests 2>/dev/null

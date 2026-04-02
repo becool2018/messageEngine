@@ -1,3 +1,5 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Copyright 2026 Don Jessup. Licensed under the Apache License, Version 2.0. See LICENSE. -->
 <application_requirements>
 NOTE: Global portable C/C++ coding standards (Power of 10, MISRA, F´ subset) are defined in .claude/CLAUDE.md.
 Project-specific architecture, layering rules, verification policy, and CI/commit rules are defined in §§1a–1d of this file.
@@ -81,6 +83,14 @@ Before every git commit, run `make lint` and `make run_tests`. Both must pass wi
 before the commit is created. If either fails, fix the issue first — do not commit broken or
 lint-failing code. These checks are also entry criteria for the formal inspection process (§12).
 
+Stress tests (`make run_stress_tests`) are NOT required on every commit. Run them when any of
+the following change:
+  - A capacity constant in src/core/Types.hpp (ACK_TRACKER_CAPACITY, DEDUP_WINDOW_SIZE,
+    MSG_RING_CAPACITY, IMPAIR_DELAY_BUF_SIZE, MAX_RETRY_COUNT, or similar).
+  - A loop bound or slot-management algorithm in AckTracker, RetryManager, RingBuffer,
+    or DuplicateFilter.
+  - A new platform port or cross-compilation target is introduced.
+
 1d. Resolved Design Decisions
 
 The following questions were open during initial design and are now resolved:
@@ -134,7 +144,7 @@ The message layer must provide helpers for:
 - [REQ-3.2.1] Message ID generation and comparison.
 - [REQ-3.2.2] Timestamps and expiry checking.
 - [REQ-3.2.3] Serialization/deserialization:
-  - Deterministic, endian-safe, version-tolerant where possible.
+  - Deterministic, endian-safe; wire format carries an explicit protocol version byte and frame magic (see REQ-3.2.8).
 - [REQ-3.2.4] ACK handling:
   - Generating ACK/NAK messages where needed.
   - Tracking outstanding messages awaiting ACK.
@@ -145,6 +155,13 @@ The message layer must provide helpers for:
   - Recognize and drop duplicates based on (source_id, message_id) pairs.
 - [REQ-3.2.7] Expiry handling:
   - Drop or deprioritize expired messages before delivery.
+- [REQ-3.2.8] Wire format version enforcement:
+  - Every serialized frame must carry a protocol version byte (byte 3 of the
+    wire header) and a 2-byte frame magic number (wire bytes 40–41).
+  - Constants are defined in src/core/ProtocolVersion.hpp (PROTO_VERSION, PROTO_MAGIC).
+  - Deserializer must reject frames whose version byte does not equal PROTO_VERSION.
+  - Deserializer must reject frames whose magic word does not equal PROTO_MAGIC.
+  - Bump PROTO_VERSION on any change to the wire field layout; PROTO_MAGIC is fixed.
 
 3.3 Delivery semantics
 The system must support multiple delivery semantics, including:

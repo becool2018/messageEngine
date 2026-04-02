@@ -1,3 +1,17 @@
+// Copyright 2026 Don Jessup
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /**
  * @file test_Serializer.cpp
  * @brief Unit tests for Serializer round-trip and edge cases.
@@ -11,7 +25,7 @@
  *   - F-Prime style: simple test framework using assert() and printf().
  */
 
-// Verifies: REQ-3.2.3
+// Verifies: REQ-3.2.3, REQ-3.2.8
 // Verification: M1 + M2 + M4 + M5 (fault injection not required — pure logic)
 
 #include <cstdio>
@@ -22,6 +36,7 @@
 #include "core/Types.hpp"
 #include "core/MessageEnvelope.hpp"
 #include "core/Serializer.hpp"
+#include "core/ProtocolVersion.hpp"
 
 // Fixed-size wire buffer for all serialization tests
 // (Power of 10 rule 3: no dynamic allocation)
@@ -203,14 +218,14 @@ static bool test_serialize_max_payload()
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 6: Verify WIRE_HEADER_SIZE constant
 // ─────────────────────────────────────────────────────────────────────────────
-// Verifies: REQ-3.2.3
+// Verifies: REQ-3.2.3, REQ-3.2.8
 static bool test_wire_header_size()
 {
     // Layout (from Serializer.hpp):
-    // 1 byte message_type + 1 reliability_class + 1 priority + 1 padding
+    // 1 byte message_type + 1 reliability_class + 1 priority + 1 proto_version
     // + 8 message_id + 8 timestamp_us + 4 source_id + 4 destination_id
-    // + 8 expiry_time_us + 4 payload_length + 4 padding
-    // = 1 + 1 + 1 + 1 + 8 + 8 + 4 + 4 + 8 + 4 + 4 = 44
+    // + 8 expiry_time_us + 4 payload_length + 2 magic + 2 reserved
+    // = 1 + 1 + 1 + 1 + 8 + 8 + 4 + 4 + 8 + 4 + 2 + 2 = 44
     assert(Serializer::WIRE_HEADER_SIZE == 44U);
 
     return true;
@@ -264,11 +279,11 @@ static bool test_deserialize_header_too_short()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 9: Deserialize with corrupt first padding byte (covers True branch of
-//         'if (padding1 != 0U)' in deserialize)
+// Test 9: Deserialize with unrecognised protocol version (covers True branch
+//         of 'if (proto_ver != PROTO_VERSION)' in deserialize)
 // ─────────────────────────────────────────────────────────────────────────────
-// Verifies: REQ-3.2.3
-static bool test_deserialize_bad_padding1()
+// Verifies: REQ-3.2.3, REQ-3.2.8
+static bool test_deserialize_version_mismatch()
 {
     // Serialize a valid message to get a well-formed wire buffer
     MessageEnvelope original;
@@ -286,7 +301,7 @@ static bool test_deserialize_bad_padding1()
     assert(sr == Result::OK);
     assert(out_len >= Serializer::WIRE_HEADER_SIZE);
 
-    // Corrupt padding byte at wire offset 3 (must be 0 per spec)
+    // Overwrite version byte at wire offset 3 with an unknown version (0xFF)
     wire_buf[3U] = 0xFFU;
 
     MessageEnvelope env;
@@ -298,11 +313,11 @@ static bool test_deserialize_bad_padding1()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 10: Deserialize with corrupt second padding word (covers True branch of
-//          'if (padding2 != 0U)' in deserialize)
+// Test 10: Deserialize with corrupted frame magic (covers True branch of
+//          'if (magic_word != ...)' in deserialize)
 // ─────────────────────────────────────────────────────────────────────────────
-// Verifies: REQ-3.2.3
-static bool test_deserialize_bad_padding2()
+// Verifies: REQ-3.2.3, REQ-3.2.8
+static bool test_deserialize_bad_magic()
 {
     // Serialize a valid message to get a well-formed wire buffer
     MessageEnvelope original;
@@ -320,7 +335,7 @@ static bool test_deserialize_bad_padding2()
     assert(sr == Result::OK);
     assert(out_len >= Serializer::WIRE_HEADER_SIZE);
 
-    // Corrupt padding word at wire offset 40-43 (must be 0x00000000 per spec)
+    // Corrupt the magic high-byte at wire offset 40 (0x4D → 0x01)
     wire_buf[40U] = 0x01U;
 
     MessageEnvelope env;
@@ -401,6 +416,67 @@ static bool test_deserialize_zero_payload()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 13: Deserialize rejects version 0 (old pre-versioning format)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.8
+static bool test_deserialize_version_zero_rejected()
+{
+    // Serialize a valid message (version byte is set to PROTO_VERSION = 1)
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type   = MessageType::DATA;
+    original.source_id      = 10U;
+    original.payload_length = 0U;
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+    assert(out_len >= Serializer::WIRE_HEADER_SIZE);
+
+    // Overwrite version byte at offset 3 with 0 (old unversioned format)
+    // — must be rejected by a v1 deserializer
+    wire_buf[3U] = 0U;
+
+    MessageEnvelope env;
+    envelope_init(env);
+    Result r = Serializer::deserialize(wire_buf, out_len, env);
+    assert(r == Result::ERR_INVALID);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 14: Verify PROTO_VERSION and PROTO_MAGIC appear correctly in wire frame
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.8
+static bool test_proto_version_in_wire_frame()
+{
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type   = MessageType::DATA;
+    original.source_id      = 11U;
+    original.payload_length = 0U;
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+    assert(out_len >= Serializer::WIRE_HEADER_SIZE);
+
+    // Wire byte 3 must equal PROTO_VERSION
+    assert(wire_buf[3U] == PROTO_VERSION);
+
+    // Wire bytes 40–41 must equal PROTO_MAGIC (big-endian: high byte, low byte)
+    assert(wire_buf[40U] == static_cast<uint8_t>((PROTO_MAGIC >> 8U) & 0xFFU));
+    assert(wire_buf[41U] == static_cast<uint8_t>(PROTO_MAGIC & 0xFFU));
+
+    // Wire bytes 42–43 must be reserved zero
+    assert(wire_buf[42U] == 0U);
+    assert(wire_buf[43U] == 0U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -463,18 +539,18 @@ int main()
         printf("PASS: test_deserialize_header_too_short\n");
     }
 
-    if (!test_deserialize_bad_padding1()) {
-        printf("FAIL: test_deserialize_bad_padding1\n");
+    if (!test_deserialize_version_mismatch()) {
+        printf("FAIL: test_deserialize_version_mismatch\n");
         ++failed;
     } else {
-        printf("PASS: test_deserialize_bad_padding1\n");
+        printf("PASS: test_deserialize_version_mismatch\n");
     }
 
-    if (!test_deserialize_bad_padding2()) {
-        printf("FAIL: test_deserialize_bad_padding2\n");
+    if (!test_deserialize_bad_magic()) {
+        printf("FAIL: test_deserialize_bad_magic\n");
         ++failed;
     } else {
-        printf("PASS: test_deserialize_bad_padding2\n");
+        printf("PASS: test_deserialize_bad_magic\n");
     }
 
     if (!test_deserialize_oversized_payload_field()) {
@@ -489,6 +565,20 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_deserialize_zero_payload\n");
+    }
+
+    if (!test_deserialize_version_zero_rejected()) {
+        printf("FAIL: test_deserialize_version_zero_rejected\n");
+        ++failed;
+    } else {
+        printf("PASS: test_deserialize_version_zero_rejected\n");
+    }
+
+    if (!test_proto_version_in_wire_frame()) {
+        printf("FAIL: test_proto_version_in_wire_frame\n");
+        ++failed;
+    } else {
+        printf("PASS: test_proto_version_in_wire_frame\n");
     }
 
     return (failed > 0) ? 1 : 0;

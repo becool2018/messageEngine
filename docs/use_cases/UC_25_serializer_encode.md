@@ -2,7 +2,7 @@
 
 **HL Group:** System Internals (sub-functions, not user-facing goals)
 **Actor:** System
-**Requirement traceability:** REQ-3.2.3, REQ-6.1.5
+**Requirement traceability:** REQ-3.2.3, REQ-3.2.8, REQ-6.1.5
 
 ---
 
@@ -41,14 +41,15 @@ Called by `TcpBackend`, `UdpBackend`, `TlsTcpBackend`, `DtlsUdpBackend` on every
    - Byte 0: `message_type` (1 byte).
    - Byte 1: `reliability_class` (1 byte).
    - Byte 2: `priority` (1 byte).
-   - Byte 3: `0` padding.
+   - Byte 3: `PROTO_VERSION` (from `ProtocolVersion.hpp`; receiver rejects any other value).
    - Bytes 4–11: `message_id` (8 bytes BE).
    - Bytes 12–19: `timestamp_us` (8 bytes BE).
    - Bytes 20–23: `source_id` (4 bytes BE).
    - Bytes 24–27: `destination_id` (4 bytes BE).
    - Bytes 28–35: `expiry_time_us` (8 bytes BE).
    - Bytes 36–39: `payload_length` (4 bytes BE).
-   - Bytes 40–43: `0` padding (4 bytes).
+   - Bytes 40–41: `PROTO_MAGIC` high then low byte (0x4D, 0x45 = 'ME'; from `ProtocolVersion.hpp`).
+   - Bytes 42–43: `0x0000` reserved.
    - Bytes 44 onward: `memcpy(buf + WIRE_HEADER_SIZE, envelope.payload, payload_length)`.
 6. `*wire_len = WIRE_HEADER_SIZE + envelope.payload_length`.
 7. `NEVER_COMPILED_OUT_ASSERT(*wire_len <= buf_cap)`.
@@ -148,10 +149,11 @@ TcpBackend::send_message()
 
 - **Safety-critical function:** `Serializer::serialize()` is listed as a target for MC/DC coverage (docs/HAZARD_ANALYSIS.md HAZ-005). Wire format errors can cause the receiver to misinterpret message type, source, or payload.
 - **Big-endian byte order:** All multi-byte fields are written in network byte order (big-endian). Any deserializer must use matching byte-order logic.
-- **Padding bytes are zero:** Bytes 3 and 40–43 are padding. Any future field additions must account for these positions.
+- **Protocol version and magic:** Byte 3 carries `PROTO_VERSION`; bytes 40–41 carry `PROTO_MAGIC`. Bytes 42–43 are reserved zero. Bump `PROTO_VERSION` in `src/core/ProtocolVersion.hpp` on any wire format change; `PROTO_MAGIC` is fixed.
 
 ---
 
 ## 15. Unknowns / Assumptions
 
 - `[ASSUMPTION]` `write_u64` writes 8 bytes big-endian using byte-by-byte shifts; confirmed from reading Serializer.cpp. This avoids alignment and endianness UB that would occur with a raw pointer cast.
+- `[CONFIRMED]` `PROTO_MAGIC` is written as the high 16 bits of a big-endian uint32 at offset 40: `write_u32(buf, 40, (uint32_t)PROTO_MAGIC << 16)` produces bytes 0x4D, 0x45, 0x00, 0x00 on the wire.

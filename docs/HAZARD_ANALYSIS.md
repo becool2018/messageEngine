@@ -66,6 +66,7 @@
 | `deserialize()` reads beyond buffer | Corrupt fields reconstructed silently | Cat I HAZ-005 | `offset + sizeof(field) > len` guard on every read | Returns `ERR_INVALID` on any out-of-bounds read |
 | Endian conversion error | Field interpreted with wrong byte order | Cat I HAZ-005 | Fixed big-endian encoding; deterministic layout | `write_u32` / `read_u32` always swap; no host-endian assumptions |
 | Payload length mismatch | Truncated payload delivered | Cat I HAZ-005 | `payload_length` field vs. actual bytes copied | `payload_length <= MSG_MAX_PAYLOAD_BYTES` enforced in both directions |
+| Protocol version or magic mismatch silently accepted | Frame from incompatible wire format decoded with wrong field layout; corrupt data delivered to caller | Cat I HAZ-005 | `proto_ver != PROTO_VERSION` check at byte 3; `magic_word != (PROTO_MAGIC << 16)` check at bytes 40–43 in `deserialize()` | `ERR_INVALID` returned immediately on version or magic mismatch before any field is read; logged at `WARNING_HI` (REQ-3.2.8) |
 
 ### TcpBackend / UdpBackend
 

@@ -1,3 +1,17 @@
+// Copyright 2026 Don Jessup
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /**
  * @file Serializer.cpp
  * @brief Implementation of deterministic, endian-safe MessageEnvelope serialization.
@@ -15,6 +29,7 @@
 
 #include "Serializer.hpp"
 #include "Assert.hpp"
+#include "ProtocolVersion.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper functions: endian-safe byte I/O
@@ -141,7 +156,7 @@ Result Serializer::serialize(const MessageEnvelope& env,
     offset = write_u8(buf, offset, static_cast<uint8_t>(env.message_type));
     offset = write_u8(buf, offset, static_cast<uint8_t>(env.reliability_class));
     offset = write_u8(buf, offset, env.priority);
-    offset = write_u8(buf, offset, 0U);  // padding byte must be 0
+    offset = write_u8(buf, offset, PROTO_VERSION);  // wire protocol version (REQ-3.2.8)
 
     offset = write_u64(buf, offset, env.message_id);
     offset = write_u64(buf, offset, env.timestamp_us);
@@ -149,7 +164,8 @@ Result Serializer::serialize(const MessageEnvelope& env,
     offset = write_u32(buf, offset, env.destination_id);
     offset = write_u64(buf, offset, env.expiry_time_us);
     offset = write_u32(buf, offset, env.payload_length);
-    offset = write_u32(buf, offset, 0U);  // padding word must be 0
+    // Bytes 40–41: PROTO_MAGIC (BE); bytes 42–43: reserved zero (REQ-3.2.8)
+    offset = write_u32(buf, offset, (static_cast<uint32_t>(PROTO_MAGIC) << 16U));
 
     // Power of 10 rule 5: assertion after header write
     NEVER_COMPILED_OUT_ASSERT(offset == WIRE_HEADER_SIZE);  // Assert: header size matches constant
@@ -201,10 +217,10 @@ Result Serializer::deserialize(const uint8_t*  buf,
     env.priority = read_u8(buf, offset);
     offset += 1U;
 
-    uint8_t padding1 = read_u8(buf, offset);
+    uint8_t proto_ver = read_u8(buf, offset);
     offset += 1U;
-    // Power of 10 rule 5: validate padding
-    if (padding1 != 0U) {
+    // REQ-3.2.8: reject any frame whose version byte does not match PROTO_VERSION
+    if (proto_ver != PROTO_VERSION) {
         return Result::ERR_INVALID;
     }
 
@@ -226,10 +242,10 @@ Result Serializer::deserialize(const uint8_t*  buf,
     env.payload_length = read_u32(buf, offset);
     offset += 4U;
 
-    uint32_t padding2 = read_u32(buf, offset);
+    uint32_t magic_word = read_u32(buf, offset);
     offset += 4U;
-    // Power of 10 rule 5: validate padding
-    if (padding2 != 0U) {
+    // REQ-3.2.8: reject if magic (bytes 40–41) is wrong or reserved (bytes 42–43) is non-zero
+    if (magic_word != (static_cast<uint32_t>(PROTO_MAGIC) << 16U)) {
         return Result::ERR_INVALID;
     }
 

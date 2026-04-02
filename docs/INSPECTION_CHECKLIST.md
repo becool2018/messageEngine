@@ -22,12 +22,20 @@ docs/DEFECT_LOG.md as an attachment reference or inline summary.
 
 ## Part A — Entry gate (verify before starting; abort review if any item fails)
 
+All nine criteria below are required by CLAUDE.md §12.2. No review may begin until
+every item is checked PASS.
+
 | # | Item | Pass / Fail |
 |---|------|-------------|
 | A1 | `make` completes with zero warnings and zero errors | |
-| A2 | `make run_tests` — all tests green | |
-| A3 | `make check_traceability` — RESULT: PASS | |
-| A4 | Author has self-reviewed this checklist before requesting review | |
+| A2 | `make lint` — zero clang-tidy violations (cyclomatic complexity ≤ 10 enforced) | |
+| A3 | `make run_tests` — all tests green | |
+| A4 | `make check_traceability` — RESULT: PASS | |
+| A5 | All new/modified `src/` files carry `// Implements: REQ-x.x` tags in file header | |
+| A6 | All new/modified `tests/` files carry `// Verifies: REQ-x.x` tags at file level | |
+| A7 | No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | |
+| A8 | No dynamic allocation on critical paths after init (Power of 10 Rule 3) | |
+| A9 | Author has self-reviewed against this checklist before requesting moderator-led review | |
 
 ---
 
@@ -61,7 +69,7 @@ docs/DEFECT_LOG.md as an attachment reference or inline summary.
 | C12 | Rule 8 | No macros used for control flow or to obscure structure | |
 | C13 | Rule 9 | No explicit function pointer declarations in `src/` | |
 | C14 | Rule 9 | Virtual functions conform to MISRA C++:2023 rules on virtuals | |
-| C15 | Rule 10 | Zero compiler warnings in this change | |
+| C15 | Rule 10 | Zero compiler warnings in this change (enforced by `make lint` — entry gate A2) | |
 
 ---
 

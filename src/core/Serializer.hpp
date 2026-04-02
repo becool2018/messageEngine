@@ -1,3 +1,17 @@
+// Copyright 2026 Don Jessup
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /**
  * @file Serializer.hpp
  * @brief Deterministic, endian-safe serialization of MessageEnvelope.
@@ -23,6 +37,7 @@
 #include "Assert.hpp"
 #include "Types.hpp"
 #include "MessageEnvelope.hpp"
+#include "ProtocolVersion.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Serializer: deterministic, endian-safe message serialization
@@ -35,15 +50,16 @@ public:
     ///   1 byte   message_type
     ///   1 byte   reliability_class
     ///   1 byte   priority
-    ///   1 byte   padding (must be 0)
+    ///   1 byte   PROTO_VERSION (from ProtocolVersion.hpp; reject if unrecognised)
     ///   8 bytes  message_id (BE)
     ///   8 bytes  timestamp_us (BE)
     ///   4 bytes  source_id (BE)
     ///   4 bytes  destination_id (BE)
     ///   8 bytes  expiry_time_us (BE)
     ///   4 bytes  payload_length (BE)
-    ///   4 bytes  padding (must be 0)
-    /// Total: 1+1+1+1+8+8+4+4+8+4+4 = 44 bytes
+    ///   2 bytes  PROTO_MAGIC (BE, 0x4D45 = 'ME'; from ProtocolVersion.hpp)
+    ///   2 bytes  reserved (must be 0x0000)
+    /// Total: 1+1+1+1+8+8+4+4+8+4+2+2 = 44 bytes
     static const uint32_t WIRE_HEADER_SIZE = 44U;
 
     // Safety-critical (SC): HAZ-005 — verified to M5

@@ -69,7 +69,7 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 | Function | Worst-case operations | Bound | Notes |
 |----------|----------------------|-------|-------|
 | `Serializer::serialize()` | Header writes (fixed) + P payload bytes | O(P) = O(4096) | Dominated by memcpy of payload |
-| `Serializer::deserialize()` | Header reads (fixed) + P payload bytes | O(P) = O(4096) | Dominated by memcpy of payload |
+| `Serializer::deserialize()` | Header reads (fixed) + 2 additional comparisons (proto_version, magic_word) + P payload bytes | O(P) = O(4096) | 2 extra comparisons are O(1); bound unchanged; dominated by memcpy of payload |
 
 ### src/core/RingBuffer.hpp
 
@@ -108,8 +108,8 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 |----------|----------------------|-------|-------|
 | `DeliveryEngine::send()` | serialize + process_outbound + track + schedule | O(P + I + A) | Dominated by serialize O(P) |
 | `DeliveryEngine::receive()` | receive_message + is_duplicate + check_and_record | O(P + D) | Dominated by deserialize O(P) and dedup O(D) |
-| `DeliveryEngine::pump_retries()` | collect_due (O(A)) + per-due: send_via_transport → serialize (O(P)) + process_outbound + collect_deliverable (O(I)) | O(A × (P + I)) = O(32 × 4128) = O(132096) | **Worst case: all 32 slots due simultaneously; each retry traverses Serializer + ImpairmentEngine** |
-| `DeliveryEngine::sweep_ack_timeouts()` | sweep_expired O(A) | O(A) = O(32) | |
+| `DeliveryEngine::pump_retries()` | collect_due (O(A)) + per-due: send_via_transport → serialize (O(P)) + process_outbound + collect_deliverable (O(I)) | O(A × (P + I)) = O(32 × 4128) = O(132096) | **Worst case: all 32 slots due simultaneously; each retry traverses Serializer + ImpairmentEngine.** DEF-002-1 resolved: output buffer is now member `m_retry_buf` (init-phase allocated). |
+| `DeliveryEngine::sweep_ack_timeouts()` | sweep_expired O(A) | O(A) = O(32) | DEF-002-1 resolved: output buffer is now member `m_timeout_buf` (init-phase allocated). |
 
 ### src/core/TransportInterface.hpp (concrete implementations)
 
@@ -190,7 +190,7 @@ To derive a true WCET on a deterministic target:
 1. Replace each `timestamp_now_us()` syscall with the target's hardware timer read latency.
 2. Replace O(P) byte-copy bounds with `P × (cycles per byte copy)` for the target's bus width.
 3. Replace O(A), O(D), O(I) loop bounds with the constant values above × (cycles per iteration body).
-4. The worst-case call chain is Chain 1 from STACK_ANALYSIS.md (9 frames); sum the per-function WCETs along that chain.
+4. The worst-case call chain by **frame depth** is Chain 3 (retry pump) or Chain 5 (DTLS outbound) from STACK_ANALYSIS.md (10 frames each); sum the per-function WCETs along that chain. The worst-case **stack size** is ~764 B (Chain 5). DEF-002-1 resolved: output buffers in `pump_retries()` and `sweep_ack_timeouts()` are now init-phase member allocations.
 
 ---
 

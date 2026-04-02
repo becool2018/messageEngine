@@ -1,16 +1,19 @@
 # messageEngine
 
 ![CI](https://github.com/becool2018/messageEngine/actions/workflows/CI.yml/badge.svg)
+![Stress Tests](https://github.com/becool2018/messageEngine/actions/workflows/stress.yml/badge.svg)
 
 > **Note:** This codebase is produced by Claude (Anthropic) as an experiment to evaluate whether an AI assistant can consistently follow strict safety-critical software engineering requirements — including NASA standards, JPL Power of 10, and MISRA C++:2023 .
 
-> **AI contributors:** If you are using an AI assistant with this project, ensure it reads **`.claude/CLAUDE.md`** (global C/C++ coding standard — Power of 10, MISRA C++:2023, F-Prime subset) and **`CLAUDE.md`** (project-specific requirements — architecture, traceability, safety, verification policy) before making any changes. Both files are normative and must be followed.
+> **AI contributors:** If you are using an AI assistant with this project, ensure it reads **`.claude/CLAUDE.md`** (global C/C++ coding standard — targets Power of 10, MISRA C++:2023, F-Prime subset; documented deviations listed therein) and **`CLAUDE.md`** (project-specific requirements — architecture, traceability, safety, verification policy) before making any changes. Both files are normative and must be followed.
 
 A safety-critical C++ networking library that models realistic communication problems — latency, jitter, packet loss, duplication, reordering, and link partitions — while providing consistent, reusable messaging utilities across three transport backends (TCP, UDP, and an in-process simulation harness).
 
-All production code complies with **JPL Power of 10**, **MISRA C++:2023**, and an **F-Prime style subset**: no exceptions, no templates, no RTTI, no STL, and no dynamic allocation on critical paths after initialization. There are minor STL exceptions; these are listed in the [Coding Standards](#coding-standards) section and justified in `.claude/CLAUDE.md`.
+All production code is written to **JPL Power of 10**, **MISRA C++:2023**, and an **F-Prime style subset**: no exceptions, no templates, no RTTI, no STL, and no dynamic allocation on critical paths after initialization. Where a rule cannot be followed without compromising correctness or using a third-party API, a documented deviation is recorded in-code with a justification comment and in `.claude/CLAUDE.md`. There are minor STL exceptions; these are listed in the [Coding Standards](#coding-standards) section.
 
-The library is maintained to **NASA-STD-8719.13C** and **NASA-STD-8739.8A** software assurance standards at **Class C** classification (infrastructure / networking library). Testing discipline voluntarily targets **Class B** rigor: all safety-critical functions require branch coverage, mandatory peer inspection (M1), and static analysis (M2), with MC/DC coverage as the goal for the five highest-hazard functions.
+> **Standards note:** MISRA C++:2023 is a proprietary standard published by MISRA (misra.org.uk) and must be purchased separately. This project targets MISRA C++:2023 guidelines and documents all deviations, but does not claim third-party-audited certification. NASA technical standards (NASA-STD-8719.13C, NASA-STD-8739.8A, NPR 7150.2D) are publicly available at standards.nasa.gov.
+
+The library targets **NASA-STD-8719.13C** and **NASA-STD-8739.8A** software assurance practices at **Class C** classification (infrastructure / networking library), with voluntary **Class B** rigor in testing discipline: all safety-critical functions require branch coverage, mandatory peer inspection (M1), and static analysis (M2), with MC/DC coverage as the goal for the five highest-hazard functions.
 
 ---
 
@@ -61,7 +64,8 @@ These are **application-layer** semantics implemented entirely in `DeliveryEngin
 ### 3. Serialization
 - Deterministic big-endian (network byte order) wire format
 - Fixed 44-byte header; payload follows immediately
-- Validated on deserialization: padding bytes, payload length bounds
+- Protocol version byte (byte 3) and 2-byte frame magic `0x4D45` ('ME') embedded in every frame — mismatched version or magic rejected before any field is read (`src/core/ProtocolVersion.hpp`)
+- Validated on deserialization: protocol version, frame magic, payload length bounds
 
 ### 4. Transport Abstraction
 A single `TransportInterface` API (`init`, `send_message`, `receive_message`, `close`) hides all transport differences. Five implementations are provided:
@@ -293,6 +297,41 @@ build/test_UdpBackend
 build/test_TlsTcpBackend
 build/test_DtlsUdpBackend
 ```
+
+---
+
+## Stress Tests
+
+Stress tests exercise **capacity-exhaustion and slot-recycling** paths with thousands of
+consecutive fill/drain cycles.  They target a different failure class than unit tests —
+slot leaks, index-arithmetic wrap errors, and counter drift that only manifest under
+sustained load.
+
+```bash
+# Build only
+make stress_tests
+
+# Build and run
+make run_stress_tests
+```
+
+| Test | Cycles | What it catches |
+|---|---|---|
+| `test_ack_tracker_fill_drain_cycles` | 10 000 × 32 slots | Slot leak on `sweep_expired`; off-by-one at slot 33 |
+| `test_ack_tracker_partial_ack_then_sweep` | 1 000 × 32 slots | Double-free if ACKed slot is re-swept; ghost entries after partial drain |
+| `test_retry_manager_fill_ack_drain_cycles` | 5 000 × 32 slots | Slot not freed after `on_ack`; stale inactive entries blocking `schedule` |
+| `test_retry_manager_max_retry_exhaustion` | 1 000 × 32 slots × 5 retries | Slot not freed at exhaustion; retry count exceeding `MAX_RETRY_COUNT`; backoff overflow |
+| `test_ring_buffer_sustained_push_pop` | 64 000 single + 1 000 fill/drain | Index-wrap arithmetic across `uint32_t` boundary; FIFO ordering; `ERR_FULL`/`ERR_EMPTY` boundaries |
+| `test_dedup_filter_window_wraparound` | 100 window lengths × 128 entries | Eviction pointer wrap; false positives after eviction; false negatives within current window |
+
+**When to run stress tests** (per `CLAUDE.md §1c`): not required on every commit. Run when
+any capacity constant in `src/core/Types.hpp` changes, or when the loop-bound or
+slot-management logic in `AckTracker`, `RetryManager`, `RingBuffer`, or `DuplicateFilter`
+is modified.
+
+**CI:** Stress tests run automatically via `.github/workflows/stress.yml` on a nightly
+schedule (2 AM UTC), on any push or PR to `main` that touches a capacity-relevant file,
+and on manual dispatch from the GitHub Actions tab.
 
 ---
 
@@ -712,14 +751,16 @@ Each Safety & Assurance document depends on the following inputs. Update the lis
 
 ## Coding Standards
 
-All production code (`src/`) is written to the following standards. Deviations require an in-code comment with justification.
+All production code (`src/`) is written to the following standards. Where a rule cannot be followed, a deviation is recorded at the point of use with a justification comment; significant deviations are also catalogued in `.claude/CLAUDE.md`. No rule is silently broken.
+
+**Standards targeting note:** This project targets these standards as a development discipline. MISRA C++:2023 is a proprietary document (purchase required; not redistributed here). NASA standards are public. Neither imposes a software license on compliant code; see the [License](#license) section at the bottom of this file.
 
 **Software classification:** NASA-STD-8719.13C / NASA-STD-8739.8A **Class C** (infrastructure / networking library). **Verification discipline voluntarily targets Class B**: all safety-critical functions require branch coverage (M4), mandatory peer inspection (M1), and static analysis (M2); MC/DC coverage (M5) is the goal for the five highest-hazard functions. See `docs/HAZARD_ANALYSIS.md` and `docs/MCDC_ANALYSIS.md`.
 
-| Standard | Requirement |
+| Standard | How this project targets it |
 |---|---|
 | **JPL Power of 10** | No goto, no recursion; fixed loop bounds; no dynamic allocation after init; cyclomatic complexity ≤ 10 per function (enforced by `make lint`); ≥ 2 assertions per function; minimal variable scope; all return values checked; minimal preprocessor use; ≤ 1 pointer indirection; zero compiler warnings |
-| **MISRA C++:2023** | Required rules enforced; advisory rules followed; all deviations documented |
+| **MISRA C++:2023** | Required rules enforced; advisory rules followed; all deviations documented in-code and in `.claude/CLAUDE.md` |
 | **F-Prime subset** | ISO C++17; `-fno-exceptions`; `-fno-rtti`; no templates; no explicit function pointers (vtable-backed virtual dispatch is a documented exception); no STL, with the following justified exceptions (see `.claude/CLAUDE.md` §3): |
 
 **STL exceptions:**
@@ -859,3 +900,17 @@ All nine documents are validated simultaneously using three dependency-ordered w
 | **Total** | **21,035** |
 
 54 source files across 3 layers; 15 test suites + 1 shared mock header (16 test files).
+
+---
+
+## License
+
+This project is released under the **Apache License 2.0**.
+
+Apache 2.0 was chosen deliberately for a safety-critical library:
+
+- **Explicit patent grant (Section 3):** every contributor automatically grants users a royalty-free license to any patents that read on their contribution. MIT and BSD-3-Clause provide no patent protection. For teams doing IP clearance before deploying safety-critical software, this removes a significant legal uncertainty.
+- **Patent retaliation clause:** a user who initiates patent litigation against contributors or other users loses their Apache 2.0 license immediately. This protects the safety-critical community using the library from patent weaponization.
+- **Consistent with F-Prime lineage:** NASA/JPL released F-Prime (the framework whose style subset this project targets) under Apache 2.0. The same license signals the same engineering heritage.
+
+**Standards note:** Compliance with MISRA C++:2023, JPL Power of 10, and NASA standards is a development process choice, not a license obligation. Neither MISRA nor NASA impose any software license on code that follows their guidelines. The MISRA standard documents themselves are proprietary and must be purchased from [misra.org.uk](https://misra.org.uk); they are not included in this repository. NASA technical standards are publicly available at [standards.nasa.gov](https://standards.nasa.gov).
