@@ -39,6 +39,21 @@ jobs:
         run: |
           make run_tests
 
+      - name: Diagnose cppcheck suppressions
+        run: |
+          echo "=== cppcheck version ==="
+          cppcheck --version
+          echo "=== Testing each suppression entry individually ==="
+          while IFS= read -r line; do
+            [[ -z "$line" || "$line" == \#* ]] && continue
+            result=$(printf '%s\n' "$line" | cppcheck --suppressions-list=/dev/stdin /dev/null 2>&1)
+            if echo "$result" | grep -q "Failed to add suppression"; then
+              echo "FAILS: |$line|"
+            else
+              echo "OK:    |$line|"
+            fi
+          done < .cppcheck-suppress
+
       - name: Static analysis (clang-tidy + cppcheck + scan-build)
         run: |
           make static_analysis
