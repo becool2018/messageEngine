@@ -45,7 +45,11 @@
 #include "platform/SocketUtils.hpp"
 #include "core/ImpairmentConfig.hpp"
 
-#include <mbedtls/build_info.h>
+#if __has_include(<mbedtls/build_info.h>)
+#  include <mbedtls/build_info.h>   // mbedTLS 3.x / 4.x
+#else
+#  include <mbedtls/version.h>      // mbedTLS 2.x
+#endif
 #include <mbedtls/error.h>
 #include <mbedtls/psa_util.h>
 #include <psa/crypto.h>

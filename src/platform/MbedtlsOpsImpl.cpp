@@ -17,7 +17,11 @@
 #include "platform/MbedtlsOpsImpl.hpp"
 #include "core/Assert.hpp"
 
-#include <mbedtls/build_info.h>
+#if __has_include(<mbedtls/build_info.h>)
+#  include <mbedtls/build_info.h>   // mbedTLS 3.x / 4.x
+#else
+#  include <mbedtls/version.h>      // mbedTLS 2.x
+#endif
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/pk.h>

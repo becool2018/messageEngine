@@ -39,7 +39,11 @@
 #include "core/MessageEnvelope.hpp"
 #include "platform/TlsTcpBackend.hpp"
 #include "MockSocketOps.hpp"
-#include <mbedtls/build_info.h>
+#if __has_include(<mbedtls/build_info.h>)
+#  include <mbedtls/build_info.h>   // mbedTLS 3.x / 4.x
+#else
+#  include <mbedtls/version.h>      // mbedTLS 2.x
+#endif
 #include <mbedtls/psa_util.h>
 #include <psa/crypto.h>
 
