@@ -1,19 +1,21 @@
 ---
 name: validate-safety-doc
-description: Validate one Safety & Assurance document in docs/ against the live source code. Checks that all claims, constants, function names, state machines, HAZ IDs, REQ IDs, and structural references are still accurate. Focuses on one document per invocation.
+description: Validate one or all Safety & Assurance documents in docs/ against the live source code. Pass a document name to validate one document, or pass "all" to validate all nine documents in parallel using dependency-ordered agent waves. Checks that all claims, constants, function names, state machines, HAZ IDs, REQ IDs, and structural references are still accurate.
 user-invocable: true
-allowed-tools: Read, Glob, Grep, Bash
+allowed-tools: Read, Glob, Grep, Bash, Agent
 ---
 
-Validate one Safety & Assurance document from `docs/` against the live source code and
+Validate Safety & Assurance document(s) from `docs/` against the live source code and
 report every discrepancy found.
 
-**Target document** — use the argument passed by the user (e.g., `HAZARD_ANALYSIS`,
-`STATE_MACHINES`, `TRACEABILITY_MATRIX`, `STACK_ANALYSIS`, `WCET_ANALYSIS`,
-`MCDC_ANALYSIS`, `INSPECTION_CHECKLIST`, `DEFECT_LOG`, `VERIFICATION_POLICY`).
+**Target document** — use the argument passed by the user:
+- A single document name (e.g., `HAZARD_ANALYSIS`, `STATE_MACHINES`, `WCET_ANALYSIS`)
+  to validate one document using Phases 1–4 below.
+- `all` to validate all nine documents in parallel using the **All-documents mode**
+  defined immediately below.
 
 If no argument was given, list the nine documents below and ask the user to pick one
-before proceeding:
+or `all` before proceeding:
 
 | # | Document | What it covers |
 |---|---|---|
@@ -26,6 +28,127 @@ before proceeding:
 | 7 | `docs/INSPECTION_CHECKLIST.md` | Formal inspection entry/exit criteria and moderator checklist |
 | 8 | `docs/DEFECT_LOG.md` | Cumulative inspection defect record |
 | 9 | `docs/VERIFICATION_POLICY.md` | VVP-001 verification methods M1–M7 by classification level |
+
+---
+
+## All-documents mode (`all`)
+
+When the user passes `all`, validate all nine documents in three dependency-ordered
+waves. Each document runs in its own sub-agent so validation work is fully parallel
+within each wave. Wave N+1 does not start until all Wave N agents have returned their
+findings, so dependent documents always receive accurate cross-check results.
+
+### Dependency order and wave assignment
+
+```
+Wave 1 (no doc dependencies — run first, in parallel):
+  HAZARD_ANALYSIS      TRACEABILITY_MATRIX      STACK_ANALYSIS
+
+Wave 2 (depend only on Wave 1 — start after all Wave 1 agents finish):
+  STATE_MACHINES       WCET_ANALYSIS            VERIFICATION_POLICY
+  (needs HAZARD)       (needs HAZARD,            (needs HAZARD)
+                        STACK)
+
+Wave 3 (depend on Wave 1 and/or Wave 2 — start after all Wave 2 agents finish):
+  MCDC_ANALYSIS        DEFECT_LOG               INSPECTION_CHECKLIST
+  (needs HAZARD,       (needs HAZARD,            (needs DEFECT_LOG,
+   VERIFICATION_POLICY) INSPECTION_CHECKLIST,     DEFECT_LOG)
+                        VERIFICATION_POLICY)
+
+Note: DEFECT_LOG and INSPECTION_CHECKLIST cross-reference each other.
+Both are placed in Wave 3; each agent reads both documents independently.
+```
+
+### Step-by-step execution
+
+**Step 1 — Launch Wave 1 (3 agents in parallel).**
+
+Send a single message with three Agent tool calls running simultaneously:
+
+- Agent 1 prompt: `Validate docs/HAZARD_ANALYSIS.md using the validate-safety-doc skill rules for HAZARD_ANALYSIS. Follow Phase 1 (read doc), Phase 2 (read sources + dependencies to cross-check), and Phase 3 (produce findings report). Return: (a) a one-line status PASS/PASS-WITH-WARNINGS/NEEDS-UPDATE, (b) the full findings table, (c) a bullet list of every HAZ ID confirmed present so dependent documents can use it.`
+
+- Agent 2 prompt: `Validate docs/TRACEABILITY_MATRIX.md using the validate-safety-doc skill rules for TRACEABILITY_MATRIX. Follow Phase 1, Phase 2, and Phase 3. Return: (a) one-line status, (b) full findings table, (c) bullet list of every REQ ID confirmed present.`
+
+- Agent 3 prompt: `Validate docs/STACK_ANALYSIS.md using the validate-safety-doc skill rules for STACK_ANALYSIS. Follow Phase 1, Phase 2, and Phase 3. Return: (a) one-line status, (b) full findings table, (c) the current worst-case call chain name and frame count so WCET_ANALYSIS can cross-check it.`
+
+**Step 2 — Collect Wave 1 results.**
+
+Wait for all three Wave 1 agents to return. Extract from their outputs:
+- From Agent 1: confirmed HAZ ID list, HAZARD_ANALYSIS status.
+- From Agent 2: TRACEABILITY_MATRIX status.
+- From Agent 3: worst-case call chain summary, STACK_ANALYSIS status.
+
+**Step 3 — Launch Wave 2 (3 agents in parallel).**
+
+Send a single message with three Agent tool calls, embedding the relevant Wave 1
+findings in each prompt:
+
+- Agent 4 prompt: `Validate docs/STATE_MACHINES.md using the validate-safety-doc skill rules for STATE_MACHINES. Follow Phase 1, Phase 2, and Phase 3. For the Dependencies cross-check, the following HAZ IDs were confirmed present in HAZARD_ANALYSIS.md by a prior validation agent: [insert confirmed HAZ ID list from Agent 1]. Flag any HAZ ID in STATE_MACHINES.md that is NOT in this confirmed list. Return: (a) one-line status, (b) full findings table.`
+
+- Agent 5 prompt: `Validate docs/WCET_ANALYSIS.md using the validate-safety-doc skill rules for WCET_ANALYSIS. Follow Phase 1, Phase 2, and Phase 3. For the Dependencies cross-check: (1) The following HAZ IDs and SC functions were confirmed by HAZARD_ANALYSIS validation: [insert from Agent 1]. Flag any WCET row whose function was not in the confirmed SC list. (2) The worst-case call chain confirmed by STACK_ANALYSIS validation is: [insert from Agent 3]. Flag if WCET_ANALYSIS references a different chain. Return: (a) one-line status, (b) full findings table.`
+
+- Agent 6 prompt: `Validate docs/VERIFICATION_POLICY.md using the validate-safety-doc skill rules for VERIFICATION_POLICY. Follow Phase 1, Phase 2, and Phase 3. For the Dependencies cross-check, the following SC/NSC classification criteria were confirmed in HAZARD_ANALYSIS.md: [insert relevant summary from Agent 1]. Flag any mismatch with the SC/NSC definitions in VERIFICATION_POLICY.md §2. Return: (a) one-line status, (b) full findings table, (c) confirmed M1–M7 method labels so Wave 3 agents can use them.`
+
+**Step 4 — Collect Wave 2 results.**
+
+Wait for all three Wave 2 agents to return. Extract:
+- From Agent 6: confirmed M1–M7 method label list, VERIFICATION_POLICY status.
+
+**Step 5 — Launch Wave 3 (3 agents in parallel).**
+
+Send a single message with three Agent tool calls:
+
+- Agent 7 prompt: `Validate docs/MCDC_ANALYSIS.md using the validate-safety-doc skill rules for MCDC_ANALYSIS. Follow Phase 1, Phase 2, and Phase 3. For the Dependencies cross-check: (1) Confirmed SC functions and HAZ IDs from HAZARD_ANALYSIS validation: [insert from Agent 1]. Verify the five functions in MCDC_ANALYSIS are still the top five by HAZ ID count. (2) Confirmed ceiling rules from VERIFICATION_POLICY validation: [insert from Agent 6]. Verify the architectural ceiling argument in MCDC_ANALYSIS still matches VVP-001 §4.3 d-i. Return: (a) one-line status, (b) full findings table.`
+
+- Agent 8 prompt: `Validate docs/DEFECT_LOG.md using the validate-safety-doc skill rules for DEFECT_LOG. Follow Phase 1, Phase 2, and Phase 3. For the Dependencies cross-check: (1) Confirmed HAZ IDs from HAZARD_ANALYSIS validation: [insert from Agent 1]. (2) Confirmed M1–M7 labels from VERIFICATION_POLICY validation: [insert from Agent 6]. (3) Also read docs/INSPECTION_CHECKLIST.md directly to verify severity and disposition code consistency. Return: (a) one-line status, (b) full findings table.`
+
+- Agent 9 prompt: `Validate docs/INSPECTION_CHECKLIST.md using the validate-safety-doc skill rules for INSPECTION_CHECKLIST. Follow Phase 1, Phase 2, and Phase 3. For the Dependencies cross-check, also read docs/DEFECT_LOG.md directly to verify that the severity levels (CRITICAL, MAJOR, MINOR) and disposition codes (FIX, WAIVE, DEFER) defined in the checklist match those used in every defect entry. Return: (a) one-line status, (b) full findings table.`
+
+**Step 6 — Aggregate and present the final report.**
+
+After all nine agents have returned, produce a single consolidated report:
+
+```
+## All-Documents Validation Report
+
+### Wave 1
+| Document | Status | Critical | Stale | Missing | Minor |
+|---|---|---|---|---|---|
+| HAZARD_ANALYSIS    | ...    | ...      | ...   | ...     | ...   |
+| TRACEABILITY_MATRIX| ...    | ...      | ...   | ...     | ...   |
+| STACK_ANALYSIS     | ...    | ...      | ...   | ...     | ...   |
+
+### Wave 2
+| Document | Status | Critical | Stale | Missing | Minor |
+|---|---|---|---|---|---|
+| STATE_MACHINES     | ...    | ...      | ...   | ...     | ...   |
+| WCET_ANALYSIS      | ...    | ...      | ...   | ...     | ...   |
+| VERIFICATION_POLICY| ...    | ...      | ...   | ...     | ...   |
+
+### Wave 3
+| Document | Status | Critical | Stale | Missing | Minor |
+|---|---|---|---|---|---|
+| MCDC_ANALYSIS      | ...    | ...      | ...   | ...     | ...   |
+| DEFECT_LOG         | ...    | ...      | ...   | ...     | ...   |
+| INSPECTION_CHECKLIST| ...   | ...      | ...   | ...     | ...   |
+
+### Overall status: PASS / PASS-WITH-WARNINGS / NEEDS-UPDATE
+Total findings: N CRITICAL, N STALE, N MISSING, N MINOR
+
+### All findings (CRITICAL first, then STALE, MISSING, MINOR)
+[consolidated findings table from all nine agents]
+
+### Recommended actions
+[numbered list across all documents, CRITICAL first]
+```
+
+Then ask:
+> Would you like me to apply all recommended fixes now? I will update each document
+> that has findings. Documents with no findings will not be touched.
+
+If yes: apply fixes document by document, in dependency order (Wave 1 first, then
+Wave 2, then Wave 3), so that upstream corrections are reflected before downstream
+documents are updated.
 
 ---
 
