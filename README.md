@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/becool2018/messageEngine/actions/workflows/CI.yml/badge.svg)
 
-> **Note:** This codebase is produced by Claude (Anthropic) as an experiment to evaluate whether an AI assistant can consistently follow strict safety-critical software engineering requirements — including NASA standards, JPL Power of 10, and MISRA C++:2023 — across a non-trivial, growing project.
+> **Note:** This codebase is produced by Claude (Anthropic) as an experiment to evaluate whether an AI assistant can consistently follow strict safety-critical software engineering requirements — including NASA standards, JPL Power of 10, and MISRA C++:2023 .
 
 A safety-critical C++ networking library that models realistic communication problems — latency, jitter, packet loss, duplication, reordering, and link partitions — while providing consistent, reusable messaging utilities across three transport backends (TCP, UDP, and an in-process simulation harness).
 
