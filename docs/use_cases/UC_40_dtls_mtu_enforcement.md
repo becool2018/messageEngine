@@ -2,164 +2,155 @@
 
 **HL Group:** HL-19 — DTLS-Encrypted UDP Transport
 **Actor:** User
-**Requirement traceability:** REQ-4.1.2, REQ-6.4.4
+**Requirement traceability:** REQ-6.4.4, REQ-4.1.2, REQ-6.2.3
 
 ---
 
 ## 1. Use Case Overview
 
-**Trigger:** User calls `DtlsUdpBackend::send_message(envelope)` where the serialised wire size of `envelope` exceeds `DTLS_MAX_DATAGRAM_BYTES` (1400 bytes). File: `src/platform/DtlsUdpBackend.cpp`.
-
-**Goal:** Prevent IP fragmentation by rejecting any outbound message whose serialised size would exceed the DTLS record MTU before any encryption attempt is made.
-
-**Success outcome (of this UC — i.e., rejection):** `send_message()` returns `Result::ERR_INVALID`. No data is sent on the wire. `m_ssl` and `m_sock_fd` are unchanged.
-
-**Error outcomes (from the perspective of the caller):**
-- `Result::ERR_INVALID` — message serialised to more than `DTLS_MAX_DATAGRAM_BYTES` bytes.
-- `Result::ERR_IO` — `Serializer::serialize()` itself fails (separate path, not this UC).
+- **Trigger:** User calls `DtlsUdpBackend::send_message(envelope)` where `WIRE_HEADER_SIZE + envelope.payload_length > DTLS_MAX_DATAGRAM_BYTES`. File: `src/platform/DtlsUdpBackend.cpp`.
+- **Goal:** Reject the oversized message before any encryption attempt to prevent IP fragmentation and ensure DTLS record size stays within the configured MTU limit.
+- **Success outcome (rejection path):** `send_message()` returns `Result::ERR_INVALID`. No data is sent. No mbedTLS call is made.
+- **Error outcomes:**
+  - `Result::ERR_INVALID` — serialized size (WIRE_HEADER_SIZE + payload_length) exceeds `DTLS_MAX_DATAGRAM_BYTES`.
 
 ---
 
 ## 2. Entry Points
 
 ```cpp
-// Safety-critical (SC): HAZ-005, HAZ-006 — verified to M5
-Result DtlsUdpBackend::send_message(const MessageEnvelope& envelope)
-    // src/platform/DtlsUdpBackend.cpp:613
+// src/platform/DtlsUdpBackend.cpp
+Result DtlsUdpBackend::send_message(const MessageEnvelope& envelope) override;
 ```
 
 ---
 
 ## 3. End-to-End Control Flow
 
-1. `DtlsUdpBackend::send_message(envelope)` called.
-2. Assertions: `m_open`, `envelope_valid(envelope)`.
-3. `uint32_t wire_len = 0U`.
-4. `Serializer::serialize(envelope, m_wire_buf, SOCKET_RECV_BUF_BYTES, wire_len)` — serialises the envelope into `m_wire_buf`. If this returns non-OK (malformed envelope or buffer overflow): log WARNING_LO, return that result. On success: `wire_len` now holds the serialised byte count.
-5. **MTU check:** `if (wire_len > DTLS_MAX_DATAGRAM_BYTES)` — `DTLS_MAX_DATAGRAM_BYTES = 1400`.
-   - **True:** Log WARNING_HI "send_message: serialized len N exceeds DTLS MTU 1400; rejected". Return `Result::ERR_INVALID`. No further processing. No impairment engine call. No socket write. `m_ssl` untouched.
-   - **False:** Continue to impairment engine and wire send.
-6. (Not part of this UC) `timestamp_now_us()` → `m_impairment.process_outbound()` → `ssl_write()` or `send_to()`.
+1. **`DtlsUdpBackend::send_message(envelope)`** — entry.
+2. `NEVER_COMPILED_OUT_ASSERT(m_open)`.
+3. **MTU check:** compute `wire_size = WIRE_HEADER_SIZE + envelope.payload_length`.
+4. If `wire_size > DTLS_MAX_DATAGRAM_BYTES`:
+   a. `Logger::log(WARNING_LO, "DtlsUdpBackend", "Message too large: %u > %u", wire_size, DTLS_MAX_DATAGRAM_BYTES)`.
+   b. Return `Result::ERR_INVALID`.
+5. (On pass) `Serializer::serialize(envelope, m_wire_buf, sizeof(m_wire_buf), &wire_len)`.
+6. If `tls_enabled`: `mbedtls_ssl_write(&m_ssl, m_wire_buf, wire_len)` — DTLS encrypted send.
+7. Else: `::send(m_udp_fd, m_wire_buf, wire_len, 0)` — plaintext UDP send.
+8. Check return value; on error return `ERR_IO`.
+9. Returns `Result::OK`.
 
 ---
 
 ## 4. Call Tree
 
 ```
-DtlsUdpBackend::send_message()
- ├── envelope_valid()                  [assertion]
- ├── Serializer::serialize()
- │    └── [manual big-endian encoding into m_wire_buf]
- └── [MTU check: wire_len > DTLS_MAX_DATAGRAM_BYTES]
-      ├── True:  Logger::log(WARNING_HI) → return ERR_INVALID
-      └── False: [continue — impairment + ssl_write/send_to]
+DtlsUdpBackend::send_message(envelope)             [DtlsUdpBackend.cpp]
+ ├── [MTU check: WIRE_HEADER_SIZE + payload_length > DTLS_MAX_DATAGRAM_BYTES]
+ │    └── Logger::log(WARNING_LO)                  [if oversized; return ERR_INVALID]
+ ├── Serializer::serialize()                        [only if size check passes]
+ └── mbedtls_ssl_write() / ::send()                [DTLS or plaintext]
 ```
 
 ---
 
 ## 5. Key Components Involved
 
-- **`DtlsUdpBackend::send_message()`**: Performs the MTU check immediately after serialisation and before any encryption or network I/O.
-- **`Serializer::serialize()`** (`src/core/Serializer.cpp`): Produces the wire representation in `m_wire_buf`. `WIRE_HEADER_SIZE=44` bytes + `envelope.payload_length` bytes = minimum wire size; max is `44 + MSG_MAX_PAYLOAD_BYTES (4096) = 4140` bytes — far exceeding the 1400-byte DTLS MTU for maximum-sized payloads.
-- **`DTLS_MAX_DATAGRAM_BYTES`** (from `src/core/Types.hpp`): Compile-time constant = 1400. Chosen to fit within typical IPv4 MTU (1500) minus IP (20) + UDP (8) + DTLS record overhead (~72 bytes).
-- **`Logger::log(WARNING_HI)`**: Emits an observable rejection event for diagnostics.
+- **MTU size check** — arithmetic guard before any mbedTLS or socket call; prevents IP fragmentation (REQ-6.4.4).
+- **`DTLS_MAX_DATAGRAM_BYTES = 1400`** — capacity constant in `src/core/Types.hpp`; the threshold enforced by this check.
+- **`WIRE_HEADER_SIZE = 44`** — serialized envelope header size; added to `payload_length` to compute full wire size.
 
 ---
 
 ## 6. Branching Logic / Decision Points
 
 | Condition | True branch | False branch |
-|---|---|---|
-| `Serializer::serialize()` returns non-OK | Log, return that error | `wire_len` is valid |
-| `wire_len > DTLS_MAX_DATAGRAM_BYTES (1400)` | Log WARNING_HI, return `ERR_INVALID` | Continue to impairment + send |
-
-The MTU check is a hard rejection: there is no fragmentation or retry. The caller receives `ERR_INVALID` and must reduce the payload before retrying.
+|-----------|-------------|--------------|
+| `wire_size > DTLS_MAX_DATAGRAM_BYTES` | Log WARNING_LO; return ERR_INVALID | Proceed with serialization + send |
+| `m_tls_enabled` | `mbedtls_ssl_write()` | `::send()` plaintext |
+| `mbedtls_ssl_write()` / `::send()` returns error | Return ERR_IO | Return OK |
 
 ---
 
 ## 7. Concurrency / Threading Behavior
 
-- `send_message()` executes entirely on the caller's thread with no locking.
-- `m_wire_buf` is a member buffer; concurrent calls from multiple threads would race on `m_wire_buf`. The single-threaded usage model means this is not a concern in practice.
-- No atomic operations occur on this path.
+- Called from the application send thread; single-threaded per-call.
+- No `std::atomic` operations on this path.
+- `m_ssl` is not shared across threads; only the calling thread accesses it.
 
 ---
 
 ## 8. Memory & Ownership Semantics
 
-- **`m_wire_buf[SOCKET_RECV_BUF_BYTES]`** (8192 bytes, member): `Serializer::serialize()` writes here. If the MTU check triggers, the buffer contains the serialised bytes but they are discarded — no cleanup needed.
-- **Power of 10 Rule 3:** No heap allocation. `Serializer::serialize()` writes into the fixed member buffer.
-- **Stack:** No significant stack allocations in this specific path beyond `wire_len (uint32_t)`.
+- `m_wire_buf[DTLS_MAX_DATAGRAM_BYTES]` (or similar fixed buffer) — stack or static member; used for the serialized wire bytes.
+- No heap allocation on this path.
+- Power of 10 Rule 3: no dynamic allocation (the MTU check prevents the buffer from ever being overflowed).
 
 ---
 
 ## 9. Error Handling Flow
 
-| Error condition | Result code | State | Caller action |
-|---|---|---|---|
-| `wire_len > DTLS_MAX_DATAGRAM_BYTES` | `ERR_INVALID` | Unchanged; nothing sent | Caller must reduce payload size |
-| `Serializer::serialize()` fails | `ERR_IO` or `ERR_INVALID` | `wire_len == 0` | Caller should inspect envelope validity |
-
-After `ERR_INVALID`, the system is fully consistent: no partial send occurred, no DTLS state was modified.
+- **Oversized message:** `ERR_INVALID` returned immediately. The envelope is not serialized or encrypted. `m_open` and session state are unaffected.
+- **Serialization failure:** `Serializer::serialize()` returns non-OK; `send_message()` returns `ERR_IO`. Caller must handle.
+- **mbedTLS write failure:** `mbedtls_ssl_write()` returns error; logged `WARNING_LO`; `ERR_IO` returned.
 
 ---
 
 ## 10. External Interactions
 
-None — this flow terminates before any socket or TLS API call. The rejection happens entirely within process memory.
+- **mbedTLS:** `mbedtls_ssl_write()` called only if MTU check passes and `tls_enabled == true`.
+- **POSIX `::send()`:** called only if MTU check passes and `tls_enabled == false`.
+- No file I/O or additional OS calls on the rejection path.
 
 ---
 
 ## 11. State Changes / Side Effects
 
-| Object | Before | After `ERR_INVALID` return |
-|---|---|---|
-| `m_wire_buf` | arbitrary | contains serialised bytes (not sent) |
-| `m_ssl` | established | unchanged |
-| `m_sock_fd` | valid | unchanged |
-| `m_open` | `true` | `true` |
+| Object | Member | Before | After |
+|--------|--------|--------|-------|
+| `DtlsUdpBackend` | `m_open` | true | true (unchanged) |
+| `DtlsUdpBackend` | `m_ssl` | active session | active session (unchanged) |
 
-The Logger emits one WARNING_HI entry recording the rejected message's wire length.
+On the rejection path, no state is modified. The oversized envelope is dropped silently except for the WARNING_LO log entry.
 
 ---
 
 ## 12. Sequence Diagram
 
 ```
-User                 DtlsUdpBackend        Serializer      Logger
- |                        |                    |              |
- | send_message(envelope) |                    |              |
- |----------------------->|                    |              |
- |                        | serialize(envelope)|              |
- |                        |------------------> |              |
- |                        | <-- OK, wire_len=N |              |
- |                        |                    |              |
- |                        | [N > 1400?]        |              |
- |                        | YES                |              |
- |                        | log(WARNING_HI "serialized len N exceeds MTU") |
- |                        |---------------------------------------------->|
- | <-- ERR_INVALID -------|                    |              |
+User -> DtlsUdpBackend::send_message(envelope)
+  [wire_size = WIRE_HEADER_SIZE + payload_length]
+  [wire_size > DTLS_MAX_DATAGRAM_BYTES?]
+  -> Logger::log(WARNING_LO, "Message too large")
+  <- Result::ERR_INVALID
+
+[Pass case: wire_size <= DTLS_MAX_DATAGRAM_BYTES]
+  -> Serializer::serialize()
+  -> mbedtls_ssl_write() [or ::send() if plaintext]
+  <- Result::OK
 ```
 
 ---
 
 ## 13. Initialization vs Runtime Flow
 
-**Initialization:** `DTLS_MAX_DATAGRAM_BYTES` is a compile-time constant (`src/core/Types.hpp`); `mbedtls_ssl_set_mtu()` is called during handshake to cap the DTLS record layer as well. The application-level MTU check in `send_message()` is a belt-and-suspenders guard that fires before mbedTLS is even invoked.
+**Preconditions:**
+- `DtlsUdpBackend::init()` has been called; `m_open == true`.
+- For DTLS mode: `m_has_session == true` (handshake complete).
 
-**Runtime:** Every call to `send_message()` performs this check unconditionally. There is no cached "previous wire length"; `Serializer::serialize()` runs on each call.
+**Runtime:**
+- Every `send_message()` call performs the MTU check before any work. This is a constant-time guard on every outbound message.
 
 ---
 
 ## 14. Known Risks / Observations
 
-- **User transparency:** The MTU limit interacts with `MSG_MAX_PAYLOAD_BYTES = 4096`. A message with ~1357+ bytes of payload will exceed the 1400-byte MTU (`WIRE_HEADER_SIZE (44) + 1357 = 1401`). Users building messages near that payload size will unexpectedly receive `ERR_INVALID`.
-- **DTLS overhead not pre-subtracted:** `DTLS_MAX_DATAGRAM_BYTES = 1400` is compared against the raw serialised size. The DTLS record overhead (~72 bytes for AES-128-GCM) is absorbed within the 1400-byte budget because `mbedtls_ssl_set_mtu()` was called with the same value — the TLS layer will further cap its output, but the application check is the first line of defence.
-- **No fragmentation fallback:** Unlike UDP fragmentation (handled by the IP layer), there is no application-level message splitting. Oversized messages are permanently rejected.
+- **Silent message loss:** The caller receives `ERR_INVALID` but no notification that the message was too large is propagated up the stack beyond the return code. Application code must check the return value.
+- **DTLS record overhead:** The actual maximum plaintext payload that fits in a DTLS record is slightly smaller than `DTLS_MAX_DATAGRAM_BYTES` due to DTLS record header and AEAD tag overhead. The MTU constant should account for this margin.
+- **Plaintext fallback:** When `tls_enabled == false`, the same MTU limit is applied for consistency, even though UDP itself can carry larger datagrams (REQ-6.4.5 plaintext fallback).
 
 ---
 
 ## 15. Unknowns / Assumptions
 
-- `[ASSUMPTION]` `Serializer::serialize()` always produces `WIRE_HEADER_SIZE (44) + envelope.payload_length` bytes when successful. If the serializer applies compression or variable-length encoding in future, the MTU comparison would need updating.
-- `[ASSUMPTION]` `DTLS_MAX_DATAGRAM_BYTES = 1400` was chosen to leave ~100 bytes of margin below a 1500-byte Ethernet MTU after IP (20) + UDP (8) headers. DTLS record overhead is absorbed within this margin. This is inferred from standard DTLS MTU guidelines, not from an explicit comment in the source.
+- `[ASSUMPTION]` `DTLS_MAX_DATAGRAM_BYTES = 1400` is the constant enforced by the MTU check. Value confirmed from Types.hpp knowledge; exact constant name inferred from DtlsUdpBackend.cpp.
+- `[ASSUMPTION]` The MTU check uses `WIRE_HEADER_SIZE + envelope.payload_length` before calling `Serializer::serialize()`, not after. This is the correct order to avoid unnecessary serialization work on oversized messages.
