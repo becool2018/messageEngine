@@ -334,24 +334,27 @@ Ceiling files are at the maximum achievable coverage: `NEVER_COMPILED_OUT_ASSERT
 
 ## Static Analysis
 
-Three tiers of static analysis are configured in the Makefile:
+Three tiers of static analysis are configured in the Makefile (see `docs/STATIC_ANALYSIS_TOOLCHAIN.md`):
+
+| Tier | Tool | Status | Target |
+|---|---|---|---|
+| **1** | Compiler `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Werror` | Active — enforced on every build | `make all` |
+| **2a** | Clang-Tidy (strict for `src/`, relaxed for `tests/`) | Active | `make lint` |
+| **2b** | Cppcheck flow/style analysis (CI-safe; no MISRA addon) | Active | `make cppcheck` |
+| **2b+** | Cppcheck + MISRA C++:2023 addon (macOS only) | Active locally | `make cppcheck-misra` |
+| **2c** | Clang Static Analyzer — path-sensitive, alpha checkers | Active | `make scan_build` |
+| **3** | PC-lint Plus — formal MISRA C++:2023 compliance report | Pending licence | `make pclint` |
 
 ```bash
-# Tier 2a: Clang-Tidy (strict config for src/, relaxed for tests/)
-make lint
-
-# Tier 2b: Cppcheck flow/style analysis (CI-safe; no MISRA addon)
-make cppcheck
-
-# Tier 2b (extended): Cppcheck + MISRA C++:2023 addon — local macOS only
-#   Ubuntu's cppcheck 2.13 does not support --addon=misra; use macOS for MISRA checks.
-make cppcheck-misra
-
-# Tier 2c: Clang Static Analyzer (path-sensitive, alpha checkers enabled)
-make scan_build
-
-# Run all Tier 2 tools in sequence (CI target: lint + cppcheck + scan_build)
+# Run all active Tier 2 tools in sequence (CI target)
 make static_analysis
+
+# Individual targets
+make lint
+make cppcheck
+make cppcheck-misra   # macOS only — Ubuntu cppcheck 2.13 does not support --addon=misra
+make scan_build
+make pclint           # Tier 3 — requires PC-lint Plus licence and pclint/ config directory
 ```
 
 Documented suppressions live in `.cppcheck-suppress`; each entry requires a justification comment and a `DEFECT_LOG.md` reference. On Linux, comment lines are stripped from the suppression file before passing to cppcheck (Ubuntu 24.04 cppcheck 2.13 limitation).
