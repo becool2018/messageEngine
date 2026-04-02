@@ -52,6 +52,8 @@ The system supports three delivery modes:
 
 Expired messages (past `expiry_time`) are dropped before delivery at both sender and receiver.
 
+These are **application-layer** semantics implemented entirely in `DeliveryEngine` (`src/core/`). No transport backend is aware of the reliability class — they all just send and receive serialized bytes. Over TCP, transport-level loss cannot occur (TCP guarantees delivery), so BEST_EFFORT will never drop and RELIABLE_RETRY will never need to retransmit due to network loss. However, the application-level ACK handshake, retry scheduler, and duplicate suppression all still execute regardless of transport, because they guard against application-level failures (peer crash, logic errors, expired messages) rather than network-level loss.
+
 ### 3. Serialization
 - Deterministic big-endian (network byte order) wire format
 - Fixed 44-byte header; payload follows immediately
