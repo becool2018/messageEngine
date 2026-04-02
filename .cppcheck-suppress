@@ -50,6 +50,17 @@ unusedFunction:src/platform/ImpairmentEngine.hpp
 # Deviation: false positive -- cppcheck does not see test callers.
 unusedFunction:src/core/MessageEnvelope.hpp
 
+# Justification: AssertState functions (set_reset_handler, check_and_clear,
+# trigger_handler_for_test) are called from tests/test_AssertState.cpp,
+# outside the analysed src/ tree. Not dead code.
+# Deviation: false positive -- cppcheck does not see test callers.
+unusedFunction:src/core/AssertState.cpp
+
+# Justification: impairment_config_load() is called from
+# tests/test_ImpairmentConfigLoader.cpp, outside the analysed src/ tree.
+# Deviation: false positive -- cppcheck does not see test callers.
+unusedFunction:src/platform/ImpairmentConfigLoader.cpp
+
 # Justification: cppcheck+misra addon cannot resolve C++ enum types (Result,
 # EntryState, ReliabilityClass, MessageType, etc.) without a compile_commands.json.
 # These are false-positive "incomplete misra check" warnings, not real violations.
