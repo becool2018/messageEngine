@@ -38,6 +38,7 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 ## HL-5: Receive a Message
 > User calls receive_message(); System returns the next available envelope, applying deduplication and expiry filtering.
 
+- UC_45 — Receive happy path: DATA envelope delivered successfully (dedup passes, not expired)
 - UC_09 — Incoming message dropped at receive because expiry_time_us has passed
 
 ---
@@ -121,12 +122,14 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 > System emits structured log entries at INFO / WARNING_LO / WARNING_HI / FATAL severity for all connection events, state changes, and errors; User reads log output to diagnose issues.
 
 - UC_27 — Configuration defaults applied and logged at init time
+- UC_46 — Logger::log() called directly by User application code to record application-level events
 
 ---
 
 ## HL-16: System Initialization
 > User constructs a DeliveryEngine, wires it to a TransportInterface, and calls init(); System allocates fixed internal state and validates configuration.
 
+- UC_47 — transport_config_default() and channel_config_default(): User fills TransportConfig and ChannelConfig with safe defaults before customising
 - UC_27 — TransportConfig defaults and per-channel ChannelConfig overrides applied
 - UC_28 — DeliveryEngine::init(): DuplicateFilter, AckTracker, RetryManager all reset
 
@@ -158,9 +161,25 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 ---
 
 ## HL-20: Load Impairment Config from File
-> User provides a path to a key=value text file; System parses it into an ImpairmentConfig, clamping probability values to [0.0, 1.0], and returns ERR_INVALID on malformed input.
+> User provides a path to a key=value text file; System parses it into an ImpairmentConfig, clamping probability values to [0.0, 1.0], and returns ERR_IO on file-open failure.
 
 - UC_41 — impairment_config_load(): read file, parse all recognised keys, clamp probabilities, return populated ImpairmentConfig
+
+---
+
+## HL-21: Build and Classify a Message Envelope
+> User calls envelope helper functions to zero-initialise an envelope before populating fields, and to classify a received envelope as data or control before processing it.
+
+- UC_43 — envelope_init(): zero-initialise a MessageEnvelope to a safe, INVALID state before field assignment
+- UC_44 — envelope_is_data() / envelope_is_control() / envelope_valid(): classify or validate an envelope type and contents
+
+---
+
+## HL-22: Read Monotonic Time and Compute Deadlines
+> User calls timestamp utilities to read the current monotonic clock and compute absolute deadline timestamps for message expiry and ACK timeout tracking.
+
+- UC_48 — timestamp_now_us(): read CLOCK_MONOTONIC in microseconds for use in send, receive, pump, and sweep calls
+- UC_49 — timestamp_deadline_us(): compute an absolute expiry deadline from current time and a duration in milliseconds
 
 ---
 
@@ -185,3 +204,12 @@ at the User → System boundary.
 - UC_21 — TCP poll and receive — poll_clients_once() called internally by TcpBackend::receive_message()
 - UC_25 — Serializer encode — Serializer::serialize() called internally by all backends; never directly by the user
 - UC_26 — Serializer decode — Serializer::deserialize() called internally by all backends; never directly by the user
+- UC_50 — envelope_copy() — copies envelope bytes between internal buffers; called by RingBuffer::push/pop and DeliveryEngine; never by the user
+- UC_51 — envelope_make_ack() — constructs an ACK reply envelope; called internally by DeliveryEngine::receive() for RELIABLE_ACK/RETRY messages; never by the user
+- UC_52 — RingBuffer push/pop — SPSC lock-free queue used internally by all backends to stage inbound envelopes between recv threads and receive_message(); never called by the user
+- UC_53 — ImpairmentEngine process_outbound/collect_deliverable/process_inbound — called internally by each backend on every send/receive; never by the user
+- UC_54 — PrngEngine next/next_double/next_range — xorshift64 PRNG called internally by ImpairmentEngine to make loss/jitter/duplication decisions; never by the user
+- UC_55 — MessageIdGen next() — monotonic message-ID counter owned by DeliveryEngine; assigns unique IDs on outbound send; never called by the user
+- UC_56 — AssertState / IResetHandler / AbortResetHandler — assertion-failure flag and handler dispatch; infrastructure for NEVER_COMPILED_OUT_ASSERT; not called from application code
+- UC_57 — ISocketOps / SocketOpsImpl — injectable POSIX socket adapter used by TcpBackend, UdpBackend, TlsTcpBackend, DtlsUdpBackend for fault injection in tests; production code uses the singleton SocketOpsImpl; never called by the user
+- UC_58 — IMbedtlsOps / MbedtlsOpsImpl — injectable mbedTLS adapter used by DtlsUdpBackend for fault injection in tests; production code uses the singleton MbedtlsOpsImpl; never called by the user
