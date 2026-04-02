@@ -393,7 +393,7 @@ This section shows how to integrate messageEngine into your own application. The
 | `DtlsUdpBackend` | `platform/DtlsUdpBackend.hpp` | Production; DTLS-encrypted UDP; MTU-bounded datagrams |
 | `LocalSimHarness` | `platform/LocalSimHarness.hpp` | Tests and simulation; no OS sockets |
 
-All three implement `TransportInterface` and are interchangeable at the `DeliveryEngine` level.
+All five implement `TransportInterface` and are interchangeable at the `DeliveryEngine` level.
 
 ### 2. Configure the transport and channel
 
@@ -425,7 +425,7 @@ Key enumerations:
 |---|---|
 | `ReliabilityClass` | `BEST_EFFORT`, `RELIABLE_ACK`, `RELIABLE_RETRY` |
 | `OrderingMode` | `ORDERED`, `UNORDERED` |
-| `TransportKind` | `TCP`, `UDP`, `LOCAL_SIM` |
+| `TransportKind` | `TCP`, `UDP`, `LOCAL_SIM`, `DTLS_UDP` |
 
 ### 3. Initialize the backend and DeliveryEngine
 
@@ -542,7 +542,7 @@ To test reliability behavior, attach an `ImpairmentEngine` to a `LocalSimHarness
 
 ```cpp
 #include "platform/ImpairmentEngine.hpp"
-#include "platform/ImpairmentConfig.hpp"
+#include "core/ImpairmentConfig.hpp"
 
 ImpairmentConfig imp;
 impairment_config_default(imp);          // all faults off, deterministic seed
@@ -575,6 +575,7 @@ All functions return a `Result` enum. Never ignore a return value.
 | `OK` | Success |
 | `ERR_TIMEOUT` | No message arrived within the timeout |
 | `ERR_FULL` | Send queue or delay buffer is full |
+| `ERR_EMPTY` | Receive queue is empty (no message available) |
 | `ERR_IO` | Socket or transport error; or link is partitioned |
 | `ERR_INVALID` | Bad argument or engine not initialized |
 | `ERR_EXPIRED` | Message TTL has elapsed |
