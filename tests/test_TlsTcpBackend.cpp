@@ -44,9 +44,9 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Embedded PEM test credentials (self-signed EC P-256, 10-year validity)
 // Generated with:
-//   openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 \
+//   openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256
 //                  -pkeyopt ec_param_enc:named_curve -out test.key
-//   openssl req -new -x509 -key test.key -out test.crt -days 3650 \
+//   openssl req -new -x509 -key test.key -out test.crt -days 3650
 //               -subj "/CN=messageEngine-test"
 // named_curve encoding required: mbedTLS 4.0 does not parse explicit params.
 // This cert is used as BOTH the server cert AND the trusted CA cert,
