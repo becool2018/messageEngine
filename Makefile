@@ -17,7 +17,9 @@ LLVM_BIN      := $(if $(wildcard $(LLVM_BIN_BREW)/clang++),$(LLVM_BIN_BREW),)
 # Tools (fall back to PATH if LLVM_BIN is empty)
 CLANG_TIDY   := $(if $(LLVM_BIN),$(LLVM_BIN)/clang-tidy,clang-tidy)
 SCAN_BUILD   := $(if $(LLVM_BIN),$(LLVM_BIN)/scan-build,scan-build)
-SCAN_ANALYZER:= $(if $(LLVM_BIN),$(LLVM_BIN)/clang++,clang++)
+# scan-build requires an absolute path for --use-analyzer on Linux.
+# Use LLVM_BIN/clang on macOS (Homebrew LLVM) or resolve via 'which' on Linux.
+SCAN_ANALYZER := $(if $(LLVM_BIN),$(LLVM_BIN)/clang,$(shell which clang 2>/dev/null))
 COV_CXX      := $(if $(LLVM_BIN),$(LLVM_BIN)/clang++,clang++)
 LLVM_PROFDATA:= $(if $(LLVM_BIN),$(LLVM_BIN)/llvm-profdata,llvm-profdata)
 LLVM_COV     := $(if $(LLVM_BIN),$(LLVM_BIN)/llvm-cov,llvm-cov)
@@ -215,7 +217,7 @@ pclint:
 # -Werror is stripped so clang dialect differences do not mask real findings.
 # Artifacts land in build/scan-build/ (HTML reports) and build/scan-objs/ (objects).
 SCAN_BUILD    := $(if $(LLVM_BIN),$(LLVM_BIN)/scan-build,scan-build)
-SCAN_ANALYZER := $(if $(LLVM_BIN),$(LLVM_BIN)/clang++,clang++)
+SCAN_ANALYZER := $(if $(LLVM_BIN),$(LLVM_BIN)/clang,$(shell which clang 2>/dev/null))
 CXX_ANALYZER  := $(wildcard /opt/homebrew/opt/llvm/libexec/c++-analyzer)
 SCAN_OBJ_DIR  := build/scan-objs
 SCAN_CXXFLAGS := $(filter-out -Werror,$(CXXFLAGS))
