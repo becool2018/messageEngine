@@ -18,7 +18,7 @@ branch. This mechanism is identical across all files and is not re-explained bel
 
 ---
 
-## Thresholds (current run: 2026-03-31)
+## Thresholds (current run: 2026-04-02)
 
 | File | Branches | Missed | Coverage | Threshold | Source |
 |------|----------|--------|----------|-----------|--------|
@@ -29,12 +29,12 @@ branch. This mechanism is identical across all files and is not re-explained bel
 | core/DeliveryEngine.cpp | 113 | 28 | 75.22% | ≥75% | SC |
 | core/AssertState.cpp | 2 | 1 | 50.00% | ≥50% | NSC-infra |
 | platform/ImpairmentEngine.cpp | 186 | 46 | 75.27% | ≥74% | SC |
-| platform/ImpairmentConfigLoader.cpp | 109 | 10 | 90.83% | ≥90% | SC |
+| platform/ImpairmentConfigLoader.cpp | 160 | 28 | 82.50% | ≥82% | SC |
 | platform/SocketUtils.cpp | 231 | 82 | 64.50% | ≥64% | NSC |
-| platform/TcpBackend.cpp | 224 | 49 | 78.12% | ≥78% | SC |
+| platform/TcpBackend.cpp | 238 | 53 | 77.73% | ≥77% | SC |
 | platform/TlsTcpBackend.cpp | 307 | 71 | 76.87% | ≥76% | SC |
 | platform/UdpBackend.cpp | 98 | 24 | 75.51% | ≥75% | SC |
-| platform/DtlsUdpBackend.cpp | 240 | 40 | 83.33% | ≥83% | SC |
+| platform/DtlsUdpBackend.cpp | 296 | 54 | 81.76% | ≥81% | SC |
 | platform/LocalSimHarness.cpp | 69 | 19 | 72.46% | ≥72% | SC |
 | platform/MbedtlsOpsImpl.cpp | 86 | 26 | 69.77% | ≥69% | SC |
 | platform/SocketOpsImpl.cpp | 70 | 22 | 68.57% | ≥64% (NSC) | NSC |
@@ -131,27 +131,46 @@ Threshold: **74%** (maximum achievable).
 
 ---
 
-### platform/ImpairmentConfigLoader.cpp — ceiling 90.83% (99/109)
+### platform/ImpairmentConfigLoader.cpp — ceiling 82.50% (132/160)
 
-Three independent sources:
+The implementation was refactored to extract five parse helpers (`parse_uint`,
+`parse_bool`, `parse_prob`, `parse_u64`, `apply_reorder_window`) and three topic
+dispatchers (`apply_kv_latency_jitter`, `apply_kv_loss_reorder`,
+`apply_kv_partition_seed`) to reduce cyclomatic complexity.  The refactoring grew
+the branch count from 109 to 160, adding 18 new permanently-missed branches from
+`NEVER_COMPILED_OUT_ASSERT` calls in the new functions.  All five `*end != '\0'`
+True branches (trailing-garbage rejection paths) are now exercised by tests
+20–24.
 
-**(a)** 5 permanently-missed `NEVER_COMPILED_OUT_ASSERT` branches — `apply_kv`
-(2: key≠nullptr, val≠nullptr), `parse_config_line` (2: line≠nullptr,
-key[0]≠'\0'), `impairment_config_load` (1: path≠nullptr).
+**Permanently-missed branches (28 total):**
 
-**(b)** 4 branches from compound-condition postcondition assertions:
-`NEVER_COMPILED_OUT_ASSERT(cfg.loss_probability >= 0.0 && cfg.loss_probability
-<= 1.0)` and the analogous `duplication_probability` assert each expand to
-`if (!(a && b))`; the short-circuit False sub-branches are permanently
-unreachable because the clamping logic immediately before the asserts
-guarantees both inequalities.
+*(a) Original 10 — unchanged*
 
-**(c)** 1 `fclose()` return-value error path — succeeds unconditionally for
-regular files in a non-adversarial environment.
+- `apply_kv` master: 2 NCAs (`key≠nullptr`, `val≠nullptr`).
+- `parse_config_line`: 2 NCAs (`line≠nullptr`, `key[0]≠'\0'`).
+- `impairment_config_load`: 1 NCA (`path≠nullptr`) + 4 compound-assertion
+  sub-branches (`cfg.loss_probability >= 0.0 && <= 1.0` and
+  `cfg.duplication_probability >= 0.0 && <= 1.0`; the `&&` short-circuit
+  False sides are unreachable because clamping immediately before the asserts
+  guarantees both inequalities) + 1 `fclose()` error path.
 
-All 99 reachable decision-level branches are 100% covered.
+*(b) New 18 — from refactored helper functions*
 
-Threshold: **90%** (maximum achievable).
+- `parse_uint`: 2 NCAs (`val≠nullptr`, `out≠nullptr`).
+- `parse_bool`: 2 NCAs (`val≠nullptr`, `out≠nullptr`).
+- `parse_prob`: 2 NCAs (`val≠nullptr`, `out≠nullptr`) + 2 compound-assertion
+  sub-branches (`*out >= 0.0 && *out <= 1.0`; same short-circuit rationale
+  as above).
+- `parse_u64`: 2 NCAs (`val≠nullptr`, `out≠nullptr`).
+- `apply_reorder_window`: 2 NCAs (`val≠nullptr`,
+  `cfg.reorder_window_size <= IMPAIR_DELAY_BUF_SIZE`).
+- `apply_kv_latency_jitter`: 2 NCAs (`key≠nullptr`, `val≠nullptr`).
+- `apply_kv_loss_reorder`: 2 NCAs (`key≠nullptr`, `val≠nullptr`).
+- `apply_kv_partition_seed`: 2 NCAs (`key≠nullptr`, `val≠nullptr`).
+
+All 132 reachable decision-level branches are 100% covered.
+
+Threshold: **82%** (maximum achievable after tests 20–24).
 
 ---
 
@@ -179,22 +198,40 @@ Threshold: **64%** (maximum achievable for NSC).
 
 ---
 
-### platform/TcpBackend.cpp — ceiling 78.12% (175/224)
+### platform/TcpBackend.cpp — ceiling 77.73% (185/238)
 
-Two independent sources:
+New CC-reduction helper functions (`build_poll_fds`, `drain_readable_clients`,
+`flush_delayed_to_queue`) were added, growing the branch count from 224 to 238.
+`test_connection_limit_reached` now covers the `m_client_count >=
+MAX_TCP_CONNECTIONS` True branch (L198) that was previously missed.
 
-**(a)** 39 permanently-missed `NEVER_COMPILED_OUT_ASSERT` branches across all 17
-functions.
+Two independent sources of permanently-missed branches (52 total):
 
-**(b)** ~10 additional architecturally-unreachable branches: `poll_clients_once`
-POLLIN True for accept fd when no client connects during the test window;
-`recv_from_client` partial-read loop body (TCP segments split across multiple
-reads, which does not occur with loopback localhost); `Serializer::serialize`
-failure (wire buffer always large enough for any valid envelope).
+**(a)** 43 permanently-missed `NEVER_COMPILED_OUT_ASSERT` branches across all 19
+functions (up from 39 — the three new helpers add 2 NCAs each).
 
-All 175 reachable decision-level branches are 100% covered.
+**(b)** ~9 additional architecturally-unreachable branches:
+- `accept_clients` L204:9 True — `do_accept()` returns negative (EAGAIN on
+  non-blocking accept when no connection pending); unreachable because the
+  test always ensures a 9th connection is pending before the capacity-limit
+  test.  All other tests call `do_accept` only when a client has connected.
+- `recv_from_client` L272:9 and L450:9 — `recv_queue.push` and Serializer
+  failure paths; `MSG_RING_CAPACITY (64) > max injectable depth`, so the queue
+  never fills, and `Serializer::serialize` always succeeds for valid envelopes.
+- `flush_delayed_to_queue` L321:13 — Serializer failure on delayed path;
+  same rationale as above.
+- `poll_clients_once` L495:9 — `NEVER_COMPILED_OUT_ASSERT(poll_count <= 50U)`
+  expansion; always-false abort path.
+- `build_poll_fds` L359:42 False — `m_client_fds[i] >= 0` condition; the
+  `&&`-chain second operand short-circuit False side is unreachable because
+  valid client slots always hold a non-negative fd.
+- `remove_client_fd` L230:27 False and L231:13 False — loop exit via bound
+  (fd always found before counter reaches MAX_TCP_CONNECTIONS) and first-slot
+  match (single-client tests always find the fd at index 0).
 
-Threshold: **78%** (maximum achievable).
+All 185 reachable decision-level branches are 100% covered.
+
+Threshold: **77%** (maximum achievable).
 
 ---
 
@@ -230,31 +267,51 @@ Threshold: **75%** (maximum achievable).
 
 ---
 
-### platform/DtlsUdpBackend.cpp — ceiling 83.33% (200/240)
+### platform/DtlsUdpBackend.cpp — ceiling 81.76% (242/296)
 
-Two independent sources:
+Two CC-reduction helpers (`send_delayed_envelopes`, `flush_delayed_to_queue`)
+were added, growing the branch count from 240 to 296 (+56 branches).
+`test_two_delayed_messages_second_recv_prequeue` now covers the
+`receive_message()` L801 True branch (pre-poll `recv_queue.pop` succeeds
+because a second delayed message was already queued by the first call's
+`flush_delayed_to_queue` invocation).
 
-**(a)** 26 permanently-missed `NEVER_COMPILED_OUT_ASSERT` branches across all 16
-functions. (Count increased from 24 to 26 when `ssl_handshake` and `ssl_read`
-were added to `IMbedtlsOps`, adding 2 new assert call sites.)
+Three independent sources of permanently-missed branches (54 total):
 
-**(b)** ~14 remaining hard mbedTLS and structural error paths: `recvfrom(MSG_PEEK)`
-failure, server/client UDP `connect()` failure, `Serializer::serialize` failure
-(wire buffer always large enough), `recv_queue` full (max injectable depth via
-`IMPAIR_DELAY_BUF_SIZE` is below `MSG_RING_CAPACITY`), WANT_READ retry paths not
-triggered in fast loopback.
+**(a)** 30 permanently-missed `NEVER_COMPILED_OUT_ASSERT` branches (up from 26):
+- Original 26 across the original 16 functions.
+- `send_delayed_envelopes` adds 3: `delayed≠nullptr`, `count≤IMPAIR_DELAY_BUF_SIZE`,
+  and the per-iteration `i<IMPAIR_DELAY_BUF_SIZE`.
+- `flush_delayed_to_queue` adds 2: `now_us>0ULL`, `m_open` (the loop-body
+  NCA `i<IMPAIR_DELAY_BUF_SIZE` is now counted in the 26 originals).
 
-Covered by fault-injection tests: all 10 `IMbedtlsOps` paths (`psa_crypto_init`,
-`ssl_config_defaults`, `ssl_conf_own_cert`, `ssl_cookie_setup`, `ssl_setup` ×2,
-`ssl_set_client_transport_id`, `recvfrom_peek`, `net_connect` ×2);
-`ssl_write` failure (`test_mock_dtls_ssl_write_fail`); DTLS handshake iteration
-limit (`test_mock_dtls_handshake_iteration_limit`); `ssl_read` fatal error
-(`test_mock_dtls_ssl_read_error`); 2 `ISocketOps` POSIX paths; impairment delay
-paths; loss path; `num_channels==0` init branch.
+*(Note: `flush_delayed_to_queue` existed before but was reclassified; net new
+NCA count from new functions: +4.)*
 
-All 200 reachable decision-level branches are 100% covered.
+**(b)** ~14 remaining hard mbedTLS and structural error paths (unchanged from
+prior ceiling):
+- `send_delayed_envelopes` L734:13 True — `Serializer::serialize` failure:
+  architecturally unreachable because every message in the delay buffer
+  already passed the MTU check in `send_message()` and serialize is
+  deterministic.
+- `send_delayed_envelopes` L734:32 True — `dlen > DTLS_MAX_DATAGRAM_BYTES`:
+  same rationale — messages in the delay buffer were already validated as
+  ≤ DTLS_MAX_DATAGRAM_BYTES when originally queued.
+- `recv_one_dtls_datagram` L565:9 True — `recv_queue.push` failure:
+  `MSG_RING_CAPACITY (64) > IMPAIR_DELAY_BUF_SIZE`, making queue overflow
+  unreachable through the public API.
+- `recv_one_dtls_datagram` L756:9 True — socket/ssl_read failure on an
+  open connection; same POSIX loopback rationale as TcpBackend.
+- `connect_client_udp` L458:23 True — `NEVER_COMPILED_OUT_ASSERT` macro
+  expansion branch at the `htons()` call site; abort path.
+- WANT_READ/WANT_WRITE retry branches L325:20 False and L522:13 False —
+  documented in the prior ceiling; SSL send/recv deferred paths not triggered
+  in fast loopback.
+- Remaining 8 paths from the prior ceiling documentation (unchanged).
 
-Threshold: **83%** (maximum achievable).
+All 242 reachable decision-level branches are 100% covered.
+
+Threshold: **81%** (maximum achievable).
 
 ---
 

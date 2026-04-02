@@ -473,6 +473,102 @@ static void test_malformed_values()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 20: parse_uint trailing garbage — *end != '\0' True branch
+//   "50abc": strtoul consumes "50", end points to "abc", *end != '\0' → reject.
+//   Result: field unchanged at default.
+// Verifies: REQ-5.2.1
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_parse_uint_trailing_garbage()
+{
+    // Verifies: REQ-5.2.1
+    write_test_file("fixed_latency_ms=50abc\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.fixed_latency_ms == 0U);  // rejected — default retained
+    assert(cfg.enabled == false);
+
+    printf("PASS: test_parse_uint_trailing_garbage\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 21: parse_bool trailing garbage — *end != '\0' True branch
+//   "1z": strtoul consumes "1", end points to "z", *end != '\0' → reject.
+// Verifies: REQ-5.2.1
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_parse_bool_trailing_garbage()
+{
+    // Verifies: REQ-5.2.1
+    write_test_file("enabled=1z\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.enabled == false);  // rejected — default retained
+    assert(cfg.fixed_latency_ms == 0U);
+
+    printf("PASS: test_parse_bool_trailing_garbage\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 22: parse_prob trailing garbage — *end != '\0' True branch
+//   "0.5x": strtod consumes "0.5", end points to "x", *end != '\0' → reject.
+// Verifies: REQ-5.2.1
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_parse_prob_trailing_garbage()
+{
+    // Verifies: REQ-5.2.1
+    write_test_file("loss_probability=0.5x\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.loss_probability == 0.0);  // rejected — default retained
+    assert(cfg.duplication_probability == 0.0);
+
+    printf("PASS: test_parse_prob_trailing_garbage\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 23: parse_u64 trailing garbage — *end != '\0' True branch
+//   "999q": strtoull consumes "999", end points to "q", *end != '\0' → reject.
+// Verifies: REQ-5.2.1
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_parse_u64_trailing_garbage()
+{
+    // Verifies: REQ-5.2.1
+    write_test_file("prng_seed=999q\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.prng_seed == 42ULL);  // rejected — default seed retained
+    assert(cfg.enabled == false);
+
+    printf("PASS: test_parse_u64_trailing_garbage\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 24: apply_reorder_window trailing garbage — *end != '\0' True branch
+//   "4k": strtoul consumes "4", end points to "k", *end != '\0' → reject.
+// Verifies: REQ-5.2.1
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_reorder_window_trailing_garbage()
+{
+    // Verifies: REQ-5.2.1
+    write_test_file("reorder_window_size=4k\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.reorder_window_size == 0U);  // rejected — default retained
+    assert(cfg.reorder_enabled == false);
+
+    printf("PASS: test_reorder_window_trailing_garbage\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -496,6 +592,11 @@ int main()
     test_truly_malformed();
     test_over_64_lines();
     test_malformed_values();
+    test_parse_uint_trailing_garbage();
+    test_parse_bool_trailing_garbage();
+    test_parse_prob_trailing_garbage();
+    test_parse_u64_trailing_garbage();
+    test_reorder_window_trailing_garbage();
 
     // Cleanup temp file
     (void)remove(TEST_FILE);

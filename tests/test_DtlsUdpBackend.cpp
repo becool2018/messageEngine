@@ -1644,6 +1644,91 @@ static void test_delay_impairment_flush_and_recv()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test N: Two delayed messages — second receive_message() hits pre-poll pop
+//   (L801 True branch).
+//
+//   With fixed_latency_ms=1 the impairment engine buffers both messages.
+//   After 10 ms both are deliverable.  The first receive_message() call enters
+//   the poll loop, flush_delayed_to_queue() pushes *both* A and B into
+//   recv_queue, and the immediate pop returns A.  The second call finds B
+//   already in recv_queue and returns it at L801 (the pre-loop pop), without
+//   entering the poll loop at all.
+//
+// Verifies: REQ-5.1.1
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.1.1
+static void test_two_delayed_messages_second_recv_prequeue()
+{
+    // Verifies: REQ-5.1.1
+    static const uint16_t SRV_PORT = 14625U;
+
+    // Server: needed so the client UDP connect() has a valid peer address.
+    DtlsUdpBackend server;
+    TransportConfig srv_cfg;
+    make_dtls_config(srv_cfg, true, SRV_PORT, false);
+    Result srv_init = server.init(srv_cfg);
+    assert(srv_init == Result::OK);
+
+    // Client: 1 ms fixed latency → both sends buffer in the delay queue.
+    DtlsUdpBackend sender;
+    TransportConfig cli_cfg;
+    make_dtls_config(cli_cfg, false, SRV_PORT, false);
+    cli_cfg.num_channels = 1U;
+    cli_cfg.channels[0U].impairment.enabled         = true;
+    cli_cfg.channels[0U].impairment.fixed_latency_ms = 1U;
+
+    Result cli_init = sender.init(cli_cfg);
+    assert(cli_init == Result::OK);
+    assert(sender.is_open());
+
+    // Build two minimal DATA envelopes.
+    MessageEnvelope env_a;
+    envelope_init(env_a);
+    env_a.message_type      = MessageType::DATA;
+    env_a.message_id        = 0xCC01ULL;
+    env_a.source_id         = 3U;
+    env_a.destination_id    = 1U;
+    env_a.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    MessageEnvelope env_b;
+    envelope_init(env_b);
+    env_b.message_type      = MessageType::DATA;
+    env_b.message_id        = 0xCC02ULL;
+    env_b.source_id         = 3U;
+    env_b.destination_id    = 1U;
+    env_b.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    // Both sends are buffered (ERR_IO from process_outbound → not sent yet).
+    Result r_a = sender.send_message(env_a);
+    assert(r_a == Result::OK);
+    Result r_b = sender.send_message(env_b);
+    assert(r_b == Result::OK);
+
+    // Wait for both 1 ms delays to expire.
+    usleep(10000U);  // 10 ms
+
+    // First receive: pre-loop pop at L801 is False (queue empty).
+    // Loop iteration 0: flush_delayed_to_queue() collects both A and B (both
+    // past-due) and pushes them into recv_queue.  The immediate pop returns A.
+    MessageEnvelope recv_1;
+    Result r1 = sender.receive_message(recv_1, 500U);
+    assert(r1 == Result::OK);
+    assert(recv_1.message_id == 0xCC01ULL);
+
+    // Second receive: B is still in recv_queue → pre-loop pop at L801 is True.
+    // receive_message() returns immediately without entering the poll loop.
+    MessageEnvelope recv_2;
+    Result r2 = sender.receive_message(recv_2, 500U);
+    assert(r2 == Result::OK);
+    assert(recv_2.message_id == 0xCC02ULL);
+
+    sender.close();
+    server.close();
+
+    printf("PASS: test_two_delayed_messages_second_recv_prequeue\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Mock test: ssl_write failure → send_message returns ERR_IO
 //
 // Client mode.  All init calls return success (crypto_init, ssl_config_defaults,
@@ -1812,6 +1897,7 @@ int main()
     test_init_num_channels_zero();
     test_loss_impairment_drops_send();
     test_delay_impairment_flush_and_recv();
+    test_two_delayed_messages_second_recv_prequeue();
 
     printf("=== test_DtlsUdpBackend: ALL TESTS PASSED ===\n");
     return 0;

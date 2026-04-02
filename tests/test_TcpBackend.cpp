@@ -1254,6 +1254,90 @@ static void test_send_message_loss_impairment_drop()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// test_connection_limit_reached — covers accept_clients() L198 True branch
+//   (m_client_count >= MAX_TCP_CONNECTIONS).  Connect MAX_TCP_CONNECTIONS raw
+//   sockets so the server is at capacity, then connect one more; the next
+//   poll tick detects a pending connection but the capacity guard fires
+//   before accept() is called.
+// Verifies: REQ-6.1.7, REQ-6.3.5
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.1.7, REQ-6.3.5
+static void test_connection_limit_reached()
+{
+    // Verifies: REQ-6.1.7, REQ-6.3.5
+    static const uint16_t PORT     = 19716U;
+    static const int      MAX_CONN = 8;   // MAX_TCP_CONNECTIONS
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+    assert(server.is_open());
+
+    // Build the destination address once.
+    struct sockaddr_in addr;
+    (void)memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(PORT);
+    int aton_r = inet_aton("127.0.0.1", &addr.sin_addr);
+    assert(aton_r != 0);
+
+    // Open MAX_CONN raw TCP sockets and connect them to the server.
+    // Each connect() succeeds immediately on loopback and queues in the backlog.
+    // Power of 10: fixed loop bound (MAX_CONN == 8)
+    int client_fds[MAX_CONN + 1];
+    for (int i = 0; i <= MAX_CONN; ++i) { client_fds[i] = -1; }
+
+    for (int i = 0; i < MAX_CONN; ++i) {
+        client_fds[i] = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
+        assert(client_fds[i] >= 0);
+        int cr = connect(client_fds[i],
+                         reinterpret_cast<const struct sockaddr*>(&addr),
+                         static_cast<socklen_t>(sizeof(addr)));
+        assert(cr == 0);
+    }
+
+    // Server accepts one connection per receive_message() call (non-blocking
+    // accept).  Eight calls accept all MAX_CONN clients (m_client_count → 8).
+    // Power of 10: fixed loop bound (MAX_CONN == 8)
+    for (int i = 0; i < MAX_CONN; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 50U);
+    }
+
+    // Connect a (MAX_CONN+1)th client.  It queues in the backlog; the server's
+    // listen fd becomes readable so the next poll will call accept_clients().
+    // Return value intentionally not asserted: the OS may refuse the connection
+    // if the backlog is full on some platforms; what matters is that the server
+    // does not crash when it sees the listen fd readable at capacity.
+    client_fds[MAX_CONN] = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
+    assert(client_fds[MAX_CONN] >= 0);
+    int overflow_r = connect(client_fds[MAX_CONN],
+                             reinterpret_cast<const struct sockaddr*>(&addr),
+                             static_cast<socklen_t>(sizeof(addr)));
+    // overflow_r checked to satisfy Rule 7; result is intentionally not asserted
+    // because OS behaviour under backlog overflow varies across platforms.
+    if (overflow_r != 0) { /* connection queued or refused — either is acceptable */ }
+
+    // One more poll: POLLIN on the listen fd → accept_clients() is called with
+    // m_client_count == MAX_TCP_CONNECTIONS → L198 True branch fires; server
+    // returns OK without accepting and without crashing.
+    MessageEnvelope env2;
+    (void)server.receive_message(env2, 100U);
+    assert(server.is_open());  // server still healthy after capacity hit
+
+    // Cleanup: close all raw client sockets, then close server.
+    // Power of 10: fixed loop bound
+    for (int i = 0; i <= MAX_CONN; ++i) {
+        if (client_fds[i] >= 0) { (void)close(client_fds[i]); }
+    }
+    server.close();
+
+    printf("PASS: test_connection_limit_reached\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1292,6 +1376,7 @@ int main()
     test_recv_queue_overflow();
     test_send_to_all_clients_send_frame_fail();
     test_send_message_loss_impairment_drop();
+    test_connection_limit_reached();
 
     printf("=== ALL PASSED ===\n");
     return 0;
