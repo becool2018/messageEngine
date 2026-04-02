@@ -114,16 +114,21 @@ Dependencies flow strictly downward. No lower layer may reference a higher one; 
 │  Core Layer  (src/core/)                              │
 │  DeliveryEngine · Serializer · AckTracker             │
 │  RetryManager · DuplicateFilter · RingBuffer          │
-│  MessageEnvelope · Timestamp · MessageIdGen           │
-│  Assert · AssertState · IResetHandler                 │
+│  MessageEnvelope · Timestamp · MessageId              │
+│  Logger · Assert · AssertState                        │
+│  IResetHandler · AbortResetHandler                    │
+│  TransportInterface · ChannelConfig · TlsConfig       │
+│  ImpairmentConfig · Types                             │
 └──────────────────────┬───────────────────────────────┘
                        │  implements TransportInterface
 ┌──────────────────────▼───────────────────────────────┐
 │  Platform Layer  (src/platform/)                      │
 │  TcpBackend · UdpBackend · LocalSimHarness            │
 │  TlsTcpBackend · DtlsUdpBackend                       │
-│  ImpairmentEngine · PrngEngine · SocketUtils          │
-│  ImpairmentConfigLoader · ISocketOps · IMbedtlsOps    │
+│  ImpairmentEngine · ImpairmentConfigLoader            │
+│  PrngEngine · SocketUtils                             │
+│  ISocketOps · SocketOpsImpl                           │
+│  IMbedtlsOps · MbedtlsOpsImpl                        │
 └──────────────────────┬───────────────────────────────┘
                        │  POSIX sockets / OS APIs / mbedTLS
 ┌──────────────────────▼───────────────────────────────┐
