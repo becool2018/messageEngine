@@ -46,6 +46,7 @@
 #include "core/ImpairmentConfig.hpp"
 
 #include <mbedtls/error.h>
+#include <mbedtls/psa_util.h>
 #include <psa/crypto.h>
 
 #include <sys/socket.h>   // connect(), recvfrom(), MSG_PEEK
@@ -172,6 +173,9 @@ Result DtlsUdpBackend::setup_dtls_config(const TlsConfig& tls_cfg)
         log_mbedtls_err("DtlsUdpBackend", "ssl_config_defaults", ret);
         return Result::ERR_IO;
     }
+
+    // Bind PSA Crypto RNG to the SSL config (required by mbedTLS 4.0).
+    mbedtls_ssl_conf_rng(&m_ssl_conf, mbedtls_psa_get_random, MBEDTLS_PSA_RANDOM_STATE);
 
     // DTLS handshake retransmission: min 1 s, max 10 s (RFC 6347 §4.2.4)
     mbedtls_ssl_conf_handshake_timeout(&m_ssl_conf, 1000U, 10000U);
