@@ -538,28 +538,31 @@ engine_b.init(&node_b, cfg_b.channels[0], 2U);
 
 ### Injecting Network Faults (ImpairmentEngine)
 
-To test reliability behavior, attach an `ImpairmentEngine` to a `LocalSimHarness` channel by enabling impairments in the channel config and configuring an `ImpairmentConfig`:
+Every backend (`LocalSimHarness`, `TcpBackend`, `UdpBackend`, `DtlsUdpBackend`) has an **internal** `ImpairmentEngine` initialized automatically from `cfg.channels[0].impairment`. Configure the `ImpairmentConfig` field on the channel before calling `init()` — no separate `ImpairmentEngine` object is needed.
 
 ```cpp
-#include "platform/ImpairmentEngine.hpp"
+#include "core/ChannelConfig.hpp"   // ImpairmentConfig is embedded here
 #include "core/ImpairmentConfig.hpp"
 
-ImpairmentConfig imp;
+// Build the transport config as normal, then configure impairments:
+TransportConfig cfg;
+transport_config_default(cfg);
+cfg.local_node_id = 1U;
+
+ImpairmentConfig& imp = cfg.channels[0].impairment;
 impairment_config_default(imp);          // all faults off, deterministic seed
-imp.enabled              = true;
-imp.loss_probability     = 0.10;         // 10 % packet loss
-imp.fixed_latency_ms     = 20U;          // 20 ms added to every message
-imp.jitter_mean_ms       = 5U;           // ±5 ms random jitter
-imp.partition_enabled    = true;
-imp.partition_gap_ms     = 1000U;        // link up for 1 second
+imp.enabled               = true;
+imp.loss_probability      = 0.10;        // 10 % packet loss
+imp.fixed_latency_ms      = 20U;         // 20 ms added to every message
+imp.jitter_mean_ms        = 5U;          // ±5 ms random jitter
+imp.partition_enabled     = true;
+imp.partition_gap_ms      = 1000U;       // link up for 1 second
 imp.partition_duration_ms = 200U;        // then down for 200 ms
-imp.prng_seed            = 42ULL;        // same seed → same fault sequence
+imp.prng_seed             = 42ULL;       // same seed → same fault sequence
 
-ImpairmentEngine impairment;
-impairment.init(imp);
-
-// Pass impaired messages through process_outbound() before injecting
-// into the peer harness, or use it directly in a custom test harness.
+// The backend initializes its internal ImpairmentEngine from cfg.channels[0].impairment
+LocalSimHarness node_a;
+(void)node_a.init(cfg);                  // faults active from first send_message() call
 ```
 
 All impairment decisions are driven by a seedable xorshift64 PRNG — given the same seed and input sequence, every run produces an identical fault pattern.
