@@ -1,18 +1,65 @@
+# Detect OS
+UNAME_S := $(shell uname -s)
+
+# Optional tool for discovering system-provided mbedTLS flags.
+PKG_CONFIG ?= pkg-config
+
+# Prefer Homebrew LLVM on macOS if it exists, otherwise use PATH
+LLVM_BIN_BREW := /opt/homebrew/opt/llvm/bin
+LLVM_BIN      := $(if $(wildcard $(LLVM_BIN_BREW)/clang++),$(LLVM_BIN_BREW),)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Makefile for messageEngine
 # Enforces Power of 10 zero-warnings policy (rule 10).
 # No cmake required; pure GNU make.
 # ─────────────────────────────────────────────────────────────────────────────
 
-CXX       := g++
+# Tools (fall back to PATH if LLVM_BIN is empty)
+CLANG_TIDY   := $(if $(LLVM_BIN),$(LLVM_BIN)/clang-tidy,clang-tidy)
+SCAN_BUILD   := $(if $(LLVM_BIN),$(LLVM_BIN)/scan-build,scan-build)
+SCAN_ANALYZER:= $(if $(LLVM_BIN),$(LLVM_BIN)/clang++,clang++)
+COV_CXX      := $(if $(LLVM_BIN),$(LLVM_BIN)/clang++,clang++)
+LLVM_PROFDATA:= $(if $(LLVM_BIN),$(LLVM_BIN)/llvm-profdata,llvm-profdata)
+LLVM_COV     := $(if $(LLVM_BIN),$(LLVM_BIN)/llvm-cov,llvm-cov)
+
+# Compiler
+CXX       ?= g++
+
+# mbedTLS include/lib discovery:
+# 1) Prefer pkg-config when available (Linux distros, some macOS setups)
+# 2) On macOS, fall back to Homebrew's opt prefix when pkg-config data is absent
+# 3) Last resort: plain linker names for environments with default system paths
+MBEDTLS_PKG_CFLAGS := $(shell $(PKG_CONFIG) --cflags mbedtls 2>/dev/null)
+MBEDTLS_PKG_LIBS   := $(shell $(PKG_CONFIG) --libs mbedtls 2>/dev/null)
+
+MBEDTLS_FALLBACK_CFLAGS :=
+MBEDTLS_FALLBACK_LIBS   :=
+
+ifeq ($(UNAME_S),Darwin)
+HOMEBREW_PREFIX := $(shell brew --prefix 2>/dev/null)
+ifneq ($(HOMEBREW_PREFIX),)
+MBEDTLS_BREW_PREFIX := $(HOMEBREW_PREFIX)/opt/mbedtls
+ifneq ($(wildcard $(MBEDTLS_BREW_PREFIX)/include/mbedtls/ssl.h),)
+MBEDTLS_FALLBACK_CFLAGS := -I$(MBEDTLS_BREW_PREFIX)/include
+MBEDTLS_FALLBACK_LIBS   := -L$(MBEDTLS_BREW_PREFIX)/lib -lmbedtls -lmbedx509 -lmbedcrypto
+endif
+endif
+endif
+
+MBEDTLS_CFLAGS ?= $(if $(strip $(MBEDTLS_PKG_CFLAGS)),$(MBEDTLS_PKG_CFLAGS),$(MBEDTLS_FALLBACK_CFLAGS))
+
+# Include path: do NOT hardcode /opt/homebrew/include by default
 CXXFLAGS  := -std=c++17 -fno-exceptions -fno-rtti \
              -Wall -Wextra -Wpedantic -Werror \
              -Wshadow -Wconversion -Wsign-conversion \
              -Wcast-align -Wformat=2 -Wnull-dereference \
              -Wdouble-promotion -Wno-unknown-pragmas \
-             -Isrc -I/opt/homebrew/include -g
+			 -Isrc $(MBEDTLS_CFLAGS) -g
 
-LDFLAGS   := -lpthread -L/opt/homebrew/lib -lmbedtls -lmbedx509 -lmbedcrypto
+# mbedTLS linking (portable default). Users can override.
+# On Ubuntu with libmbedtls-dev installed, these libs are on the default linker path.
+MBEDTLS_LIBS ?= $(if $(strip $(MBEDTLS_PKG_LIBS)),$(MBEDTLS_PKG_LIBS),$(if $(strip $(MBEDTLS_FALLBACK_LIBS)),$(MBEDTLS_FALLBACK_LIBS),-lmbedtls -lmbedx509 -lmbedcrypto))
+LDFLAGS      := -lpthread $(MBEDTLS_LIBS)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Source groups
@@ -118,9 +165,9 @@ check_traceability:
 # clang-tidy discovers the nearest .clang-tidy by searching up from each source file.
 lint:
 	@echo "=== Clang-Tidy: src/ (strict) ==="
-	@PATH="/opt/homebrew/opt/llvm/bin:$$PATH" clang-tidy $(shell find src -name '*.cpp') -- $(CXXFLAGS)
+	@$(CLANG_TIDY) $(shell find src -name '*.cpp') -- $(CXXFLAGS)
 	@echo "=== Clang-Tidy: tests/ (relaxed) ==="
-	@PATH="/opt/homebrew/opt/llvm/bin:$$PATH" clang-tidy $(shell find tests -name '*.cpp') -- $(CXXFLAGS)
+	@$(CLANG_TIDY) $(shell find tests -name '*.cpp') -- $(CXXFLAGS)
 	@echo "=== Clang-Tidy: PASS ==="
 
 # Tier 2b: Cppcheck with MISRA C++:2023 addon
@@ -150,9 +197,9 @@ pclint:
 # Alpha checkers are selectively enabled for safety-critical (Power of 10) analysis.
 # -Werror is stripped so clang dialect differences do not mask real findings.
 # Artifacts land in build/scan-build/ (HTML reports) and build/scan-objs/ (objects).
-SCAN_BUILD    := /opt/homebrew/opt/llvm/bin/scan-build
-SCAN_ANALYZER := /opt/homebrew/opt/llvm/bin/clang++
-CXX_ANALYZER  := /opt/homebrew/opt/llvm/libexec/c++-analyzer
+SCAN_BUILD    := $(if $(LLVM_BIN),$(LLVM_BIN)/scan-build,scan-build)
+SCAN_ANALYZER := $(if $(LLVM_BIN),$(LLVM_BIN)/clang++,clang++)
+CXX_ANALYZER  := $(if $(wildcard /opt/homebrew/opt/llvm/libexec/c++-analyzer),/opt/homebrew/opt/llvm/libexec/c++-analyzer,c++-analyzer)
 SCAN_OBJ_DIR  := build/scan-objs
 SCAN_CXXFLAGS := $(filter-out -Werror,$(CXXFLAGS))
 SCAN_SRCS     := $(CORE_SRC) $(PLATFORM_SRC) src/app/Server.cpp src/app/Client.cpp
@@ -197,9 +244,9 @@ static_analysis: lint cppcheck scan_build
 # Uses clang++ -fprofile-instr-generate -fcoverage-mapping; no lcov required.
 # Artifacts land in build/cov/ (raw profiles, merged data) and build/cov-objs/.
 # ─────────────────────────────────────────────────────────────────────────────
-COV_CXX       := /opt/homebrew/opt/llvm/bin/clang++
-LLVM_PROFDATA := /opt/homebrew/opt/llvm/bin/llvm-profdata
-LLVM_COV      := /opt/homebrew/opt/llvm/bin/llvm-cov
+COV_CXX       := $(if $(LLVM_BIN),$(LLVM_BIN)/clang++,clang++)
+LLVM_PROFDATA := $(if $(LLVM_BIN),$(LLVM_BIN)/llvm-profdata,llvm-profdata)
+LLVM_COV      := $(if $(LLVM_BIN),$(LLVM_BIN)/llvm-cov,llvm-cov)
 COV_OBJ_DIR   := build/cov-objs
 # Strip -Werror so clang++ dialect differences do not block coverage builds;
 # add instrumentation flags; disable optimisation for accurate line mapping.

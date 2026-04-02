@@ -221,13 +221,13 @@ messageEngine/
 
 **macOS (Homebrew):**
 ```bash
-brew install gcc make llvm cppcheck
+brew install gcc make llvm cppcheck pkg-config mbedtls
 ```
 
 **Ubuntu / Debian:**
 ```bash
 sudo apt update
-sudo apt install build-essential clang clang-tidy cppcheck llvm
+sudo apt install build-essential clang clang-tidy cppcheck llvm pkg-config libmbedtls-dev
 ```
 
 ### Building

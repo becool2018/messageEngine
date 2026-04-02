@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build_test_and_analysis:
+    name: Build, Test, Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install toolchain + analyzers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            clang-tidy \
+            llvm \
+            cppcheck \
+            pkg-config \
+            libmbedtls-dev
+
+      - name: Build + run tests
+        run: |
+          make run_tests
+
+      - name: Static analysis (clang-tidy + cppcheck + scan-build)
+        run: |
+          make static_analysis
+
+  codeql:
+    name: CodeQL (C/C++)
+    runs-on: ubuntu-latest
+
+    permissions:
+      security-events: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: cpp
+
+      # For C/C++ CodeQL you must build the code.
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
