@@ -39,6 +39,7 @@
 #include "core/MessageEnvelope.hpp"
 #include "platform/TlsTcpBackend.hpp"
 #include "MockSocketOps.hpp"
+#include <mbedtls/psa_util.h>
 #include <psa/crypto.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -801,13 +802,12 @@ static void test_tls_verify_peer_with_ca()
     (void)pthread_join(tid, nullptr);
     server.close();
 
-    // mbedTLS 4.0 requires mbedtls_ssl_set_hostname() when verify_peer=true;
-    // TlsTcpBackend::connect_to_server() does not call it (MBEDTLS_ERR_SSL_BAD_INPUT_DATA).
-    // The handshake therefore fails at L273 True (ssl_handshake (client) fails).
-    // setup_tls_config DID succeed (CA cert loaded → L160 False) before the handshake.
-    // Coverage points L152 True, L158:9 True, L158:32 True, L160 False are confirmed.
-    assert(args.result == Result::ERR_IO);
-    assert(recv_res == Result::ERR_TIMEOUT);
+    // The server cert IS the CA cert (self-signed), so peer verification succeeds.
+    // Coverage points L152 True, L158:9 True, L158:32 True, L160 False are confirmed
+    // (verify_peer=true → MBEDTLS_SSL_VERIFY_REQUIRED; CA cert loaded and parsed OK).
+    assert(args.result == Result::OK);
+    assert(recv_res == Result::OK);
+    assert(received.message_id == 0xCAFEULL);
     printf("PASS: test_tls_verify_peer_with_ca\n");
 }
 
@@ -1464,6 +1464,7 @@ static void* tls_zero_frame_func(void* raw)
         return nullptr;
     }
     mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
+    mbedtls_ssl_conf_rng(&conf, mbedtls_psa_get_random, MBEDTLS_PSA_RANDOM_STATE);
 
     ret = mbedtls_ssl_setup(&ssl, &conf);
     if (ret != 0) {

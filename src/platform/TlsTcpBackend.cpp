@@ -28,6 +28,7 @@
 #include "platform/SocketUtils.hpp"
 
 #include <mbedtls/error.h>
+#include <mbedtls/psa_util.h>
 #include <psa/crypto.h>
 #include <cstdio>
 #include <cstring>
@@ -169,6 +170,9 @@ Result TlsTcpBackend::setup_tls_config(const TlsConfig& tls_cfg)
         log_mbedtls_err("TlsTcpBackend", "ssl_config_defaults", ret);
         return Result::ERR_IO;
     }
+
+    // Bind PSA Crypto RNG to the SSL config (required by mbedTLS 4.0).
+    mbedtls_ssl_conf_rng(&m_ssl_conf, mbedtls_psa_get_random, MBEDTLS_PSA_RANDOM_STATE);
 
     // Set peer-verification mode
     int authmode = tls_cfg.verify_peer
