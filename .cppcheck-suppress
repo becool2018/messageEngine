@@ -94,8 +94,12 @@ compareValueOutOfTypeRangeError:src/core/Serializer.cpp
 
 # Justification: knownConditionTrueFalse -- these defensive guards check conditions
 # that are provably bounded by construction. They serve as redundant safety nets
-# (Power of 10 Rule 5: defensive checking). Pre-existing.
+# (Power of 10 Rule 5: defensive checking). The pattern is: NEVER_COMPILED_OUT_ASSERT
+# proves the condition is true/false, then the following if() repeats the same check
+# as a second safety net. cppcheck sees the assertion as a proof and flags the if()
+# as always-true/false. This is intentional. Pre-existing.
 knownConditionTrueFalse:src/app/Client.cpp
+knownConditionTrueFalse:src/core/DeliveryEngine.cpp
 knownConditionTrueFalse:src/platform/LocalSimHarness.cpp
 
 # Justification: constParameter for argv in static arg-parsing helpers --
