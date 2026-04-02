@@ -732,6 +732,31 @@ All production code (`src/`) is written to the following standards. Deviations r
 | **Assertions** | `NEVER_COMPILED_OUT_ASSERT(cond)` — always compiled in; in debug/test builds calls `abort()`; in production logs FATAL and triggers a controlled reset |
 | **Layering** | App → Core → Platform → OS; no upward dependencies; no cyclic dependencies |
 
+### Work Required to Achieve Formal Class B Classification
+
+The project voluntarily meets Class B verification rigor (M1 + M2 + M4 + M5 for all SC functions) but is formally classified **Class C**. Formal reclassification to Class B requires completing the following items. The full gap list is in [`TODO_FOR_CLASS_B_CERT.txt`](TODO_FOR_CLASS_B_CERT.txt).
+
+#### Already achieved (no further work needed)
+
+| Item | Evidence |
+|---|---|
+| M1 — Code review / inspection | [`docs/DEFECT_LOG.md`](docs/DEFECT_LOG.md) INSP-001 (2026-03-31) |
+| M2 — Static analysis (compiler + clang-tidy + cppcheck) | `make lint`; zero unresolved findings |
+| M4 — Branch coverage of all SC functions | `make coverage`; 100% of reachable branches; ceilings documented in `CLAUDE.md §14` |
+| M5 — Fault injection for all SC dependency-failure paths | Injectable interfaces (`IMbedtlsOps`, `ISocketOps`); fault-injection tests in `tests/` |
+| MC/DC analysis (M6 goal, five highest-hazard SC functions) | [`docs/MCDC_ANALYSIS.md`](docs/MCDC_ANALYSIS.md) — all decisions demonstrated |
+
+#### Remaining work (external tools or personnel required)
+
+| # | Item | What is needed | Blocker |
+|---|---|---|---|
+| 6 | **TLA+ model checking** | Formally verify the three SC state machines (`AckTracker`, `RetryManager`, `ImpairmentEngine`) against all invariants in [`docs/STATE_MACHINES.md`](docs/STATE_MACHINES.md) using TLA+ or SPIN | TLA+ toolchain + team member with TLA+ authoring experience |
+| 7 | **Frama-C WP bounds proof** | Prove absence of buffer overflow in `Serializer::serialize()` and `Serializer::deserialize()` using the Frama-C WP plugin with ACSL annotations | Frama-C installation + ACSL annotation authoring |
+| 8 | **PC-lint Plus MISRA C++:2023 report** | Run PC-lint Plus with the MISRA C++:2023 ruleset over all of `src/` to produce a formal compliance report (`make pclint` is a documented TODO stub) | PC-lint Plus commercial licence ([gimpel.com](https://gimpel.com)) |
+| 9 | **Independent V&V** | A second qualified engineer (not the author) must complete a structured inspection of all SC functions per [`docs/INSPECTION_CHECKLIST.md`](docs/INSPECTION_CHECKLIST.md) and record findings in [`docs/DEFECT_LOG.md`](docs/DEFECT_LOG.md) (INSP-002 onward) | Second qualified reviewer |
+
+Items 6 and 7 are also required for Class A reclassification; Item 9 is required at both Class B and Class A (NPR 7150.2D §3.11). Item 8 closes the Tier 3 static analysis gap (see [`docs/STATIC_ANALYSIS_TOOLCHAIN.md`](docs/STATIC_ANALYSIS_TOOLCHAIN.md)).
+
 ---
 
 ## Project Standards Files
