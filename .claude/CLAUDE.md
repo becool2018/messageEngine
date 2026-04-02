@@ -2,24 +2,10 @@
 
 ## 1. How to use this file
 
-- These instructions apply to all C/C++ code in this repository.
+- These instructions define a portable C/C++ coding standard applicable to any project using C or C++.
 - Always follow the **Global C/C++ Coding Standard** first.
-- Then apply any **Architecture & Layering** and **Module-Specific Requirements** relevant to the files you are touching.
+- Then apply any project-specific architecture, layering, and module requirements defined in the project's root CLAUDE.md.
 - If a user request conflicts with these rules, follow these standards and briefly explain the conflict in your response.
-- **Verification policy:** Before writing or reviewing any test, read
-  `.claude/VERIFICATION_POLICY.md` (VVP-001). It defines the minimum
-  verification methods (M1–M7) required at each software classification
-  level (Class C / B / A) and the rules governing architectural ceiling
-  arguments, fault injection, and injectable interface requirements.
-  The table in §4.1 is normative: a method not listed as sufficient for
-  a given classification is explicitly insufficient regardless of its
-  quality. Key rules to apply immediately:
-    - "Code review alone" (M1 only) never satisfies Class C for SC functions.
-    - A loopback-only test environment satisfies M4 only for branches
-      reachable under loopback. Dependency-failure branches require M5.
-    - Architectural ceilings are a Class C instrument only; they do not
-      apply at Class B or A for dependency-failure paths (VVP-001 §4.3 e-i).
-
 ---
 
 ## 2. Global C/C++ Coding Standard
@@ -38,8 +24,9 @@ This project uses C and C++ only. All code must comply with the following global
   - Production code (src/) is treated as high criticality; all rules apply without
     exception unless an explicit deviation is documented.
   - Test code (tests/) must obey all non-negotiable rules listed below but may relax
-    a defined subset of rules to accommodate test-framework idioms — see §3 for the
-    exact permitted relaxations. No rule relaxation is permitted in src/.
+    a defined subset of rules to accommodate test-framework idioms — see the project
+    architecture and layering rules for the exact permitted relaxations. No rule
+    relaxation is permitted in src/.
 
 2. Power of 10 rules (enforced on all code)
 Apply these rules in every file:
@@ -48,7 +35,7 @@ Apply these rules in every file:
    - No direct or indirect recursion.
 2) Fixed loop bounds
    - Every loop must have a statically provable upper bound that a static analysis tool can verify.
-   - Exception - Certain infrastructure loops (TCP accept loop, poll/recv loop, application event loop) are designed to operate for 
+   - Exception - Certain infrastructure loops (server accept loops, I/O poll loops, application event loops) are designed to operate for
      the lifetime of the process or connection and therefore have no meaningful finite iteration bound. These loops are treated as 
      non‑terminating scheduler‑style iterations as allowed by the Power of 10 rationale.
      Deviation: For these designated loops, the project does not require a statically provable finite iteration bound. 
@@ -79,7 +66,7 @@ Apply these rules in every file:
    - No more than one level of pointer indirection per expression.
    - Function pointers are prohibited in production code.
    - Exception — compiler-generated vtables backing C++ virtual functions are permitted.
-     Rationale: virtual dispatch is the architectural mechanism for TransportInterface
+     Rationale: virtual dispatch is the approved architectural mechanism for interface
      polymorphism; it is endorsed by MISRA C++:2023 rules on virtuals; and it produces
      no explicit function pointer declarations in application code.
      All virtual functions must conform to MISRA C++:2023 rules on virtual functions.
@@ -200,7 +187,8 @@ Apply these rules in every file:
     Rationale: JPL Power of 10 Rule 5 requires assertions to remain active in all builds.
     The prior wording ("fail fast in debug builds while preserving safe behavior in
     production") implied NDEBUG-disabled assertions in production, which directly conflicts
-    with Rule 5. NEVER_COMPILED_OUT_ASSERT resolves this — see CLAUDE.md §10.
+    with Rule 5. A project-defined always-on assertion macro (never disabled by NDEBUG)
+    resolves this.
 - Static analysis:
   - Code is written assuming regular static analysis and MISRA checks.
   - Avoid patterns that defeat or confuse analyzers.
@@ -224,82 +212,13 @@ When editing or generating C/C++ code, I must:
 - Structure code to compile cleanly with strict warnings and pass MISRA-oriented static analysis.
 - Preserve clear layering, testability, and portability in designs and APIs.
 - Explicitly comment any unavoidable deviation and keep it as small as possible.
-- Traceability: follow the rules in ./CLAUDE.md §11 (traceability policy)
-  and ./CLAUDE.md §13 (safety requirements). Run docs/check_traceability.sh
-  after any change.
+- Traceability: follow the project traceability policy. Run any traceability check script after changes that add or remove requirements or implementations.
 </global_c_cplusplus_standard>
 ```
 
 ---
 
-## 3. Architecture and Layering
-
-```xml
-<architecture_and_layers>
-- src/core:
-  - Core domain logic.
-  - Depends only on abstract interfaces declared in src/platform (e.g.,
-    TransportInterface); no direct POSIX, socket, or thread API calls.
-  - Must not include or call concrete platform implementations directly.
-- src/platform:
-  - OS and platform adapters (sockets, timers, threading, filesystem).
-  - No application-specific policy; only mechanics and thin wrappers.
-- src/app:
-  - Application orchestration and high-level behavior.
-  - Uses src/core and src/platform through their public interfaces.
-- tests:
-  - Unit and integration tests.
-  - Must obey all non-negotiable rules: no undefined behaviour, no C-style casts,
-    no goto/recursion, no exceptions (compile flag enforced), no C++20+ features,
-    zero compiler warnings, and all return values checked.
-  - May relax the following rules to accommodate test-framework idioms:
-    - STL containers (e.g., std::vector, std::string) are permitted for test
-      fixture setup and data construction only; not on paths under test.
-    - Templates are permitted for test helper utilities (e.g., typed test tables).
-    - Dynamic allocation (new/delete) is permitted in test fixture setup and
-      teardown; not on the path that exercises production code.
-    - The per-function assertion minimum (Rule 5) is relaxed to one assertion per
-      test function when the function body is a single VERIFY/CHECK call.
-    - Cyclomatic complexity ceiling (Rule 4, ≤10) is raised to ≤15 for test
-      functions that necessarily exercise many code paths in sequence.
-    - MISRA advisory rules may be relaxed where the test framework requires it;
-      MISRA required rules remain in force.
-  - No other relaxations are permitted. When in doubt, follow the production rules.
-- docs:
-  - Requirements, design docs, and other project documentation.
-
-Layering rules:
-- Higher layers may depend on lower ones (app → core → platform), never the reverse.
-- No bypassing abstractions:
-  - src/app and src/core must not call raw OS APIs or sockets directly; only through src/platform interfaces.
-- No cyclic dependencies between modules or directories.
-</architecture_and_layers>
-```
-
----
-
-## 4. Module-Specific Requirements (placeholder)
-
-You can expand these as your design solidifies.
-
-```xml
-<module_requirements name="network_layer">
-- Implements shared message envelopes, delivery semantics, and any impairment/simulation logic.
-- Depends only on abstract transport interfaces (e.g., from src/platform), not raw sockets.
-- Respects all global standards: no dynamic allocation after init on critical paths, Power of 10, MISRA, F´ subset.
-
-<module_requirements name="platform_network">
-- Encapsulates TCP/UDP sockets and optional TLS/DTLS.
-- Handles framing, timeouts, basic error mapping, and connection management.
-- No application-level policy decisions (retries, routing, business logic); only transport mechanics.
-</module_requirements>
-```
-
-Add more `<module_requirements>` blocks as you define components.
-
----
-
-## 5. Testing, Analysis, and CI Expectations
+## 3. Testing, Analysis, and CI Expectations
 
 ```xml
 <testing_and_analysis>
@@ -314,7 +233,7 @@ Add more `<module_requirements>` blocks as you define components.
 
 ---
 
-## 6. Instructions for Claude
+## 4. Instructions for Claude
 
 ```xml
 <instructions_for_claude>
@@ -327,27 +246,8 @@ Add more `<module_requirements>` blocks as you define components.
    - "// Power of 10: no dynamic allocation after init — using static buffer"
    - "// Power of 10: bounded loop with explicit max_iterations"
    - "// Power of 10 Rule 2 deviation: infrastructure event loop — bounded per-iteration
-   //   work, terminates on signal/timeout/close per CLAUDE.md §2.2 exception."
+   //   work, terminates on signal/timeout/close per project deviation policy."
 4. Favor simpler, safer designs over clever or complex ones, especially where they improve analyzability and testability.
-5. Before every git commit, run `make lint` and `make run_tests`. Both must pass
-   with zero errors before the commit is created. If either fails, fix the issue
-   first — do not commit broken or lint-failing code.
 </instructions_for_claude>
 ```
 
----
-
-## 7. Open Questions / TODOs
-
-```xml
-<open_questions>
-- MISRA versions are resolved: MISRA C:2025 for C code, MISRA C++:2023 for C++ code.
-- Compiler standard is resolved: -std=c++17 in use.
-- std::atomic carve-out is resolved: std::atomic<T> for integral types is permitted;
-  GCC __atomic built-ins are no longer used anywhere in the codebase.
-- Performance targets are addressed in §14 (WCET) and docs/WCET_ANALYSIS.md;
-  per-module resource limits are the compile-time constants in src/core/Types.hpp.
-- Test-only relaxations are resolved: see §3 (Architecture and Layering, tests entry)
-  for the exact enumerated list of permitted relaxations and non-negotiable rules.
-</open_questions>
-```

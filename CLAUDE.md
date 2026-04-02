@@ -1,5 +1,6 @@
 <application_requirements>
-NOTE: Global high-level C/C++ coding standards (Power of 10, MISRA, F´ subset, architecture and layering rules) are defined in .claude/CLAUDE.md.
+NOTE: Global portable C/C++ coding standards (Power of 10, MISRA, F´ subset) are defined in .claude/CLAUDE.md.
+Project-specific architecture, layering rules, verification policy, and CI/commit rules are defined in §§1a–1d of this file.
 This section defines project-specific application requirements for the shared network, messaging, impairment engine, and transports.
 
 1. Overall goals and scope
@@ -11,6 +12,86 @@ This section defines project-specific application requirements for the shared ne
   - Deterministic behavior under test.
   - Strong observability (logging and metrics).
   - Easy unit/integration testing without a real network.
+
+1a. Verification Policy (VVP-001)
+
+Before writing or reviewing any test, read `.claude/VERIFICATION_POLICY.md` (VVP-001). It defines the minimum
+verification methods (M1–M7) required at each software classification level (Class C / B / A) and the rules
+governing architectural ceiling arguments, fault injection, and injectable interface requirements.
+The table in §4.1 is normative: a method not listed as sufficient for a given classification is explicitly
+insufficient regardless of its quality. Key rules to apply immediately:
+  - "Code review alone" (M1 only) never satisfies Class C for SC functions.
+  - A loopback-only test environment satisfies M4 only for branches reachable under loopback.
+    Dependency-failure branches require M5.
+  - Architectural ceilings are a Class C instrument only; they do not apply at Class B or A
+    for dependency-failure paths (VVP-001 §4.3 e-i).
+
+1b. Architecture, Layering, and Directory Rules for AI
+
+The following directory-specific rules govern how code is organized in this project and must be
+followed by all contributors and AI assistants when editing or generating code:
+
+- src/core:
+  - Core domain logic.
+  - Depends only on abstract interfaces declared in src/platform (e.g., TransportInterface);
+    no direct POSIX, socket, or thread API calls.
+  - Must not include or call concrete platform implementations directly.
+- src/platform:
+  - OS and platform adapters (sockets, timers, threading, filesystem).
+  - No application-specific policy; only mechanics and thin wrappers.
+- src/app:
+  - Application orchestration and high-level behavior.
+  - Uses src/core and src/platform through their public interfaces.
+- tests/:
+  - Unit and integration tests.
+  - Must obey all non-negotiable rules: no undefined behaviour, no C-style casts,
+    no goto/recursion, no exceptions (compile flag enforced), no C++20+ features,
+    zero compiler warnings, and all return values checked.
+  - May relax the following rules to accommodate test-framework idioms:
+    - STL containers (e.g., std::vector, std::string) are permitted for test
+      fixture setup and data construction only; not on paths under test.
+    - Templates are permitted for test helper utilities (e.g., typed test tables).
+    - Dynamic allocation (new/delete) is permitted in test fixture setup and
+      teardown; not on the path that exercises production code.
+    - The per-function assertion minimum (Rule 5) is relaxed to one assertion per
+      test function when the function body is a single VERIFY/CHECK call.
+    - Cyclomatic complexity ceiling (Rule 4, ≤10) is raised to ≤15 for test
+      functions that necessarily exercise many code paths in sequence.
+    - MISRA advisory rules may be relaxed where the test framework requires it;
+      MISRA required rules remain in force.
+  - No other relaxations are permitted. When in doubt, follow the production rules.
+- docs/:
+  - Requirements, design docs, and other project documentation.
+
+Layering rules:
+- Higher layers may depend on lower ones (app → core → platform), never the reverse.
+- No bypassing abstractions:
+  - src/app and src/core must not call raw OS APIs or sockets directly; only through
+    src/platform interfaces.
+- No cyclic dependencies between modules or directories.
+
+Before making significant changes, briefly summarize how the planned change fits:
+  - The global C/C++ coding standard (.claude/CLAUDE.md).
+  - The layering rules above.
+  - Any relevant module requirements in §§3–7 of this file.
+
+1c. CI/Commit Rules
+
+Before every git commit, run `make lint` and `make run_tests`. Both must pass with zero errors
+before the commit is created. If either fails, fix the issue first — do not commit broken or
+lint-failing code. These checks are also entry criteria for the formal inspection process (§12).
+
+1d. Resolved Design Decisions
+
+The following questions were open during initial design and are now resolved:
+- MISRA versions: MISRA C:2025 for C code, MISRA C++:2023 for C++ code.
+- Compiler standard: -std=c++17 in use.
+- std::atomic carve-out: std::atomic<T> for integral types is permitted;
+  GCC __atomic built-ins are no longer used anywhere in the codebase.
+- Performance targets: addressed in §16 (WCET) and docs/WCET_ANALYSIS.md;
+  per-module resource limits are the compile-time constants in src/core/Types.hpp.
+- Test-only relaxations: see §1b above (Architecture, Layering, and Directory Rules for AI,
+  tests/ entry) for the exact enumerated list of permitted relaxations and non-negotiable rules.
 
 2. Layered architecture
 We conceptually split the network system into four layers:
