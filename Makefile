@@ -199,7 +199,7 @@ pclint:
 # Artifacts land in build/scan-build/ (HTML reports) and build/scan-objs/ (objects).
 SCAN_BUILD    := $(if $(LLVM_BIN),$(LLVM_BIN)/scan-build,scan-build)
 SCAN_ANALYZER := $(if $(LLVM_BIN),$(LLVM_BIN)/clang++,clang++)
-CXX_ANALYZER  := $(if $(wildcard /opt/homebrew/opt/llvm/libexec/c++-analyzer),/opt/homebrew/opt/llvm/libexec/c++-analyzer,c++-analyzer)
+CXX_ANALYZER  := $(wildcard /opt/homebrew/opt/llvm/libexec/c++-analyzer)
 SCAN_OBJ_DIR  := build/scan-objs
 SCAN_CXXFLAGS := $(filter-out -Werror,$(CXXFLAGS))
 SCAN_SRCS     := $(CORE_SRC) $(PLATFORM_SRC) src/app/Server.cpp src/app/Client.cpp
@@ -219,6 +219,7 @@ $(SCAN_OBJ_DIR)/app/%.o: src/app/%.cpp
 
 scan_build:
 	@echo "=== Clang Static Analyzer: src/ ==="
+	@echo "=== scan-build=$(SCAN_BUILD)  analyzer=$(SCAN_ANALYZER)$(if $(CXX_ANALYZER),  CXX_ANALYZER=$(CXX_ANALYZER),) ==="
 	@$(SCAN_BUILD) \
 	    --use-analyzer=$(SCAN_ANALYZER) \
 	    --status-bugs \
@@ -227,7 +228,7 @@ scan_build:
 	    -enable-checker alpha.core.Conversion \
 	    -enable-checker alpha.unix.cstring.OutOfBounds \
 	    $(MAKE) $(SCAN_OBJS) \
-	        CXX="$(CXX_ANALYZER)" \
+	        $(if $(CXX_ANALYZER),CXX="$(CXX_ANALYZER)",) \
 	        CXXFLAGS="$(SCAN_CXXFLAGS)"
 	@echo "=== Clang Static Analyzer: PASS ==="
 

@@ -23,10 +23,17 @@ jobs:
             build-essential \
             clang \
             clang-tidy \
+            clang-tools \
             llvm \
             cppcheck \
             pkg-config \
             libmbedtls-dev
+
+      - name: Verify tool versions
+        run: |
+          which scan-build && scan-build --version || true
+          clang-tidy --version
+          cppcheck --version
 
       - name: Build + run tests
         run: |
@@ -53,9 +60,20 @@ jobs:
         with:
           languages: cpp
 
-      # For C/C++ CodeQL you must build the code.
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            pkg-config \
+            libmbedtls-dev
+
+      # Replace autobuild with explicit build so CodeQL can observe compilation.
+      - name: Build
+        run: |
+          make clean
+          make all
 
       - name: Analyze
         uses: github/codeql-action/analyze@v3
