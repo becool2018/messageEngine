@@ -1,5 +1,7 @@
 # messageEngine
 
+![CI](https://github.com/becool2018/messageEngine/actions/workflows/CI.yml/badge.svg)
+
 A safety-critical C++ networking library that models realistic communication problems — latency, jitter, packet loss, duplication, reordering, and link partitions — while providing consistent, reusable messaging utilities across three transport backends (TCP, UDP, and an in-process simulation harness).
 
 All production code complies with **JPL Power of 10**, **MISRA C++:2023**, and an **F-Prime style subset**: no exceptions, no STL, no templates, no RTTI, and no dynamic allocation on critical paths after initialization.
@@ -227,8 +229,10 @@ brew install gcc make llvm cppcheck pkg-config mbedtls
 **Ubuntu / Debian:**
 ```bash
 sudo apt update
-sudo apt install build-essential clang clang-tidy cppcheck llvm pkg-config libmbedtls-dev
+sudo apt install build-essential clang clang-tidy clang-tools cppcheck llvm pkg-config libmbedtls-dev
 ```
+
+> **Linux note:** `clang-tools` provides `scan-build`. The Makefile auto-detects the full path to `clang` via `which clang`, so no manual path configuration is needed.
 
 ### Building
 
@@ -325,17 +329,21 @@ Three tiers of static analysis are configured in the Makefile:
 # Tier 2a: Clang-Tidy (strict config for src/, relaxed for tests/)
 make lint
 
-# Tier 2b: Cppcheck with MISRA C++:2023 addon
+# Tier 2b: Cppcheck flow/style analysis (CI-safe; no MISRA addon)
 make cppcheck
+
+# Tier 2b (extended): Cppcheck + MISRA C++:2023 addon — local macOS only
+#   Ubuntu's cppcheck 2.13 does not support --addon=misra; use macOS for MISRA checks.
+make cppcheck-misra
 
 # Tier 2c: Clang Static Analyzer (path-sensitive, alpha checkers enabled)
 make scan_build
 
-# Run all Tier 2 tools in sequence (CI target)
+# Run all Tier 2 tools in sequence (CI target: lint + cppcheck + scan_build)
 make static_analysis
 ```
 
-Documented suppressions live in `.cppcheck-suppress`; each entry requires a justification comment and a `DEFECT_LOG.md` reference.
+Documented suppressions live in `.cppcheck-suppress`; each entry requires a justification comment and a `DEFECT_LOG.md` reference. On Linux, comment lines are stripped from the suppression file before passing to cppcheck (Ubuntu 24.04 cppcheck 2.13 limitation).
 
 ---
 
@@ -660,8 +668,8 @@ This project ships a set of reusable Claude Code skills in `.claude/skills/`. Sk
 
 | Category | Lines |
 |---|---|
-| `src/` (production + headers) | 9,824 |
-| `tests/` | 10,999 |
-| **Total** | **20,823** |
+| `src/` (production + headers) | 9,578 |
+| `tests/` | 11,017 |
+| **Total** | **20,595** |
 
 54 source files across 3 layers and 15 test suites.
