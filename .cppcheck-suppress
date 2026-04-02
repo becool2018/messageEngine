@@ -1,12 +1,12 @@
-# .cppcheck-suppress — Cppcheck suppression list for messageEngine
-# Policy: CLAUDE.md §9.1 Tier 2b
+# .cppcheck-suppress -- Cppcheck suppression list for messageEngine
+# Policy: CLAUDE.md S9.1 Tier 2b
 # Format: <id>[:<file>[:<line>]]
 # Each suppression must have a justification comment on the preceding line.
 #
 # Usage: cppcheck --suppressions-list=.cppcheck-suppress ...
 #
 # IMPORTANT: Adding a suppression is a deviation from the MISRA / Power of 10
-# standard. Every entry here must be reviewed during inspection (CLAUDE.md §12)
+# standard. Every entry here must be reviewed during inspection (CLAUDE.md S12)
 # and logged in docs/DEFECT_LOG.md with a WAIVE disposition.
 
 # System headers are not analysed; missing-include noise for <cassert>, <cstdint> etc.
@@ -19,11 +19,11 @@ unmatchedSuppression
 
 # POSIX socket API returns int; Cppcheck flags the signed/unsigned comparison in
 # fd range checks (fd >= 0). This is intentional and correct POSIX idiom.
-# Deviation: MISRA C++:2023 Rule 5.0.4 (implicit integral conversions) — waived
+# Deviation: MISRA C++:2023 Rule 5.0.4 (implicit integral conversions) -- waived
 # for POSIX socket fd comparisons only. Logged: DEFECT_LOG.md INSP-000-1 (pending).
 # signConversion:src/platform/SocketUtils.cpp
 
-# ── Add project-specific suppressions below this line ──────────────────────────
+# -- Add project-specific suppressions below this line --------------------------
 # Template:
 #   # Justification: <why this finding is a false positive or accepted deviation>
 #   # Deviation: <MISRA rule or Power of 10 rule being waived>
@@ -32,77 +32,77 @@ unmatchedSuppression
 
 # Justification: LocalSimHarness::link() is called from tests/test_LocalSim.cpp,
 # which is outside the src/ directory that cppcheck analyses. Not dead code.
-# Deviation: false positive — cppcheck does not see test callers.
+# Deviation: false positive -- cppcheck does not see test callers.
 unusedFunction:src/platform/LocalSimHarness.cpp
 
 # Justification: ImpairmentEngine::process_inbound() is called from
 # tests/test_ImpairmentEngine.cpp, outside the analysed src/ tree.
-# Deviation: false positive — cppcheck does not see test callers.
+# Deviation: false positive -- cppcheck does not see test callers.
 unusedFunction:src/platform/ImpairmentEngine.cpp
 
 # Justification: ImpairmentEngine::config() is called from
 # tests/test_ImpairmentEngine.cpp, outside the analysed src/ tree.
-# Deviation: false positive — cppcheck does not see test callers.
+# Deviation: false positive -- cppcheck does not see test callers.
 unusedFunction:src/platform/ImpairmentEngine.hpp
 
 # Justification: envelope_make_ack() is called from tests/test_MessageEnvelope.cpp,
 # outside the analysed src/ tree. Not dead code.
-# Deviation: false positive — cppcheck does not see test callers.
+# Deviation: false positive -- cppcheck does not see test callers.
 unusedFunction:src/core/MessageEnvelope.hpp
 
 # Justification: cppcheck+misra addon cannot resolve C++ enum types (Result,
 # EntryState, ReliabilityClass, MessageType, etc.) without a compile_commands.json.
 # These are false-positive "incomplete misra check" warnings, not real violations.
 # A compile_commands.json would eliminate them; generating one requires CMake or Bear.
-# Deviation: misra-config informational — not a code defect. Pre-existing limitation.
+# Deviation: misra-config informational -- not a code defect. Pre-existing limitation.
 misra-config
 
-# Justification: noConstructor — these classes deliberately use an explicit init()
+# Justification: noConstructor -- these classes deliberately use an explicit init()
 # pattern instead of constructors, following the F-Prime / MISRA recommendation for
 # explicit initialization phases with no implicit side effects.
-# Deviation: MISRA C++:2023 advisory — init() pattern preferred over constructors for
+# Deviation: MISRA C++:2023 advisory -- init() pattern preferred over constructors for
 # safety-critical embedded code where initialization order and error handling matter.
 noConstructor
 
-# Justification: arrayIndexThenCheck in ChannelConfig.hpp — the loop bound is checked
+# Justification: arrayIndexThenCheck in ChannelConfig.hpp -- the loop bound is checked
 # by the outer loop condition; the inner access is within a provably bounded range.
 # Pre-existing, verified safe. Deviation: false positive from cppcheck's flow analysis.
 arrayIndexThenCheck:src/core/ChannelConfig.hpp
 
-# Justification: compareValueOutOfTypeRangeError — comparing uint32_t-derived values
+# Justification: compareValueOutOfTypeRangeError -- comparing uint32_t-derived values
 # against UINT32_MAX (4294967295) as a sentinel/guard. These are deliberate range
 # checks for expiry/validity sentinel values, not logic errors.
 # Pre-existing, verified correct. Deviation: cppcheck false positive on sentinel comparisons.
 compareValueOutOfTypeRangeError:src/core/Timestamp.hpp
 compareValueOutOfTypeRangeError:src/core/Serializer.cpp
 
-# Justification: knownConditionTrueFalse — these defensive guards check conditions
+# Justification: knownConditionTrueFalse -- these defensive guards check conditions
 # that are provably bounded by construction. They serve as redundant safety nets
 # (Power of 10 Rule 5: defensive checking). Pre-existing.
 knownConditionTrueFalse:src/app/Client.cpp
 knownConditionTrueFalse:src/platform/LocalSimHarness.cpp
 
-# Justification: constParameter for argv in static arg-parsing helpers —
+# Justification: constParameter for argv in static arg-parsing helpers --
 # parse_peer_ip/parse_peer_port/parse_server_port receive argv from main() which
 # is typed char* argv[] per the C++ standard. Changing to char* const is correct
 # but cppcheck may still flag depending on exact version behavior.
 constParameter:src/app/Client.cpp
 constParameter:src/app/Server.cpp
 
-# Justification: normalCheckLevelMaxBranches — cppcheck informational note that it is
+# Justification: normalCheckLevelMaxBranches -- cppcheck informational note that it is
 # limiting branch analysis depth for performance in DeliveryEngine and Serializer.
 # Not a code defect; use --check-level=exhaustive to remove, at significant cost.
 # Pre-existing analysis limitation. Deviation: cppcheck performance trade-off.
 normalCheckLevelMaxBranches
 
-# Justification: misra-c2012-12.3 (comma operator) — the cppcheck misra addon applies
+# Justification: misra-c2012-12.3 (comma operator) -- the cppcheck misra addon applies
 # MISRA C:2012 rule 12.3 to C++ constructor member-initializer lists, which is a false
 # positive. Constructor initializer lists use commas as separators, not the comma operator.
 # This project targets MISRA C++:2023, not MISRA C:2012; C++ initializer lists are
 # explicitly permitted and have no equivalent restriction in MISRA C++:2023.
 misra-c2012-12.3
 
-# Justification: oppositeInnerCondition — NEVER_COMPILED_OUT_ASSERT(cond) expands
+# Justification: oppositeInnerCondition -- NEVER_COMPILED_OUT_ASSERT(cond) expands
 # to if (!(cond)) { ... }, which cppcheck identifies as never-true when cond is the
 # same as the enclosing if-branch guard. These assertions intentionally document branch
 # invariants per Power of 10 Rule 5. Raw assert() had built-in cppcheck awareness and
@@ -111,7 +111,7 @@ misra-c2012-12.3
 oppositeInnerCondition:src/core/RetryManager.cpp
 oppositeInnerCondition:src/platform/SocketUtils.cpp
 
-# Justification: arrayIndexOutOfBoundsCond — NEVER_COMPILED_OUT_ASSERT(i < BOUND)
+# Justification: arrayIndexOutOfBoundsCond -- NEVER_COMPILED_OUT_ASSERT(i < BOUND)
 # expands to if (!(i < BOUND)) { ... }, causing cppcheck to hypothesize the path where
 # i >= BOUND, then flag the subsequent array access delayed[i] as out-of-bounds. In
 # reality, the macro aborts (debug) or returns (production) before that access.
