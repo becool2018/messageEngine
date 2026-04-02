@@ -61,6 +61,11 @@ unusedFunction:src/core/AssertState.cpp
 # Deviation: false positive -- cppcheck does not see test callers.
 unusedFunction:src/platform/ImpairmentConfigLoader.cpp
 
+# Justification: DtlsUdpBackend::is_open() is called from
+# tests/test_DtlsUdpBackend.cpp, outside the analysed src/ tree.
+# Deviation: false positive -- cppcheck does not see test callers.
+unusedFunction:src/platform/DtlsUdpBackend.cpp
+
 # Justification: cppcheck+misra addon cannot resolve C++ enum types (Result,
 # EntryState, ReliabilityClass, MessageType, etc.) without a compile_commands.json.
 # These are false-positive "incomplete misra check" warnings, not real violations.
