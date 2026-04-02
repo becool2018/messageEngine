@@ -29,8 +29,8 @@ CXX       ?= g++
 # 1) Prefer pkg-config when available (Linux distros, some macOS setups)
 # 2) On macOS, fall back to Homebrew's opt prefix when pkg-config data is absent
 # 3) Last resort: plain linker names for environments with default system paths
-MBEDTLS_PKG_CFLAGS := $(shell $(PKG_CONFIG) --cflags mbedtls 2>/dev/null)
-MBEDTLS_PKG_LIBS   := $(shell $(PKG_CONFIG) --libs mbedtls 2>/dev/null)
+MBEDTLS_PKG_CFLAGS := $(shell $(PKG_CONFIG) --cflags mbedtls mbedx509 mbedcrypto 2>/dev/null)
+MBEDTLS_PKG_LIBS   := $(shell $(PKG_CONFIG) --libs mbedtls mbedx509 mbedcrypto 2>/dev/null)
 
 MBEDTLS_FALLBACK_CFLAGS :=
 MBEDTLS_FALLBACK_LIBS   :=
