@@ -15,7 +15,7 @@ This section defines project-specific application requirements for the shared ne
 
 1a. Verification Policy (VVP-001)
 
-Before writing or reviewing any test, read `.claude/VERIFICATION_POLICY.md` (VVP-001). It defines the minimum
+Before writing or reviewing any test, read `docs/VERIFICATION_POLICY.md` (VVP-001). It defines the minimum
 verification methods (M1–M7) required at each software classification level (Class C / B / A) and the rules
 governing architectural ceiling arguments, fault injection, and injectable interface requirements.
 The table in §4.1 is normative: a method not listed as sufficient for a given classification is explicitly
@@ -555,7 +555,7 @@ src/core/Types.hpp changes or a new SC function is added.
    It does not directly command actuators or safety barriers. The application
    embedding it is responsible for Class A/B assurance if required.
 
-2. Current verification baseline (per .claude/VERIFICATION_POLICY.md VVP-001 §4.1):
+2. Current verification baseline (per docs/VERIFICATION_POLICY.md VVP-001 §4.1):
    - SC functions:  M1 (inspection) + M2 (static analysis) + M4 (branch coverage)
    - NSC functions: M1 (inspection) + M2 (static analysis) + M3 (line coverage)
    Although the software classification is Class C, all verification activity
