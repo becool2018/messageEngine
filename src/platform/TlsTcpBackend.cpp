@@ -269,6 +269,63 @@ Result TlsTcpBackend::bind_and_listen(const char* ip, uint16_t port)
 // connect_to_server() — client mode
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Perform TLS setup (set_block, ssl_setup, set_hostname, set_bio) and the
+/// TLS handshake for the client socket at slot 0.
+/// Extracted from connect_to_server() to reduce its CC.
+Result TlsTcpBackend::tls_connect_handshake()
+{
+    NEVER_COMPILED_OUT_ASSERT(m_tls_enabled);
+    NEVER_COMPILED_OUT_ASSERT(m_client_net[0U].fd >= 0);
+
+    // mbedtls_net_connect returns a blocking socket by default; set explicitly.
+    int ret = mbedtls_net_set_block(&m_client_net[0U]);
+    if (ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "net_set_block (client connect)", ret);
+        mbedtls_net_free(&m_client_net[0U]);
+        return Result::ERR_IO;
+    }
+
+    ret = mbedtls_ssl_setup(&m_ssl[0U], &m_ssl_conf);
+    if (ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "ssl_setup (client)", ret);
+        mbedtls_net_free(&m_client_net[0U]);
+        return Result::ERR_IO;
+    }
+
+    // Set expected server hostname for SNI and certificate hostname
+    // verification (required by mbedTLS 4.0+ when verify_peer is true).
+    // Pass NULL when peer_hostname is empty to explicitly opt out.
+    const char* hostname = (m_cfg.tls.peer_hostname[0] != '\0')
+                           ? m_cfg.tls.peer_hostname
+                           : nullptr;
+    ret = mbedtls_ssl_set_hostname(&m_ssl[0U], hostname);
+    if (ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "ssl_set_hostname", ret);
+        mbedtls_net_free(&m_client_net[0U]);
+        return Result::ERR_IO;
+    }
+
+    mbedtls_ssl_set_bio(&m_ssl[0U], &m_client_net[0U],
+                        mbedtls_net_send, mbedtls_net_recv, nullptr);
+
+    // TLS handshake (Power of 10 Rule 3 deviation: init-phase heap alloc)
+    ret = mbedtls_ssl_handshake(&m_ssl[0U]);
+    if (ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "ssl_handshake (client)", ret);
+        mbedtls_ssl_free(&m_ssl[0U]);
+        mbedtls_ssl_init(&m_ssl[0U]);
+        mbedtls_net_free(&m_client_net[0U]);
+        mbedtls_net_init(&m_client_net[0U]);
+        return Result::ERR_IO;
+    }
+
+    Logger::log(Severity::INFO, "TlsTcpBackend",
+                "TLS handshake complete (client): cipher=%s",
+                mbedtls_ssl_get_ciphersuite(&m_ssl[0U]));
+    NEVER_COMPILED_OUT_ASSERT(m_client_net[0U].fd >= 0);
+    return Result::OK;
+}
+
 Result TlsTcpBackend::connect_to_server()
 {
     NEVER_COMPILED_OUT_ASSERT(!m_is_server);
@@ -285,54 +342,8 @@ Result TlsTcpBackend::connect_to_server()
     }
 
     if (m_tls_enabled) {
-        // mbedtls_net_connect returns a blocking socket by default, but
-        // explicitly set blocking mode to be safe before the TLS handshake.
-        ret = mbedtls_net_set_block(&m_client_net[0U]);
-        if (ret != 0) {
-            log_mbedtls_err("TlsTcpBackend", "net_set_block (client connect)", ret);
-            mbedtls_net_free(&m_client_net[0U]);
-            return Result::ERR_IO;
-        }
-
-        ret = mbedtls_ssl_setup(&m_ssl[0U], &m_ssl_conf);
-        if (ret != 0) {
-            log_mbedtls_err("TlsTcpBackend", "ssl_setup (client)", ret);
-            mbedtls_net_free(&m_client_net[0U]);
-            return Result::ERR_IO;
-        }
-
-        // Set expected server hostname for SNI and certificate hostname
-        // verification (required by mbedTLS 4.0+ when verify_peer is true).
-        // Pass NULL when peer_hostname is empty and verify_peer is false to
-        // explicitly opt out (mbedTLS 2.x/3.x: NULL is the default already).
-        {
-            const char* hostname = (m_cfg.tls.peer_hostname[0] != '\0')
-                                   ? m_cfg.tls.peer_hostname
-                                   : nullptr;
-            ret = mbedtls_ssl_set_hostname(&m_ssl[0U], hostname);
-            if (ret != 0) {
-                log_mbedtls_err("TlsTcpBackend", "ssl_set_hostname", ret);
-                mbedtls_net_free(&m_client_net[0U]);
-                return Result::ERR_IO;
-            }
-        }
-
-        mbedtls_ssl_set_bio(&m_ssl[0U], &m_client_net[0U],
-                            mbedtls_net_send, mbedtls_net_recv, nullptr);
-
-        // TLS handshake (Power of 10 Rule 3 deviation: init-phase heap alloc)
-        ret = mbedtls_ssl_handshake(&m_ssl[0U]);
-        if (ret != 0) {
-            log_mbedtls_err("TlsTcpBackend", "ssl_handshake (client)", ret);
-            mbedtls_ssl_free(&m_ssl[0U]);
-            mbedtls_ssl_init(&m_ssl[0U]);
-            mbedtls_net_free(&m_client_net[0U]);
-            mbedtls_net_init(&m_client_net[0U]);
-            return Result::ERR_IO;
-        }
-        Logger::log(Severity::INFO, "TlsTcpBackend",
-                    "TLS handshake complete (client): cipher=%s",
-                    mbedtls_ssl_get_ciphersuite(&m_ssl[0U]));
+        Result res = tls_connect_handshake();
+        if (!result_ok(res)) { return res; }
     }
 
     m_client_count = 1U;

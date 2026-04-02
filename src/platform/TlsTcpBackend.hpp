@@ -116,6 +116,11 @@ private:
     /// Establish outbound connection and optionally perform TLS handshake.
     Result connect_to_server();
 
+    /// Perform TLS setup (set_block, ssl_setup, set_hostname, BIO, handshake)
+    /// for the client socket at slot 0. Called by connect_to_server() when
+    /// tls_enabled is true. Extracted to reduce connect_to_server() CC.
+    Result tls_connect_handshake();
+
     /// Accept one pending connection and optionally perform TLS handshake.
     /// Does nothing if no pending connection or table is full.
     Result accept_and_handshake();
