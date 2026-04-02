@@ -637,10 +637,11 @@ Two CLAUDE.md files govern all code in this repository and divide responsibility
 
 | File | Purpose |
 |---|---|
-| `.claude/CLAUDE.md` | **Portable coding standard.** Contains the global C/C++ rules applicable to any project: all 10 JPL Power of 10 rules, MISRA C++:2023 compliance requirements, F-Prime style subset, architecture/layering rules, security posture, and NASA assurance mindset. No references to project-specific files. |
+| `.claude/CLAUDE.md` | **Global C/C++ coding standard.** Contains all 10 JPL Power of 10 rules, MISRA C++:2023 compliance requirements, F-Prime style subset, architecture/layering rules, security posture, and NASA assurance mindset. Also cross-references `.claude/VERIFICATION_POLICY.md` and `CLAUDE.md` §§11/13 for traceability and safety obligations. |
 | `CLAUDE.md` | **Project-specific spec.** Contains everything tied to this repository: numbered application requirements (`[REQ-x.x]`), references to `docs/` artifacts, the per-directory rule compliance table, named static analysis toolchain, `NEVER_COMPILED_OUT_ASSERT` policy, traceability rules, formal inspection process, and safety/coverage/WCET/formal-methods obligations. |
+| `.claude/VERIFICATION_POLICY.md` | **Verification policy (VVP-001).** Defines the minimum verification methods (M1–M7) required at each software classification level (Class C / B / A) and the rules governing architectural ceiling arguments, fault injection, and injectable interface requirements. |
 
-**How they divide responsibility:** `.claude/CLAUDE.md` is the portable coding standard (no project-file references); `CLAUDE.md` is the project-specific spec (requirement IDs, file paths, process rules, safety artifacts). Anything that references a specific file in this repo lives in `CLAUDE.md`.
+**How they divide responsibility:** `.claude/CLAUDE.md` is the authoritative coding standard; `CLAUDE.md` is the project-specific spec (requirement IDs, file paths, process rules, safety artifacts). `VERIFICATION_POLICY.md` governs what test evidence is required at each classification level.
 
 ---
 
