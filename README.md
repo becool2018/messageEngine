@@ -217,6 +217,7 @@ messageEngine/
 | **GCC** or **Clang** | GCC 8+ / Clang 7+ | C++17 compiler; must support `-std=c++17 -fno-exceptions -fno-rtti` |
 | **GNU Make** | 3.81+ | Build system; no CMake required |
 | **pthreads** | POSIX | TCP/UDP receiver threads; linked via `-lpthread` |
+| **mbedTLS** | 3.x / 4.x | TLS and DTLS backends (`TlsTcpBackend`, `DtlsUdpBackend`); located via `pkg-config` with Homebrew fallback |
 
 ### Optional Tools (static analysis and coverage)
 
@@ -227,7 +228,7 @@ messageEngine/
 | **scan-build** (LLVM) | Tier 2c path-sensitive analysis (`make scan_build`) | Included with LLVM (`brew install llvm`) |
 | **llvm-profdata / llvm-cov** | Branch coverage (`make coverage`) | Included with LLVM (`brew install llvm`) |
 
-> **macOS note:** The Makefile expects LLVM tools at `/opt/homebrew/opt/llvm/bin/`. After `brew install llvm` run `brew info llvm` for the exact path and adjust `SCAN_BUILD`, `COV_CXX`, `LLVM_PROFDATA`, and `LLVM_COV` in the Makefile if your installation differs.
+> **macOS note:** The Makefile auto-detects LLVM tools at `/opt/homebrew/opt/llvm/bin/` and falls back to PATH if not found there. No manual configuration is needed after `brew install llvm` unless you have a non-standard Homebrew prefix.
 
 ### Installing Prerequisites
 
@@ -242,7 +243,7 @@ sudo apt update
 sudo apt install build-essential clang clang-tidy clang-tools cppcheck llvm pkg-config libmbedtls-dev
 ```
 
-> **Linux note:** `clang-tools` provides `scan-build`. The Makefile auto-detects the full path to `clang` via `which clang`, so no manual path configuration is needed.
+> **Linux note:** `clang-tools` provides `scan-build`. All LLVM tools fall back to PATH automatically. The `scan-build` analyzer path is resolved via `which clang` at build time; no manual path configuration is needed.
 
 ### Building
 
