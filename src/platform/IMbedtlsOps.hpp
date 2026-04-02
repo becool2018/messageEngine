@@ -1,3 +1,17 @@
+// Copyright 2026 Don Jessup
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /**
  * @file IMbedtlsOps.hpp
  * @brief Pure-virtual interface wrapping mbedTLS and POSIX network calls used
@@ -105,13 +119,13 @@ public:
     /// Wraps mbedtls_ssl_handshake().
     /// @return 0 on success; MBEDTLS_ERR_SSL_WANT_READ, MBEDTLS_ERR_SSL_WANT_WRITE,
     ///         MBEDTLS_ERR_SSL_HELLO_VERIFY_REQUIRED, or a fatal error code.
-    // Safety-critical (SC): HAZ-004, HAZ-005, HAZ-006  — verified to M5— verified to M5
+    // Safety-critical (SC): HAZ-004, HAZ-005, HAZ-006 — verified to M5
     virtual int ssl_handshake(mbedtls_ssl_context* ssl) = 0;
 
     /// Write @p len bytes from @p buf through the DTLS record layer.
     /// Wraps mbedtls_ssl_write().
     /// @return Number of bytes written (>0) on success; negative error code on failure.
-    // Safety-critical (SC): HAZ-005, HAZ-006  — verified to M5— verified to M5
+    // Safety-critical (SC): HAZ-005, HAZ-006 — verified to M5
     virtual int ssl_write(mbedtls_ssl_context*  ssl,
                           const unsigned char*  buf,
                           size_t                len) = 0;
@@ -120,7 +134,7 @@ public:
     /// Wraps mbedtls_ssl_read().
     /// @return Bytes read (>0) on success; 0 on peer close;
     ///         MBEDTLS_ERR_SSL_WANT_READ, MBEDTLS_ERR_SSL_TIMEOUT, or negative on error.
-    // Safety-critical (SC): HAZ-004, HAZ-005  — verified to M5— verified to M5
+    // Safety-critical (SC): HAZ-004, HAZ-005 — verified to M5
     virtual int ssl_read(mbedtls_ssl_context* ssl,
                          unsigned char*       buf,
                          size_t               len) = 0;

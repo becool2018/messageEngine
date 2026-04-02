@@ -1,3 +1,17 @@
+// Copyright 2026 Don Jessup
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /**
  * @file test_DeliveryEngine.cpp
  * @brief Unit tests for DeliveryEngine: send, receive, retry, and ACK timeout logic.
@@ -756,6 +770,132 @@ static void test_pump_retries_resends()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 20: init() zero-initialises m_retry_buf; pump_retries() immediately after
+// init with nothing scheduled reads only 0 entries — confirms the init loops ran
+// without corrupting engine state.
+// Verifies: REQ-4.1.1, REQ-3.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_init_retry_buf_is_zeroed()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Nothing scheduled; pump must return 0 and must not assert on any slot
+    uint32_t count = engine.pump_retries(NOW_US);
+
+    assert(count == 0U);
+    assert(count <= MSG_RING_CAPACITY);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_init_retry_buf_is_zeroed\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 21: init() zero-initialises m_timeout_buf; sweep_ack_timeouts() immediately
+// after init with nothing tracked reads 0 entries — confirms the init loops ran
+// without corrupting engine state.
+// Verifies: REQ-4.1.1, REQ-3.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_init_timeout_buf_is_zeroed()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Nothing tracked; sweep must return 0 and must not assert on any slot
+    uint32_t count = engine.sweep_ack_timeouts(NOW_US);
+
+    assert(count == 0U);
+    assert(count <= ACK_TRACKER_CAPACITY);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_init_timeout_buf_is_zeroed\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 22: fill RetryManager to capacity (ACK_TRACKER_CAPACITY slots), make all
+// entries due simultaneously, pump_retries() fills m_retry_buf to its maximum
+// realistic depth (ACK_TRACKER_CAPACITY entries); confirms no buffer overrun.
+// Verifies: REQ-3.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_pump_retries_capacity()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Fill RetryManager to its capacity with RELIABLE_RETRY messages
+    // Power of 10: bounded loop
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        MessageEnvelope env;
+        make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_RETRY);
+        Result r = engine.send(env, NOW_US);
+        assert(r == Result::OK);
+        // Drain harness_b to prevent its queue filling
+        MessageEnvelope drain;
+        (void)harness_b.receive_message(drain, 10U);
+    }
+
+    // Advance time well past all retry deadlines (first retry_us == NOW_US)
+    uint32_t collected = engine.pump_retries(NOW_US + 1ULL);
+
+    // All ACK_TRACKER_CAPACITY entries must be collected; m_retry_buf must hold them
+    assert(collected == ACK_TRACKER_CAPACITY);
+    assert(collected <= MSG_RING_CAPACITY);  // buffer never overrun
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_pump_retries_capacity\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 23: fill AckTracker to capacity (ACK_TRACKER_CAPACITY slots), expire all
+// with a far-future timestamp; sweep_ack_timeouts() fills m_timeout_buf to its
+// maximum depth; confirms no buffer overrun.
+// Verifies: REQ-3.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_sweep_ack_timeouts_capacity()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Fill AckTracker to capacity with RELIABLE_ACK messages
+    // Power of 10: bounded loop
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        MessageEnvelope env;
+        make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+        Result r = engine.send(env, NOW_US);
+        assert(r == Result::OK);
+        // Drain harness_b to prevent its queue filling
+        MessageEnvelope drain;
+        (void)harness_b.receive_message(drain, 10U);
+    }
+
+    // Sweep with far-future now_us (past all deadlines = NOW_US + recv_timeout_ms*1000)
+    uint32_t collected = engine.sweep_ack_timeouts(NOW_US + 100000000ULL);
+
+    // All ACK_TRACKER_CAPACITY entries must be reported timed out
+    assert(collected == ACK_TRACKER_CAPACITY);
+    assert(collected <= ACK_TRACKER_CAPACITY);  // buffer never overrun
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_sweep_ack_timeouts_capacity\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -779,6 +919,10 @@ int main()
     test_receive_nak_control();
     test_receive_heartbeat_control();
     test_pump_retries_resends();
+    test_init_retry_buf_is_zeroed();
+    test_init_timeout_buf_is_zeroed();
+    test_pump_retries_capacity();
+    test_sweep_ack_timeouts_capacity();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;

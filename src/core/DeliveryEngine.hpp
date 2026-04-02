@@ -1,3 +1,17 @@
+// Copyright 2026 Don Jessup
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /**
  * @file DeliveryEngine.hpp
  * @brief Top-level coordinator tying transport, ACK tracking, retry, and dedup together.
@@ -116,6 +130,12 @@ private:
     DuplicateFilter     m_dedup;
     MessageIdGen        m_id_gen;
     bool                m_initialized;
+
+    // Power of 10 Rule 3: pre-allocated output buffers for pump_retries() and
+    // sweep_ack_timeouts(). Zero-initialized in init(). Single-threaded access
+    // only; each buffer is owned exclusively by its corresponding function.
+    MessageEnvelope m_retry_buf[MSG_RING_CAPACITY];
+    MessageEnvelope m_timeout_buf[ACK_TRACKER_CAPACITY];
 
     // Private helper: send a message envelope via transport (checked return).
     Result send_via_transport(const MessageEnvelope& env);

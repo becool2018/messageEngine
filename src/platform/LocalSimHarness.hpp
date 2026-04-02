@@ -1,3 +1,17 @@
+// Copyright 2026 Don Jessup
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /**
  * @file LocalSimHarness.hpp
  * @brief In-process message transport for deterministic testing.
@@ -44,7 +58,9 @@ public:
 
     // TransportInterface implementation
     Result init(const TransportConfig& config) override;
+    // Safety-critical (SC): HAZ-001, HAZ-003, HAZ-005, HAZ-006
     Result send_message(const MessageEnvelope& envelope) override;
+    // Safety-critical (SC): HAZ-001, HAZ-004, HAZ-005
     Result receive_message(MessageEnvelope& envelope, uint32_t timeout_ms) override;
     void close() override;
     bool is_open() const override;
@@ -73,6 +89,7 @@ public:
      * @param[in] envelope Message to inject.
      * @return OK on success, ERR_FULL if receive queue is full.
      */
+    // Safety-critical (SC): HAZ-006
     Result inject(const MessageEnvelope& envelope);
 
 private:

@@ -1,0 +1,12 @@
+messageEngine
+Copyright 2026 Don Jessup
+
+This product is licensed under the Apache License, Version 2.0.
+You may obtain a copy of the License at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+This software targets JPL Power of 10, MISRA C++:2023, and NASA safety
+standards (NASA-STD-8719.13C, NASA-STD-8739.8A, NPR 7150.2D) with
+documented deviations. No third-party compliance certification has been
+performed.

@@ -1,3 +1,17 @@
+// Copyright 2026 Don Jessup
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 /**
  * @file DeliveryEngine.cpp
  * @brief Implementation of delivery engine for reliable messaging.
@@ -38,6 +52,16 @@ void DeliveryEngine::init(TransportInterface* transport,
         id_seed = 1ULL;  // Ensure non-zero seed
     }
     m_id_gen.init(id_seed);
+
+    // Power of 10 Rule 3: zero-initialize pre-allocated output buffers during
+    // init phase so they contain no garbage before first use by pump_retries()
+    // and sweep_ack_timeouts(). Bounded loops — compile-time constants.
+    for (uint32_t i = 0U; i < MSG_RING_CAPACITY; ++i) {
+        envelope_init(m_retry_buf[i]);
+    }
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        envelope_init(m_timeout_buf[i]);
+    }
 
     m_initialized = true;
 
@@ -229,29 +253,30 @@ uint32_t DeliveryEngine::pump_retries(uint64_t now_us)
     NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: engine initialized
     NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);  // Assert: valid timestamp
 
-    // Power of 10 rule 3: bounded buffer on stack (use MSG_RING_CAPACITY)
-    MessageEnvelope retry_buf[MSG_RING_CAPACITY];
+    // Power of 10 Rule 3: use pre-allocated member buffer m_retry_buf (initialized
+    // in init()). collect_due() overwrites only the first 'collected' slots;
+    // stale data beyond that index is never read.
     uint32_t collected = 0U;
 
     // Collect due retries
     // Power of 10 rule 7: check return value (it's count, always valid)
-    collected = m_retry_manager.collect_due(now_us, retry_buf, MSG_RING_CAPACITY);
+    collected = m_retry_manager.collect_due(now_us, m_retry_buf, MSG_RING_CAPACITY);
     NEVER_COMPILED_OUT_ASSERT(collected <= MSG_RING_CAPACITY);  // Assert: bounded result
 
     // Re-send each
     // Power of 10 rule 2: bounded loop (collected is ≤ MSG_RING_CAPACITY)
     for (uint32_t i = 0U; i < collected; ++i) {
         // Power of 10 rule 7: check return value
-        Result send_res = send_via_transport(retry_buf[i]);
+        Result send_res = send_via_transport(m_retry_buf[i]);
         if (send_res != Result::OK) {
             Logger::log(Severity::WARNING_LO, "DeliveryEngine",
                         "Retry send failed for message_id=%llu (result=%u)",
-                        (unsigned long long)retry_buf[i].message_id,
+                        (unsigned long long)m_retry_buf[i].message_id,
                         static_cast<uint8_t>(send_res));
         } else {
             Logger::log(Severity::INFO, "DeliveryEngine",
                         "Retried message_id=%llu",
-                        (unsigned long long)retry_buf[i].message_id);
+                        (unsigned long long)m_retry_buf[i].message_id);
         }
     }
 
@@ -269,13 +294,14 @@ uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
     NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: engine initialized
     NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);  // Assert: valid timestamp
 
-    // Power of 10 rule 3: bounded buffer on stack
-    MessageEnvelope timeout_buf[ACK_TRACKER_CAPACITY];
+    // Power of 10 Rule 3: use pre-allocated member buffer m_timeout_buf (initialized
+    // in init()). sweep_expired() overwrites only the first 'collected' slots;
+    // stale data beyond that index is never read.
     uint32_t collected = 0U;
 
     // Sweep expired ACK entries
     // Power of 10 rule 7: check return value (it's count)
-    collected = m_ack_tracker.sweep_expired(now_us, timeout_buf, ACK_TRACKER_CAPACITY);
+    collected = m_ack_tracker.sweep_expired(now_us, m_timeout_buf, ACK_TRACKER_CAPACITY);
     NEVER_COMPILED_OUT_ASSERT(collected <= ACK_TRACKER_CAPACITY);  // Assert: bounded result
 
     // Log each timeout as WARNING_HI (system-wide but recoverable)
@@ -283,8 +309,8 @@ uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
     for (uint32_t i = 0U; i < collected; ++i) {
         Logger::log(Severity::WARNING_HI, "DeliveryEngine",
                     "ACK timeout for message_id=%llu sent to node=%u",
-                    (unsigned long long)timeout_buf[i].message_id,
-                    timeout_buf[i].destination_id);
+                    (unsigned long long)m_timeout_buf[i].message_id,
+                    m_timeout_buf[i].destination_id);
     }
 
     // Power of 10 rule 5: post-condition assertion
