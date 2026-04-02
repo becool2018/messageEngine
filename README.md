@@ -306,15 +306,15 @@ Policy floor: 100% of all reachable branches for SC files (CLAUDE.md §14). Per-
 | `core/RetryManager.cpp` | 79.12% | SC | Pass |
 | `core/DeliveryEngine.cpp` | 75.22% | SC | Pass |
 | `core/AssertState.cpp` | 50.00% | NSC-infra | Ceiling — abort() False branch untestable |
-| `platform/ImpairmentEngine.cpp` | 75.27% | SC | Ceiling — 40 assert + 6 unreachable branches |
-| `platform/ImpairmentConfigLoader.cpp` | 90.83% | SC | Pass |
-| `platform/TcpBackend.cpp` | 78.12% | SC | Pass |
+| `platform/ImpairmentEngine.cpp` | 74.19% | SC | Ceiling — 40 assert + 8 unreachable branches |
+| `platform/ImpairmentConfigLoader.cpp` | 82.50% | SC | Ceiling — 23 assert + 5 unreachable branches |
+| `platform/TcpBackend.cpp` | 77.73% | SC | Ceiling — 38 assert + 15 unreachable branches |
 | `platform/UdpBackend.cpp` | 75.51% | SC | Pass |
-| `platform/TlsTcpBackend.cpp` | 76.87% | SC | Pass |
-| `platform/DtlsUdpBackend.cpp` | 83.33% | SC | Pass |
+| `platform/TlsTcpBackend.cpp` | 76.25% | SC | Pass |
+| `platform/DtlsUdpBackend.cpp` | 81.76% | SC | Ceiling — 35 assert + 19 unreachable branches |
 | `platform/LocalSimHarness.cpp` | 72.46% | SC | Ceiling — 17 assert + 2 unreachable branches |
 | `platform/MbedtlsOpsImpl.cpp` | 69.77% | SC | Ceiling — 26 assert `[[noreturn]]` branches |
-| `platform/SocketUtils.cpp` | 64.50% | NSC | Ceiling — POSIX errors unreachable on loopback |
+| `platform/SocketUtils.cpp` | 64.94% | NSC | Ceiling — POSIX errors unreachable on loopback |
 | `platform/SocketOpsImpl.cpp` | 68.57% | NSC | Line coverage sufficient |
 
 Ceiling files are at the maximum achievable coverage: `NEVER_COMPILED_OUT_ASSERT` generates one permanently-missed branch per call (the `[[noreturn]]` `abort()` path), and certain POSIX/mbedTLS error paths cannot be triggered in a loopback test environment. All are documented deviations, not defects.
