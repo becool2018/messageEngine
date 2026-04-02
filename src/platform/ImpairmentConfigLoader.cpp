@@ -28,91 +28,153 @@
 static const uint32_t MAX_CONFIG_LINE_LEN = 128U;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Leaf parse helpers — strip nesting from apply_kv branches (CC-reduction)
+// Each returns true on successful parse, false on sscanf failure (field unchanged).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Parse a uint32 from @p val into @p out. Returns true on success.
+static bool parse_uint(const char* val, uint32_t* out)
+{
+    NEVER_COMPILED_OUT_ASSERT(val != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(out != nullptr);
+    return (sscanf(val, "%u", out) == 1);
+}
+
+/// Parse a uint32 from @p val and store as bool in @p out. Returns true on success.
+static bool parse_bool(const char* val, bool* out)
+{
+    NEVER_COMPILED_OUT_ASSERT(val != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(out != nullptr);
+    uint32_t v = 0U;
+    if (sscanf(val, "%u", &v) != 1) { return false; }
+    *out = (v != 0U);
+    return true;
+}
+
+/// Parse a double from @p val, clamp to [0.0, 1.0], store in @p out.
+/// Returns true on success.
+static bool parse_prob(const char* val, double* out)
+{
+    NEVER_COMPILED_OUT_ASSERT(val != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(out != nullptr);
+    double v = 0.0;
+    if (sscanf(val, "%lf", &v) != 1) { return false; }
+    // Clamp to [0.0, 1.0] (Power of 10: explicit bounds check)
+    if (v < 0.0) { v = 0.0; }
+    if (v > 1.0) { v = 1.0; }
+    *out = v;
+    NEVER_COMPILED_OUT_ASSERT(*out >= 0.0 && *out <= 1.0);
+    return true;
+}
+
+/// Parse a uint64 from @p val into @p out. Returns true on success.
+/// sscanf %llu requires unsigned long long*; cast to uint64_t after.
+static bool parse_u64(const char* val, uint64_t* out)
+{
+    NEVER_COMPILED_OUT_ASSERT(val != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(out != nullptr);
+    unsigned long long ull = 0ULL;  // NOLINT(google-runtime-int) — sscanf requires this
+    if (sscanf(val, "%llu", &ull) != 1) { return false; }
+    *out = static_cast<uint64_t>(ull);
+    return true;
+}
+
+/// Parse and apply reorder_window_size: parse uint32, clamp to IMPAIR_DELAY_BUF_SIZE.
+static void apply_reorder_window(const char* val, ImpairmentConfig& cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(val != nullptr);
+    uint32_t v = 0U;
+    if (sscanf(val, "%u", &v) != 1) { return; }
+    // Clamp to IMPAIR_DELAY_BUF_SIZE (Power of 10: bounded buffer)
+    if (v > IMPAIR_DELAY_BUF_SIZE) {
+        Logger::log(Severity::WARNING_LO, "ConfigLoader",
+                    "reorder_window_size %u exceeds IMPAIR_DELAY_BUF_SIZE %u; clamping",
+                    v, IMPAIR_DELAY_BUF_SIZE);
+        v = IMPAIR_DELAY_BUF_SIZE;
+    }
+    cfg.reorder_window_size = v;
+    NEVER_COMPILED_OUT_ASSERT(cfg.reorder_window_size <= IMPAIR_DELAY_BUF_SIZE);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Topic dispatchers — each handles one semantic group of 4 keys.
+// Returns true if the key was recognised and handled, false otherwise.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Handle: enabled, fixed_latency_ms, jitter_mean_ms, jitter_variance_ms.
+static bool apply_kv_latency_jitter(const char* key, const char* val,
+                                     ImpairmentConfig& cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(key != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(val != nullptr);
+    if (strcmp(key, "enabled") == 0) {
+        (void)parse_bool(val, &cfg.enabled);
+    } else if (strcmp(key, "fixed_latency_ms") == 0) {
+        (void)parse_uint(val, &cfg.fixed_latency_ms);
+    } else if (strcmp(key, "jitter_mean_ms") == 0) {
+        (void)parse_uint(val, &cfg.jitter_mean_ms);
+    } else if (strcmp(key, "jitter_variance_ms") == 0) {
+        (void)parse_uint(val, &cfg.jitter_variance_ms);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/// Handle: loss_probability, duplication_probability, reorder_enabled, reorder_window_size.
+static bool apply_kv_loss_reorder(const char* key, const char* val,
+                                   ImpairmentConfig& cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(key != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(val != nullptr);
+    if (strcmp(key, "loss_probability") == 0) {
+        (void)parse_prob(val, &cfg.loss_probability);
+    } else if (strcmp(key, "duplication_probability") == 0) {
+        (void)parse_prob(val, &cfg.duplication_probability);
+    } else if (strcmp(key, "reorder_enabled") == 0) {
+        (void)parse_bool(val, &cfg.reorder_enabled);
+    } else if (strcmp(key, "reorder_window_size") == 0) {
+        apply_reorder_window(val, cfg);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+/// Handle: partition_enabled, partition_duration_ms, partition_gap_ms, prng_seed.
+static bool apply_kv_partition_seed(const char* key, const char* val,
+                                     ImpairmentConfig& cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(key != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(val != nullptr);
+    if (strcmp(key, "partition_enabled") == 0) {
+        (void)parse_bool(val, &cfg.partition_enabled);
+    } else if (strcmp(key, "partition_duration_ms") == 0) {
+        (void)parse_uint(val, &cfg.partition_duration_ms);
+    } else if (strcmp(key, "partition_gap_ms") == 0) {
+        (void)parse_uint(val, &cfg.partition_gap_ms);
+    } else if (strcmp(key, "prng_seed") == 0) {
+        (void)parse_u64(val, &cfg.prng_seed);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Static helper — apply one parsed key/value pair to cfg
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Apply a single key/value string pair to the ImpairmentConfig struct.
-/// Called only when sscanf successfully extracted both key and val.
-/// Unknown keys are logged at WARNING_LO; malformed values retain defaults.
+/// Dispatches to topic helpers; logs unknown keys at WARNING_LO.
 static void apply_kv(const char* key, const char* val, ImpairmentConfig& cfg)
 {
     NEVER_COMPILED_OUT_ASSERT(key != nullptr);
     NEVER_COMPILED_OUT_ASSERT(val != nullptr);
-
-    if (strcmp(key, "enabled") == 0) {
-        uint32_t v = 0U;
-        if (sscanf(val, "%u", &v) == 1) {
-            cfg.enabled = (v != 0U);
-        }
-    } else if (strcmp(key, "fixed_latency_ms") == 0) {
-        uint32_t v = 0U;
-        if (sscanf(val, "%u", &v) == 1) {
-            cfg.fixed_latency_ms = v;
-        }
-    } else if (strcmp(key, "jitter_mean_ms") == 0) {
-        uint32_t v = 0U;
-        if (sscanf(val, "%u", &v) == 1) {
-            cfg.jitter_mean_ms = v;
-        }
-    } else if (strcmp(key, "jitter_variance_ms") == 0) {
-        uint32_t v = 0U;
-        if (sscanf(val, "%u", &v) == 1) {
-            cfg.jitter_variance_ms = v;
-        }
-    } else if (strcmp(key, "loss_probability") == 0) {
-        double v = 0.0;
-        if (sscanf(val, "%lf", &v) == 1) {
-            // Clamp to [0.0, 1.0] (Power of 10: explicit bounds check)
-            if (v < 0.0) { v = 0.0; }
-            if (v > 1.0) { v = 1.0; }
-            cfg.loss_probability = v;
-        }
-    } else if (strcmp(key, "duplication_probability") == 0) {
-        double v = 0.0;
-        if (sscanf(val, "%lf", &v) == 1) {
-            if (v < 0.0) { v = 0.0; }
-            if (v > 1.0) { v = 1.0; }
-            cfg.duplication_probability = v;
-        }
-    } else if (strcmp(key, "reorder_enabled") == 0) {
-        uint32_t v = 0U;
-        if (sscanf(val, "%u", &v) == 1) {
-            cfg.reorder_enabled = (v != 0U);
-        }
-    } else if (strcmp(key, "reorder_window_size") == 0) {
-        uint32_t v = 0U;
-        if (sscanf(val, "%u", &v) == 1) {
-            // Clamp to IMPAIR_DELAY_BUF_SIZE (Power of 10: bounded buffer)
-            if (v > IMPAIR_DELAY_BUF_SIZE) {
-                Logger::log(Severity::WARNING_LO, "ConfigLoader",
-                            "reorder_window_size %u exceeds IMPAIR_DELAY_BUF_SIZE %u; clamping",
-                            v, IMPAIR_DELAY_BUF_SIZE);
-                v = IMPAIR_DELAY_BUF_SIZE;
-            }
-            cfg.reorder_window_size = v;
-        }
-    } else if (strcmp(key, "partition_enabled") == 0) {
-        uint32_t v = 0U;
-        if (sscanf(val, "%u", &v) == 1) {
-            cfg.partition_enabled = (v != 0U);
-        }
-    } else if (strcmp(key, "partition_duration_ms") == 0) {
-        uint32_t v = 0U;
-        if (sscanf(val, "%u", &v) == 1) {
-            cfg.partition_duration_ms = v;
-        }
-    } else if (strcmp(key, "partition_gap_ms") == 0) {
-        uint32_t v = 0U;
-        if (sscanf(val, "%u", &v) == 1) {
-            cfg.partition_gap_ms = v;
-        }
-    } else if (strcmp(key, "prng_seed") == 0) {
-        // sscanf %llu requires unsigned long long*; cast to uint64_t after.
-        unsigned long long ull = 0ULL;  // NOLINT(google-runtime-int) — sscanf requires this
-        if (sscanf(val, "%llu", &ull) == 1) {
-            cfg.prng_seed = static_cast<uint64_t>(ull);
-        }
-    } else {
+    bool handled = apply_kv_latency_jitter(key, val, cfg);
+    if (!handled) { handled = apply_kv_loss_reorder(key, val, cfg); }
+    if (!handled) { handled = apply_kv_partition_seed(key, val, cfg); }
+    if (!handled) {
         Logger::log(Severity::WARNING_LO, "ConfigLoader",
                     "Unknown config key ignored: %.40s", key);
     }
