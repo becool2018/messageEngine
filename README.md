@@ -620,9 +620,9 @@ All production code (`src/`) is written to the following standards. Deviations r
 
 | Standard | Requirement |
 |---|---|
-| **JPL Power of 10** | No recursion; fixed loop bounds; no dynamic allocation after init; functions ≤ 1 page; ≥ 2 assertions per function; all return values checked; minimal preprocessor use; ≤ 1 pointer indirection; zero compiler warnings |
+| **JPL Power of 10** | No goto, no recursion; fixed loop bounds; no dynamic allocation after init; cyclomatic complexity ≤ 10 per function (enforced by `make lint`); ≥ 2 assertions per function; minimal variable scope; all return values checked; minimal preprocessor use; ≤ 1 pointer indirection; zero compiler warnings |
 | **MISRA C++:2023** | Required rules enforced; advisory rules followed; all deviations documented |
-| **F-Prime subset** | ISO C++17; `-fno-exceptions`; `-fno-rtti`; no STL; no templates; no function pointers; `std::atomic<T>` is a documented carve-out |
+| **F-Prime subset** | ISO C++17; `-fno-exceptions`; `-fno-rtti`; no STL (except `std::atomic<T>`); no templates; no explicit function pointers (vtable-backed virtual dispatch is a documented exception); `std::atomic<T>` is a documented carve-out |
 | **Error handling** | All errors returned via `Result` enum (`OK`, `ERR_TIMEOUT`, `ERR_FULL`, `ERR_IO`, …); no exceptions |
 | **Assertions** | `NEVER_COMPILED_OUT_ASSERT(cond)` — always compiled in; in debug/test builds calls `abort()`; in production logs FATAL and triggers a controlled reset |
 | **Layering** | App → Core → Platform → OS; no upward dependencies; no cyclic dependencies |
