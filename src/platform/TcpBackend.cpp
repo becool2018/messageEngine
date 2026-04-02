@@ -346,6 +346,58 @@ void TcpBackend::flush_delayed_to_queue(uint64_t now_us)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// build_poll_fds() — CC-reduction helper for poll_clients_once
+// ─────────────────────────────────────────────────────────────────────────────
+
+uint32_t TcpBackend::build_poll_fds(struct pollfd* pfds, uint32_t cap,
+                                     bool* has_listen_out) const
+{
+    NEVER_COMPILED_OUT_ASSERT(pfds != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(has_listen_out != nullptr);
+
+    uint32_t nfds = 0U;
+    bool server_ok      = m_is_server && (m_listen_fd >= 0);
+    *has_listen_out     = server_ok && (m_client_count < MAX_TCP_CONNECTIONS);
+
+    if (*has_listen_out) {
+        pfds[0U].fd      = m_listen_fd;
+        pfds[0U].events  = POLLIN;
+        pfds[0U].revents = 0;
+        nfds = 1U;
+    }
+
+    // Power of 10 Rule 2: fixed bound (MAX_TCP_CONNECTIONS)
+    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
+        if (m_client_fds[i] >= 0) {
+            NEVER_COMPILED_OUT_ASSERT(nfds < cap);
+            pfds[nfds].fd      = m_client_fds[i];
+            pfds[nfds].events  = POLLIN;
+            pfds[nfds].revents = 0;
+            ++nfds;
+        }
+    }
+    NEVER_COMPILED_OUT_ASSERT(nfds <= cap);
+    return nfds;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// drain_readable_clients() — CC-reduction helper for poll_clients_once
+// ─────────────────────────────────────────────────────────────────────────────
+
+void TcpBackend::drain_readable_clients(uint32_t timeout_ms)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_open);
+    NEVER_COMPILED_OUT_ASSERT(timeout_ms <= 60000U);
+
+    // Power of 10 Rule 2: fixed loop bound (MAX_TCP_CONNECTIONS)
+    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
+        if (m_client_fds[i] >= 0) {
+            (void)recv_from_client(m_client_fds[i], timeout_ms);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // poll_clients_once() — private helper
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -355,32 +407,12 @@ void TcpBackend::poll_clients_once(uint32_t timeout_ms)
     NEVER_COMPILED_OUT_ASSERT(timeout_ms <= 60000U);    // Power of 10: reasonable per-poll timeout
 
     // Build a pollfd set: listen fd (server, not at capacity) + all client fds.
-    // This replaces the prior blocking accept() design. The listen fd is non-blocking
-    // (set in init()); poll() provides the per-iteration wait.
     // Power of 10: fixed-size stack array; bounded build loop.
     static const uint32_t MAX_POLL_FDS = MAX_TCP_CONNECTIONS + 1U;
     struct pollfd pfds[MAX_POLL_FDS];
-    uint32_t nfds = 0U;
+    bool has_listen = false;
 
-    bool has_listen = m_is_server && (m_listen_fd >= 0) &&
-                      (m_client_count < MAX_TCP_CONNECTIONS);
-    if (has_listen) {
-        pfds[0U].fd      = m_listen_fd;
-        pfds[0U].events  = POLLIN;
-        pfds[0U].revents = 0;
-        nfds = 1U;
-    }
-    // Power of 10 Rule 2: fixed bound (MAX_TCP_CONNECTIONS)
-    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
-        if (m_client_fds[i] >= 0) {
-            NEVER_COMPILED_OUT_ASSERT(nfds < MAX_POLL_FDS);
-            pfds[nfds].fd      = m_client_fds[i];
-            pfds[nfds].events  = POLLIN;
-            pfds[nfds].revents = 0;
-            ++nfds;
-        }
-    }
-    NEVER_COMPILED_OUT_ASSERT(nfds <= MAX_POLL_FDS);
+    uint32_t nfds = build_poll_fds(pfds, MAX_POLL_FDS, &has_listen);
 
     if (nfds == 0U) {
         return;  // No fds to watch; outer loop handles retry timing
@@ -399,13 +431,7 @@ void TcpBackend::poll_clients_once(uint32_t timeout_ms)
         (void)accept_clients();
     }
 
-    // Receive from any connected client fd that is now readable.
-    // Power of 10 rule 2: fixed loop bound
-    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
-        if (m_client_fds[i] >= 0) {
-            (void)recv_from_client(m_client_fds[i], timeout_ms);
-        }
-    }
+    drain_readable_clients(timeout_ms);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

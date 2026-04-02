@@ -27,6 +27,7 @@
 #include "core/Timestamp.hpp"
 #include "platform/SocketUtils.hpp"
 
+#include <mbedtls/build_info.h>
 #include <mbedtls/error.h>
 #include <mbedtls/psa_util.h>
 #include <psa/crypto.h>
@@ -171,8 +172,12 @@ Result TlsTcpBackend::setup_tls_config(const TlsConfig& tls_cfg)
         return Result::ERR_IO;
     }
 
-    // Bind PSA Crypto RNG to the SSL config (required by mbedTLS 4.0).
+    // mbedTLS 4.0 removed mbedtls_ssl_conf_rng(): the PSA RNG is automatically
+    // bound to the SSL config after psa_crypto_init() completes.
+    // mbedTLS 2.x/3.x with MBEDTLS_USE_PSA_CRYPTO requires the explicit call.
+#if MBEDTLS_VERSION_MAJOR < 4
     mbedtls_ssl_conf_rng(&m_ssl_conf, mbedtls_psa_get_random, MBEDTLS_PSA_RANDOM_STATE);
+#endif
 
     // Set peer-verification mode
     int authmode = tls_cfg.verify_peer
@@ -291,6 +296,23 @@ Result TlsTcpBackend::connect_to_server()
             mbedtls_net_free(&m_client_net[0U]);
             return Result::ERR_IO;
         }
+
+        // Set expected server hostname for SNI and certificate hostname
+        // verification (required by mbedTLS 4.0+ when verify_peer is true).
+        // Pass NULL when peer_hostname is empty and verify_peer is false to
+        // explicitly opt out (mbedTLS 2.x/3.x: NULL is the default already).
+        {
+            const char* hostname = (m_cfg.tls.peer_hostname[0] != '\0')
+                                   ? m_cfg.tls.peer_hostname
+                                   : nullptr;
+            ret = mbedtls_ssl_set_hostname(&m_ssl[0U], hostname);
+            if (ret != 0) {
+                log_mbedtls_err("TlsTcpBackend", "ssl_set_hostname", ret);
+                mbedtls_net_free(&m_client_net[0U]);
+                return Result::ERR_IO;
+            }
+        }
+
         mbedtls_ssl_set_bio(&m_ssl[0U], &m_client_net[0U],
                             mbedtls_net_send, mbedtls_net_recv, nullptr);
 
@@ -457,6 +479,43 @@ bool TlsTcpBackend::tls_send_frame(uint32_t idx,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// tls_read_payload() — CC-reduction helper for tls_recv_frame
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool TlsTcpBackend::tls_read_payload(uint32_t idx, uint8_t* buf,
+                                      uint32_t payload_len, uint32_t* out_len)
+{
+    NEVER_COMPILED_OUT_ASSERT(buf != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(payload_len > 0U && payload_len <= SOCKET_RECV_BUF_BYTES);
+
+    uint32_t received = 0U;
+    // Power of 10 Rule 2: bounded loop — at most payload_len iterations total
+    for (uint32_t iter = 0U; iter < payload_len && received < payload_len; ++iter) {
+        int ret = mbedtls_ssl_read(&m_ssl[idx],
+                                   buf + received,
+                                   static_cast<size_t>(payload_len - received));
+        if (ret > 0) {
+            received += static_cast<uint32_t>(ret);
+        } else if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
+            continue;
+        } else {
+            log_mbedtls_err("TlsTcpBackend", "ssl_read (payload)", ret);
+            return false;
+        }
+    }
+
+    if (received != payload_len) {
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "tls_recv_frame: short read %u/%u", received, payload_len);
+        return false;
+    }
+
+    *out_len = payload_len;
+    NEVER_COMPILED_OUT_ASSERT(*out_len > 0U);
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // tls_recv_frame() — receive 4-byte length prefix + payload
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -496,32 +555,8 @@ bool TlsTcpBackend::tls_recv_frame(uint32_t idx,
         return false;
     }
 
-    // Read payload in one ssl_read call (TLS records are typically ≤ 16 KB)
-    uint32_t received = 0U;
-    // Power of 10 Rule 2: bounded loop — at most payload_len iterations total
-    for (uint32_t iter = 0U; iter < payload_len && received < payload_len; ++iter) {
-        ret = mbedtls_ssl_read(&m_ssl[idx],
-                               buf + received,
-                               static_cast<size_t>(payload_len - received));
-        if (ret > 0) {
-            received += static_cast<uint32_t>(ret);
-        } else if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
-            continue;
-        } else {
-            log_mbedtls_err("TlsTcpBackend", "ssl_read (payload)", ret);
-            return false;
-        }
-    }
-
-    if (received != payload_len) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "tls_recv_frame: short read %u/%u", received, payload_len);
-        return false;
-    }
-
-    *out_len = payload_len;
-    NEVER_COMPILED_OUT_ASSERT(*out_len <= buf_cap);
-    return true;
+    // Read payload via helper (Power of 10 Rule 4: CC-reduction extraction)
+    return tls_read_payload(idx, buf, payload_len, out_len);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

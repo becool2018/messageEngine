@@ -17,6 +17,7 @@
 #include "platform/MbedtlsOpsImpl.hpp"
 #include "core/Assert.hpp"
 
+#include <mbedtls/build_info.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/pk.h>
@@ -95,7 +96,14 @@ int MbedtlsOpsImpl::ssl_conf_own_cert(mbedtls_ssl_config*  conf,
 int MbedtlsOpsImpl::ssl_cookie_setup(mbedtls_ssl_cookie_ctx* ctx)
 {
     NEVER_COMPILED_OUT_ASSERT(ctx != nullptr);
+    // mbedTLS 4.0 removed the RNG arguments from mbedtls_ssl_cookie_setup():
+    // the PSA RNG is bound automatically after psa_crypto_init().
+    // mbedTLS 2.x/3.x requires the explicit mbedtls_psa_get_random arguments.
+#if MBEDTLS_VERSION_MAJOR < 4
     int ret = mbedtls_ssl_cookie_setup(ctx, mbedtls_psa_get_random, MBEDTLS_PSA_RANDOM_STATE);
+#else
+    int ret = mbedtls_ssl_cookie_setup(ctx);
+#endif
     NEVER_COMPILED_OUT_ASSERT(true);
     return ret;
 }

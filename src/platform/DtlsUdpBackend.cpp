@@ -45,6 +45,7 @@
 #include "platform/SocketUtils.hpp"
 #include "core/ImpairmentConfig.hpp"
 
+#include <mbedtls/build_info.h>
 #include <mbedtls/error.h>
 #include <mbedtls/psa_util.h>
 #include <psa/crypto.h>
@@ -143,6 +144,73 @@ DtlsUdpBackend::~DtlsUdpBackend()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// load_certs_and_key() — CC-reduction helper for setup_dtls_config
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result DtlsUdpBackend::load_certs_and_key(const TlsConfig& tls_cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(tls_cfg.cert_file[0] != '\0');
+    NEVER_COMPILED_OUT_ASSERT(tls_cfg.key_file[0] != '\0');
+
+    if (tls_cfg.verify_peer && tls_cfg.ca_file[0] != '\0') {
+        int ret = m_ops->x509_crt_parse_file(&m_ca_cert, tls_cfg.ca_file);
+        if (ret != 0) {
+            log_mbedtls_err("DtlsUdpBackend", "x509_crt_parse_file (CA)", ret);
+            return Result::ERR_IO;
+        }
+        mbedtls_ssl_conf_ca_chain(&m_ssl_conf, &m_ca_cert, nullptr);
+    }
+
+    int ret = m_ops->x509_crt_parse_file(&m_cert, tls_cfg.cert_file);
+    if (ret != 0) {
+        log_mbedtls_err("DtlsUdpBackend", "x509_crt_parse_file (cert)", ret);
+        return Result::ERR_IO;
+    }
+
+    ret = m_ops->pk_parse_keyfile(&m_pkey, tls_cfg.key_file, nullptr);
+    if (ret != 0) {
+        log_mbedtls_err("DtlsUdpBackend", "pk_parse_keyfile", ret);
+        return Result::ERR_IO;
+    }
+
+    ret = m_ops->ssl_conf_own_cert(&m_ssl_conf, &m_cert, &m_pkey);
+    if (ret != 0) {
+        log_mbedtls_err("DtlsUdpBackend", "ssl_conf_own_cert", ret);
+        return Result::ERR_IO;
+    }
+
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// setup_cookie_if_server() — CC-reduction helper for setup_dtls_config
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result DtlsUdpBackend::setup_cookie_if_server(const TlsConfig& tls_cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(tls_cfg.tls_enabled);
+    NEVER_COMPILED_OUT_ASSERT(m_ops != nullptr);
+
+    if (tls_cfg.role == TlsRole::SERVER) {
+        // DTLS cookie anti-replay (REQ-6.4.2)
+        // Power of 10 Rule 9 deviation: mbedtls_ssl_conf_dtls_cookies() requires
+        // function-pointer arguments as part of the mbedTLS 4.0 DTLS cookie API.
+        // Using library-defined symbols only; no application-level fn-ptr declarations.
+        int ret = m_ops->ssl_cookie_setup(&m_cookie_ctx);
+        if (ret != 0) {
+            log_mbedtls_err("DtlsUdpBackend", "ssl_cookie_setup", ret);
+            return Result::ERR_IO;
+        }
+        mbedtls_ssl_conf_dtls_cookies(&m_ssl_conf,
+                                      mbedtls_ssl_cookie_write,
+                                      mbedtls_ssl_cookie_check,
+                                      &m_cookie_ctx);
+    }
+
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // setup_dtls_config() — configure shared ssl_conf for DTLS transport
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -174,8 +242,12 @@ Result DtlsUdpBackend::setup_dtls_config(const TlsConfig& tls_cfg)
         return Result::ERR_IO;
     }
 
-    // Bind PSA Crypto RNG to the SSL config (required by mbedTLS 4.0).
+    // mbedTLS 4.0 removed mbedtls_ssl_conf_rng(): the PSA RNG is automatically
+    // bound to the SSL config after psa_crypto_init() completes.
+    // mbedTLS 2.x/3.x with MBEDTLS_USE_PSA_CRYPTO requires the explicit call.
+#if MBEDTLS_VERSION_MAJOR < 4
     mbedtls_ssl_conf_rng(&m_ssl_conf, mbedtls_psa_get_random, MBEDTLS_PSA_RANDOM_STATE);
+#endif
 
     // DTLS handshake retransmission: min 1 s, max 10 s (RFC 6347 §4.2.4)
     mbedtls_ssl_conf_handshake_timeout(&m_ssl_conf, 1000U, 10000U);
@@ -188,50 +260,11 @@ Result DtlsUdpBackend::setup_dtls_config(const TlsConfig& tls_cfg)
                    : MBEDTLS_SSL_VERIFY_NONE;
     mbedtls_ssl_conf_authmode(&m_ssl_conf, authmode);
 
-    if (tls_cfg.verify_peer && tls_cfg.ca_file[0] != '\0') {
-        ret = m_ops->x509_crt_parse_file(&m_ca_cert, tls_cfg.ca_file);
-        if (ret != 0) {
-            log_mbedtls_err("DtlsUdpBackend", "x509_crt_parse_file (CA)", ret);
-            return Result::ERR_IO;
-        }
-        mbedtls_ssl_conf_ca_chain(&m_ssl_conf, &m_ca_cert, nullptr);
-    }
+    Result res = load_certs_and_key(tls_cfg);
+    if (!result_ok(res)) { return res; }
 
-    ret = m_ops->x509_crt_parse_file(&m_cert, tls_cfg.cert_file);
-    if (ret != 0) {
-        log_mbedtls_err("DtlsUdpBackend", "x509_crt_parse_file (cert)", ret);
-        return Result::ERR_IO;
-    }
-
-    ret = m_ops->pk_parse_keyfile(&m_pkey, tls_cfg.key_file, nullptr);
-    if (ret != 0) {
-        log_mbedtls_err("DtlsUdpBackend", "pk_parse_keyfile", ret);
-        return Result::ERR_IO;
-    }
-
-    ret = m_ops->ssl_conf_own_cert(&m_ssl_conf, &m_cert, &m_pkey);
-    if (ret != 0) {
-        log_mbedtls_err("DtlsUdpBackend", "ssl_conf_own_cert", ret);
-        return Result::ERR_IO;
-    }
-
-    // DTLS cookie anti-replay (server only, REQ-6.4.2)
-    // Power of 10 Rule 9 deviation: mbedtls_ssl_conf_dtls_cookies() requires
-    // function-pointer arguments as part of the mbedTLS 4.0 DTLS cookie API.
-    // Using library-defined symbols mbedtls_ssl_cookie_write /
-    // mbedtls_ssl_cookie_check only; no application-level function pointer
-    // declarations are introduced.  Minimized to this one call site.
-    if (tls_cfg.role == TlsRole::SERVER) {
-        ret = m_ops->ssl_cookie_setup(&m_cookie_ctx);
-        if (ret != 0) {
-            log_mbedtls_err("DtlsUdpBackend", "ssl_cookie_setup", ret);
-            return Result::ERR_IO;
-        }
-        mbedtls_ssl_conf_dtls_cookies(&m_ssl_conf,
-                                      mbedtls_ssl_cookie_write,
-                                      mbedtls_ssl_cookie_check,
-                                      &m_cookie_ctx);
-    }
+    res = setup_cookie_if_server(tls_cfg);
+    if (!result_ok(res)) { return res; }
 
     Logger::log(Severity::INFO, "DtlsUdpBackend",
                 "DTLS config ready: role=%s verify_peer=%d cert=%s",
@@ -469,6 +502,30 @@ Result DtlsUdpBackend::client_connect_and_handshake()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// try_tls_recv() — CC-reduction helper for recv_one_dtls_datagram
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool DtlsUdpBackend::try_tls_recv(uint32_t* out_len)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_tls_enabled);
+    NEVER_COMPILED_OUT_ASSERT(out_len != nullptr);
+
+    // mbedtls_ssl_conf_read_timeout() is set to 100 ms; ssl_read returns
+    // MBEDTLS_ERR_SSL_TIMEOUT when no record arrives within that window.
+    int ret = m_ops->ssl_read(&m_ssl, m_wire_buf,
+                              static_cast<size_t>(SOCKET_RECV_BUF_BYTES));
+    if (ret <= 0) {
+        if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
+            ret != MBEDTLS_ERR_SSL_TIMEOUT) {
+            log_mbedtls_err("DtlsUdpBackend", "ssl_read", ret);
+        }
+        return false;
+    }
+    *out_len = static_cast<uint32_t>(ret);
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // recv_one_dtls_datagram() — private helper
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -480,18 +537,7 @@ bool DtlsUdpBackend::recv_one_dtls_datagram(uint32_t timeout_ms)
     uint32_t out_len = 0U;
 
     if (m_tls_enabled) {
-        // mbedtls_ssl_conf_read_timeout() is set to 100 ms; ssl_read returns
-        // MBEDTLS_ERR_SSL_TIMEOUT when no record arrives within that window.
-        int ret = m_ops->ssl_read(&m_ssl, m_wire_buf,
-                                  static_cast<size_t>(SOCKET_RECV_BUF_BYTES));
-        if (ret <= 0) {
-            if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
-                ret != MBEDTLS_ERR_SSL_TIMEOUT) {
-                log_mbedtls_err("DtlsUdpBackend", "ssl_read", ret);
-            }
-            return false;
-        }
-        out_len = static_cast<uint32_t>(ret);
+        if (!try_tls_recv(&out_len)) { return false; }
     } else {
         // Plaintext path: delegate to ISocketOps (REQ-6.4.5)
         char     src_ip[48];
@@ -539,37 +585,22 @@ void DtlsUdpBackend::flush_delayed_to_queue(uint64_t now_us)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// init()
+// create_and_bind_udp_socket() — CC-reduction helper for init
 // ─────────────────────────────────────────────────────────────────────────────
 
-Result DtlsUdpBackend::init(const TransportConfig& config)
+Result DtlsUdpBackend::create_and_bind_udp_socket(const TransportConfig& config)
 {
-    NEVER_COMPILED_OUT_ASSERT(config.kind == TransportKind::DTLS_UDP);
-    NEVER_COMPILED_OUT_ASSERT(!m_open);
-
-    m_cfg         = config;
-    m_is_server   = config.is_server;
-    m_tls_enabled = config.tls.tls_enabled;
-
-    m_recv_queue.init();
-
-    ImpairmentConfig imp_cfg;
-    impairment_config_default(imp_cfg);
-    if (config.num_channels > 0U) {
-        imp_cfg = config.channels[0U].impairment;
-    }
-    m_impairment.init(imp_cfg);
+    NEVER_COMPILED_OUT_ASSERT(m_sock_fd < 0);
+    NEVER_COMPILED_OUT_ASSERT(m_sock_ops != nullptr);
 
     m_sock_fd = m_sock_ops->create_udp();
     if (m_sock_fd < 0) {
-        Logger::log(Severity::FATAL, "DtlsUdpBackend",
-                    "socket_create_udp failed");
+        Logger::log(Severity::FATAL, "DtlsUdpBackend", "socket_create_udp failed");
         return Result::ERR_IO;
     }
 
     if (!m_sock_ops->set_reuseaddr(m_sock_fd)) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "socket_set_reuseaddr failed");
+        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend", "socket_set_reuseaddr failed");
         m_sock_ops->do_close(m_sock_fd);
         m_sock_fd = -1;
         return Result::ERR_IO;
@@ -582,6 +613,18 @@ Result DtlsUdpBackend::init(const TransportConfig& config)
         m_sock_fd = -1;
         return Result::ERR_IO;
     }
+
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// run_tls_handshake_phase() — CC-reduction helper for init
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result DtlsUdpBackend::run_tls_handshake_phase(const TransportConfig& config)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_sock_fd >= 0);
+    NEVER_COMPILED_OUT_ASSERT(!m_open);
 
     if (m_tls_enabled) {
         Result res = setup_dtls_config(config.tls);
@@ -606,8 +649,92 @@ Result DtlsUdpBackend::init(const TransportConfig& config)
                     config.bind_ip, config.bind_port);
     }
 
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// init()
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result DtlsUdpBackend::init(const TransportConfig& config)
+{
+    NEVER_COMPILED_OUT_ASSERT(config.kind == TransportKind::DTLS_UDP);
+    NEVER_COMPILED_OUT_ASSERT(!m_open);
+
+    m_cfg         = config;
+    m_is_server   = config.is_server;
+    m_tls_enabled = config.tls.tls_enabled;
+
+    m_recv_queue.init();
+
+    ImpairmentConfig imp_cfg;
+    impairment_config_default(imp_cfg);
+    if (config.num_channels > 0U) {
+        imp_cfg = config.channels[0U].impairment;
+    }
+    m_impairment.init(imp_cfg);
+
+    Result res = create_and_bind_udp_socket(config);
+    if (!result_ok(res)) { return res; }
+
+    res = run_tls_handshake_phase(config);
+    if (!result_ok(res)) { return res; }
+
     NEVER_COMPILED_OUT_ASSERT(m_open);
     return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// send_wire_bytes() — CC-reduction helper for send_message
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result DtlsUdpBackend::send_wire_bytes(const uint8_t* buf, uint32_t len)
+{
+    NEVER_COMPILED_OUT_ASSERT(buf != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(len > 0U && len <= DTLS_MAX_DATAGRAM_BYTES);
+
+    if (m_tls_enabled) {
+        int ret = m_ops->ssl_write(&m_ssl, buf, static_cast<size_t>(len));
+        if (ret < 0) {
+            log_mbedtls_err("DtlsUdpBackend", "ssl_write", ret);
+            return Result::ERR_IO;
+        }
+    } else {
+        if (!m_sock_ops->send_to(m_sock_fd, buf, len,
+                                 m_cfg.peer_ip, m_cfg.peer_port)) {
+            Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
+                        "send_message: socket_send_to failed to %s:%u",
+                        m_cfg.peer_ip, m_cfg.peer_port);
+            return Result::ERR_IO;
+        }
+    }
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// send_delayed_envelopes() — CC-reduction helper for send_message
+// ─────────────────────────────────────────────────────────────────────────────
+
+void DtlsUdpBackend::send_delayed_envelopes(const MessageEnvelope* delayed,
+                                             uint32_t count)
+{
+    NEVER_COMPILED_OUT_ASSERT(delayed != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(count <= IMPAIR_DELAY_BUF_SIZE);
+
+    // Power of 10 Rule 2: fixed loop bound (IMPAIR_DELAY_BUF_SIZE)
+    for (uint32_t i = 0U; i < count; ++i) {
+        NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
+        uint32_t dlen = 0U;
+        Result res = Serializer::serialize(delayed[i], m_wire_buf,
+                                           SOCKET_RECV_BUF_BYTES, dlen);
+        if (!result_ok(res) || dlen > DTLS_MAX_DATAGRAM_BYTES) { continue; }
+        if (m_tls_enabled) {
+            (void)mbedtls_ssl_write(&m_ssl, m_wire_buf, static_cast<size_t>(dlen));
+        } else {
+            (void)m_sock_ops->send_to(m_sock_fd, m_wire_buf, dlen,
+                                      m_cfg.peer_ip, m_cfg.peer_port);
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -647,38 +774,10 @@ Result DtlsUdpBackend::send_message(const MessageEnvelope& envelope)
     uint32_t delayed_count = m_impairment.collect_deliverable(now_us, delayed,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    // Send main message
-    if (m_tls_enabled) {
-        int ret = m_ops->ssl_write(&m_ssl, m_wire_buf,
-                                   static_cast<size_t>(wire_len));
-        if (ret < 0) {
-            log_mbedtls_err("DtlsUdpBackend", "ssl_write", ret);
-            return Result::ERR_IO;
-        }
-    } else {
-        if (!m_sock_ops->send_to(m_sock_fd, m_wire_buf, wire_len,
-                                 m_cfg.peer_ip, m_cfg.peer_port)) {
-            Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
-                        "send_message: socket_send_to failed to %s:%u",
-                        m_cfg.peer_ip, m_cfg.peer_port);
-            return Result::ERR_IO;
-        }
-    }
+    res = send_wire_bytes(m_wire_buf, wire_len);
+    if (!result_ok(res)) { return res; }
 
-    // Send delayed messages (Power of 10 Rule 2: fixed loop bound)
-    for (uint32_t i = 0U; i < delayed_count; ++i) {
-        NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        uint32_t dlen = 0U;
-        res = Serializer::serialize(delayed[i], m_wire_buf,
-                                    SOCKET_RECV_BUF_BYTES, dlen);
-        if (!result_ok(res) || dlen > DTLS_MAX_DATAGRAM_BYTES) { continue; }
-        if (m_tls_enabled) {
-            (void)mbedtls_ssl_write(&m_ssl, m_wire_buf, static_cast<size_t>(dlen));
-        } else {
-            (void)m_sock_ops->send_to(m_sock_fd, m_wire_buf, dlen,
-                                      m_cfg.peer_ip, m_cfg.peer_port);
-        }
-    }
+    send_delayed_envelopes(delayed, delayed_count);
 
     NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);
     return Result::OK;

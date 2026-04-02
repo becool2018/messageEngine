@@ -147,6 +147,14 @@ private:
     /// Receive a 4-byte length-prefixed frame via TLS (tls_enabled) or raw TCP.
     bool tls_recv_frame(uint32_t idx, uint8_t* buf, uint32_t buf_cap,
                         uint32_t timeout_ms, uint32_t* out_len);
+
+    // ── CC-reduction helper ───────────────────────────────────────────────────
+
+    /// Read exactly @p payload_len bytes from m_ssl[idx] into @p buf, handling
+    /// MBEDTLS_ERR_SSL_WANT_READ continuations. Sets *out_len on success.
+    /// Extracted from tls_recv_frame() to reduce its CC.
+    bool tls_read_payload(uint32_t idx, uint8_t* buf,
+                          uint32_t payload_len, uint32_t* out_len);
 };
 
 #endif // PLATFORM_TLS_TCP_BACKEND_HPP

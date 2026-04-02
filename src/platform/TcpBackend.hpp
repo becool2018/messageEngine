@@ -23,6 +23,7 @@
 #define PLATFORM_TCP_BACKEND_HPP
 
 #include <cstdint>
+#include <poll.h>
 #include "core/Assert.hpp"
 #include "core/TransportInterface.hpp"
 #include "core/ChannelConfig.hpp"
@@ -122,6 +123,19 @@ private:
     /// Receives up to one frame per client into m_recv_queue.
     /// @param[in] timeout_ms Per-client receive timeout in milliseconds.
     void poll_clients_once(uint32_t timeout_ms);
+
+    // ── CC-reduction helpers (extracted to keep each caller CC ≤ 10) ─────────
+
+    /// Build a pollfd array from the listen fd (server, if applicable) and all
+    /// active client fds. Sets *has_listen_out to indicate whether pfds[0] is
+    /// the listen fd. Returns the number of entries populated.
+    /// Extracted from poll_clients_once() to reduce its CC.
+    uint32_t build_poll_fds(struct pollfd* pfds, uint32_t cap,
+                             bool* has_listen_out) const;
+
+    /// Iterate all active client fds and call recv_from_client() on each.
+    /// Extracted from poll_clients_once() to reduce its CC.
+    void drain_readable_clients(uint32_t timeout_ms);
 };
 
 #endif // PLATFORM_TCP_BACKEND_HPP

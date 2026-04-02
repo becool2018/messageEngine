@@ -102,3 +102,4 @@ All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-03-31. All entry and exit criteria satisfied. No CRITICAL or MAJOR defects. Inspection closed PASS.
+

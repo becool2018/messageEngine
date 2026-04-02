@@ -162,6 +162,39 @@ private:
     /// Drain impairment-delayed inbound messages into m_recv_queue.
     /// @param now_us Current wall-clock time in microseconds.
     void flush_delayed_to_queue(uint64_t now_us);
+
+    // ── CC-reduction helpers (extracted to keep each caller CC ≤ 10) ─────────
+
+    /// Load CA cert (if verify_peer), own cert, private key; bind to ssl_conf.
+    /// Extracted from setup_dtls_config to reduce its CC.
+    Result load_certs_and_key(const TlsConfig& tls_cfg);
+
+    /// Configure DTLS cookie anti-replay context (server role only, REQ-6.4.2).
+    /// Extracted from setup_dtls_config to reduce its CC.
+    Result setup_cookie_if_server(const TlsConfig& tls_cfg);
+
+    /// Perform a single DTLS ssl_read; handle WANT_READ/TIMEOUT non-errors.
+    /// Extracted from recv_one_dtls_datagram to reduce its CC.
+    /// @param out_len Set to bytes received on success.
+    /// @return true if a record was read successfully.
+    bool try_tls_recv(uint32_t* out_len);
+
+    /// Create UDP socket, set SO_REUSEADDR, and bind to configured address.
+    /// Extracted from init() to reduce its CC.
+    Result create_and_bind_udp_socket(const TransportConfig& config);
+
+    /// Run DTLS handshake (if TLS enabled) or set m_open for plaintext UDP.
+    /// Extracted from init() to reduce its CC.
+    Result run_tls_handshake_phase(const TransportConfig& config);
+
+    /// Send @p len bytes from @p buf via TLS or plaintext UDP.
+    /// Extracted from send_message() to reduce its CC.
+    Result send_wire_bytes(const uint8_t* buf, uint32_t len);
+
+    /// Serialize and send each envelope in @p delayed[0..count-1].
+    /// Best-effort: serialization or MTU failures skip the entry silently.
+    /// Extracted from send_message() to reduce its CC.
+    void send_delayed_envelopes(const MessageEnvelope* delayed, uint32_t count);
 };
 
 #endif // PLATFORM_DTLS_UDP_BACKEND_HPP

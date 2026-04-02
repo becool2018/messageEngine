@@ -39,6 +39,7 @@
 #include "core/MessageEnvelope.hpp"
 #include "platform/TlsTcpBackend.hpp"
 #include "MockSocketOps.hpp"
+#include <mbedtls/build_info.h>
 #include <mbedtls/psa_util.h>
 #include <psa/crypto.h>
 
@@ -581,7 +582,8 @@ struct VerifyPeerClientArg {
     uint16_t    port;
     bool        tls_on;
     bool        verify_peer;
-    const char* ca_file;   // nullptr or "" → no CA loaded
+    const char* ca_file;        // nullptr or "" → no CA loaded
+    const char* peer_hostname;  // nullptr or "" → no hostname set (skips mbedTLS 4.0 check)
     Result      result;
 };
 
@@ -599,6 +601,11 @@ static void* verify_peer_client_func(void* raw_arg)
         uint32_t len = static_cast<uint32_t>(sizeof(cfg.tls.ca_file) - 1U);
         (void)strncpy(cfg.tls.ca_file, a->ca_file, len);
         cfg.tls.ca_file[len] = '\0';
+    }
+    if (a->peer_hostname != nullptr && a->peer_hostname[0] != '\0') {
+        uint32_t len = static_cast<uint32_t>(sizeof(cfg.tls.peer_hostname) - 1U);
+        (void)strncpy(cfg.tls.peer_hostname, a->peer_hostname, len);
+        cfg.tls.peer_hostname[len] = '\0';
     }
     a->result = client.init(cfg);
     if (a->result == Result::OK) {
@@ -787,12 +794,14 @@ static void test_tls_verify_peer_with_ca()
 
     // Client: verify_peer=true, ca_file=TEST_CERT_FILE (the server's self-signed cert)
     // The server cert IS the CA cert, so verification should succeed.
+    // peer_hostname must match the cert's CN ("messageEngine-test") for mbedTLS 4.0+.
     VerifyPeerClientArg args;
-    args.port        = PORT;
-    args.tls_on      = true;
-    args.verify_peer = true;
-    args.ca_file     = TEST_CERT_FILE;
-    args.result      = Result::ERR_IO;
+    args.port          = PORT;
+    args.tls_on        = true;
+    args.verify_peer   = true;
+    args.ca_file       = TEST_CERT_FILE;
+    args.peer_hostname = "messageEngine-test";  // matches cert CN
+    args.result        = Result::ERR_IO;
 
     pthread_t tid = create_thread_4mb(verify_peer_client_func, &args);
 
@@ -830,11 +839,12 @@ static void test_tls_verify_peer_no_ca()
     // Client: verify_peer=true but ca_file="" → CA chain never loaded →
     // TLS handshake attempts peer verification with no trusted CA → fails.
     VerifyPeerClientArg args;
-    args.port        = PORT;
-    args.tls_on      = true;
-    args.verify_peer = true;
-    args.ca_file     = "";    // empty: ca_file[0]=='\0' → L158:32 False
-    args.result      = Result::OK;  // expect ERR_IO
+    args.port          = PORT;
+    args.tls_on        = true;
+    args.verify_peer   = true;
+    args.ca_file       = "";    // empty: ca_file[0]=='\0' → L158:32 False
+    args.peer_hostname = "messageEngine-test";  // set hostname; chain validation still fails
+    args.result        = Result::OK;  // expect ERR_IO
 
     pthread_t tid = create_thread_4mb(verify_peer_client_func, &args);
 
@@ -1464,7 +1474,10 @@ static void* tls_zero_frame_func(void* raw)
         return nullptr;
     }
     mbedtls_ssl_conf_authmode(&conf, MBEDTLS_SSL_VERIFY_NONE);
+    // mbedTLS 4.0 removed mbedtls_ssl_conf_rng() — PSA RNG is auto-bound after psa_crypto_init().
+#if MBEDTLS_VERSION_MAJOR < 4
     mbedtls_ssl_conf_rng(&conf, mbedtls_psa_get_random, MBEDTLS_PSA_RANDOM_STATE);
+#endif
 
     ret = mbedtls_ssl_setup(&ssl, &conf);
     if (ret != 0) {

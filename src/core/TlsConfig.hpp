@@ -72,6 +72,13 @@ struct TlsConfig {
     /// false = skip peer verification (MBEDTLS_SSL_VERIFY_NONE).
     ///         Only disable for testing — never in production.
     bool verify_peer;
+
+    /// Expected server hostname for TLS SNI and certificate hostname verification.
+    /// Used by TLS clients only (ignored by servers).
+    /// Required by mbedTLS 4.0+ when verify_peer is true — set to the CN or SAN
+    /// that the server certificate is expected to present (e.g. "example.com").
+    /// Leave empty ("") only when verify_peer is false (no cert check performed).
+    char peer_hostname[TLS_PATH_MAX];
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -85,9 +92,10 @@ inline void tls_config_default(TlsConfig& cfg)
 {
     cfg.tls_enabled = false;
     cfg.role        = TlsRole::CLIENT;
-    (void)memset(cfg.cert_file, 0, TLS_PATH_MAX);
-    (void)memset(cfg.key_file,  0, TLS_PATH_MAX);
-    (void)memset(cfg.ca_file,   0, TLS_PATH_MAX);
+    (void)memset(cfg.cert_file,     0, TLS_PATH_MAX);
+    (void)memset(cfg.key_file,      0, TLS_PATH_MAX);
+    (void)memset(cfg.ca_file,       0, TLS_PATH_MAX);
+    (void)memset(cfg.peer_hostname, 0, TLS_PATH_MAX);
     cfg.verify_peer = true;   // Secure default: always verify when TLS is on
 }
 
