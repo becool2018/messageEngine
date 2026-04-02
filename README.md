@@ -668,6 +668,7 @@ This project ships a set of reusable Claude Code skills in `.claude/skills/`. Sk
 | **generate_use_case_list** | `/generate_use_case_list` | Reads the live source code in `src/` (headers, implementations, and app entry points) and all test files in `tests/` to regenerate `docs/use_cases/HIGH_LEVEL_USE_CASES.md` from scratch. Automatically picks up new files and ignores deleted ones. Classifies each capability as a user-facing HL group, an Application Workflow pattern, or a System Internal sub-function using a concrete decision algorithm anchored to what `src/app/` code actually calls. |
 | **generate_use_cases** | `/generate_use_cases` | Reads `HIGH_LEVEL_USE_CASES.md` and all source files, then regenerates every individual `UC_*.md` document in `docs/use_cases/` using the 15-section flow-of-control format defined in `docs/use_cases/use_case_format.txt`. Overwrites existing UC files; creates new ones for any UC number that has no matching file. |
 | **find_missing_use_cases** | `/find_missing_use_cases` | Compares the live source code against existing `UC_*.md` files and `HIGH_LEVEL_USE_CASES.md` to identify undocumented capabilities. Writes a new `UC_*.md` for each gap (using the same 15-section format) and inserts the new entries into `HIGH_LEVEL_USE_CASES.md`. Never modifies existing UC files. |
+| **validate-safety-doc** | `/validate-safety-doc <DOC>` | Validates one Safety & Assurance document in `docs/` against the live source code. Checks that all claims, constants, function names, state machines, HAZ IDs, REQ IDs, and structural references are still accurate. Pass the document name as the argument (e.g., `/validate-safety-doc HAZARD_ANALYSIS`). If no argument is given, lists all nine documents and prompts for a selection. Reports findings by severity (CRITICAL / STALE / MISSING / MINOR) and offers to apply fixes. |
 
 ### Directory layout
 
@@ -680,7 +681,9 @@ This project ships a set of reusable Claude Code skills in `.claude/skills/`. Sk
     │   └── SKILL.md
     ├── generate_use_cases/
     │   └── SKILL.md
-    └── find_missing_use_cases/
+    ├── find_missing_use_cases/
+    │   └── SKILL.md
+    └── validate-safety-doc/
         └── SKILL.md
 ```
 
