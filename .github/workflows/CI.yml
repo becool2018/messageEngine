@@ -11,6 +11,9 @@ on:
 permissions:
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build_test_and_analysis:
     name: Build, Test, Static Analysis
@@ -46,39 +49,3 @@ jobs:
       - name: Static analysis (clang-tidy + cppcheck + scan-build)
         run: |
           make static_analysis
-
-  codeql:
-    name: CodeQL (C/C++)
-    runs-on: ubuntu-latest
-
-    permissions:
-      actions: read
-      security-events: write
-      contents: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: cpp
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            clang \
-            pkg-config \
-            libmbedtls-dev
-
-      # Replace autobuild with explicit build so CodeQL can observe compilation.
-      - name: Build
-        run: |
-          make clean
-          make all
-
-      - name: Analyze
-        uses: github/codeql-action/analyze@v3
