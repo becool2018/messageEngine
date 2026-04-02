@@ -611,6 +611,7 @@ NASA-STD-8719.13C / NASA-STD-8739.8A compliance artifacts maintained in [`docs/`
 | [MCDC_ANALYSIS.md](docs/MCDC_ANALYSIS.md) | MC/DC coverage analysis for the five highest-hazard SC functions: `DeliveryEngine::send`, `DeliveryEngine::receive`, `DuplicateFilter::check_and_record`, `Serializer::serialize`, `Serializer::deserialize`. |
 | [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md) | Moderator-led formal inspection checklist (NPR 7150.2D §3 / NASA-STD-8739.8); entry/exit criteria, severity definitions, and waiver policy for all `src/` changes. |
 | [DEFECT_LOG.md](docs/DEFECT_LOG.md) | Cumulative inspection defect record; every defect found during formal review of `src/` changes is logged here with disposition and sign-off. |
+| [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md) | Verification policy (VVP-001); defines the minimum verification methods (M1–M7) required at each software classification level (Class C / B / A), architectural ceiling rules, fault injection requirements, and injectable interface obligations. |
 
 ---
 
