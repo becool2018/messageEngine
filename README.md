@@ -182,6 +182,7 @@ messageEngine/
 │       ├── Server.cpp
 │       └── Client.cpp
 ├── tests/                # Unit tests (one binary per module)
+│   ├── MockSocketOps.hpp           # Injectable ISocketOps stub for TcpBackend/UdpBackend tests
 │   ├── test_MessageEnvelope.cpp
 │   ├── test_Serializer.cpp
 │   ├── test_DuplicateFilter.cpp
