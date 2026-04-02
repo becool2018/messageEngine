@@ -608,6 +608,9 @@ NASA-STD-8719.13C / NASA-STD-8739.8A compliance artifacts maintained in [`docs/`
 | [TRACEABILITY_MATRIX.md](docs/TRACEABILITY_MATRIX.md) | Bidirectional requirements traceability matrix mapping every `[REQ-x.x]` ID from `CLAUDE.md` to the `src/` file that implements it and the `tests/` file that verifies it. |
 | [STACK_ANALYSIS.md](docs/STACK_ANALYSIS.md) | Worst-case stack depth analysis across four call chains; worst-case frame depth is 10 frames (retry pump), worst-case stack size is ~748 bytes (outbound send). |
 | [WCET_ANALYSIS.md](docs/WCET_ANALYSIS.md) | Worst-case execution time analysis expressed as closed-form operation counts for every SC function, derived from the compile-time capacity constants in `src/core/Types.hpp`. |
+| [MCDC_ANALYSIS.md](docs/MCDC_ANALYSIS.md) | MC/DC coverage analysis for the five highest-hazard SC functions: `DeliveryEngine::send`, `DeliveryEngine::receive`, `DuplicateFilter::check_and_record`, `Serializer::serialize`, `Serializer::deserialize`. |
+| [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md) | Moderator-led formal inspection checklist (NPR 7150.2D §3 / NASA-STD-8739.8); entry/exit criteria, severity definitions, and waiver policy for all `src/` changes. |
+| [DEFECT_LOG.md](docs/DEFECT_LOG.md) | Cumulative inspection defect record; every defect found during formal review of `src/` changes is logged here with disposition and sign-off. |
 
 ---
 
