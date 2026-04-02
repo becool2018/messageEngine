@@ -693,6 +693,20 @@ Each Safety & Assurance document depends on the following inputs. Update the lis
 | **Source files** | — (process/policy document) |
 | **Other docs** | [`HAZARD_ANALYSIS.md`](docs/HAZARD_ANALYSIS.md) §3 (SC/NSC definitions); `CLAUDE.md` §14 (coverage requirements) |
 
+#### Dependency Summary
+
+| Document | Depends on |
+|---|---|
+| [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md) | — (primary artifact; no doc dependencies) |
+| [STATE_MACHINES.md](docs/STATE_MACHINES.md) | [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md) |
+| [TRACEABILITY_MATRIX.md](docs/TRACEABILITY_MATRIX.md) | — (generated from source; no doc dependencies) |
+| [STACK_ANALYSIS.md](docs/STACK_ANALYSIS.md) | — |
+| [WCET_ANALYSIS.md](docs/WCET_ANALYSIS.md) | [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md), [STACK_ANALYSIS.md](docs/STACK_ANALYSIS.md) |
+| [MCDC_ANALYSIS.md](docs/MCDC_ANALYSIS.md) | [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md), [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md) |
+| [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md) | [DEFECT_LOG.md](docs/DEFECT_LOG.md) |
+| [DEFECT_LOG.md](docs/DEFECT_LOG.md) | [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md), [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md), [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md) |
+| [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md) | [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md) |
+
 ---
 
 ## Coding Standards
