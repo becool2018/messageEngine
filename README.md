@@ -4,6 +4,8 @@
 
 > **Note:** This codebase is produced by Claude (Anthropic) as an experiment to evaluate whether an AI assistant can consistently follow strict safety-critical software engineering requirements — including NASA standards, JPL Power of 10, and MISRA C++:2023 .
 
+> **AI contributors:** If you are using an AI assistant with this project, ensure it reads **`.claude/CLAUDE.md`** (global C/C++ coding standard — Power of 10, MISRA C++:2023, F-Prime subset) and **`CLAUDE.md`** (project-specific requirements — architecture, traceability, safety, verification policy) before making any changes. Both files are normative and must be followed.
+
 A safety-critical C++ networking library that models realistic communication problems — latency, jitter, packet loss, duplication, reordering, and link partitions — while providing consistent, reusable messaging utilities across three transport backends (TCP, UDP, and an in-process simulation harness).
 
 All production code complies with **JPL Power of 10**, **MISRA C++:2023**, and an **F-Prime style subset**: no exceptions, no templates, no RTTI, no STL, and no dynamic allocation on critical paths after initialization. There are minor STL exceptions; these are listed in the [Coding Standards](#coding-standards) section and justified in `.claude/CLAUDE.md`.
