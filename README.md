@@ -758,7 +758,37 @@ This project ships a set of reusable Claude Code skills in `.claude/skills/`. Sk
 | **generate_use_case_list** | `/generate_use_case_list` | Reads the live source code in `src/` (headers, implementations, and app entry points) and all test files in `tests/` to regenerate `docs/use_cases/HIGH_LEVEL_USE_CASES.md` from scratch. Automatically picks up new files and ignores deleted ones. Classifies each capability as a user-facing HL group, an Application Workflow pattern, or a System Internal sub-function using a concrete decision algorithm anchored to what `src/app/` code actually calls. |
 | **generate_use_cases** | `/generate_use_cases` | Reads `HIGH_LEVEL_USE_CASES.md` and all source files, then regenerates every individual `UC_*.md` document in `docs/use_cases/` using the 15-section flow-of-control format defined in `docs/use_cases/use_case_format.txt`. Overwrites existing UC files; creates new ones for any UC number that has no matching file. |
 | **find_missing_use_cases** | `/find_missing_use_cases` | Compares the live source code against existing `UC_*.md` files and `HIGH_LEVEL_USE_CASES.md` to identify undocumented capabilities. Writes a new `UC_*.md` for each gap (using the same 15-section format) and inserts the new entries into `HIGH_LEVEL_USE_CASES.md`. Never modifies existing UC files. |
-| **validate-safety-doc** | `/validate-safety-doc <DOC>` | Validates one Safety & Assurance document in `docs/` against the live source code. Checks that all claims, constants, function names, state machines, HAZ IDs, REQ IDs, and structural references are still accurate. Pass the document name as the argument (e.g., `/validate-safety-doc HAZARD_ANALYSIS`). If no argument is given, lists all nine documents and prompts for a selection. Reports findings by severity (CRITICAL / STALE / MISSING / MINOR) and offers to apply fixes. |
+| **validate-safety-doc** | `/validate-safety-doc <DOC>` or `/validate-safety-doc all` | Validates one or all Safety & Assurance documents in `docs/` against the live source code. Checks that all claims, constants, function names, state machines, HAZ IDs, REQ IDs, and structural references are still accurate. Pass a document name (e.g., `/validate-safety-doc HAZARD_ANALYSIS`) to validate one document, or pass `all` to validate all nine in parallel. Reports findings by severity (CRITICAL / STALE / MISSING / MINOR) and offers to apply fixes. See below for how `all` mode works. |
+
+#### How `/validate-safety-doc all` works
+
+All nine documents are validated simultaneously using three dependency-ordered waves. Each document runs in its own sub-agent so validation work is fully parallel within each wave. A wave does not start until all agents in the previous wave have returned their findings — so dependent documents always receive accurate cross-check context.
+
+**Wave 1 — independent documents (run in parallel):**
+
+| Agent | Document | Outputs to downstream waves |
+|---|---|---|
+| 1 | `HAZARD_ANALYSIS.md` | Confirmed HAZ ID list; confirmed SC function list |
+| 2 | `TRACEABILITY_MATRIX.md` | Confirmed REQ ID list |
+| 3 | `STACK_ANALYSIS.md` | Worst-case call chain name and frame count |
+
+**Wave 2 — depend on Wave 1 (run in parallel after Wave 1 completes):**
+
+| Agent | Document | Dependencies used |
+|---|---|---|
+| 4 | `STATE_MACHINES.md` | HAZ IDs from Agent 1 |
+| 5 | `WCET_ANALYSIS.md` | SC function list from Agent 1; worst-case chain from Agent 3 |
+| 6 | `VERIFICATION_POLICY.md` | SC/NSC criteria from Agent 1; outputs confirmed M1–M7 labels |
+
+**Wave 3 — depend on Wave 1 and/or Wave 2 (run in parallel after Wave 2 completes):**
+
+| Agent | Document | Dependencies used |
+|---|---|---|
+| 7 | `MCDC_ANALYSIS.md` | SC function list from Agent 1; ceiling rules from Agent 6 |
+| 8 | `DEFECT_LOG.md` | HAZ IDs from Agent 1; M1–M7 labels from Agent 6; reads `INSPECTION_CHECKLIST.md` directly |
+| 9 | `INSPECTION_CHECKLIST.md` | Reads `DEFECT_LOG.md` directly for severity/disposition code consistency |
+
+**Final step:** All findings are aggregated into a single report (status + finding counts per document, then a consolidated findings table sorted CRITICAL → STALE → MISSING → MINOR). If fixes are accepted, they are applied in dependency order — Wave 1 documents first — so upstream corrections are in place before downstream documents are updated.
 
 ### Directory layout
 
