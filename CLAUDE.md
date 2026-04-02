@@ -348,6 +348,7 @@ docs/DEFECT_LOG.md. Full procedure and moderator checklist: docs/INSPECTION_CHEC
 12.2 Entry criteria (all must be true before review begins)
 
   [ ] make passes with zero warnings and zero errors.
+  [ ] make lint passes with zero clang-tidy violations (CC ≤ 10 enforced).
   [ ] make check_traceability passes with RESULT: PASS.
   [ ] make run_tests passes — all tests green.
   [ ] All new or modified src/ files carry // Implements: REQ-x.x tags.

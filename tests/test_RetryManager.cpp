@@ -90,7 +90,7 @@ static void test_schedule_full()
     // Fill all slots — Power of 10: bounded loop
     for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
         MessageEnvelope env;
-        make_test_envelope(env, static_cast<uint64_t>(i + 1U));
+        make_test_envelope(env, static_cast<uint64_t>(i) + 1U);
         Result r = mgr.schedule(env, 5U, 100U, 1000000ULL);
         assert(r == Result::OK);
     }
@@ -408,7 +408,7 @@ static void test_collect_due_buf_cap_limits()
     for (uint32_t i = 1U; i <= 3U; ++i) {
         MessageEnvelope env;
         make_test_envelope(env,
-                           static_cast<uint64_t>(400U + i),
+                           static_cast<uint64_t>(i) + 400U,
                            T + 60000000ULL);
         Result r = mgr.schedule(env, 5U, 100U, T);
         assert(r == Result::OK);

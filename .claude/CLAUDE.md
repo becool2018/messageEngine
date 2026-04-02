@@ -329,6 +329,9 @@ Add more `<module_requirements>` blocks as you define components.
    - "// Power of 10 Rule 2 deviation: infrastructure event loop — bounded per-iteration
    //   work, terminates on signal/timeout/close per CLAUDE.md §2.2 exception."
 4. Favor simpler, safer designs over clever or complex ones, especially where they improve analyzability and testability.
+5. Before every git commit, run `make lint` and `make run_tests`. Both must pass
+   with zero errors before the commit is created. If either fails, fix the issue
+   first — do not commit broken or lint-failing code.
 </instructions_for_claude>
 ```
 

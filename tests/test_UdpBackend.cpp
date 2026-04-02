@@ -201,7 +201,7 @@ static void test_udp_multiple_messages()
     // Power of 10 Rule 2: fixed loop bound (N = 4)
     for (uint32_t i = 0U; i < N; ++i) {
         MessageEnvelope env;
-        make_test_envelope(env, static_cast<uint64_t>(i + 1U));
+        make_test_envelope(env, static_cast<uint64_t>(i) + 1U);
         Result r = side_a.send_message(env);
         assert(r == Result::OK);
     }

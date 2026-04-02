@@ -584,7 +584,7 @@ static void test_pump_retries_send_fails()
     // Fill the remaining capacity (MSG_RING_CAPACITY - 2 more messages).
     for (uint32_t i = 0U; i < MSG_RING_CAPACITY - 2U; ++i) {
         MessageEnvelope filler;
-        make_data_envelope(filler, 2U, 1U, static_cast<uint64_t>(i + 100U), ReliabilityClass::BEST_EFFORT);
+        make_data_envelope(filler, 2U, 1U, static_cast<uint64_t>(i) + 100U, ReliabilityClass::BEST_EFFORT);
         Result r = harness_b.inject(filler);
         assert(r == Result::OK);
     }
@@ -617,7 +617,7 @@ static void test_send_transport_queue_full()
     // Fill harness_b's receive queue to capacity via direct inject
     for (uint32_t i = 0U; i < MSG_RING_CAPACITY; ++i) {
         MessageEnvelope filler;
-        make_data_envelope(filler, 2U, 1U, static_cast<uint64_t>(i + 1U), ReliabilityClass::BEST_EFFORT);
+        make_data_envelope(filler, 2U, 1U, static_cast<uint64_t>(i) + 1U, ReliabilityClass::BEST_EFFORT);
         Result r = harness_b.inject(filler);
         assert(r == Result::OK);
     }

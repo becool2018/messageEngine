@@ -110,6 +110,10 @@ private:
     /// Called once during init() when tls_enabled is true.
     Result setup_tls_config(const TlsConfig& tls_cfg);
 
+    /// Load CA cert (if verify_peer), own cert, private key; bind to ssl_conf.
+    /// Extracted from setup_tls_config() to reduce its CC.
+    Result load_tls_certs(const TlsConfig& tls_cfg);
+
     /// Bind listen socket and start accepting (server mode).
     Result bind_and_listen(const char* ip, uint16_t port);
 

@@ -90,7 +90,7 @@ static void test_track_full()
     // Fill all slots — Power of 10: bounded loop
     for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
         MessageEnvelope env;
-        make_test_envelope(env, static_cast<uint64_t>(i + 1U));
+        make_test_envelope(env, static_cast<uint64_t>(i) + 1U);
         Result r = tracker.track(env, 9000000ULL);
         assert(r == Result::OK);
     }
@@ -234,7 +234,7 @@ static void test_sweep_releases_acked()
     // Fill all slots
     for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
         MessageEnvelope env;
-        make_test_envelope(env, static_cast<uint64_t>(i + 1U));
+        make_test_envelope(env, static_cast<uint64_t>(i) + 1U);
         Result r = tracker.track(env, 0xFFFFFFFFFFFFFFFFULL - 1ULL);
         assert(r == Result::OK);
     }
@@ -271,7 +271,7 @@ static void test_sweep_buf_capacity()
     // Track 4 expired entries (deadline in the past)
     for (uint32_t i = 0U; i < 4U; ++i) {
         MessageEnvelope env;
-        make_test_envelope(env, static_cast<uint64_t>(i + 100U));
+        make_test_envelope(env, static_cast<uint64_t>(i) + 100U);
         Result r = tracker.track(env, 1ULL);  // deadline=1us (expired)
         assert(r == Result::OK);
     }

@@ -149,6 +149,44 @@ TlsTcpBackend::~TlsTcpBackend()
 // setup_tls_config() — load certs/keys; configure mbedTLS shared object
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Load CA cert (if verify_peer), own cert, private key; bind to ssl_conf.
+/// Extracted from setup_tls_config() to reduce its CC.
+Result TlsTcpBackend::load_tls_certs(const TlsConfig& tls_cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(tls_cfg.cert_file[0] != '\0');
+    NEVER_COMPILED_OUT_ASSERT(tls_cfg.key_file[0] != '\0');
+
+    if (tls_cfg.verify_peer && tls_cfg.ca_file[0] != '\0') {
+        int ret = mbedtls_x509_crt_parse_file(&m_ca_cert, tls_cfg.ca_file);
+        if (ret != 0) {
+            log_mbedtls_err("TlsTcpBackend", "x509_crt_parse_file (CA)", ret);
+            return Result::ERR_IO;
+        }
+        mbedtls_ssl_conf_ca_chain(&m_ssl_conf, &m_ca_cert, nullptr);
+    }
+
+    int ret = mbedtls_x509_crt_parse_file(&m_cert, tls_cfg.cert_file);
+    if (ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "x509_crt_parse_file (cert)", ret);
+        return Result::ERR_IO;
+    }
+
+    ret = mbedtls_pk_parse_keyfile(&m_pkey, tls_cfg.key_file, nullptr);
+    if (ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "pk_parse_keyfile", ret);
+        return Result::ERR_IO;
+    }
+
+    ret = mbedtls_ssl_conf_own_cert(&m_ssl_conf, &m_cert, &m_pkey);
+    if (ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "ssl_conf_own_cert", ret);
+        return Result::ERR_IO;
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(m_cert.version > 0);
+    return Result::OK;
+}
+
 Result TlsTcpBackend::setup_tls_config(const TlsConfig& tls_cfg)
 {
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.tls_enabled);
@@ -183,42 +221,13 @@ Result TlsTcpBackend::setup_tls_config(const TlsConfig& tls_cfg)
     mbedtls_ssl_conf_rng(&m_ssl_conf, mbedtls_psa_get_random, MBEDTLS_PSA_RANDOM_STATE);
 #endif
 
-    // Set peer-verification mode
     int authmode = tls_cfg.verify_peer
                    ? MBEDTLS_SSL_VERIFY_REQUIRED
                    : MBEDTLS_SSL_VERIFY_NONE;
     mbedtls_ssl_conf_authmode(&m_ssl_conf, authmode);
 
-    // Load CA certificate for peer verification (only when verify_peer is set)
-    if (tls_cfg.verify_peer && tls_cfg.ca_file[0] != '\0') {
-        ret = mbedtls_x509_crt_parse_file(&m_ca_cert, tls_cfg.ca_file);
-        if (ret != 0) {
-            log_mbedtls_err("TlsTcpBackend", "x509_crt_parse_file (CA)", ret);
-            return Result::ERR_IO;
-        }
-        mbedtls_ssl_conf_ca_chain(&m_ssl_conf, &m_ca_cert, nullptr);
-    }
-
-    // Load own certificate chain
-    ret = mbedtls_x509_crt_parse_file(&m_cert, tls_cfg.cert_file);
-    if (ret != 0) {
-        log_mbedtls_err("TlsTcpBackend", "x509_crt_parse_file (cert)", ret);
-        return Result::ERR_IO;
-    }
-
-    // Load own private key
-    ret = mbedtls_pk_parse_keyfile(&m_pkey, tls_cfg.key_file, nullptr);
-    if (ret != 0) {
-        log_mbedtls_err("TlsTcpBackend", "pk_parse_keyfile", ret);
-        return Result::ERR_IO;
-    }
-
-    // Associate cert + key with the shared SSL config
-    ret = mbedtls_ssl_conf_own_cert(&m_ssl_conf, &m_cert, &m_pkey);
-    if (ret != 0) {
-        log_mbedtls_err("TlsTcpBackend", "ssl_conf_own_cert", ret);
-        return Result::ERR_IO;
-    }
+    Result res = load_tls_certs(tls_cfg);
+    if (!result_ok(res)) { return res; }
 
     Logger::log(Severity::INFO, "TlsTcpBackend",
                 "TLS config ready: role=%s verify_peer=%d cert=%s",

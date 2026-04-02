@@ -234,7 +234,7 @@ static void test_plaintext_loopback()
 
     pthread_attr_t attr;
     assert(pthread_attr_init(&attr) == 0);
-    assert(pthread_attr_setstacksize(&attr, 2U * 1024U * 1024U) == 0);
+    assert(pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U) == 0);
 
     pthread_t tid;
     assert(pthread_create(&tid, &attr, dtls_client_thread, &args) == 0);
@@ -307,7 +307,7 @@ static void test_dtls_loopback()
     // Use a large stack: DtlsUdpBackend + mbedTLS contexts are sizable
     pthread_attr_t attr;
     assert(pthread_attr_init(&attr) == 0);
-    assert(pthread_attr_setstacksize(&attr, 4U * 1024U * 1024U) == 0);
+    assert(pthread_attr_setstacksize(&attr, static_cast<size_t>(4U) * 1024U * 1024U) == 0);
 
     pthread_t srv_tid;
     assert(pthread_create(&srv_tid, &attr, dtls_server_thread, &srv_arg) == 0);
@@ -321,7 +321,7 @@ static void test_dtls_loopback()
 
     pthread_attr_t cli_attr;
     assert(pthread_attr_init(&cli_attr) == 0);
-    assert(pthread_attr_setstacksize(&cli_attr, 4U * 1024U * 1024U) == 0);
+    assert(pthread_attr_setstacksize(&cli_attr, static_cast<size_t>(4U) * 1024U * 1024U) == 0);
 
     pthread_t cli_tid;
     assert(pthread_create(&cli_tid, &cli_attr, dtls_client_thread, &cli_arg) == 0);
@@ -646,7 +646,7 @@ static void test_dtls_server_recv_after_client_close()
 
     pthread_attr_t srv_attr;
     assert(pthread_attr_init(&srv_attr) == 0);
-    assert(pthread_attr_setstacksize(&srv_attr, 4U * 1024U * 1024U) == 0);
+    assert(pthread_attr_setstacksize(&srv_attr, static_cast<size_t>(4U) * 1024U * 1024U) == 0);
 
     pthread_t srv_tid;
     assert(pthread_create(&srv_tid, &srv_attr, dtls_simple_server_thread,
@@ -661,7 +661,7 @@ static void test_dtls_server_recv_after_client_close()
 
     pthread_attr_t cli_attr;
     assert(pthread_attr_init(&cli_attr) == 0);
-    assert(pthread_attr_setstacksize(&cli_attr, 4U * 1024U * 1024U) == 0);
+    assert(pthread_attr_setstacksize(&cli_attr, static_cast<size_t>(4U) * 1024U * 1024U) == 0);
 
     pthread_t cli_tid;
     assert(pthread_create(&cli_tid, &cli_attr, dtls_early_close_client_thread,
@@ -743,7 +743,7 @@ static void test_dtls_server_handshake_garbage()
 
     pthread_attr_t attr;
     assert(pthread_attr_init(&attr) == 0);
-    assert(pthread_attr_setstacksize(&attr, 512U * 1024U) == 0);
+    assert(pthread_attr_setstacksize(&attr, static_cast<size_t>(512U) * 1024U) == 0);
 
     pthread_t tid;
     assert(pthread_create(&tid, &attr, dtls_garbage_sender_thread,
@@ -833,7 +833,7 @@ static void test_receive_long_timeout_clamp()
 
     pthread_attr_t attr;
     assert(pthread_attr_init(&attr) == 0);
-    assert(pthread_attr_setstacksize(&attr, 2U * 1024U * 1024U) == 0);
+    assert(pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U) == 0);
     pthread_t cli_tid;
     assert(pthread_create(&cli_tid, &attr, dtls_client_thread, &cli_arg) == 0);
     (void)pthread_attr_destroy(&attr);
@@ -925,7 +925,7 @@ static void test_dtls_server_zero_connect_timeout()
 
     pthread_attr_t attr;
     assert(pthread_attr_init(&attr) == 0);
-    assert(pthread_attr_setstacksize(&attr, 4U * 1024U * 1024U) == 0);
+    assert(pthread_attr_setstacksize(&attr, static_cast<size_t>(4U) * 1024U * 1024U) == 0);
     pthread_t cli_tid;
     assert(pthread_create(&cli_tid, &attr, dtls_client_thread, &cli_arg) == 0);
     (void)pthread_attr_destroy(&attr);
@@ -1124,7 +1124,7 @@ static pthread_t start_trigger_thread(MockTriggerArg& trig_arg, uint16_t port)
 
     pthread_attr_t attr;
     (void)pthread_attr_init(&attr);
-    (void)pthread_attr_setstacksize(&attr, 256U * 1024U);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(256U) * 1024U);
 
     pthread_t tid;
     (void)pthread_create(&tid, &attr, mock_trigger_thread, &trig_arg);

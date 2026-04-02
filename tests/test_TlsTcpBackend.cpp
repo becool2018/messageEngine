@@ -284,7 +284,7 @@ static void test_plaintext_loopback()
     pthread_attr_t attr;
     int pattr = pthread_attr_init(&attr);
     assert(pattr == 0);
-    pattr = pthread_attr_setstacksize(&attr, 4U * 1024U * 1024U);
+    pattr = pthread_attr_setstacksize(&attr, static_cast<size_t>(4U) * 1024U * 1024U);
     assert(pattr == 0);
 
     pthread_t tid;
@@ -332,7 +332,7 @@ static void test_tls_loopback()
     pthread_attr_t attr;
     int pattr = pthread_attr_init(&attr);
     assert(pattr == 0);
-    pattr = pthread_attr_setstacksize(&attr, 4U * 1024U * 1024U);
+    pattr = pthread_attr_setstacksize(&attr, static_cast<size_t>(4U) * 1024U * 1024U);
     assert(pattr == 0);
 
     pthread_t tid;
@@ -511,7 +511,7 @@ static void test_echo_loopback_plaintext()
     pthread_attr_t attr;
     int pattr = pthread_attr_init(&attr);
     assert(pattr == 0);
-    pattr = pthread_attr_setstacksize(&attr, 4U * 1024U * 1024U);
+    pattr = pthread_attr_setstacksize(&attr, static_cast<size_t>(4U) * 1024U * 1024U);
     assert(pattr == 0);
 
     pthread_t tid;
@@ -548,7 +548,7 @@ static pthread_t create_thread_4mb(void* (*func)(void*), void* arg)
     pthread_attr_t attr;
     int pattr = pthread_attr_init(&attr);
     assert(pattr == 0);
-    pattr = pthread_attr_setstacksize(&attr, 4U * 1024U * 1024U);
+    pattr = pthread_attr_setstacksize(&attr, static_cast<size_t>(4U) * 1024U * 1024U);
     assert(pattr == 0);
     pthread_t tid;
     int pret = pthread_create(&tid, &attr, func, arg);
@@ -681,11 +681,11 @@ static void* raw_socket_thread_func(void* raw_arg)
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct MultiMsgClientArg {
-    uint16_t port;
-    bool     tls_on;
     uint32_t delay_us;       // initial delay before connecting
     uint32_t num_msgs;       // messages to send (max 4)
     uint32_t stay_alive_us;  // how long to stay connected after sending
+    uint16_t port;
+    bool     tls_on;
     Result   result;
 };
 
@@ -1573,9 +1573,9 @@ static void test_tls_zero_length_frame()
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct HeavySenderArg {
-    uint16_t port;
     uint32_t num_msgs;      // how many messages to send
     uint32_t stay_alive_us; // how long to stay alive after sending
+    uint16_t port;
     Result   result;
 };
 

@@ -18,6 +18,7 @@
 #include "core/Assert.hpp"
 #include "core/Logger.hpp"
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -29,7 +30,9 @@ static const uint32_t MAX_CONFIG_LINE_LEN = 128U;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Leaf parse helpers — strip nesting from apply_kv branches (CC-reduction)
-// Each returns true on successful parse, false on sscanf failure (field unchanged).
+// Use strto* (not sscanf) to satisfy bugprone-unchecked-string-to-number-conversion:
+// check the end pointer to confirm the entire token was consumed.
+// Each returns true on successful parse, false on failure (field unchanged).
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Parse a uint32 from @p val into @p out. Returns true on success.
@@ -37,7 +40,11 @@ static bool parse_uint(const char* val, uint32_t* out)
 {
     NEVER_COMPILED_OUT_ASSERT(val != nullptr);
     NEVER_COMPILED_OUT_ASSERT(out != nullptr);
-    return (sscanf(val, "%u", out) == 1);
+    char* end = nullptr;
+    unsigned long v = strtoul(val, &end, 10);
+    if (end == val || *end != '\0') { return false; }
+    *out = static_cast<uint32_t>(v);
+    return true;
 }
 
 /// Parse a uint32 from @p val and store as bool in @p out. Returns true on success.
@@ -45,9 +52,10 @@ static bool parse_bool(const char* val, bool* out)
 {
     NEVER_COMPILED_OUT_ASSERT(val != nullptr);
     NEVER_COMPILED_OUT_ASSERT(out != nullptr);
-    uint32_t v = 0U;
-    if (sscanf(val, "%u", &v) != 1) { return false; }
-    *out = (v != 0U);
+    char* end = nullptr;
+    unsigned long v = strtoul(val, &end, 10);
+    if (end == val || *end != '\0') { return false; }
+    *out = (v != 0UL);
     return true;
 }
 
@@ -57,8 +65,9 @@ static bool parse_prob(const char* val, double* out)
 {
     NEVER_COMPILED_OUT_ASSERT(val != nullptr);
     NEVER_COMPILED_OUT_ASSERT(out != nullptr);
-    double v = 0.0;
-    if (sscanf(val, "%lf", &v) != 1) { return false; }
+    char* end = nullptr;
+    double v = strtod(val, &end);
+    if (end == val || *end != '\0') { return false; }
     // Clamp to [0.0, 1.0] (Power of 10: explicit bounds check)
     if (v < 0.0) { v = 0.0; }
     if (v > 1.0) { v = 1.0; }
@@ -68,14 +77,15 @@ static bool parse_prob(const char* val, double* out)
 }
 
 /// Parse a uint64 from @p val into @p out. Returns true on success.
-/// sscanf %llu requires unsigned long long*; cast to uint64_t after.
 static bool parse_u64(const char* val, uint64_t* out)
 {
     NEVER_COMPILED_OUT_ASSERT(val != nullptr);
     NEVER_COMPILED_OUT_ASSERT(out != nullptr);
-    unsigned long long ull = 0ULL;  // NOLINT(google-runtime-int) — sscanf requires this
-    if (sscanf(val, "%llu", &ull) != 1) { return false; }
-    *out = static_cast<uint64_t>(ull);
+    char* end = nullptr;
+    // strtoull returns unsigned long long; safe cast to uint64_t (both ≥ 64 bits).
+    unsigned long long v = strtoull(val, &end, 10);  // NOLINT(google-runtime-int)
+    if (end == val || *end != '\0') { return false; }
+    *out = static_cast<uint64_t>(v);
     return true;
 }
 
@@ -83,16 +93,18 @@ static bool parse_u64(const char* val, uint64_t* out)
 static void apply_reorder_window(const char* val, ImpairmentConfig& cfg)
 {
     NEVER_COMPILED_OUT_ASSERT(val != nullptr);
-    uint32_t v = 0U;
-    if (sscanf(val, "%u", &v) != 1) { return; }
+    char* end = nullptr;
+    unsigned long v = strtoul(val, &end, 10);
+    if (end == val || *end != '\0') { return; }
+    uint32_t w = static_cast<uint32_t>(v);
     // Clamp to IMPAIR_DELAY_BUF_SIZE (Power of 10: bounded buffer)
-    if (v > IMPAIR_DELAY_BUF_SIZE) {
+    if (w > IMPAIR_DELAY_BUF_SIZE) {
         Logger::log(Severity::WARNING_LO, "ConfigLoader",
                     "reorder_window_size %u exceeds IMPAIR_DELAY_BUF_SIZE %u; clamping",
-                    v, IMPAIR_DELAY_BUF_SIZE);
-        v = IMPAIR_DELAY_BUF_SIZE;
+                    w, IMPAIR_DELAY_BUF_SIZE);
+        w = IMPAIR_DELAY_BUF_SIZE;
     }
-    cfg.reorder_window_size = v;
+    cfg.reorder_window_size = w;
     NEVER_COMPILED_OUT_ASSERT(cfg.reorder_window_size <= IMPAIR_DELAY_BUF_SIZE);
 }
 

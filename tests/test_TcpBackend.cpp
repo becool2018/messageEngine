@@ -491,7 +491,7 @@ static void test_loopback_roundtrip()
     // TcpBackend is ~539 KB on the stack; add headroom for call frames and
     // flush_delayed_to_queue's 132 KB MessageEnvelope[32] temporary array.
     // 2 MB comfortably accommodates the peak stack depth for both threads.
-    (void)pthread_attr_setstacksize(&attr, 2U * 1024U * 1024U);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
 
     pthread_t srv_tid;
     (void)pthread_create(&srv_tid, &attr, tcp_server_thread, &srv_arg);
@@ -632,7 +632,7 @@ static void test_garbage_frame_deserialize_fail()
 
     pthread_attr_t attr;
     (void)pthread_attr_init(&attr);
-    (void)pthread_attr_setstacksize(&attr, 2U * 1024U * 1024U);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
 
     pthread_t srv_tid;
     (void)pthread_create(&srv_tid, &attr, garbage_tcp_srv_thread, &srv_arg);
@@ -683,7 +683,7 @@ static void test_two_clients_compact()
 
     pthread_attr_t attr;
     (void)pthread_attr_init(&attr);
-    (void)pthread_attr_setstacksize(&attr, 2U * 1024U * 1024U);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
 
     pthread_t srv_tid;
     (void)pthread_create(&srv_tid, &attr, two_cli_srv_thread, &srv_arg);
@@ -728,7 +728,7 @@ static void test_client_detect_server_close()
 
     pthread_attr_t attr;
     (void)pthread_attr_init(&attr);
-    (void)pthread_attr_setstacksize(&attr, 2U * 1024U * 1024U);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
 
     pthread_t srv_tid;
     (void)pthread_create(&srv_tid, &attr, srv_close_thread, &srv_arg);
@@ -1032,7 +1032,7 @@ static void test_remove_client_fd_false_at_index0()
 
     pthread_attr_t attr;
     (void)pthread_attr_init(&attr);
-    (void)pthread_attr_setstacksize(&attr, 2U * 1024U * 1024U);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
 
     pthread_t srv_tid;
     (void)pthread_create(&srv_tid, &attr, two_cli_srv_b_thread, &srv_arg);
@@ -1076,9 +1076,9 @@ static void test_remove_client_fd_false_at_index0()
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct HeavyTcpSenderArg {
-    uint16_t port;
     uint32_t num_msgs;
     uint32_t stay_alive_us;
+    uint16_t port;
     Result   result;
 };
 
@@ -1126,7 +1126,7 @@ static void test_recv_queue_overflow()
 
     pthread_attr_t attr;
     (void)pthread_attr_init(&attr);
-    (void)pthread_attr_setstacksize(&attr, 2U * 1024U * 1024U);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
 
     // Power of 10 Rule 2: fixed loop bound (N_CLIENTS = 8)
     for (uint32_t k = 0U; k < N_CLIENTS; ++k) {

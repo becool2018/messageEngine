@@ -413,7 +413,7 @@ static bool test_delay_buf_full_enabled()
     // Fill all IMPAIR_DELAY_BUF_SIZE slots (Power of 10: bounded loop)
     for (uint32_t i = 0U; i < IMPAIR_DELAY_BUF_SIZE; ++i) {
         MessageEnvelope env;
-        create_test_envelope(env, 1U, 2U, static_cast<uint64_t>(1000U + i));
+        create_test_envelope(env, 1U, 2U, static_cast<uint64_t>(i) + 1000U);
         Result r = engine.process_outbound(env, now_us);
         assert(r == Result::OK);
     }
@@ -445,7 +445,7 @@ static bool test_delay_buf_full_disabled()
     // Fill all IMPAIR_DELAY_BUF_SIZE slots without collecting (Power of 10: bounded loop)
     for (uint32_t i = 0U; i < IMPAIR_DELAY_BUF_SIZE; ++i) {
         MessageEnvelope env;
-        create_test_envelope(env, 1U, 2U, static_cast<uint64_t>(2000U + i));
+        create_test_envelope(env, 1U, 2U, static_cast<uint64_t>(i) + 2000U);
         Result r = engine.process_outbound(env, now_us);
         assert(r == Result::OK);
     }
@@ -718,7 +718,7 @@ static bool test_duplication_buffer_full_skip()
     // (Power of 10: bounded loop)
     for (uint32_t i = 0U; i < 16U; ++i) {
         MessageEnvelope env;
-        create_test_envelope(env, 1U, 2U, static_cast<uint64_t>(100U + i));
+        create_test_envelope(env, 1U, 2U, static_cast<uint64_t>(i) + 100U);
         Result r = engine.process_outbound(env, now_us);
         assert(r == Result::OK);
     }
