@@ -693,7 +693,7 @@ This project ships a set of reusable Claude Code skills in `.claude/skills/`. Sk
 | Category | Lines |
 |---|---|
 | `src/` (production + headers) | 9,578 |
-| `tests/` | 11,017 |
-| **Total** | **20,595** |
+| `tests/` | 11,457 |
+| **Total** | **21,035** |
 
-54 source files across 3 layers and 15 test suites.
+54 source files across 3 layers; 15 test suites + 1 shared mock header (16 test files).
