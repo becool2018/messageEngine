@@ -6,6 +6,8 @@ A safety-critical C++ networking library that models realistic communication pro
 
 All production code complies with **JPL Power of 10**, **MISRA C++:2023**, and an **F-Prime style subset**: no exceptions, no STL, no templates, no RTTI, and no dynamic allocation on critical paths after initialization.
 
+The library is maintained to **NASA-STD-8719.13C** and **NASA-STD-8739.8A** software assurance standards at **Class C** classification (infrastructure / networking library). Testing discipline voluntarily targets **Class B** rigor: all safety-critical functions require branch coverage, mandatory peer inspection (M1), and static analysis (M2), with MC/DC coverage as the goal for the five highest-hazard functions.
+
 ---
 
 ## Table of Contents
