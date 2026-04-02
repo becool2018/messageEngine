@@ -39,24 +39,6 @@ jobs:
         run: |
           make run_tests
 
-      - name: Diagnose cppcheck suppressions
-        run: |
-          echo "=== cppcheck version ==="
-          cppcheck --version
-          echo "=== Test 1: full file, no flags ==="
-          cppcheck --suppressions-list=.cppcheck-suppress /dev/null 2>&1 || echo "FAILED test 1"
-          echo "=== Test 2: full file + --enable=all ==="
-          cppcheck --enable=all --suppressions-list=.cppcheck-suppress /dev/null 2>&1 || echo "FAILED test 2"
-          echo "=== Test 3: full file + --enable=all + --std=c++17 ==="
-          cppcheck --enable=all --suppressions-list=.cppcheck-suppress --std=c++17 /dev/null 2>&1 || echo "FAILED test 3"
-          echo "=== Test 4: full file + full flags against src/ ==="
-          cppcheck --enable=all --error-exitcode=1 --suppressions-list=.cppcheck-suppress --std=c++17 -I src src/ 2>&1 | head -5 || echo "FAILED test 4"
-          echo "=== Test 5: all entries combined via stdin ==="
-          grep -v '^#' .cppcheck-suppress | grep -v '^$' | cppcheck --suppressions-list=/dev/stdin /dev/null 2>&1 || echo "FAILED test 5"
-          echo "=== Test 6: wc and xxd of suppression file ==="
-          wc -lc .cppcheck-suppress
-          od -c .cppcheck-suppress | tail -3
-
       - name: Static analysis (clang-tidy + cppcheck + scan-build)
         run: |
           make static_analysis

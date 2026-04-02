@@ -177,8 +177,9 @@ lint:
 #       On Linux: apt install cppcheck
 cppcheck:
 	@echo "=== Cppcheck: src/ ==="
-	@cppcheck --enable=all --error-exitcode=1 \
-	    --suppressions-list=.cppcheck-suppress \
+	@grep -v '^#' .cppcheck-suppress | grep -v '^$$' | \
+	    cppcheck --enable=all --error-exitcode=1 \
+	    --suppressions-list=/dev/stdin \
 	    --std=c++17 -I src \
 	    src/ 2>&1
 	@echo "=== Cppcheck: PASS ==="
@@ -191,9 +192,10 @@ cppcheck:
 #       On Linux: apt install cppcheck  (addon disabled; use make cppcheck instead)
 cppcheck-misra:
 	@echo "=== Cppcheck + MISRA C++:2023 addon: src/ ==="
-	@cppcheck --enable=all --error-exitcode=1 \
+	@grep -v '^#' .cppcheck-suppress | grep -v '^$$' | \
+	    cppcheck --enable=all --error-exitcode=1 \
 	    --addon=misra \
-	    --suppressions-list=.cppcheck-suppress \
+	    --suppressions-list=/dev/stdin \
 	    --std=c++17 -I src \
 	    src/ 2>&1
 	@echo "=== Cppcheck + MISRA addon: PASS ==="
