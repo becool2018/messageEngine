@@ -21,6 +21,7 @@
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/ssl_cookie.h>
+#include <mbedtls/psa_util.h>
 #include <psa/crypto.h>
 
 #include <sys/socket.h>   // connect(), recvfrom()
@@ -94,7 +95,7 @@ int MbedtlsOpsImpl::ssl_conf_own_cert(mbedtls_ssl_config*  conf,
 int MbedtlsOpsImpl::ssl_cookie_setup(mbedtls_ssl_cookie_ctx* ctx)
 {
     NEVER_COMPILED_OUT_ASSERT(ctx != nullptr);
-    int ret = mbedtls_ssl_cookie_setup(ctx);
+    int ret = mbedtls_ssl_cookie_setup(ctx, mbedtls_psa_get_random, MBEDTLS_PSA_RANDOM_STATE);
     NEVER_COMPILED_OUT_ASSERT(true);
     return ret;
 }
