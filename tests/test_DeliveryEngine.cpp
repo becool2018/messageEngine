@@ -309,10 +309,11 @@ static void test_receive_ack_cancels_retry()
     assert(rb_res == Result::OK);
     uint64_t sent_msg_id = received_at_b.message_id;
 
-    // Build an ACK from node 2 referencing the sent message_id
-    // Note: ACK source_id must match the source tracked in AckTracker (source_id=1, local node)
+    // Build an ACK from node 2 (receiver) to node 1 (sender) referencing the sent message_id.
+    // DeliveryEngine::receive() now uses env.destination_id (=1, the local sender) for the
+    // tracker lookup, matching the source_id stored at track() time.
     MessageEnvelope ack_env;
-    make_ack_envelope(ack_env, 1U, 2U, sent_msg_id);
+    make_ack_envelope(ack_env, 2U, 1U, sent_msg_id);
 
     // Inject the ACK into harness_a's receive queue
     Result inject_res = harness_a.inject(ack_env);

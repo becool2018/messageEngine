@@ -202,12 +202,16 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
     // Handle control messages (ACK/NAK/HEARTBEAT)
     if (envelope_is_control(env)) {
         if (env.message_type == MessageType::ACK) {
-            // Process ACK: clear from retrying, confirm in ack_tracker
+            // Process ACK: clear from retrying, confirm in ack_tracker.
+            // The ACK envelope carries source_id = remote peer (ACK sender) and
+            // destination_id = local node (original message sender).
+            // Tracker/retry slots store source_id = local node (set in send()).
+            // Therefore look up by destination_id, not source_id.
             // Power of 10 rule 7: check return values
-            Result ack_res = m_ack_tracker.on_ack(env.source_id, env.message_id);
+            Result ack_res = m_ack_tracker.on_ack(env.destination_id, env.message_id);
             (void)ack_res;  // Side effect; not critical to fail receive
 
-            Result retry_res = m_retry_manager.on_ack(env.source_id, env.message_id);
+            Result retry_res = m_retry_manager.on_ack(env.destination_id, env.message_id);
             (void)retry_res;  // Side effect
 
             Logger::log(Severity::INFO, "DeliveryEngine",

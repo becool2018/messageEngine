@@ -184,3 +184,43 @@ Entry criteria verified 2026-04-02:
 
 Moderator: Don Jessup — 2026-04-02. DEF-002-1 resolved. All entry and exit criteria satisfied. No regressions. Inspection INSP-002 closed PASS.
 
+---
+
+### INSP-003 — ACK cancellation source_id mismatch fix (DEF-003-1)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-03 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | PASS |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `src/core/DeliveryEngine.cpp` `receive()` | Changed `on_ack(env.source_id, ...)` to `on_ack(env.destination_id, ...)` in both `m_ack_tracker` and `m_retry_manager` calls; added explanatory comment |
+| `tests/test_DeliveryEngine.cpp` `test_receive_ack_cancels_retry()` | Replaced workaround ACK (`source_id=1`) with protocol-correct ACK (`source_id=2, destination_id=1`); updated comment |
+| `docs/STATE_MACHINES.md` §1 | Replaced "Known implementation defect" note with "Defect fixed (DEF-003-1)" |
+| `docs/HAZARD_ANALYSIS.md` §2 AckTracker FMEA | Updated `on_ack()` source_id mismatch row to reflect fix |
+
+#### Defects found
+
+| ID | File : line | Description | Severity | Disposition | Resolution |
+|----|-------------|-------------|----------|-------------|------------|
+| DEF-003-1 | `src/core/DeliveryEngine.cpp:207,210` | **ACK cancellation broken in two-node deployment.** `on_ack()` was passed `env.source_id` (the remote ACK sender's ID) but tracker/retry slots store the local sender's ID (`env.destination_id`). The PENDING→ACKED transition was never taken; all ACK-tracked slots expired via sweep only. RELIABLE_RETRY traffic retransmitted up to `max_retries` even after a valid ACK was received. | CRITICAL | FIX | Changed lookup key from `env.source_id` to `env.destination_id` in `DeliveryEngine::receive()`. Updated test to use correct two-node ACK protocol. |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make lint` — zero clang-tidy violations | PASS |
+| `make run_tests` — all tests pass | PASS |
+| SC annotations on `receive()` unchanged | PASS |
+| `NEVER_COMPILED_OUT_ASSERT` density unchanged (no new functions) | PASS |
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-03. DEF-003-1 resolved. All entry and exit criteria satisfied. Inspection INSP-003 closed PASS.
+

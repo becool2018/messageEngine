@@ -45,7 +45,7 @@ equivalent) for all state machines documented here.
 - A slot in `PENDING` state is never freed without being copied to `expired_buf` (if capacity allows) or transitioning through `ACKED`.
 - `on_ack()` never decrements `m_count` — only `sweep_expired()` does.
 
-> **Known implementation defect:** `on_ack(src, msg_id)` matches on `slot.env.source_id == src`. At `track()` time, `slot.env.source_id` is set to the local node's ID (the sender). At `on_ack()` time, the ACK envelope carries `source_id` = remote peer's ID. In a two-node deployment (local_id=1, remote_id=2), these are always different, so the PENDING→ACKED transition via `on_ack()` is never taken. All slot reclamation occurs via `sweep_expired()` instead. This means every sent message that receives an ACK still consumes an AckTracker slot until the sweep deadline elapses.
+> **Defect fixed (DEF-003-1):** `on_ack(src, msg_id)` matches on `slot.env.source_id == src`. Previously, `DeliveryEngine::receive()` passed `env.source_id` (the remote ACK sender's ID) as `src`, which never matched the locally-assigned `source_id` stored at `track()` time. Fixed by passing `env.destination_id` (the local node ID — the original message sender) instead. The PENDING→ACKED transition now fires correctly in normal two-node deployments.
 
 ### State Diagram
 
