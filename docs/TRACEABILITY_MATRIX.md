@@ -7,8 +7,8 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ ID    | Requirement (summary)                              | Implements (src/ file)                                      | Verifies (tests/ file :: test name)                  |
 |-----------|----------------------------------------------------|-------------------------------------------------------------|------------------------------------------------------|
 | REQ-3.1   | MessageEnvelope standard fields                    | src/core/MessageEnvelope.hpp, src/core/Types.hpp            | test_MessageEnvelope.cpp :: test_envelope_init, test_envelope_valid, test_envelope_copy, test_envelope_is_data |
-| REQ-3.2.1 | Message ID generation and comparison               | src/core/MessageId.hpp, src/core/MessageId.cpp              | — (no dedicated test; covered indirectly by send-path tests) |
-| REQ-3.2.2 | Timestamps and expiry checking                     | src/core/Timestamp.hpp, src/core/Timestamp.cpp              | — (no dedicated test)                                |
+| REQ-3.2.1 | Message ID generation and comparison               | src/core/MessageId.hpp, src/core/MessageId.cpp              | test_MessageId.cpp :: test_init_seed, test_monotonic_increment, test_wraparound_recovery, test_min_valid_seed |
+| REQ-3.2.2 | Timestamps and expiry checking                     | src/core/Timestamp.hpp, src/core/Timestamp.cpp              | test_Timestamp.cpp :: test_expired_false_before_deadline, test_expired_true_at_deadline, test_expired_true_past_deadline, test_expiry_zero_never_expires, test_deadline_arithmetic, test_deadline_zero_duration |
 | REQ-3.2.3 | Serialization / deserialization                    | src/core/Serializer.hpp, src/core/Serializer.cpp            | test_Serializer.cpp :: test_serialize_deserialize_basic, test_serialize_buffer_too_small, test_serialize_invalid_envelope, test_deserialize_truncated, test_serialize_max_payload, test_wire_header_size, test_serialize_zero_payload, test_deserialize_header_too_short, test_deserialize_version_mismatch, test_deserialize_bad_magic, test_deserialize_oversized_payload_field, test_deserialize_zero_payload, test_deserialize_version_zero_rejected, test_proto_version_in_wire_frame |
 | REQ-3.2.8 | Wire format version and magic enforcement          | src/core/ProtocolVersion.hpp, src/core/Serializer.hpp, src/core/Serializer.cpp | test_Serializer.cpp :: test_deserialize_version_mismatch, test_deserialize_bad_magic, test_deserialize_version_zero_rejected, test_proto_version_in_wire_frame |
 | REQ-3.2.4 | ACK handling                                       | src/core/AckTracker.hpp, src/core/AckTracker.cpp            | test_MessageEnvelope.cpp :: test_envelope_make_ack; test_AckTracker.cpp :: test_track_ok, test_track_full, test_on_ack_ok, test_on_ack_wrong_src, test_on_ack_wrong_id, test_sweep_expired_pending, test_sweep_pending_not_expired, test_sweep_releases_acked, test_sweep_buf_capacity |
@@ -18,7 +18,7 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-3.3.1 | Best effort delivery semantic                      | src/core/DeliveryEngine.cpp, src/core/Types.hpp             | test_DeliveryEngine.cpp :: test_send_best_effort, test_receive_data_best_effort |
 | REQ-3.3.2 | Reliable with ACK delivery semantic                | src/core/DeliveryEngine.cpp, src/core/AckTracker.cpp        | test_AckTracker.cpp :: all ten tests; test_DeliveryEngine.cpp :: test_send_reliable_ack, test_sweep_detects_timeout, test_send_ack_tracker_full |
 | REQ-3.3.3 | Reliable with retry and dedupe semantic            | src/core/DeliveryEngine.cpp, src/core/RetryManager.cpp, src/core/DuplicateFilter.cpp | test_RetryManager.cpp :: all twelve tests; test_DeliveryEngine.cpp :: test_send_reliable_retry, test_receive_duplicate, test_receive_ack_cancels_retry, test_pump_retries_fires, test_pump_retries_resends, test_send_retry_manager_full |
-| REQ-3.3.4 | Expiring messages delivery semantic                | src/core/DeliveryEngine.cpp, src/core/Timestamp.cpp         | test_DeliveryEngine.cpp :: test_receive_expired |
+| REQ-3.3.4 | Expiring messages delivery semantic                | src/core/DeliveryEngine.cpp, src/core/Timestamp.cpp         | test_DeliveryEngine.cpp :: test_receive_expired; test_Timestamp.cpp :: test_expiry_zero_never_expires |
 | REQ-3.3.5 | Ordered / unordered channel support                | src/core/ChannelConfig.hpp                                  | — (no dedicated test)                                |
 | REQ-4.1.1 | init(config) transport operation                   | src/core/TransportInterface.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp, src/platform/LocalSimHarness.cpp | — |
 | REQ-4.1.2 | send_message(envelope) transport operation         | src/core/TransportInterface.hpp, src/core/RingBuffer.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp, src/platform/LocalSimHarness.cpp | test_LocalSim.cpp :: basic send/receive, bidirectional, queue-full |
@@ -31,7 +31,7 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-5.1.3 | Packet loss impairment                             | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: deterministic 100% loss, zero loss |
 | REQ-5.1.4 | Packet duplication impairment                      | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: test_duplication, test_duplication_no_fire, test_duplication_buffer_full_skip |
 | REQ-5.1.5 | Packet reordering impairment                       | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: test_process_inbound_passthrough, test_process_inbound_reorder, test_reorder_window_zero_enabled |
-| REQ-5.1.6 | Partition / intermittent outage impairment         | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: test_partition_state_machine, test_partition_waiting_and_active |
+| REQ-5.1.6 | Partition / intermittent outage impairment         | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: test_partition_state_machine, test_partition_waiting_and_active, test_partition_gap_ms_minimum_valid |
 | REQ-5.2.1 | Structured impairment configuration object        | src/platform/ImpairmentConfig.hpp, src/platform/ImpairmentConfigLoader.hpp, src/platform/ImpairmentConfigLoader.cpp | test_ImpairmentEngine.cpp :: disabled pass-through; test_ImpairmentConfigLoader.cpp :: all twelve tests |
 | REQ-5.2.2 | Enable / disable each impairment independently     | src/platform/ImpairmentConfig.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: disabled pass-through  |
 | REQ-5.2.3 | Per-channel / per-peer impairment config           | src/platform/ImpairmentConfig.hpp                           | — (no dedicated test)                                |
@@ -72,7 +72,7 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 ## Coverage gaps (requirements with no test)
 
 The following REQ IDs have no `Verifies:` entry. These are candidates for new tests:
-REQ-3.2.1, REQ-3.2.2, REQ-3.2.7,
+REQ-3.2.7,
 REQ-3.3.5,
 REQ-4.1.1, REQ-4.2.1, REQ-4.2.2,
 REQ-5.2.3, REQ-5.2.5,
@@ -98,4 +98,6 @@ Resolved since last generation (tests added):
 - REQ-5.1.2 — now verified by test_ImpairmentEngine.cpp :: test_jitter
 - REQ-5.1.4 — now verified by test_ImpairmentEngine.cpp :: test_duplication, test_duplication_no_fire, test_duplication_buffer_full_skip
 - REQ-5.1.5 — now verified by test_ImpairmentEngine.cpp :: test_process_inbound_passthrough, test_process_inbound_reorder, test_reorder_window_zero_enabled
-- REQ-5.1.6 — now verified by test_ImpairmentEngine.cpp :: test_partition_state_machine, test_partition_waiting_and_active
+- REQ-5.1.6 — now verified by test_ImpairmentEngine.cpp :: test_partition_state_machine, test_partition_waiting_and_active, test_partition_gap_ms_minimum_valid
+- REQ-3.2.1 — now covered by test_MessageId.cpp (4 tests: seed, monotonic increment, wraparound recovery, min valid seed)
+- REQ-3.2.2 — now covered by test_Timestamp.cpp (6 tests: expired false, expired at deadline, expired past deadline, zero-expiry never-expires, deadline arithmetic, zero-duration deadline)

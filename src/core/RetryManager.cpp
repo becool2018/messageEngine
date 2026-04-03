@@ -58,8 +58,10 @@ static uint32_t advance_backoff(uint32_t current_ms)
 // ─────────────────────────────────────────────────────────────────────────────
 void RetryManager::init()
 {
-    // Power of 10 rule 5: initialize state and mark not yet initialized
-    NEVER_COMPILED_OUT_ASSERT(true);  // Assert: function entry point
+    // Power of 10 rule 5: precondition — manager must not already be initialized.
+    // Re-calling init() on an active manager is a contract violation; slots would be
+    // silently zeroed while callers believe entries are still valid.
+    NEVER_COMPILED_OUT_ASSERT(!m_initialized);  // Assert: first-time initialization only
 
     m_count = 0U;
     m_initialized = true;
@@ -169,6 +171,43 @@ Result RetryManager::on_ack(NodeId src, uint64_t msg_id)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// RetryManager::reap_terminated_slots()
+// Phase 1 of collect_due(): remove expired and exhausted entries from the table.
+// Extracted to keep collect_due() within CC ≤ 10.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions.
+// ─────────────────────────────────────────────────────────────────────────────
+void RetryManager::reap_terminated_slots(uint64_t now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);   // Assert: manager was initialized
+    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);   // Assert: valid timestamp
+
+    // Power of 10 rule 2: fully bounded loop (compile-time constant).
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        if (!m_slots[i].active) {
+            continue;
+        }
+        if (slot_has_expired(m_slots[i].expiry_us, now_us)) {
+            m_slots[i].active = false;
+            --m_count;
+            Logger::log(Severity::WARNING_LO, "RetryManager",
+                        "Expired retry entry for message_id=%llu",
+                        (unsigned long long)m_slots[i].env.message_id);
+            continue;
+        }
+        if (m_slots[i].retry_count >= m_slots[i].max_retries) {
+            m_slots[i].active = false;
+            --m_count;
+            Logger::log(Severity::WARNING_HI, "RetryManager",
+                        "Exhausted retries for message_id=%llu (count=%u, max=%u)",
+                        (unsigned long long)m_slots[i].env.message_id,
+                        m_slots[i].retry_count, m_slots[i].max_retries);
+        }
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count bounded
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // RetryManager::collect_due()
 // ─────────────────────────────────────────────────────────────────────────────
 uint32_t RetryManager::collect_due(uint64_t         now_us,
@@ -181,31 +220,20 @@ uint32_t RetryManager::collect_due(uint64_t         now_us,
 
     uint32_t collected = 0U;
 
-    // Power of 10 rule 2: bounded loop (compile-time constant)
+    // MED-3 fix: separate reaping from collecting to avoid skipping tail slots.
+    // Previously a single loop with `&& collected < buf_cap` exited before visiting
+    // remaining slots when the output buffer was full, leaving expired/exhausted slots
+    // unreaped until the next call. Under HAZ-002 (retry storm), a full buffer leads to
+    // unbounded slot accumulation in the worst case.
+    //
+    // Phase 1: reap expired and exhausted slots across all indices (full sweep).
+    reap_terminated_slots(now_us);
+
+    // Phase 2: collect due retries into output buffer.
+    // Power of 10 rule 2: bounded by compile-time constant; early exit when buffer full.
     for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY && collected < buf_cap; ++i) {
         if (!m_slots[i].active) {
-            continue;  // Skip inactive slots
-        }
-
-        // Check if this entry has expired
-        if (slot_has_expired(m_slots[i].expiry_us, now_us)) {
-            m_slots[i].active = false;
-            --m_count;
-            Logger::log(Severity::WARNING_LO, "RetryManager",
-                        "Expired retry entry for message_id=%llu",
-                        (unsigned long long)m_slots[i].env.message_id);
-            continue;
-        }
-
-        // Check if this entry has exhausted retries
-        if (m_slots[i].retry_count >= m_slots[i].max_retries) {
-            m_slots[i].active = false;
-            --m_count;
-            Logger::log(Severity::WARNING_HI, "RetryManager",
-                        "Exhausted retries for message_id=%llu (count=%u, max=%u)",
-                        (unsigned long long)m_slots[i].env.message_id,
-                        m_slots[i].retry_count, m_slots[i].max_retries);
-            continue;
+            continue;  // Skip inactive slots (including those just reaped in Phase 1)
         }
 
         // Check if retry is due

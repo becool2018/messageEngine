@@ -26,6 +26,47 @@
 #include "Assert.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
+// File-static helper: process an ACK message — cancel ack_tracker and retry slots.
+// Extracted to keep DeliveryEngine::receive() within CC ≤ 10.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions.
+// ─────────────────────────────────────────────────────────────────────────────
+static void process_ack(AckTracker&          ack_tracker,
+                         RetryManager&        retry_manager,
+                         const MessageEnvelope& env)
+{
+    NEVER_COMPILED_OUT_ASSERT(env.message_type == MessageType::ACK);  // pre-condition
+    NEVER_COMPILED_OUT_ASSERT(envelope_is_control(env));               // pre-condition
+
+    // Look up by destination_id: ACK carries (src=remote, dst=local); tracker slot was
+    // originally created with source_id = local node in send().
+    Result ack_res = ack_tracker.on_ack(env.destination_id, env.message_id);
+    if (ack_res == Result::ERR_INVALID) {
+        Logger::log(Severity::INFO, "DeliveryEngine",
+                    "ACK has no matching ack_tracker slot for message_id=%llu",
+                    (unsigned long long)env.message_id);
+    } else if (ack_res != Result::OK) {
+        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
+                    "Unexpected ack_tracker result=%d for message_id=%llu",
+                    static_cast<int>(ack_res), (unsigned long long)env.message_id);
+    }
+
+    Result retry_res = retry_manager.on_ack(env.destination_id, env.message_id);
+    if (retry_res == Result::ERR_INVALID) {
+        Logger::log(Severity::INFO, "DeliveryEngine",
+                    "ACK has no matching retry slot for message_id=%llu",
+                    (unsigned long long)env.message_id);
+    } else if (retry_res != Result::OK) {
+        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
+                    "Unexpected retry_manager result=%d for message_id=%llu",
+                    static_cast<int>(retry_res), (unsigned long long)env.message_id);
+    }
+
+    Logger::log(Severity::INFO, "DeliveryEngine",
+                "Received ACK for message_id=%llu from src=%u",
+                (unsigned long long)env.message_id, env.source_id);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DeliveryEngine::init()
 // ─────────────────────────────────────────────────────────────────────────────
 void DeliveryEngine::init(TransportInterface* transport,
@@ -202,21 +243,8 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
     // Handle control messages (ACK/NAK/HEARTBEAT)
     if (envelope_is_control(env)) {
         if (env.message_type == MessageType::ACK) {
-            // Process ACK: clear from retrying, confirm in ack_tracker.
-            // The ACK envelope carries source_id = remote peer (ACK sender) and
-            // destination_id = local node (original message sender).
-            // Tracker/retry slots store source_id = local node (set in send()).
-            // Therefore look up by destination_id, not source_id.
-            // Power of 10 rule 7: check return values
-            Result ack_res = m_ack_tracker.on_ack(env.destination_id, env.message_id);
-            (void)ack_res;  // Side effect; not critical to fail receive
-
-            Result retry_res = m_retry_manager.on_ack(env.destination_id, env.message_id);
-            (void)retry_res;  // Side effect
-
-            Logger::log(Severity::INFO, "DeliveryEngine",
-                        "Received ACK for message_id=%llu from src=%u",
-                        (unsigned long long)env.message_id, env.source_id);
+            // Power of 10 rule 7: return values checked inside process_ack().
+            process_ack(m_ack_tracker, m_retry_manager, env);
         }
         // For other control messages (NAK, HEARTBEAT), just pass through
         return Result::OK;

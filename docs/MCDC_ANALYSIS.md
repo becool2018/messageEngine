@@ -127,15 +127,15 @@ All three are analysed here as they form the single logical operation.
 
 ## 4. `Serializer::serialize()` — HAZ-005
 
-**File:** `src/core/Serializer.cpp` lines 117–169
+**File:** `src/core/Serializer.cpp` lines 132–189
 
 ### Decision table
 
 | ID | Source line | Decision expression | Conditions | MC/DC pair — True outcome | MC/DC pair — False outcome | Test(s) |
 |----|-------------|--------------------|-----------|--------------------------|-----------------------------|---------|
-| SZ-D1 | L127 | `!envelope_valid(env)` | A = envelope invalid | A=T → return ERR_INVALID | A=F → continue | T: `test_serialize_invalid_envelope`; F: `test_serialize_deserialize_basic` |
-| SZ-D2 | L133 | `buf_len < required_len` | A = buffer too small | A=T → return ERR_INVALID | A=F → continue | T: `test_serialize_buffer_too_small`; F: `test_serialize_deserialize_basic` |
-| SZ-D3 | L159 | `env.payload_length > 0U` | A = non-zero payload | A=T → memcpy payload | A=F → skip memcpy | T: `test_serialize_deserialize_basic`; F: `test_serialize_zero_payload` |
+| SZ-D1 | L142 | `!envelope_valid(env)` | A = envelope invalid | A=T → return ERR_INVALID | A=F → continue | T: `test_serialize_invalid_envelope`; F: `test_serialize_deserialize_basic` |
+| SZ-D2 | L148 | `buf_len < required_len` | A = buffer too small | A=T → return ERR_INVALID | A=F → continue | T: `test_serialize_buffer_too_small`; F: `test_serialize_deserialize_basic` |
+| SZ-D3 | L175 | `env.payload_length > 0U` | A = non-zero payload | A=T → memcpy payload | A=F → skip memcpy | T: `test_serialize_deserialize_basic`; F: `test_serialize_zero_payload` |
 
 **MC/DC status: DEMONSTRATED** — all single-condition decisions covered T and F.
 
@@ -143,18 +143,18 @@ All three are analysed here as they form the single logical operation.
 
 ## 5. `Serializer::deserialize()` — HAZ-001, HAZ-005
 
-**File:** `src/core/Serializer.cpp` lines 175–259
+**File:** `src/core/Serializer.cpp` lines 191–273
 
 ### Decision table
 
 | ID | Source line | Decision expression | Conditions | MC/DC pair — True outcome | MC/DC pair — False outcome | Test(s) |
 |----|-------------|--------------------|-----------|--------------------------|-----------------------------|---------|
-| DS-D1 | L184 | `buf_len < WIRE_HEADER_SIZE` | A = buffer shorter than header | A=T → return ERR_INVALID | A=F → continue | T: `test_deserialize_header_too_short`; F: `test_serialize_deserialize_basic` |
-| DS-D2 | L207 | `padding1 != 0U` | A = first padding byte non-zero | A=T → return ERR_INVALID | A=F → continue | T: `test_deserialize_bad_padding1`; F: `test_serialize_deserialize_basic` |
-| DS-D3 | L232 | `padding2 != 0U` | A = second padding word non-zero | A=T → return ERR_INVALID | A=F → continue | T: `test_deserialize_bad_padding2`; F: `test_serialize_deserialize_basic` |
-| DS-D4 | L240 | `env.payload_length > MSG_MAX_PAYLOAD_BYTES` | A = payload field too large | A=T → return ERR_INVALID | A=F → continue | T: `test_deserialize_oversized_payload_field`; F: `test_serialize_deserialize_basic` |
-| DS-D5 | L246 | `buf_len < total_size` | A = buffer shorter than header+payload | A=T → return ERR_INVALID | A=F → continue | T: `test_deserialize_truncated`; F: `test_serialize_deserialize_basic` |
-| DS-D6 | L251 | `env.payload_length > 0U` | A = non-zero payload | A=T → memcpy payload | A=F → skip memcpy | T: `test_serialize_deserialize_basic`; F: `test_deserialize_zero_payload` |
+| DS-D1 | L200 | `buf_len < WIRE_HEADER_SIZE` | A = buffer shorter than header | A=T → return ERR_INVALID | A=F → continue | T: `test_deserialize_header_too_short`; F: `test_serialize_deserialize_basic` |
+| DS-D2 | L223 | `proto_ver != PROTO_VERSION` | A = protocol version byte mismatch | A=T → return ERR_INVALID | A=F → continue | T: `test_deserialize_version_mismatch`; F: `test_serialize_deserialize_basic` |
+| DS-D3 | L248 | `magic_word != (static_cast<uint32_t>(PROTO_MAGIC) << 16U)` | A = frame magic mismatch or reserved bytes non-zero | A=T → return ERR_INVALID | A=F → continue | T: `test_deserialize_bad_magic`; F: `test_serialize_deserialize_basic` |
+| DS-D4 | L256 | `env.payload_length > MSG_MAX_PAYLOAD_BYTES` | A = payload field too large | A=T → return ERR_INVALID | A=F → continue | T: `test_deserialize_oversized_payload_field`; F: `test_serialize_deserialize_basic` |
+| DS-D5 | L262 | `buf_len < total_size` | A = buffer shorter than header+payload | A=T → return ERR_INVALID | A=F → continue | T: `test_deserialize_truncated`; F: `test_serialize_deserialize_basic` |
+| DS-D6 | L267 | `env.payload_length > 0U` | A = non-zero payload | A=T → memcpy payload | A=F → skip memcpy | T: `test_serialize_deserialize_basic`; F: `test_deserialize_zero_payload` |
 
 **MC/DC status: DEMONSTRATED** — all single-condition decisions covered T and F.
 

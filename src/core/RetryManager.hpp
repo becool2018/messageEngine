@@ -101,6 +101,10 @@ public:
                          uint32_t             buf_cap);
 
 private:
+    // Phase 1 of collect_due(): reap all expired and exhausted slots across the full table.
+    // Extracted to keep collect_due() within CC ≤ 10.
+    void reap_terminated_slots(uint64_t now_us);
+
     // ─────────────────────────────────────────────────────────────────────────
     // Retry table entry (fixed-size slot in m_slots array)
     // ─────────────────────────────────────────────────────────────────────────
@@ -116,8 +120,8 @@ private:
 
     // Power of 10 rule 3: fixed-capacity storage, no dynamic allocation
     RetryEntry m_slots[ACK_TRACKER_CAPACITY];
-    uint32_t   m_count;  ///< Number of active entries
-    bool       m_initialized;
+        uint32_t   m_count      = 0U;   ///< Number of active entries
+        bool       m_initialized = false; ///< True after init() has been called
 };
 
 #endif // CORE_RETRY_MANAGER_HPP

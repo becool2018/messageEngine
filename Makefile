@@ -130,7 +130,9 @@ tests: \
     build/test_TcpBackend \
     build/test_UdpBackend \
     build/test_SocketUtils \
-    build/test_AssertState
+    build/test_AssertState \
+    build/test_MessageId \
+    build/test_Timestamp
 
 build/test_%: $(ALL_LIB_OBJS) build/objs/tests/test_%.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
@@ -329,7 +331,7 @@ COV_CXXFLAGS  := $(filter-out -Werror,$(CXXFLAGS)) \
                  -fprofile-instr-generate -fcoverage-mapping -O0
 COV_LDFLAGS   := -fprofile-instr-generate $(LDFLAGS)
 COV_LIB_OBJS  := $(patsubst src/%.cpp,$(COV_OBJ_DIR)/%.o,$(ALL_LIB_SRC))
-TEST_NAMES    := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader TlsTcpBackend DtlsUdpBackend TcpBackend UdpBackend SocketUtils AssertState
+TEST_NAMES    := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader TlsTcpBackend DtlsUdpBackend TcpBackend UdpBackend SocketUtils AssertState MessageId Timestamp
 COV_TESTS     := $(patsubst %,build/cov_test_%,$(TEST_NAMES))
 
 $(COV_OBJ_DIR)/core/%.o: src/core/%.cpp
@@ -365,6 +367,8 @@ coverage: $(COV_TESTS)
 	@LLVM_PROFILE_FILE="build/cov/UdpBackend.profraw"    build/cov_test_UdpBackend    >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/SocketUtils.profraw"  build/cov_test_SocketUtils   >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/AssertState.profraw"  build/cov_test_AssertState   >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/MessageId.profraw"   build/cov_test_MessageId     >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/Timestamp.profraw"   build/cov_test_Timestamp     >/dev/null 2>&1
 	@$(LLVM_PROFDATA) merge -sparse \
 	    build/cov/MessageEnvelope.profraw \
 	    build/cov/Serializer.profraw \
@@ -381,6 +385,8 @@ coverage: $(COV_TESTS)
 	    build/cov/UdpBackend.profraw \
 	    build/cov/SocketUtils.profraw \
 	    build/cov/AssertState.profraw \
+	    build/cov/MessageId.profraw \
+	    build/cov/Timestamp.profraw \
 	    -o build/cov/merged.profdata
 	@echo "=== Coverage Report (src/ only) ==="
 	@$(LLVM_COV) report \
@@ -400,6 +406,8 @@ coverage: $(COV_TESTS)
 	    -object build/cov_test_UdpBackend \
 	    -object build/cov_test_SocketUtils \
 	    -object build/cov_test_AssertState \
+	    -object build/cov_test_MessageId \
+	    -object build/cov_test_Timestamp \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "Policy (CLAUDE.md §12): SC functions require >= branch coverage."
@@ -425,6 +433,8 @@ coverage_show:
 	    -object build/cov_test_UdpBackend \
 	    -object build/cov_test_SocketUtils \
 	    -object build/cov_test_AssertState \
+	    -object build/cov_test_MessageId \
+	    -object build/cov_test_Timestamp \
 	    -format=text \
 	    -show-branches=count \
 	    $(CORE_SRC) $(PLATFORM_SRC)
@@ -457,6 +467,8 @@ coverage_report: coverage
 	    -object build/cov_test_UdpBackend \
 	    -object build/cov_test_SocketUtils \
 	    -object build/cov_test_AssertState \
+	    -object build/cov_test_MessageId \
+	    -object build/cov_test_Timestamp \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "--- Per-function detail ---"
@@ -478,6 +490,8 @@ coverage_report: coverage
 	    -object build/cov_test_UdpBackend \
 	    -object build/cov_test_SocketUtils \
 	    -object build/cov_test_AssertState \
+	    -object build/cov_test_MessageId \
+	    -object build/cov_test_Timestamp \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "--- Policy compliance (CLAUDE.md §14) ---"
@@ -560,4 +574,6 @@ run_tests: tests
 	@echo "=== test_UdpBackend ==="; build/test_UdpBackend
 	@echo "=== test_SocketUtils ==="; build/test_SocketUtils
 	@echo "=== test_AssertState ==="; build/test_AssertState
+	@echo "=== test_MessageId ===";  build/test_MessageId
+	@echo "=== test_Timestamp ===";  build/test_Timestamp
 	@echo "=== ALL TESTS PASSED ==="

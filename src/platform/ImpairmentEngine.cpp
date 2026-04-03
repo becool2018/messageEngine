@@ -60,6 +60,11 @@ void ImpairmentEngine::init(const ImpairmentConfig& cfg)
     // Power of 10 rule 5: precondition assertions
     NEVER_COMPILED_OUT_ASSERT(cfg.reorder_window_size <= IMPAIR_DELAY_BUF_SIZE);
     NEVER_COMPILED_OUT_ASSERT(cfg.loss_probability >= 0.0 && cfg.loss_probability <= 1.0);
+    // MED-7 fix: partition_gap_ms==0 with partition enabled causes an immediate, permanent
+    // partition on the very first call to is_partition_active() (documented in
+    // STATE_MACHINES.md §3 "Known edge case"). Reject this at init time so the
+    // configuration error is detected immediately rather than causing silent message loss.
+    NEVER_COMPILED_OUT_ASSERT(!cfg.partition_enabled || cfg.partition_gap_ms > 0U);
 
     // Store configuration
     m_cfg = cfg;
@@ -197,7 +202,13 @@ Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env,
     uint64_t base_delay_us = static_cast<uint64_t>(m_cfg.fixed_latency_ms) * 1000ULL;
     uint64_t jitter_us = 0ULL;
     if (m_cfg.jitter_mean_ms > 0U) {
-        uint32_t jitter_offset_ms = m_prng.next_range(0U, m_cfg.jitter_variance_ms);
+            // REQ-5.1.2: jitter is centered on mean_ms with up to variance_ms of additional
+            // random delay. offset = mean + uniform(0, variance) → range [mean, mean+variance].
+            // A true ±variance distribution would risk uint underflow when variance > mean;
+            // the [mean, mean+variance] interpretation is the safe, uint-compatible form used here.
+            // Previously jitter_mean_ms was used only as a gate; its value was never added.
+            uint32_t jitter_offset_ms = m_cfg.jitter_mean_ms +
+                                        m_prng.next_range(0U, m_cfg.jitter_variance_ms);
         jitter_us = static_cast<uint64_t>(jitter_offset_ms) * 1000ULL;
     }
     uint64_t release_us = now_us + base_delay_us + jitter_us;

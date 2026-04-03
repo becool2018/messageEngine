@@ -542,11 +542,11 @@ Reclassifying a function from NSC to SC, or adding a new SC function, requires:
 15. Stack Depth Analysis (NASA-STD-8719.13C)
 
 Analysis artifact and current worst-case call chains: docs/STACK_ANALYSIS.md.
-Current worst case: 9 frames, ~748 bytes (Chain 1 — outbound send). Platform
-headroom: >700× on macOS/Linux.
+Current worst case: 10 frames, ~764 bytes (Chains 3 and 5 — retry pump and DTLS
+outbound send). Platform headroom: >10 000× on macOS/Linux.
 
 Update trigger: update docs/STACK_ANALYSIS.md when any function introduces a
-stack-allocated buffer >256 bytes, a new call chain exceeds 9 frames, or a new
+stack-allocated buffer >256 bytes, a new call chain exceeds 10 frames, or a new
 thread entry point is added.
 
 ---

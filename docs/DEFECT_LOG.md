@@ -224,3 +224,55 @@ Moderator: Don Jessup — 2026-04-02. DEF-002-1 resolved. All entry and exit cri
 
 Moderator: Don Jessup — 2026-04-03. DEF-003-1 resolved. All entry and exit criteria satisfied. Inspection INSP-003 closed PASS.
 
+---
+
+### INSP-004 — Formal deferral of REQ-7.2.1 through REQ-7.2.4 (metrics hooks)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-03 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review |
+| Outcome     | DEFER — four requirements formally deferred to a future milestone; no code changes |
+
+#### Background
+
+`TRACEABILITY_MATRIX.md` lists REQ-7.2.1 through REQ-7.2.4 as "not implemented" with no
+associated source files or tests. Per CLAUDE.md §11.1 and NPR 7150.2D, every assigned REQ ID
+must be implemented, verified, or formally deferred with a tracking record. This inspection
+provides that record.
+
+#### Defects formally deferred
+
+| ID | REQ ID | Description | Severity | Disposition | Rationale |
+|----|--------|-------------|----------|-------------|-----------|
+| DEF-004-1 | REQ-7.2.1 | Latency distribution metrics hooks not implemented | MINOR | DEFER | See rationale below |
+| DEF-004-2 | REQ-7.2.2 | Loss / duplication / reordering rate metrics not implemented | MINOR | DEFER | See rationale below |
+| DEF-004-3 | REQ-7.2.3 | Retry / timeout / failure counters not implemented | MINOR | DEFER | See rationale below |
+| DEF-004-4 | REQ-7.2.4 | Connection / restart / fatal event counters not implemented | MINOR | DEFER | See rationale below |
+
+#### Deferral rationale
+
+messageEngine is a Class C networking library (NPR 7150.2D Appendix D). Metrics hooks
+(REQ-7.2.x) require a stable observer/subscriber interface design whose API depends on the
+embedding application's telemetry framework. No embedding application has been defined. The
+metrics requirements are functionality requirements, not safety requirements; none are
+classified SC in HAZARD_ANALYSIS.md §3. Deferring until the first application integration
+milestone, when the telemetry sink and observer pattern can be designed holistically with
+the consuming application, avoids premature API lock-in and implementation churn.
+
+#### Acceptance criteria for undeferral
+
+Before these defects can be closed FIX, the following must be satisfied:
+1. A `MetricsObserver` interface (or equivalent) defined in `src/core/`.
+2. Each REQ-7.2.x counter/hook implemented and annotated `// Implements: REQ-7.2.x`.
+3. Dedicated tests in `tests/` annotated `// Verifies: REQ-7.2.x`.
+4. `make check_traceability` PASS with all four REQ IDs fully traced.
+5. TRACEABILITY_MATRIX.md updated.
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-03. DEF-004-1 through DEF-004-4 formally deferred.
+Rationale accepted. No safety impact. INSP-004 closed DEFER.
+

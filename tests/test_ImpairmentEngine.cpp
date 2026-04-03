@@ -762,6 +762,57 @@ static bool test_duplication_buffer_full_skip()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 20: partition_gap_ms minimum valid boundary (gap=1 ms)
+//
+// Policy: init() asserts !cfg.partition_enabled || cfg.partition_gap_ms > 0U
+// (MED-7 fix). This test verifies the positive case: gap_ms=1 (minimum
+// non-zero value) is accepted and the partition fires after 1 ms.
+//
+// A gap_ms==0 with partition_enabled=true would fire the NEVER_COMPILED_OUT_ASSERT
+// in init() and abort. That fail-fast path is architecturally unreachable in
+// this test environment; coverage of the assertion-abort branch is excluded per
+// CLAUDE.md §14 ceiling policy (NEVER_COMPILED_OUT_ASSERT [[noreturn]] True paths).
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.1.6
+static bool test_partition_gap_ms_minimum_valid()
+{
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled               = true;
+    cfg.partition_enabled     = true;
+    cfg.partition_gap_ms      = 1U;    // minimum valid gap: 1 ms = 1 000 µs
+    cfg.partition_duration_ms = 5U;    // 5 ms partition duration
+    cfg.loss_probability      = 0.0;
+
+    // init() must succeed: gap_ms=1 satisfies the MED-7 assertion
+    engine.init(cfg);
+
+    // Phase 1: first call initialises partition timer; partition not yet active
+    uint64_t now1 = 1000000ULL;
+    MessageEnvelope env1;
+    create_test_envelope(env1, 1U, 2U, 8000ULL);
+    Result r1 = engine.process_outbound(env1, now1);
+    assert(r1 == Result::OK);    // gap not yet elapsed; message passes
+
+    // Phase 2: advance past 1 ms gap → partition activates immediately
+    uint64_t now2 = now1 + 1001ULL;   // 1.001 ms > 1 ms gap
+    MessageEnvelope env2;
+    create_test_envelope(env2, 1U, 2U, 8001ULL);
+    Result r2 = engine.process_outbound(env2, now2);
+    assert(r2 == Result::ERR_IO);  // dropped: partition active
+
+    // Phase 3: advance past 5 ms partition duration → partition ends
+    uint64_t now3 = now2 + 5001ULL;   // 5.001 ms > 5 ms duration
+    MessageEnvelope env3;
+    create_test_envelope(env3, 1U, 2U, 8002ULL);
+    Result r3 = engine.process_outbound(env3, now3);
+    assert(r3 == Result::OK);    // partition ended; message passes
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -899,6 +950,13 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_duplication_buffer_full_skip\n");
+    }
+
+    if (!test_partition_gap_ms_minimum_valid()) {
+        printf("FAIL: test_partition_gap_ms_minimum_valid\n");
+        ++failed;
+    } else {
+        printf("PASS: test_partition_gap_ms_minimum_valid\n");
     }
 
     return (failed > 0) ? 1 : 0;

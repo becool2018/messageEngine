@@ -128,10 +128,19 @@ Result LocalSimHarness::send_message(const MessageEnvelope& envelope)
 
     // Apply impairment: process_outbound may drop the message (ERR_IO = drop silently)
     uint64_t now_us = timestamp_now_us();
-    Result res = m_impairment.process_outbound(envelope, now_us);
-    if (res == Result::ERR_IO) {
-        // Message dropped by loss impairment
+    // HIGH-1 fix: capture outbound result before flushing delayed messages.
+    // ERR_IO   — current message dropped by loss impairment; return OK (intentional drop).
+    // ERR_FULL — delay buffer full; current message dropped; return ERR_FULL to caller.
+    //            Previously ERR_FULL was silently overwritten by a later inject() OK result.
+    // OK       — message queued; will appear via collect_deliverable() when its timer fires.
+    Result outbound_res = m_impairment.process_outbound(envelope, now_us);
+    if (outbound_res == Result::ERR_IO) {
+        // Intentional loss-impairment drop; caller does not retry (by design).
         return Result::OK;
+    }
+    if (outbound_res != Result::OK) {
+        // Delay buffer full or other impairment error; return immediately.
+        return outbound_res;
     }
 
     // Collect all messages now ready to deliver (includes the current message when
@@ -143,14 +152,26 @@ Result LocalSimHarness::send_message(const MessageEnvelope& envelope)
                                                               delayed_envelopes,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    // Inject all ready messages into peer. Power of 10: fixed loop bound.
+    // MED-4 fix: log all failed inject() calls; propagate first failure to caller.
+    // Power of 10: fixed loop bound.
+    Result first_inject_err = Result::OK;
     for (uint32_t i = 0U; i < delayed_count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        res = m_peer->inject(delayed_envelopes[i]);
+        Result inject_res = m_peer->inject(delayed_envelopes[i]);
+        if (inject_res != Result::OK) {
+            Logger::log(Severity::WARNING_HI, "LocalSimHarness",
+                        "inject() failed for delayed message at index %u: result=%d",
+                        i, static_cast<int>(inject_res));
+            if (first_inject_err == Result::OK) {
+                first_inject_err = inject_res;  // capture first failure
+            }
+        }
     }
 
-    NEVER_COMPILED_OUT_ASSERT(res == Result::OK || res == Result::ERR_FULL);  // Post-condition
-    return res;
+    // If any inject failed (e.g. peer receive queue full), return that error so the
+    // caller knows the message was not delivered.
+    NEVER_COMPILED_OUT_ASSERT(first_inject_err == Result::OK || first_inject_err == Result::ERR_FULL);
+    return first_inject_err;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -64,7 +64,7 @@ main()  [~64 B]
 main()  [~64 B]
   └─ run_client_iteration()  [~80 B]
        └─ wait_for_echo()  [~64 B]
-            └─ DeliveryEngine::pump_retries()  [~64 B]  ← m_retry_buf is a static member; stack frame is loop variables only
+            └─ DeliveryEngine::pump_retries()  [~64 B]  ← m_retry_buf is a pre-allocated member array; stack frame is loop variables only
                  └─ RetryManager::collect_due()  [~48 B]
                       └─ DeliveryEngine::send_via_transport()  [~48 B]
                            └─ TcpBackend::send_message()  [~48 B]
@@ -84,7 +84,7 @@ main()  [~64 B]
 main()  [~64 B]
   └─ run_client_iteration()  [~80 B]
        └─ wait_for_echo()  [~64 B]
-            └─ DeliveryEngine::sweep_ack_timeouts()  [~48 B]  ← m_timeout_buf is a static member; stack frame is loop variables only
+            └─ DeliveryEngine::sweep_ack_timeouts()  [~48 B]  ← m_timeout_buf is a pre-allocated member array; stack frame is loop variables only
                  └─ AckTracker::sweep_expired()  [~48 B]
                       └─ AckTracker::sweep_one_slot()  [~32 B]
 ```
@@ -141,10 +141,6 @@ main()  [~64 B]
 
 **Depth:** 8 frames (one extra for `MbedtlsOpsImpl::ssl_read()` thin wrapper)
 **Estimated peak stack:** ~504 B
-
----
-
-## Summary
 
 ---
 
