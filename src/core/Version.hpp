@@ -38,6 +38,9 @@
  *   1.0.0 — initial release: Apache 2.0 license, protocol versioning
  *            (PROTO_VERSION=1), capacity stress tests.
  *
+ * NSC-infrastructure: compile-time version constants only; no requirement
+ *   implementation belongs here. No REQ-x.x tag applies.
+ *
  * Rules applied:
  *   - Power of 10 rule 8: compile-time constants only; no macros that affect
  *     control flow.

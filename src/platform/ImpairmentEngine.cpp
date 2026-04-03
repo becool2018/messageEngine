@@ -25,7 +25,7 @@
  *   - MISRA C++: no STL, no exceptions, no templates.
  *   - F-Prime style: Result enum return codes, Logger::log() for events.
  *
- * Implements: REQ-5.1.1, REQ-5.1.2, REQ-5.1.3, REQ-5.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.2.2, REQ-5.2.5, REQ-5.3.1, REQ-5.3.2, REQ-7.2.1, REQ-7.2.2
+ * Implements: REQ-5.1.1, REQ-5.1.2, REQ-5.1.3, REQ-5.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.2.2, REQ-5.2.5, REQ-5.3.1, REQ-5.3.2
  */
 
 #include "ImpairmentEngine.hpp"

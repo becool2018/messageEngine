@@ -64,10 +64,10 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-7.1.2 | Log major state changes                            | src/core/Logger.hpp                                         | — (observable in output)                             |
 | REQ-7.1.3 | Log errors and FATAL with debug context            | src/core/Logger.hpp                                         | — (observable in output)                             |
 | REQ-7.1.4 | No full payload logging by default                 | src/core/Logger.hpp                                         | — (convention; no automated test)                    |
-| REQ-7.2.1 | Latency distribution metrics hooks                 | src/platform/ImpairmentEngine.cpp                           | — (TODO: not fully implemented)                      |
-| REQ-7.2.2 | Loss / duplication / reordering rate metrics       | src/platform/ImpairmentEngine.cpp                           | — (TODO: not fully implemented)                      |
-| REQ-7.2.3 | Retry / timeout / failure counters                 | src/core/DeliveryEngine.cpp, src/core/RetryManager.cpp      | — (TODO: not fully implemented)                      |
-| REQ-7.2.4 | Connection / restart / fatal event counters        | src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp    | — (TODO: not fully implemented)                      |
+| REQ-7.2.1 | Latency distribution metrics hooks                 | — (not implemented)                                         | — (not implemented)                                  |
+| REQ-7.2.2 | Loss / duplication / reordering rate metrics       | — (not implemented)                                         | — (not implemented)                                  |
+| REQ-7.2.3 | Retry / timeout / failure counters                 | — (not implemented)                                         | — (not implemented)                                  |
+| REQ-7.2.4 | Connection / restart / fatal event counters        | — (not implemented)                                         | — (not implemented)                                  |
 
 ## Coverage gaps (requirements with no test)
 
