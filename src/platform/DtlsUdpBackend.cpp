@@ -781,24 +781,42 @@ Result DtlsUdpBackend::send_message(const MessageEnvelope& envelope)
         return Result::ERR_INVALID;
     }
 
+    // Apply impairment: process_outbound queues the message into the delay buffer.
+    // ERR_IO   — intentional loss-impairment drop; return OK (expected behavior).
+    // ERR_FULL — delay buffer full; message not queued; propagate to caller.
+    // OK       — message queued with release_us = now_us (no latency) or future time.
     uint64_t now_us = timestamp_now_us();
     res = m_impairment.process_outbound(envelope, now_us);
     if (res == Result::ERR_IO) {
-        return Result::OK;  // silently dropped by impairment engine
+        return Result::OK;  // intentional loss-impairment drop
+    }
+    if (res != Result::OK) {
+        return res;  // ERR_FULL: delay buffer full; message not queued
     }
 
-    // Collect delayed messages before the main send so they go first if late
+    // process_outbound() already queued the message; collect_deliverable() returns
+    // all messages due now — covering both the zero-delay pass-through and timed-
+    // delay cases. Do NOT also call send_wire_bytes() here; that would send every
+    // message twice. (HAZ-003)
+    // Propagate the first send failure so callers can detect bad peer addresses.
+    // Power of 10: fixed loop bound (IMPAIR_DELAY_BUF_SIZE compile-time constant).
     MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];
     uint32_t delayed_count = m_impairment.collect_deliverable(now_us, delayed,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    res = send_wire_bytes(m_wire_buf, wire_len);
-    if (!result_ok(res)) { return res; }
-
-    send_delayed_envelopes(delayed, delayed_count);
+    Result first_send_err = Result::OK;
+    for (uint32_t i = 0U; i < delayed_count; ++i) {
+        NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
+        uint32_t dlen = 0U;
+        res = Serializer::serialize(delayed[i], m_wire_buf,
+                                    SOCKET_RECV_BUF_BYTES, dlen);
+        if (!result_ok(res)) { continue; }
+        Result send_res = send_wire_bytes(m_wire_buf, dlen);
+        if (send_res != Result::OK && first_send_err == Result::OK) { first_send_err = send_res; }
+    }
 
     NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);
-    return Result::OK;
+    return first_send_err;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

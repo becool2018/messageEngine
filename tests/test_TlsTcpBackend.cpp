@@ -1082,11 +1082,17 @@ static void test_garbage_frame_deserialize_fail()
 // Covers: L713 True (queue already has item at start of receive_message)
 //
 // Sequence:
-//   Call A — accepts Thread1 (slot 0), reads msg0, returns msg0.
-//   Call B — accepts Thread2 (slot 1); backwards loop reads msg1 (Thread2)
-//            then msg_b (Thread1's second message still in socket buffer);
-//            queue = [msg1, msg_b]; pops msg1 → returns.
-//   Call C — L712: queue.pop → msg_b → L713 True → returns immediately.
+//   Thread1 sends 2 msgs; Thread2 sends 1 msg; each send_message places 1 copy
+//   on the wire (HAZ-003 double-send fix: process_outbound queues once; no
+//   separate direct send).
+//   Call A — accepts Thread1 (slot 0), reads Thread1 msg1 → push → pop → return.
+//            Thread2 remains in the accept backlog.
+//   Call B — accepts Thread2 (slot 1, m_client_count→2); backwards loop:
+//            recv_from_client(1) → Thread2 msg1 → push;
+//            recv_from_client(0) → Thread1 msg2 → push.
+//            Queue = [Thread2_msg1, Thread1_msg2].  Pop Thread2_msg1 → return.
+//            Thread1_msg2 remains in the recv_queue.
+//   Call C — L713 True: recv_queue non-empty at entry → pop Thread1_msg2 immediately.
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void test_two_client_queue_prefill()
@@ -1099,16 +1105,13 @@ static void test_two_client_queue_prefill()
     Result init_res = server.init(srv_cfg);
     assert(init_res == Result::OK);
 
-    // Both threads connect immediately (delay_us=0) and send 1 msg each.
-    // Due to the double-send behaviour in send_message (ImpairmentEngine
-    // always stages to delay buf even when disabled, then flush_delayed_to_clients
-    // delivers it immediately), each send_message call places 2 copies on the
-    // wire.  Thread1 sends copy1+copy2; Thread2 sends copy1+copy2.
+    // Thread1 sends 2 msgs; Thread2 sends 1 msg.  Each send_message places
+    // exactly 1 copy on the wire (HAZ-003 double-send fix).
     MultiMsgClientArg arg1;
     arg1.port          = PORT;
     arg1.tls_on        = false;
     arg1.delay_us      = 0U;       // connect as soon as the thread is scheduled
-    arg1.num_msgs      = 1U;       // 1 msg → 2 copies on wire
+    arg1.num_msgs      = 2U;       // 2 msgs → 2 copies on wire (1 per send)
     arg1.stay_alive_us = 500000U;  // stay alive 500 ms
     arg1.result        = Result::ERR_IO;
 
@@ -1127,22 +1130,22 @@ static void test_two_client_queue_prefill()
     // Both TCP connections will be queued in the kernel backlog.
     usleep(50000U);  // 50 ms
 
-    // Call A: poll listen → accept Thread1 (first in backlog); read Thread1 copy1
+    // Call A: poll listen → accept Thread1 (first in backlog); read Thread1 msg1
     //         → push → pop → return.  Thread2 remains in the accept backlog.
     MessageEnvelope envA;
     Result resA = server.receive_message(envA, 3000U);
     assert(resA == Result::OK);
 
     // Call B: m_client_count=1; accept Thread2 (slot 1, m_client_count→2);
-    //   backwards loop: recv_from_client(1) → Thread2 copy1 → push;
-    //                   recv_from_client(0) → Thread1 copy2 → push.
-    //   Queue = [Thread2_copy1, Thread1_copy2].  Pop Thread2_copy1 → return.
-    //   Thread1_copy2 remains in the recv_queue.
+    //   backwards loop: recv_from_client(1) → Thread2 msg1 → push;
+    //                   recv_from_client(0) → Thread1 msg2 → push.
+    //   Queue = [Thread2_msg1, Thread1_msg2].  Pop Thread2_msg1 → return.
+    //   Thread1_msg2 remains in the recv_queue.
     MessageEnvelope envB;
     Result resB = server.receive_message(envB, 3000U);
     assert(resB == Result::OK);
 
-    // Call C: recv_queue is non-empty at entry → L713 True → pop Thread1_copy2
+    // Call C: recv_queue is non-empty at entry → L713 True → pop Thread1_msg2
     //         immediately without polling.
     MessageEnvelope envC;
     Result resC = server.receive_message(envC, 3000U);
@@ -1161,27 +1164,23 @@ static void test_two_client_queue_prefill()
 // Test 22: Two clients — remove_client on slot 0 while slot 1 exists
 // Covers: L384 True (compact loop: j==0 < m_client_count-1==1 → body executes)
 //         L375 False (plaintext path — no ssl_close_notify)
-//         L713 True  (bonus: queue pre-populated from Call B spill)
 //
 // Sequence:
-//   Thread1 connects at 5 ms, sends 1 msg (→ 2 copies on wire), closes
-//   immediately.  TCP stream for Thread1: [copy1][copy2][FIN].
-//   Thread2 connects at 50 ms, sends 1 msg (→ 2 copies), stays alive 1 s.
+//   Thread1 connects at 5 ms, sends 1 msg, closes immediately.
+//   TCP stream for Thread1: [msg1][FIN].
+//   Thread2 connects at 50 ms, sends 2 msgs, stays alive 1 s.
+//   (each send_message places 1 copy on the wire — HAZ-003 double-send fix)
 //
-//   Call A — sleep ensures Thread2 is in backlog;
-//             accepts Thread1 (slot 0), reads copy1 → push → pop → return.
+//   Call A — accepts Thread1 (slot 0), reads Thread1 msg1 → push → pop → return.
 //   Call B — main thread sleeps 100 ms so Thread2 is in the TCP backlog;
 //             accepts Thread2 (slot 1, m_client_count→2);
-//             backwards: recv(1)→Thread2 copy1 push; recv(0)→Thread1 copy2 push;
-//             queue=[Thread2_copy1, Thread1_copy2]; pop Thread2_copy1 → return.
-//   Call C — queue non-empty → L713 True → pop Thread1_copy2 immediately.
-//             Thread1's socket now has only [FIN] remaining.
-//   Call D — backwards: recv(1)→Thread2 copy2 push;
-//             recv(0)→Thread1 FIN → socket_recv_exact returns 0 →
-//             recv_from_client calls remove_client(0):
+//             backwards: recv(1)→Thread2 msg1 push;
+//                        recv(0)→Thread1 FIN → remove_client(0):
 //               L375 False (TLS off), L384 True (j=0 < m_client_count-1=1) →
 //               compact: Thread2 shifts slot 1 → slot 0; m_client_count→1.
-//             pop Thread2_copy2 → return.
+//             pop Thread2_msg1 → return.
+//   Call C — queue empty; poll Thread2 (slot 0 after compact); reads Thread2 msg2
+//            → push → pop → return.
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void test_two_client_compact_loop()
@@ -1194,7 +1193,7 @@ static void test_two_client_compact_loop()
     Result init_res = server.init(srv_cfg);
     assert(init_res == Result::OK);
 
-    // Thread1: connect at 5 ms, send 1 msg (→ 2 wire copies), close immediately.
+    // Thread1: connect at 5 ms, send 1 msg, close immediately.
     MultiMsgClientArg arg1;
     arg1.port          = PORT;
     arg1.tls_on        = false;
@@ -1203,19 +1202,19 @@ static void test_two_client_compact_loop()
     arg1.stay_alive_us = 0U;      // close immediately after sending
     arg1.result        = Result::ERR_IO;
 
-    // Thread2: connect at 50 ms, send 1 msg, stay alive 1 s.
+    // Thread2: connect at 50 ms, send 2 msgs, stay alive 1 s.
     MultiMsgClientArg arg2;
     arg2.port          = PORT;
     arg2.tls_on        = false;
     arg2.delay_us      = 50000U;  // 50 ms: connect after Thread1 is in slot 0
-    arg2.num_msgs      = 1U;
+    arg2.num_msgs      = 2U;      // 2 msgs; each places 1 copy on the wire
     arg2.stay_alive_us = 1000000U;
     arg2.result        = Result::ERR_IO;
 
     pthread_t t1 = create_thread_4mb(multi_msg_client_func, &arg1);
     pthread_t t2 = create_thread_4mb(multi_msg_client_func, &arg2);
 
-    // Call A: Thread1 connects at 5 ms; server accepts it (slot 0); reads copy1.
+    // Call A: Thread1 connects at 5 ms; server accepts it (slot 0); reads msg1.
     MessageEnvelope envA;
     Result resA = server.receive_message(envA, 3000U);
     assert(resA == Result::OK);
@@ -1224,26 +1223,20 @@ static void test_two_client_compact_loop()
     usleep(100000U);  // 100 ms
 
     // Call B: accept Thread2 (slot 1, m_client_count→2); backwards loop:
-    //   recv(1) → Thread2 copy1 → push; recv(0) → Thread1 copy2 → push.
-    //   Queue = [Thread2_copy1, Thread1_copy2].  Pop Thread2_copy1 → return.
+    //   recv(1) → Thread2 msg1 → push;
+    //   recv(0) → Thread1 FIN → remove_client(0)
+    //     [L375 False: TLS off; L384 True: j=0 < m_client_count-1=1 → compact].
+    //   Thread2 shifts slot 1 → slot 0; m_client_count→1.
+    //   Pop Thread2_msg1 → return.
     MessageEnvelope envB;
     Result resB = server.receive_message(envB, 3000U);
     assert(resB == Result::OK);
 
-    // Call C: recv_queue has Thread1_copy2 → L713 True → pop immediately.
-    //         Thread1's TCP stream now contains only [FIN].
+    // Call C: queue empty; poll Thread2 (slot 0 after compact); reads Thread2 msg2
+    //         → push → pop → return.
     MessageEnvelope envC;
     Result resC = server.receive_message(envC, 3000U);
-    assert(resC == Result::OK);
-
-    // Call D: backwards loop (m_client_count=2, Thread1 slot 0, Thread2 slot 1):
-    //   recv(1) → Thread2 copy2 → push;
-    //   recv(0) → Thread1 FIN → socket returns 0 → remove_client(0)
-    //     [L375 False: TLS off; L384 True: j=0 < m_client_count-1=1 → compact].
-    //   Pop Thread2_copy2 → return.
-    MessageEnvelope envD;
-    Result resD = server.receive_message(envD, 3000U);
-    assert(resD == Result::OK);   // L384 True covered
+    assert(resC == Result::OK);   // L384 True covered in Call B
 
     server.close();
     (void)pthread_join(t1, nullptr);

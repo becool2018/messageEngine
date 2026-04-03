@@ -141,30 +141,32 @@ Result UdpBackend::send_message(const MessageEnvelope& envelope)
         return res;
     }
 
-    // Apply impairment: process_outbound may drop the message (ERR_IO = drop silently)
+    // Apply impairment: process_outbound queues the message into the delay buffer.
+    // ERR_IO   — intentional loss-impairment drop; return OK (expected behavior).
+    // ERR_FULL — delay buffer full; message not queued; propagate to caller.
+    // OK       — message queued with release_us = now_us (no latency) or future time.
     uint64_t now_us = timestamp_now_us();
     res = m_impairment.process_outbound(envelope, now_us);
     if (res == Result::ERR_IO) {
-        // Message dropped by loss impairment
-        return Result::OK;
+        return Result::OK;  // intentional loss-impairment drop
+    }
+    if (res != Result::OK) {
+        return res;  // ERR_FULL: delay buffer full; message not queued
     }
 
-    // Check for delayed messages ready to send
+    // process_outbound() already queued the message into the delay buffer
+    // (release_us = now_us when latency is 0). collect_deliverable() returns
+    // all messages whose release_us <= now_us, covering both the zero-delay
+    // pass-through and the timed-delay cases. Do NOT also call send_to() for
+    // `envelope` directly — that causes every message to be sent twice. (HAZ-003)
+    // Power of 10: fixed loop bound (IMPAIR_DELAY_BUF_SIZE compile-time constant).
     MessageEnvelope delayed_envelopes[IMPAIR_DELAY_BUF_SIZE];
     uint32_t delayed_count = m_impairment.collect_deliverable(now_us,
                                                               delayed_envelopes,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    // Send main message
-    if (!m_sock_ops->send_to(m_fd, m_wire_buf, wire_len,
-                             m_cfg.peer_ip, m_cfg.peer_port)) {
-        Logger::log(Severity::WARNING_LO, "UdpBackend",
-                   "socket_send_to failed to %s:%u",
-                   m_cfg.peer_ip, m_cfg.peer_port);
-        return Result::ERR_IO;
-    }
-
-    // Send any delayed messages (Power of 10: fixed loop bound)
+    // Propagate the first send failure so callers can detect bad peer addresses.
+    Result first_send_err = Result::OK;
     for (uint32_t i = 0U; i < delayed_count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
 
@@ -175,12 +177,15 @@ Result UdpBackend::send_message(const MessageEnvelope& envelope)
             continue;
         }
 
-        (void)m_sock_ops->send_to(m_fd, m_wire_buf, delayed_len,
-                                  m_cfg.peer_ip, m_cfg.peer_port);
+        if (!m_sock_ops->send_to(m_fd, m_wire_buf, delayed_len,
+                                 m_cfg.peer_ip, m_cfg.peer_port) &&
+            first_send_err == Result::OK) {
+            first_send_err = Result::ERR_IO;
+        }
     }
 
     NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);  // Post-condition
-    return Result::OK;
+    return first_send_err;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

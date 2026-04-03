@@ -781,10 +781,17 @@ Result TlsTcpBackend::send_message(const MessageEnvelope& envelope)
         return res;
     }
 
+    // Apply impairment: process_outbound queues the message into the delay buffer.
+    // ERR_IO   — intentional loss-impairment drop; return OK (expected behavior).
+    // ERR_FULL — delay buffer full; message not queued; propagate to caller.
+    // OK       — message queued with release_us = now_us (no latency) or future time.
     uint64_t now_us = timestamp_now_us();
     res = m_impairment.process_outbound(envelope, now_us);
     if (res == Result::ERR_IO) {
-        return Result::OK;  // dropped by impairment engine
+        return Result::OK;  // intentional loss-impairment drop
+    }
+    if (res != Result::OK) {
+        return res;  // ERR_FULL: delay buffer full; message not queued
     }
 
     if (m_client_count == 0U) {
@@ -793,7 +800,10 @@ Result TlsTcpBackend::send_message(const MessageEnvelope& envelope)
         return Result::OK;
     }
 
-    send_to_all_clients(m_wire_buf, wire_len);
+    // process_outbound() already queued the message; flush_delayed_to_clients()
+    // calls collect_deliverable() and sends everything due — covering both the
+    // zero-delay pass-through and timed-delay cases. Do NOT also call
+    // send_to_all_clients() here; that would send every message twice. (HAZ-003)
     flush_delayed_to_clients(now_us);
 
     NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);
