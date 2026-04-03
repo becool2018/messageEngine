@@ -26,6 +26,39 @@
 #include "Assert.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
+// File-static helper: validate routing and expiry of a received envelope.
+// Returns ERR_EXPIRED (stale message) or ERR_INVALID (wrong-node delivery),
+// or OK. Combines both checks to keep DeliveryEngine::receive() within CC ≤ 10.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions.
+// ─────────────────────────────────────────────────────────────────────────────
+static Result check_routing(const MessageEnvelope& env,
+                             NodeId                 local_id,
+                             uint64_t               now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(local_id != NODE_ID_INVALID);  // pre-condition
+    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);                // pre-condition
+
+    if (timestamp_expired(env.expiry_time_us, now_us)) {
+        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
+                    "Dropping expired message_id=%llu from src=%u",
+                    (unsigned long long)env.message_id, env.source_id);
+        return Result::ERR_EXPIRED;
+    }
+
+    // Safety-critical (SC): HAZ-001 — drop messages not addressed to this node.
+    // destination_id == NODE_ID_INVALID (0) is the broadcast sentinel; always accept.
+    if (!envelope_addressed_to(env, local_id)) {
+        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
+                    "Dropping misrouted message_id=%llu: dst=%u local=%u",
+                    (unsigned long long)env.message_id,
+                    env.destination_id, local_id);
+        return Result::ERR_INVALID;
+    }
+
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // File-static helper: send an ACK for a received reliable data message.
 // Non-fatal on send failure (data still delivered). Extracted to keep
 // DeliveryEngine::receive() within CC ≤ 10.
@@ -258,12 +291,11 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
     // Power of 10 rule 5: validate received envelope
     NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));  // Assert: transport provides valid envelope
 
-    // Check if message has expired
-    if (timestamp_expired(env.expiry_time_us, now_us)) {
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "Dropping expired message_id=%llu from src=%u",
-                    (unsigned long long)env.message_id, env.source_id);
-        return Result::ERR_EXPIRED;
+    // Check expiry and destination in one call (HAZ-001, HAZ-004).
+    // Power of 10 rule 7: check return value.
+    Result routing_res = check_routing(env, m_local_id, now_us);
+    if (routing_res != Result::OK) {
+        return routing_res;
     }
 
     // Handle control messages (ACK/NAK/HEARTBEAT)

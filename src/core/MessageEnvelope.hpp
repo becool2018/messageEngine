@@ -97,6 +97,16 @@ inline bool envelope_is_control(const MessageEnvelope& env)
            (env.message_type == MessageType::HEARTBEAT);
 }
 
+// Safety-critical (SC): HAZ-001 — verified to M5
+/// Return true when env is addressed to this_node (unicast) or to all nodes
+/// (destination_id == NODE_ID_INVALID = broadcast sentinel).
+/// Used by DeliveryEngine::receive() to drop misrouted messages before delivery.
+inline bool envelope_addressed_to(const MessageEnvelope& env, NodeId this_node)
+{
+    return (env.destination_id == this_node) ||
+           (env.destination_id == NODE_ID_INVALID);  // 0 = broadcast
+}
+
 // Safety-critical (SC): HAZ-002 — verified to M5
 /// Return true if a received DATA envelope requires an automatic ACK response
 /// (reliability class RELIABLE_ACK or RELIABLE_RETRY). Extracted to keep
