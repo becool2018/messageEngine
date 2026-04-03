@@ -1002,6 +1002,89 @@ static void test_mock_pump_retries_transport_err_io()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: receiving a RELIABLE_ACK DATA frame causes exactly one outbound ACK.
+// Verifies REQ-3.2.4: auto-ACK emission on the receive path for RELIABLE_ACK class.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_receive_reliable_ack_data_emits_ack()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Inject RELIABLE_ACK DATA from node 2 → node 1
+    MessageEnvelope data_env;
+    make_data_envelope(data_env, 2U, 1U, 55555ULL, ReliabilityClass::RELIABLE_ACK);
+    Result inj = harness_a.inject(data_env);
+    assert(inj == Result::OK);
+
+    // engine.receive() accepts the data and auto-sends an ACK via the transport
+    MessageEnvelope out;
+    Result res = engine.receive(out, 100U, NOW_US);
+    assert(res == Result::OK);
+    assert(out.message_id == 55555ULL);
+
+    // Exactly one ACK must have arrived at harness_b (the "remote" side)
+    MessageEnvelope ack;
+    Result rack = harness_b.receive_message(ack, 100U);
+    assert(rack == Result::OK);
+    assert(ack.message_type == MessageType::ACK);
+    assert(ack.message_id   == 55555ULL);
+
+    // No second ACK should be present
+    MessageEnvelope extra;
+    Result rextra = harness_b.receive_message(extra, 10U);
+    assert(rextra != Result::OK);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_receive_reliable_ack_data_emits_ack\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: receiving a RELIABLE_RETRY DATA frame (first occurrence) causes exactly
+// one outbound ACK.
+// Verifies REQ-3.2.4: auto-ACK emission on the receive path for RELIABLE_RETRY class.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_receive_reliable_retry_data_emits_ack()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Inject RELIABLE_RETRY DATA from node 2 → node 1 (first occurrence)
+    MessageEnvelope data_env;
+    make_data_envelope(data_env, 2U, 1U, 66666ULL, ReliabilityClass::RELIABLE_RETRY);
+    Result inj = harness_a.inject(data_env);
+    assert(inj == Result::OK);
+
+    // engine.receive() accepts the data and auto-sends an ACK via the transport
+    MessageEnvelope out;
+    Result res = engine.receive(out, 100U, NOW_US);
+    assert(res == Result::OK);
+    assert(out.message_id == 66666ULL);
+
+    // Exactly one ACK must have arrived at harness_b
+    MessageEnvelope ack;
+    Result rack = harness_b.receive_message(ack, 100U);
+    assert(rack == Result::OK);
+    assert(ack.message_type == MessageType::ACK);
+    assert(ack.message_id   == 66666ULL);
+
+    // No second ACK should be present
+    MessageEnvelope extra;
+    Result rextra = harness_b.receive_message(extra, 10U);
+    assert(rextra != Result::OK);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_receive_reliable_retry_data_emits_ack\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test: duplicate RELIABLE_RETRY still triggers ACK resend (ACK-loss recovery).
 // First receive returns OK and sends ACK. Second receive (same envelope) returns
 // ERR_DUPLICATE and must ALSO send an ACK so the sender can stop retrying even
@@ -1087,6 +1170,8 @@ int main()
     test_init_timeout_buf_is_zeroed();
     test_pump_retries_capacity();
     test_sweep_ack_timeouts_capacity();
+    test_receive_reliable_ack_data_emits_ack();
+    test_receive_reliable_retry_data_emits_ack();
     test_receive_duplicate_resends_ack();
     test_mock_send_transport_err_io();
     test_mock_receive_transport_err_io();
