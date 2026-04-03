@@ -17,7 +17,7 @@
  * @brief Unit tests for SocketUtils.cpp POSIX socket helpers.
  *
  * Tests cover:
- *   - socket_create_tcp() / socket_create_udp() success paths
+ *   - socket_create_tcp(false) / socket_create_udp(false) success paths
  *   - socket_set_nonblocking() on a valid fd
  *   - socket_set_reuseaddr() on a valid fd
  *   - socket_bind() with valid IP+port (success) and invalid IP (failure)
@@ -31,8 +31,9 @@
  *   - socket_send_to() + socket_recv_from() UDP round-trip
  *
  * Reachable branches specifically exercised:
- *   - socket_bind()    L133 True  (inet_aton returns 0 for bad IP)
- *   - socket_send_to() L500 True  (inet_aton returns 0 for bad IP)
+ *   - socket_bind()    True branch  (inet_pton returns 0 for bad IP)
+ *   - socket_send_to() True branch  (inet_pton returns 0 for bad IP)
+ *   - socket_recv_from() AF_INET6 branch (IPv6 loopback UDP round-trip)
  *
  * All other uncovered branches in SocketUtils.cpp are architectural ceilings
  * (POSIX hard error paths unreachable on loopback: fcntl failure, setsockopt
@@ -70,6 +71,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 static const char   LOOPBACK_IP[]   = "127.0.0.1";
+static const char   LOOPBACK_IP6[]  = "::1";
 static const char   BAD_IP[]        = "999.999.999.999";
 static const uint32_t TIMEOUT_MS    = 2000U;
 
@@ -95,13 +97,13 @@ static bool wait_readable(int fd, uint32_t timeout_ms)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 1: socket_create_tcp() returns a valid fd
+// Test 1: socket_create_tcp(false) returns a valid fd
 // Verifies: REQ-6.3.1
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void test_create_tcp()
 {
-    int fd = socket_create_tcp();
+    int fd = socket_create_tcp(false);
     assert(fd >= 0);
 
     socket_close(fd);
@@ -109,13 +111,13 @@ static void test_create_tcp()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 2: socket_create_udp() returns a valid fd
+// Test 2: socket_create_udp(false) returns a valid fd
 // Verifies: REQ-6.3.1
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void test_create_udp()
 {
-    int fd = socket_create_udp();
+    int fd = socket_create_udp(false);
     assert(fd >= 0);
 
     socket_close(fd);
@@ -129,7 +131,7 @@ static void test_create_udp()
 
 static void test_set_nonblocking()
 {
-    int fd = socket_create_tcp();
+    int fd = socket_create_tcp(false);
     assert(fd >= 0);
 
     bool ok = socket_set_nonblocking(fd);
@@ -146,7 +148,7 @@ static void test_set_nonblocking()
 
 static void test_set_reuseaddr()
 {
-    int fd = socket_create_tcp();
+    int fd = socket_create_tcp(false);
     assert(fd >= 0);
 
     bool ok = socket_set_reuseaddr(fd);
@@ -163,7 +165,7 @@ static void test_set_reuseaddr()
 
 static void test_bind_valid()
 {
-    int fd = socket_create_tcp();
+    int fd = socket_create_tcp(false);
     assert(fd >= 0);
 
     bool ra = socket_set_reuseaddr(fd);
@@ -184,7 +186,7 @@ static void test_bind_valid()
 
 static void test_bind_bad_ip()
 {
-    int fd = socket_create_tcp();
+    int fd = socket_create_tcp(false);
     assert(fd >= 0);
 
     bool ok = socket_bind(fd, BAD_IP, 19201U);
@@ -201,7 +203,7 @@ static void test_bind_bad_ip()
 
 static void test_listen()
 {
-    int fd = socket_create_tcp();
+    int fd = socket_create_tcp(false);
     assert(fd >= 0);
 
     bool ra = socket_set_reuseaddr(fd);
@@ -227,7 +229,7 @@ static void test_listen()
 static void test_accept()
 {
     // Set up server
-    int srv_fd = socket_create_tcp();
+    int srv_fd = socket_create_tcp(false);
     assert(srv_fd >= 0);
 
     bool ra = socket_set_reuseaddr(srv_fd);
@@ -240,7 +242,7 @@ static void test_accept()
     assert(listening);
 
     // Client initiates connection (uses timeout helper which sets non-blocking)
-    int cli_fd = socket_create_tcp();
+    int cli_fd = socket_create_tcp(false);
     assert(cli_fd >= 0);
 
     bool connected = socket_connect_with_timeout(cli_fd, LOOPBACK_IP,
@@ -267,7 +269,7 @@ static void test_accept()
 
 static void test_close()
 {
-    int fd = socket_create_tcp();
+    int fd = socket_create_tcp(false);
     assert(fd >= 0);
 
     socket_close(fd);  // must not crash
@@ -282,7 +284,7 @@ static void test_close()
 static void test_connect_with_timeout()
 {
     // Set up server
-    int srv_fd = socket_create_tcp();
+    int srv_fd = socket_create_tcp(false);
     assert(srv_fd >= 0);
 
     bool ra = socket_set_reuseaddr(srv_fd);
@@ -295,7 +297,7 @@ static void test_connect_with_timeout()
     assert(listening);
 
     // Client connects
-    int cli_fd = socket_create_tcp();
+    int cli_fd = socket_create_tcp(false);
     assert(cli_fd >= 0);
 
     bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19204U,
@@ -324,7 +326,7 @@ static void test_connect_with_timeout()
 static void test_tcp_frame_round_trip()
 {
     // Set up server
-    int srv_fd = socket_create_tcp();
+    int srv_fd = socket_create_tcp(false);
     assert(srv_fd >= 0);
 
     bool ra = socket_set_reuseaddr(srv_fd);
@@ -337,7 +339,7 @@ static void test_tcp_frame_round_trip()
     assert(listening);
 
     // Client connects
-    int cli_fd = socket_create_tcp();
+    int cli_fd = socket_create_tcp(false);
     assert(cli_fd >= 0);
 
     bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19205U,
@@ -389,7 +391,7 @@ static void test_tcp_frame_round_trip()
 static void test_tcp_recv_oversized_frame()
 {
     // Set up server
-    int srv_fd = socket_create_tcp();
+    int srv_fd = socket_create_tcp(false);
     assert(srv_fd >= 0);
 
     bool ra = socket_set_reuseaddr(srv_fd);
@@ -402,7 +404,7 @@ static void test_tcp_recv_oversized_frame()
     assert(listening);
 
     // Client connects
-    int cli_fd = socket_create_tcp();
+    int cli_fd = socket_create_tcp(false);
     assert(cli_fd >= 0);
 
     bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19206U,
@@ -453,7 +455,7 @@ static void test_tcp_recv_oversized_frame()
 
 static void test_send_to_bad_ip()
 {
-    int fd = socket_create_udp();
+    int fd = socket_create_udp(false);
     assert(fd >= 0);
 
     static const uint8_t DATA[4U] = {0x01U, 0x02U, 0x03U, 0x04U};
@@ -473,7 +475,7 @@ static void test_send_to_bad_ip()
 static void test_udp_send_recv_round_trip()
 {
     // Receiver binds to 19208; sender uses 19209 as an ephemeral source.
-    int recv_fd = socket_create_udp();
+    int recv_fd = socket_create_udp(false);
     assert(recv_fd >= 0);
 
     bool ra = socket_set_reuseaddr(recv_fd);
@@ -482,7 +484,7 @@ static void test_udp_send_recv_round_trip()
     bool bound = socket_bind(recv_fd, LOOPBACK_IP, 19208U);
     assert(bound);
 
-    int send_fd = socket_create_udp();
+    int send_fd = socket_create_udp(false);
     assert(send_fd >= 0);
 
     static const uint8_t PAYLOAD[8U] =
@@ -521,7 +523,7 @@ static void test_udp_send_recv_round_trip()
 
 static void test_udp_recv_timeout()
 {
-    int fd = socket_create_udp();
+    int fd = socket_create_udp(false);
     assert(fd >= 0);
 
     bool ra = socket_set_reuseaddr(fd);
@@ -556,7 +558,7 @@ static void test_udp_recv_timeout()
 static void test_tcp_send_recv_exact()
 {
     // Set up server
-    int srv_fd = socket_create_tcp();
+    int srv_fd = socket_create_tcp(false);
     assert(srv_fd >= 0);
 
     bool ra = socket_set_reuseaddr(srv_fd);
@@ -569,7 +571,7 @@ static void test_tcp_send_recv_exact()
     assert(listening);
 
     // Client connects
-    int cli_fd = socket_create_tcp();
+    int cli_fd = socket_create_tcp(false);
     assert(cli_fd >= 0);
 
     bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19210U,
@@ -615,7 +617,7 @@ static void test_tcp_send_recv_exact()
 static void test_tcp_frame_zero_payload()
 {
     // Set up server
-    int srv_fd = socket_create_tcp();
+    int srv_fd = socket_create_tcp(false);
     assert(srv_fd >= 0);
 
     bool ra = socket_set_reuseaddr(srv_fd);
@@ -628,7 +630,7 @@ static void test_tcp_frame_zero_payload()
     assert(listening);
 
     // Client connects
-    int cli_fd = socket_create_tcp();
+    int cli_fd = socket_create_tcp(false);
     assert(cli_fd >= 0);
 
     bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19211U,
@@ -667,6 +669,124 @@ static void test_tcp_frame_zero_payload()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 18: socket_is_ipv6() classifies IPv4 and IPv6 strings correctly
+// Verifies: REQ-6.3.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_socket_is_ipv6()
+{
+    // IPv6 strings must return true
+    assert(socket_is_ipv6("::1"));
+    assert(socket_is_ipv6("::"));
+    assert(socket_is_ipv6("2001:db8::1"));
+    assert(socket_is_ipv6("fe80::1%eth0"));
+
+    // IPv4 strings must return false
+    assert(!socket_is_ipv6("127.0.0.1"));
+    assert(!socket_is_ipv6("0.0.0.0"));
+    assert(!socket_is_ipv6("192.168.1.1"));
+
+    printf("PASS: test_socket_is_ipv6\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 19: socket_create_tcp(true) returns a valid AF_INET6 fd
+// Verifies: REQ-6.3.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_create_tcp_ipv6()
+{
+    int fd = socket_create_tcp(true);
+    assert(fd >= 0);
+
+    socket_close(fd);
+    printf("PASS: test_create_tcp_ipv6\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 20: socket_create_udp(true) returns a valid AF_INET6 fd
+// Verifies: REQ-6.3.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_create_udp_ipv6()
+{
+    int fd = socket_create_udp(true);
+    assert(fd >= 0);
+
+    socket_close(fd);
+    printf("PASS: test_create_udp_ipv6\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 21: socket_bind() on IPv6 loopback succeeds
+// Verifies: REQ-6.3.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_bind_ipv6()
+{
+    int fd = socket_create_tcp(true);
+    assert(fd >= 0);
+
+    bool ra = socket_set_reuseaddr(fd);
+    assert(ra);
+
+    bool ok = socket_bind(fd, LOOPBACK_IP6, 19300U);
+    assert(ok);
+
+    socket_close(fd);
+    printf("PASS: test_bind_ipv6\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 22: socket_send_to() + socket_recv_from() UDP round-trip over IPv6
+// Exercises the AF_INET6 branch in socket_recv_from().
+// Verifies: REQ-6.2.1, REQ-6.3.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_udp_ipv6_send_recv()
+{
+    int recv_fd = socket_create_udp(true);
+    assert(recv_fd >= 0);
+
+    bool ra = socket_set_reuseaddr(recv_fd);
+    assert(ra);
+
+    bool bound = socket_bind(recv_fd, LOOPBACK_IP6, 19301U);
+    assert(bound);
+
+    int send_fd = socket_create_udp(true);
+    assert(send_fd >= 0);
+
+    static const uint8_t PAYLOAD[6U] =
+        {0x10U, 0x20U, 0x30U, 0x40U, 0x50U, 0x60U};
+    static const uint32_t PAYLOAD_LEN = 6U;
+
+    bool sent = socket_send_to(send_fd, PAYLOAD, PAYLOAD_LEN,
+                                LOOPBACK_IP6, 19301U);
+    assert(sent);
+
+    uint8_t  recv_buf[256U];
+    uint32_t recv_len = 0U;
+    char     src_ip[48U];
+    uint16_t src_port = 0U;
+
+    (void)memset(recv_buf, 0, sizeof(recv_buf));
+    (void)memset(src_ip, 0, sizeof(src_ip));
+
+    bool ok = socket_recv_from(recv_fd, recv_buf,
+                                static_cast<uint32_t>(sizeof(recv_buf)),
+                                TIMEOUT_MS, &recv_len, src_ip, &src_port);
+    assert(ok);
+    assert(recv_len == PAYLOAD_LEN);
+    assert(memcmp(recv_buf, PAYLOAD, PAYLOAD_LEN) == 0);
+    assert(src_ip[0] != '\0');  // non-empty source address extracted
+
+    socket_close(send_fd);
+    socket_close(recv_fd);
+    printf("PASS: test_udp_ipv6_send_recv\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main — run all tests in sequence
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -691,6 +811,11 @@ int main()
     test_udp_recv_timeout();
     test_tcp_send_recv_exact();
     test_tcp_frame_zero_payload();
+    test_socket_is_ipv6();
+    test_create_tcp_ipv6();
+    test_create_udp_ipv6();
+    test_bind_ipv6();
+    test_udp_ipv6_send_recv();
 
     printf("=== ALL PASSED ===\n");
     return 0;

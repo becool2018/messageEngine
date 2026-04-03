@@ -30,6 +30,7 @@
 #include "platform/UdpBackend.hpp"
 #include "platform/ISocketOps.hpp"
 #include "platform/SocketOpsImpl.hpp"
+#include "platform/SocketUtils.hpp"
 #include "core/Assert.hpp"
 #include "core/Serializer.hpp"
 #include "core/Logger.hpp"
@@ -78,7 +79,7 @@ Result UdpBackend::init(const TransportConfig& config)
     m_cfg = config;
 
     // Create UDP socket
-    m_fd = m_sock_ops->create_udp();
+    m_fd = m_sock_ops->create_udp(socket_is_ipv6(config.bind_ip));
     if (m_fd < 0) {
         Logger::log(Severity::FATAL, "UdpBackend", "socket_create_udp failed");
         return Result::ERR_IO;

@@ -36,16 +36,79 @@
 #include "core/Assert.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
+// fill_addr() — private helper: fill sockaddr_storage for IPv4 or IPv6
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fill @p addr for @p ip:@p port. Detects IPv4/IPv6 from the address string.
+/// Strips any zone-ID suffix (e.g. "%eth0") from IPv6 before calling inet_pton.
+/// Power of 10 Rule 2: zone-strip loop bounded to 47 iterations.
+/// @pre ip != nullptr; addr != nullptr; addr_len != nullptr
+/// @return true on success; false if inet_pton() rejects the address string.
+static bool fill_addr(const char* ip, uint16_t port,
+                      struct sockaddr_storage* addr, socklen_t* addr_len)
+{
+    NEVER_COMPILED_OUT_ASSERT(ip != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(addr != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(addr_len != nullptr);
+
+    (void)memset(addr, 0, sizeof(*addr));
+
+    if (socket_is_ipv6(ip)) {
+        // Strip optional zone-ID suffix (inet_pton rejects "%eth0" suffixes).
+        // Power of 10 Rule 2: bounded to 47 characters.
+        char stripped[48];
+        uint32_t i = 0U;
+        while (i < 47U && ip[i] != '\0' && ip[i] != '%') {
+            stripped[i] = ip[i];
+            ++i;
+        }
+        stripped[i] = '\0';
+
+        // MISRA C++:2023 Rule 5.2.4: reinterpret_cast from sockaddr_storage* to
+        // sockaddr_in6* is the POSIX-standard address-family polymorphism idiom.
+        struct sockaddr_in6* a6 = reinterpret_cast<struct sockaddr_in6*>(addr);
+        a6->sin6_family = AF_INET6;
+        a6->sin6_port   = htons(port);
+        if (inet_pton(AF_INET6, stripped, &a6->sin6_addr) != 1) {
+            Logger::log(Severity::WARNING_LO, "SocketUtils",
+                       "inet_pton(AF_INET6, '%s') failed", ip);
+            return false;
+        }
+        *addr_len = static_cast<socklen_t>(sizeof(struct sockaddr_in6));
+    } else {
+        // MISRA C++:2023 Rule 5.2.4: reinterpret_cast from sockaddr_storage* to
+        // sockaddr_in* is the POSIX-standard address-family polymorphism idiom.
+        struct sockaddr_in* a4 = reinterpret_cast<struct sockaddr_in*>(addr);
+        a4->sin_family = AF_INET;
+        a4->sin_port   = htons(port);
+        if (inet_pton(AF_INET, ip, &a4->sin_addr) != 1) {
+            Logger::log(Severity::WARNING_LO, "SocketUtils",
+                       "inet_pton(AF_INET, '%s') failed", ip);
+            return false;
+        }
+        *addr_len = static_cast<socklen_t>(sizeof(struct sockaddr_in));
+    }
+
+    // Power of 10: postcondition assertion
+    NEVER_COMPILED_OUT_ASSERT(*addr_len > 0U);
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // socket_create_tcp()
 // ─────────────────────────────────────────────────────────────────────────────
 
-int socket_create_tcp()
+int socket_create_tcp(bool ipv6)
 {
+    const int family = ipv6 ? AF_INET6 : AF_INET;
+    NEVER_COMPILED_OUT_ASSERT(family == AF_INET || family == AF_INET6);  // Pre-condition
+
     // Power of 10: check return value
-    int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    int fd = socket(family, SOCK_STREAM, IPPROTO_TCP);
     if (fd < 0) {
         Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "socket(AF_INET, SOCK_STREAM) failed: %d", errno);
+                   "socket(%s, SOCK_STREAM) failed: %d",
+                   ipv6 ? "AF_INET6" : "AF_INET", errno);
         return -1;
     }
 
@@ -58,13 +121,17 @@ int socket_create_tcp()
 // socket_create_udp()
 // ─────────────────────────────────────────────────────────────────────────────
 
-int socket_create_udp()
+int socket_create_udp(bool ipv6)
 {
+    const int family = ipv6 ? AF_INET6 : AF_INET;
+    NEVER_COMPILED_OUT_ASSERT(family == AF_INET || family == AF_INET6);  // Pre-condition
+
     // Power of 10: check return value
-    int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    int fd = socket(family, SOCK_DGRAM, IPPROTO_UDP);
     if (fd < 0) {
         Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "socket(AF_INET, SOCK_DGRAM) failed: %d", errno);
+                   "socket(%s, SOCK_DGRAM) failed: %d",
+                   ipv6 ? "AF_INET6" : "AF_INET", errno);
         return -1;
     }
 
@@ -137,22 +204,15 @@ bool socket_bind(int fd, const char* ip, uint16_t port)
     NEVER_COMPILED_OUT_ASSERT(fd >= 0);
     NEVER_COMPILED_OUT_ASSERT(ip != nullptr);
 
-    struct sockaddr_in addr;
-    (void)memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-
-    // Parse IP address string to in_addr
-    int aton_result = inet_aton(ip, &addr.sin_addr);
-    if (aton_result == 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "inet_aton('%s') failed", ip);
+    struct sockaddr_storage addr;
+    socklen_t addr_len = 0;
+    if (!fill_addr(ip, port, &addr, &addr_len)) {
         return false;
     }
 
-    // Bind socket
-    int result = bind(fd, reinterpret_cast<struct sockaddr*>(&addr),
-                     sizeof(addr));
+    // MISRA C++:2023 Rule 5.2.4: reinterpret_cast from sockaddr_storage* to
+    // sockaddr* is the POSIX-standard socket API polymorphism idiom.
+    int result = bind(fd, reinterpret_cast<struct sockaddr*>(&addr), addr_len);
     if (result < 0) {
         Logger::log(Severity::WARNING_LO, "SocketUtils",
                    "bind(%s:%u) failed: %d", ip, port, errno);
@@ -180,22 +240,17 @@ bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
         return false;
     }
 
-    // Build address
-    struct sockaddr_in addr;
-    (void)memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-
-    int aton_result = inet_aton(ip, &addr.sin_addr);
-    if (aton_result == 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "inet_aton('%s') failed", ip);
+    // Build address (IPv4 or IPv6 detected from ip string)
+    struct sockaddr_storage addr;
+    socklen_t addr_len = 0;
+    if (!fill_addr(ip, port, &addr, &addr_len)) {
         return false;
     }
 
-    // Attempt non-blocking connect
+    // MISRA C++:2023 Rule 5.2.4: reinterpret_cast from sockaddr_storage* to
+    // sockaddr* is the POSIX-standard socket API polymorphism idiom.
     int conn_result = connect(fd, reinterpret_cast<struct sockaddr*>(&addr),
-                             sizeof(addr));
+                             addr_len);
     if (conn_result == 0) {
         // Immediate success
         NEVER_COMPILED_OUT_ASSERT(conn_result == 0);
@@ -504,23 +559,18 @@ bool socket_send_to(int fd, const uint8_t* buf, uint32_t len,
     NEVER_COMPILED_OUT_ASSERT(len > 0U);
     NEVER_COMPILED_OUT_ASSERT(ip != nullptr);
 
-    // Build destination address
-    struct sockaddr_in addr;
-    (void)memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-
-    int aton_result = inet_aton(ip, &addr.sin_addr);
-    if (aton_result == 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "inet_aton('%s') failed", ip);
+    // Build destination address (IPv4 or IPv6 detected from ip string)
+    struct sockaddr_storage addr;
+    socklen_t addr_len = 0;
+    if (!fill_addr(ip, port, &addr, &addr_len)) {
         return false;
     }
 
-    // Send datagram
+    // MISRA C++:2023 Rule 5.2.4: reinterpret_cast from sockaddr_storage* to
+    // sockaddr* is the POSIX-standard socket API polymorphism idiom.
     ssize_t send_result = sendto(fd, buf, len, 0,
                                 reinterpret_cast<struct sockaddr*>(&addr),
-                                sizeof(addr));
+                                addr_len);
     if (send_result < 0) {
         Logger::log(Severity::WARNING_LO, "SocketUtils",
                    "sendto(%s:%u) failed: %d", ip, port, errno);
@@ -568,11 +618,13 @@ bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,
         return false;
     }
 
-    // Receive datagram
-    struct sockaddr_in src_addr;
-    socklen_t src_len = sizeof(src_addr);
+    // Receive datagram — sockaddr_storage handles both IPv4 and IPv6.
+    struct sockaddr_storage src_addr;
+    socklen_t src_len = static_cast<socklen_t>(sizeof(src_addr));
     (void)memset(&src_addr, 0, sizeof(src_addr));
 
+    // MISRA C++:2023 Rule 5.2.4: reinterpret_cast from sockaddr_storage* to
+    // sockaddr* is the POSIX-standard socket API polymorphism idiom.
     ssize_t recv_result = recvfrom(fd, buf, buf_cap, 0,
                                   reinterpret_cast<struct sockaddr*>(&src_addr),
                                   &src_len);
@@ -588,20 +640,34 @@ bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,
         return false;
     }
 
-    // Extract source address and port
-    const char* inet_result = inet_ntop(AF_INET, &src_addr.sin_addr,
-                                       out_ip, 48);
-    if (inet_result == nullptr) {
+    // Extract source address and port — family-aware.
+    const char* ntop_result = nullptr;
+    if (src_addr.ss_family == AF_INET6) {
+        // MISRA C++:2023 Rule 5.2.4: reinterpret_cast from sockaddr_storage* to
+        // sockaddr_in6* is the POSIX-standard address-family polymorphism idiom.
+        const struct sockaddr_in6* a6 =
+            reinterpret_cast<const struct sockaddr_in6*>(&src_addr);
+        ntop_result = inet_ntop(AF_INET6, &a6->sin6_addr, out_ip, 48);
+        *out_port = ntohs(a6->sin6_port);
+    } else {
+        // MISRA C++:2023 Rule 5.2.4: reinterpret_cast from sockaddr_storage* to
+        // sockaddr_in* is the POSIX-standard address-family polymorphism idiom.
+        const struct sockaddr_in* a4 =
+            reinterpret_cast<const struct sockaddr_in*>(&src_addr);
+        ntop_result = inet_ntop(AF_INET, &a4->sin_addr, out_ip, 48);
+        *out_port = ntohs(a4->sin_port);
+    }
+
+    if (ntop_result == nullptr) {
         Logger::log(Severity::WARNING_LO, "SocketUtils",
                    "inet_ntop() failed: %d", errno);
         return false;
     }
 
-    *out_port = ntohs(src_addr.sin_port);
     *out_len = static_cast<uint32_t>(recv_result);
 
     // Power of 10: postcondition assertions
     NEVER_COMPILED_OUT_ASSERT(*out_len > 0U && *out_len <= buf_cap);
-    NEVER_COMPILED_OUT_ASSERT(inet_result != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(ntop_result != nullptr);
     return true;
 }

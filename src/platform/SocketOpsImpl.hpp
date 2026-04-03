@@ -46,8 +46,8 @@ public:
     // ISocketOps overrides — each delegates to the corresponding SocketUtils
     // free function. See ISocketOps.hpp for parameter and return semantics.
 
-    int  create_tcp()                                              override;
-    int  create_udp()                                             override;
+    int  create_tcp(bool ipv6)                                     override;
+    int  create_udp(bool ipv6)                                    override;
     bool set_reuseaddr(int fd)                                    override;
     bool set_nonblocking(int fd)                                  override;
     bool do_bind(int fd, const char* ip, uint16_t port)           override;

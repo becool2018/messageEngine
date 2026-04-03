@@ -86,7 +86,7 @@ Result TcpBackend::bind_and_listen(const char* ip, uint16_t port)
     NEVER_COMPILED_OUT_ASSERT(ip != nullptr);          // Power of 10: valid pointer
     NEVER_COMPILED_OUT_ASSERT(m_is_server);            // Server mode only
 
-    m_listen_fd = m_sock_ops->create_tcp();
+    m_listen_fd = m_sock_ops->create_tcp(socket_is_ipv6(ip));
     if (m_listen_fd < 0) {
         Logger::log(Severity::FATAL, "TcpBackend", "socket_create_tcp failed in server mode");
         return Result::ERR_IO;
@@ -166,7 +166,7 @@ Result TcpBackend::connect_to_server()
     NEVER_COMPILED_OUT_ASSERT(!m_is_server);  // Client mode only
     NEVER_COMPILED_OUT_ASSERT(m_client_fds[0U] == -1);  // Not yet connected
 
-    int fd = m_sock_ops->create_tcp();
+    int fd = m_sock_ops->create_tcp(socket_is_ipv6(m_cfg.peer_ip));
     if (fd < 0) {
         Logger::log(Severity::FATAL, "TcpBackend",
                    "socket_create_tcp failed in client mode");

@@ -41,6 +41,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
+#include "core/Assert.hpp"
 #include "core/Types.hpp"
 #include "core/Logger.hpp"
 
@@ -48,13 +49,31 @@
 // TCP Socket Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Create a TCP socket (AF_INET, SOCK_STREAM).
-/// @return File descriptor (>= 0) on success, -1 on error.
-int socket_create_tcp();
+/// Return true if @p ip is an IPv6 address string (contains ':').
+/// Used by backends to select the correct address family before socket creation.
+/// Power of 10 Rule 2: loop bounded to 46 iterations (INET6_ADDRSTRLEN).
+/// @pre ip != nullptr
+inline bool socket_is_ipv6(const char* ip)
+{
+    NEVER_COMPILED_OUT_ASSERT(ip != nullptr);
+    for (uint32_t i = 0U; i < 46U && ip[i] != '\0'; ++i) {
+        if (ip[i] == ':') {
+            return true;
+        }
+    }
+    NEVER_COMPILED_OUT_ASSERT(true);  // Power of 10 Rule 5: structural assertion
+    return false;
+}
 
-/// Create a UDP socket (AF_INET, SOCK_DGRAM).
+/// Create a TCP socket (AF_INET or AF_INET6, SOCK_STREAM, IPPROTO_TCP).
+/// @param[in] ipv6 true → AF_INET6; false → AF_INET.
 /// @return File descriptor (>= 0) on success, -1 on error.
-int socket_create_udp();
+int socket_create_tcp(bool ipv6);
+
+/// Create a UDP socket (AF_INET or AF_INET6, SOCK_DGRAM, IPPROTO_UDP).
+/// @param[in] ipv6 true → AF_INET6; false → AF_INET.
+/// @return File descriptor (>= 0) on success, -1 on error.
+int socket_create_udp(bool ipv6);
 
 /// Set a socket to non-blocking mode (O_NONBLOCK).
 /// @param[in] fd File descriptor.
@@ -66,16 +85,16 @@ bool socket_set_nonblocking(int fd);
 /// @return true on success, false on error.
 bool socket_set_reuseaddr(int fd);
 
-/// Bind a socket to an IP address and port.
+/// Bind a socket to an IP address and port (IPv4 or IPv6).
 /// @param[in] fd   File descriptor.
-/// @param[in] ip   IPv4 address string (e.g., "127.0.0.1" or "0.0.0.0").
+/// @param[in] ip   IPv4 or IPv6 address string (e.g., "0.0.0.0" or "::").
 /// @param[in] port Port number (host byte order).
 /// @return true on success, false on error.
 bool socket_bind(int fd, const char* ip, uint16_t port);
 
 /// Connect to a remote address with timeout (non-blocking connect via poll).
 /// @param[in] fd          File descriptor.
-/// @param[in] ip          IPv4 address string.
+/// @param[in] ip          IPv4 or IPv6 address string.
 /// @param[in] port        Port number (host byte order).
 /// @param[in] timeout_ms  Timeout in milliseconds.
 /// @return true on success (connected), false on error or timeout.
@@ -148,23 +167,24 @@ bool tcp_recv_frame(int fd, uint8_t* buf, uint32_t buf_cap,
 // UDP Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Send a UDP datagram to a remote address.
+/// Send a UDP datagram to a remote address (IPv4 or IPv6).
 /// @param[in] fd    File descriptor of UDP socket.
 /// @param[in] buf   Pointer to data to send.
 /// @param[in] len   Number of bytes to send.
-/// @param[in] ip    Destination IPv4 address string.
+/// @param[in] ip    Destination IPv4 or IPv6 address string.
 /// @param[in] port  Destination port (host byte order).
 /// @return true on success, false on error.
 bool socket_send_to(int fd, const uint8_t* buf, uint32_t len,
                     const char* ip, uint16_t port);
 
-/// Receive a UDP datagram with timeout.
+/// Receive a UDP datagram with timeout (IPv4 or IPv6).
 /// @param[in] fd          File descriptor of UDP socket.
 /// @param[out] buf        Pointer to receive buffer.
 /// @param[in] buf_cap     Capacity of receive buffer (max UDP packet size).
 /// @param[in] timeout_ms  Timeout in milliseconds.
 /// @param[out] out_len    Number of bytes received (datagram size).
-/// @param[out] out_ip     IPv4 source address string (caller provides 48-char buffer).
+/// @param[out] out_ip     Source address string — caller provides 48-char buffer
+///                        (large enough for IPv4 or IPv6).
 /// @param[out] out_port   Source port (host byte order).
 /// @return true on success (datagram received), false on error or timeout.
 bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,

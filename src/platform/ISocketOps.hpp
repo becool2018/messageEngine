@@ -58,15 +58,17 @@ public:
 
     // ── Socket creation ───────────────────────────────────────────────────────
 
-    /// Create a TCP socket (AF_INET, SOCK_STREAM, IPPROTO_TCP).
+    /// Create a TCP socket (SOCK_STREAM, IPPROTO_TCP).
     /// Wraps socket_create_tcp().
+    /// @param[in] ipv6 true → AF_INET6; false → AF_INET.
     /// @return File descriptor (≥0) on success; -1 on failure.
-    virtual int create_tcp() = 0;
+    virtual int create_tcp(bool ipv6) = 0;
 
-    /// Create a UDP socket (AF_INET, SOCK_DGRAM, IPPROTO_UDP).
+    /// Create a UDP socket (SOCK_DGRAM, IPPROTO_UDP).
     /// Wraps socket_create_udp().
+    /// @param[in] ipv6 true → AF_INET6; false → AF_INET.
     /// @return File descriptor (≥0) on success; -1 on failure.
-    virtual int create_udp() = 0;
+    virtual int create_udp(bool ipv6) = 0;
 
     // ── Socket options ────────────────────────────────────────────────────────
 

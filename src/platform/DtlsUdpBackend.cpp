@@ -611,7 +611,7 @@ Result DtlsUdpBackend::create_and_bind_udp_socket(const TransportConfig& config)
     NEVER_COMPILED_OUT_ASSERT(m_sock_fd < 0);
     NEVER_COMPILED_OUT_ASSERT(m_sock_ops != nullptr);
 
-    m_sock_fd = m_sock_ops->create_udp();
+    m_sock_fd = m_sock_ops->create_udp(socket_is_ipv6(config.bind_ip));
     if (m_sock_fd < 0) {
         Logger::log(Severity::FATAL, "DtlsUdpBackend", "socket_create_udp failed");
         return Result::ERR_IO;

@@ -73,12 +73,12 @@ struct MockSocketOps : public ISocketOps {
 
     // ── Socket creation ───────────────────────────────────────────────────────
 
-    int create_tcp() override
+    int create_tcp(bool /*ipv6*/) override
     {
         return fail_create_tcp ? -1 : FAKE_FD;
     }
 
-    int create_udp() override
+    int create_udp(bool /*ipv6*/) override
     {
         return fail_create_udp ? -1 : FAKE_FD;
     }
