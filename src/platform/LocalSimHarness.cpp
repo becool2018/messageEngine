@@ -134,21 +134,20 @@ Result LocalSimHarness::send_message(const MessageEnvelope& envelope)
         return Result::OK;
     }
 
-    // Check for delayed messages ready to deliver
+    // Collect all messages now ready to deliver (includes the current message when
+    // impairments are disabled, since process_outbound queues it with release_us=now_us).
+    // Do NOT also inject `envelope` directly — that would double-send every message
+    // and bypass configured delay for the current message. (HAZ-003, HAZARD_ANALYSIS §2)
     MessageEnvelope delayed_envelopes[IMPAIR_DELAY_BUF_SIZE];
     uint32_t delayed_count = m_impairment.collect_deliverable(now_us,
                                                               delayed_envelopes,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    // Inject delayed messages into peer first (FIFO order)
-    // Power of 10: fixed loop bound
+    // Inject all ready messages into peer. Power of 10: fixed loop bound.
     for (uint32_t i = 0U; i < delayed_count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        (void)m_peer->inject(delayed_envelopes[i]);
+        res = m_peer->inject(delayed_envelopes[i]);
     }
-
-    // Inject main message into peer
-    res = m_peer->inject(envelope);
 
     NEVER_COMPILED_OUT_ASSERT(res == Result::OK || res == Result::ERR_FULL);  // Post-condition
     return res;

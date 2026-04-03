@@ -592,12 +592,10 @@ static void test_pump_retries_send_fails()
     Result send_res = engine.send(env, NOW_US);
     assert(send_res == Result::OK);
 
-    // The LocalSimHarness send_message routes through the impairment delay buffer
-    // even when impairments are disabled: process_outbound queues the message with
-    // deliver_time = now_us, collect_deliverable immediately retrieves it AND it is
-    // also injected explicitly — resulting in 2 entries in harness_b per send call.
-    // Fill the remaining capacity (MSG_RING_CAPACITY - 2 more messages).
-    for (uint32_t i = 0U; i < MSG_RING_CAPACITY - 2U; ++i) {
+    // engine.send() places exactly 1 entry in harness_b (through the impairment
+    // delay buffer; collect_deliverable injects it once). Fill the remaining
+    // MSG_RING_CAPACITY - 1 slots so the next pump_retries send fails ERR_FULL.
+    for (uint32_t i = 0U; i < MSG_RING_CAPACITY - 1U; ++i) {
         MessageEnvelope filler;
         make_data_envelope(filler, 2U, 1U, static_cast<uint64_t>(i) + 100U, ReliabilityClass::BEST_EFFORT);
         Result r = harness_b.inject(filler);
