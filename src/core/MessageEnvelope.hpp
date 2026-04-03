@@ -98,6 +98,16 @@ inline bool envelope_is_control(const MessageEnvelope& env)
 }
 
 // Safety-critical (SC): HAZ-002 — verified to M5
+/// Return true if a received DATA envelope requires an automatic ACK response
+/// (reliability class RELIABLE_ACK or RELIABLE_RETRY). Extracted to keep
+/// DeliveryEngine::receive() within CC ≤ 10 (removes compound || condition).
+inline bool envelope_needs_ack_response(const MessageEnvelope& env)
+{
+    return (env.reliability_class == ReliabilityClass::RELIABLE_ACK) ||
+           (env.reliability_class == ReliabilityClass::RELIABLE_RETRY);
+}
+
+// Safety-critical (SC): HAZ-002 — verified to M5
 /// Build a minimal ACK envelope targeting the source of @p original.
 inline void envelope_make_ack(MessageEnvelope&       ack,
                                const MessageEnvelope& original,

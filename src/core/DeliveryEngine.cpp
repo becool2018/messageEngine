@@ -26,6 +26,32 @@
 #include "Assert.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
+// File-static helper: send an ACK for a received reliable data message.
+// Non-fatal on send failure (data still delivered). Extracted to keep
+// DeliveryEngine::receive() within CC ≤ 10.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions.
+// ─────────────────────────────────────────────────────────────────────────────
+static void send_data_ack(TransportInterface&    transport,
+                           const MessageEnvelope& data_env,
+                           NodeId                 local_id,
+                           uint64_t               now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(envelope_is_data(data_env));  // pre-condition
+    NEVER_COMPILED_OUT_ASSERT(local_id != NODE_ID_INVALID); // pre-condition
+
+    MessageEnvelope ack_env;
+    envelope_make_ack(ack_env, data_env, local_id, now_us);
+    Result res = transport.send_message(ack_env);
+    if (res != Result::OK) {
+        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
+                    "Failed to send ACK for message_id=%llu: result=%d",
+                    (unsigned long long)data_env.message_id,
+                    static_cast<int>(res));
+    }
+    NEVER_COMPILED_OUT_ASSERT(ack_env.message_type == MessageType::ACK);  // post-condition
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // File-static helper: process an ACK message — cancel ack_tracker and retry slots.
 // Extracted to keep DeliveryEngine::receive() within CC ≤ 10.
 // Power of 10: single-purpose, ≤1 page, ≥2 assertions.
@@ -270,6 +296,13 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
                 "Received data message_id=%llu from src=%u, length=%u",
                 (unsigned long long)env.message_id, env.source_id,
                 env.payload_length);
+
+    // Generate and send ACK for RELIABLE_ACK and RELIABLE_RETRY messages.
+    // Implements REQ-3.2.4 (automatic ACK on receive path).
+    // ACK send failure is non-fatal; data is still delivered to the caller.
+    if (envelope_needs_ack_response(env)) {
+        send_data_ack(*m_transport, env, m_local_id, now_us);
+    }
 
     // Power of 10 rule 5: post-condition assertion
     NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));  // Assert: envelope still valid
