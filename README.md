@@ -112,36 +112,143 @@ All impairment decisions are driven by a seedable xorshift64 PRNG — identical 
 
 Dependencies flow strictly downward. No lower layer may reference a higher one; cyclic dependencies are prohibited.
 
+### Layer Overview
+
 ```
-┌──────────────────────────────────────────────────────┐
-│           App Layer  (src/app/)                       │
-│           Server · Client                             │
-└──────────────────────┬───────────────────────────────┘
-                       │  uses
-┌──────────────────────▼───────────────────────────────┐
-│  Core Layer  (src/core/)                              │
-│  DeliveryEngine · Serializer · AckTracker             │
-│  RetryManager · DuplicateFilter · RingBuffer          │
-│  MessageEnvelope · Timestamp · MessageId              │
-│  Logger · Assert · AssertState                        │
-│  IResetHandler · AbortResetHandler                    │
-│  TransportInterface · ChannelConfig · TlsConfig       │
-│  ImpairmentConfig · Types                             │
-└──────────────────────┬───────────────────────────────┘
-                       │  implements TransportInterface
-┌──────────────────────▼───────────────────────────────┐
-│  Platform Layer  (src/platform/)                      │
-│  TcpBackend · UdpBackend · LocalSimHarness            │
-│  TlsTcpBackend · DtlsUdpBackend                       │
-│  ImpairmentEngine · ImpairmentConfigLoader            │
-│  PrngEngine · SocketUtils                             │
-│  ISocketOps · SocketOpsImpl                           │
-│  IMbedtlsOps · MbedtlsOpsImpl                        │
-└──────────────────────┬───────────────────────────────┘
-                       │  POSIX sockets / OS APIs / mbedTLS
-┌──────────────────────▼───────────────────────────────┐
-│  OS  (Berkeley sockets, POSIX clocks, pthreads)       │
-└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  App Layer  (src/app/)                                                        │
+│                                                                               │
+│       Server (TCP echo)                    Client (TCP demo)                  │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │  uses DeliveryEngine + TransportInterface*
+┌────────────────────────────────▼─────────────────────────────────────────────┐
+│  Core Layer  (src/core/)                                                      │
+│                                                                               │
+│  ┌────────────────────────────────────────────────────────────────────────┐  │
+│  │  DeliveryEngine                                                         │  │
+│  │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────┐  │  │
+│  │  │   AckTracker     │  │  RetryManager    │  │  DuplicateFilter     │  │  │
+│  │  │  32-slot table   │  │  exp. backoff    │  │  128-entry window    │  │  │
+│  │  │  FREE/PENDING/   │  │  INACTIVE/       │  │  (src,msg_id) pairs  │  │  │
+│  │  │  ACKED states    │  │  WAITING/DUE/    │  │  FIFO eviction       │  │  │
+│  │  │                  │  │  EXHAUSTED/EXPD  │  │                      │  │  │
+│  │  └──────────────────┘  └──────────────────┘  └──────────────────────┘  │  │
+│  │  ┌──────────────────┐                                                    │  │
+│  │  │  MessageIdGen    │  monotonically incrementing uint64; never 0        │  │
+│  │  └──────────────────┘                                                    │  │
+│  └──────────────────────────────────┬─────────────────────────────────────┘  │
+│                                     │  TransportInterface* (injected)         │
+│  ┌──────────────────────────────────┴─────────────────────────────────────┐  │
+│  │  Foundations                                                            │  │
+│  │  Serializer · MessageEnvelope · RingBuffer (64-slot SPSC lock-free)    │  │
+│  │  Timestamp  · MessageId       · Logger    · Assert / AssertState       │  │
+│  │  TransportInterface (abstract) · ChannelConfig · TlsConfig · Types     │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │  implements TransportInterface
+┌────────────────────────────────▼─────────────────────────────────────────────┐
+│  Platform Layer  (src/platform/)                                              │
+│                                                                               │
+│  ┌─────────────┐ ┌─────────────┐ ┌─────────────────┐ ┌──────────────────┐   │
+│  │ TcpBackend  │ │ UdpBackend  │ │ TlsTcpBackend   │ │ DtlsUdpBackend   │   │
+│  │ server+client│ │ datagram   │ │ TLS over TCP    │ │ DTLS over UDP    │   │
+│  │ 4-byte frame │ │ one dgram  │ │ (mbedTLS 4.0)   │ │ (mbedTLS 4.0)    │   │
+│  │ 8 clients max│ │ per message│ │ cert/key/handshk│ │ cookie exchange  │   │
+│  └──────┬──────┘ └──────┬──────┘ └────────┬────────┘ └────────┬─────────┘   │
+│         │               │                 │                    │              │
+│         └───────────────┴─────────────────┴────────────────────┘             │
+│                                     │                                         │
+│         each backend owns ──────────▼──────────────────────────────────────  │
+│         ┌──────────────────────────────────────────────────────────────────┐  │
+│         │  ImpairmentEngine                                                │  │
+│         │  ┌──────────────┐  ┌───────────────────┐  ┌──────────────────┐  │  │
+│         │  │  PrngEngine  │  │  Delay Buf [32]   │  │  Reorder Buf[32] │  │  │
+│         │  │  xorshift64  │  │  latency / jitter │  │  reorder window  │  │  │
+│         │  │  seedable    │  │  SLOT_FREE /      │  │  SLOT_FREE /     │  │  │
+│         │  │              │  │  SLOT_HELD /READY │  │  SLOT_HELD/READY │  │  │
+│         │  └──────────────┘  └───────────────────┘  └──────────────────┘  │  │
+│         │  loss · duplication · partition (UNINIT/READY/NO_PART/PART_ACT) │  │
+│         └──────────────────────────────────────────────────────────────────┘  │
+│         ┌──────────────────────────────────────────────────────────────────┐  │
+│         │  RingBuffer [64]  (each backend owns one inbound recv queue)     │  │
+│         └──────────────────────────────────────────────────────────────────┘  │
+│                                                                               │
+│  LocalSimHarness (in-process, no sockets)   ImpairmentConfigLoader           │
+│  SocketUtils · ISocketOps / SocketOpsImpl   IMbedtlsOps / MbedtlsOpsImpl    │
+└────────────────────────────────┬─────────────────────────────────────────────┘
+                                 │  POSIX sockets · mbedTLS 4.0 · CLOCK_MONOTONIC
+┌────────────────────────────────▼─────────────────────────────────────────────┐
+│  OS / External Libraries                                                      │
+│  Berkeley sockets  ·  POSIX clocks (CLOCK_MONOTONIC)  ·  mbedTLS 4.0        │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Send Path (outbound)
+
+```
+App
+ │  fills MessageEnvelope (type, payload, reliability, expiry, destination)
+ ▼
+DeliveryEngine::send()
+ │  assigns message_id (MessageIdGen)  ·  stamps source_id
+ │  RELIABLE_ACK/RETRY → AckTracker::track()
+ │  RELIABLE_RETRY     → RetryManager::schedule()
+ ▼
+TransportInterface::send_message()  [virtual dispatch to concrete backend]
+ ▼
+TcpBackend / UdpBackend / TlsTcpBackend / DtlsUdpBackend
+ │  Serializer::serialize() → wire bytes (44-byte header + payload)
+ ▼
+ImpairmentEngine::process_outbound()
+ │  partition active?  → drop, return ERR_IO
+ │  loss roll?         → drop, return ERR_IO
+ │  duplication?       → queue extra copy with short time offset
+ │  latency/jitter?    → queue to delay buffer with release_us
+ ▼
+ImpairmentEngine::collect_deliverable()  [releases delay-buffer slots]
+ ▼
+SocketUtils / mbedTLS  →  OS socket (TCP frame / UDP datagram / DTLS record)
+```
+
+### Receive Path (inbound)
+
+```
+OS socket  →  SocketUtils / mbedTLS
+ │  TCP: socket_recv_exact (length-prefixed frame)
+ │  UDP: socket_recv_from  (one datagram)
+ │  DTLS: IMbedtlsOps::ssl_read via MbedtlsOpsImpl
+ ▼
+Serializer::deserialize()
+ │  validates protocol version byte · frame magic · payload length bounds
+ ▼
+ImpairmentEngine::process_inbound()
+ │  reorder window: hold or release
+ ▼
+RingBuffer::push()  [backend inbound queue]
+ ▼
+TransportInterface::receive_message()  [pops from RingBuffer]
+ ▼
+DeliveryEngine::receive()
+ │  timestamp_expired()?       → return ERR_EXPIRED  (drop stale)
+ │  envelope_is_control()?
+ │    ACK → AckTracker::on_ack() · RetryManager::on_ack()
+ │  RELIABLE_RETRY DATA?
+ │    DuplicateFilter::check_and_record() → ERR_DUPLICATE (drop) or OK
+ ▼
+App  [processes delivered DATA envelope]
+```
+
+### Retry Pump (called each main-loop iteration)
+
+```
+DeliveryEngine::pump_retries(now_us)
+ │  RetryManager::collect_due() → envelopes whose next_retry_us ≤ now_us
+ │  for each due envelope → send_via_transport() → full send path above
+ │  backoff doubles each attempt; slot removed at max_retries or on ACK
+ ▼
+DeliveryEngine::sweep_ack_timeouts(now_us)
+ │  AckTracker::sweep_expired() → frees PENDING slots past their deadline
+ └  logs WARNING_HI per expired slot
 ```
 
 ---
