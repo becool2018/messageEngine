@@ -48,7 +48,7 @@
 - **No hidden state:** every piece of mutable state is owned explicitly by a named class; no globals except the signal flag in the demo server.
 - **Fail loud, fail safe:** `NEVER_COMPILED_OUT_ASSERT` fires in every build; it never silently degrades.
 - **Fixed resources:** all buffer sizes are compile-time constants; capacity overflow is a returned error, never undefined behavior.
-- **Shallow call depth:** no recursion; worst-case call chain is 9 frames / ~748 bytes of stack.
+- **Shallow call depth:** no recursion; worst-case call chain is 10 frames / ~764 bytes of stack (DTLS outbound send path; see `docs/STACK_ANALYSIS.md`).
 - **Dependency injection over globals:** `DeliveryEngine` receives a `TransportInterface*` at `init()` time, enabling any backend — or a mock — to be substituted without changing core code.
 
 ---
@@ -211,7 +211,7 @@ main → run_client_iteration → send_test_message → DeliveryEngine::send
      → ImpairmentEngine::process_outbound → ImpairmentEngine::queue_to_delay_buf
 ```
 
-**Worst case: 9 frames, ~748 bytes.** Well within any POSIX default thread stack (≥ 8 MB).
+**Worst case: 10 frames, ~764 bytes** (Chain 5 — DTLS outbound send, dominated by `payload_buf[256]`). Well within any POSIX default thread stack (≥ 8 MB). Full per-chain breakdown: `docs/STACK_ANALYSIS.md`.
 
 ---
 
