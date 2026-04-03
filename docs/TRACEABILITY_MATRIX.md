@@ -27,11 +27,11 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-4.2.1 | Logical channels with priority, reliability, order | src/core/ChannelConfig.hpp                                  | — (no dedicated test)                                |
 | REQ-4.2.2 | Transport configuration (timeouts, limits)         | src/core/ChannelConfig.hpp                                  | — (no dedicated test)                                |
 | REQ-5.1.1 | Fixed latency impairment                           | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: fixed-latency gating   |
-| REQ-5.1.2 | Random jitter impairment                           | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | — (no dedicated test)                               |
+| REQ-5.1.2 | Random jitter impairment                           | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: test_jitter             |
 | REQ-5.1.3 | Packet loss impairment                             | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: deterministic 100% loss, zero loss |
-| REQ-5.1.4 | Packet duplication impairment                      | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | — (no dedicated test)                               |
-| REQ-5.1.5 | Packet reordering impairment                       | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | — (no dedicated test)                               |
-| REQ-5.1.6 | Partition / intermittent outage impairment         | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | — (no dedicated test)                               |
+| REQ-5.1.4 | Packet duplication impairment                      | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: test_duplication, test_duplication_no_fire, test_duplication_buffer_full_skip |
+| REQ-5.1.5 | Packet reordering impairment                       | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: test_process_inbound_passthrough, test_process_inbound_reorder, test_reorder_window_zero_enabled |
+| REQ-5.1.6 | Partition / intermittent outage impairment         | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: test_partition_state_machine, test_partition_waiting_and_active |
 | REQ-5.2.1 | Structured impairment configuration object        | src/platform/ImpairmentConfig.hpp, src/platform/ImpairmentConfigLoader.hpp, src/platform/ImpairmentConfigLoader.cpp | test_ImpairmentEngine.cpp :: disabled pass-through; test_ImpairmentConfigLoader.cpp :: all twelve tests |
 | REQ-5.2.2 | Enable / disable each impairment independently     | src/platform/ImpairmentConfig.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: disabled pass-through  |
 | REQ-5.2.3 | Per-channel / per-peer impairment config           | src/platform/ImpairmentConfig.hpp                           | — (no dedicated test)                                |
@@ -75,10 +75,11 @@ The following REQ IDs have no `Verifies:` entry. These are candidates for new te
 REQ-3.2.1, REQ-3.2.2, REQ-3.2.7,
 REQ-3.3.5,
 REQ-4.1.1, REQ-4.2.1, REQ-4.2.2,
-REQ-5.1.2, REQ-5.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.2.3, REQ-5.2.5,
+REQ-5.2.3, REQ-5.2.5,
 REQ-6.1.1 through REQ-6.1.7, REQ-6.2.1 through REQ-6.2.4,
 REQ-6.3.1, REQ-6.3.2, REQ-6.3.5,
-REQ-7.1.1 through REQ-7.2.4
+REQ-7.1.1 through REQ-7.1.4
+REQ-7.2.1 through REQ-7.2.4 are unimplemented requirements (no test expected until implemented)
 
 Resolved since last generation (tests added):
 - REQ-3.2.4 — now covered by test_AckTracker.cpp (10 tests)
@@ -94,3 +95,7 @@ Resolved since last generation (tests added):
 - REQ-6.4.3 — now implemented by DtlsUdpBackend.hpp/.cpp (mbedtls_timing_delay_context); verified by test_DtlsUdpBackend.cpp :: test_dtls_loopback
 - REQ-6.4.4 — now implemented by Types.hpp (DTLS_MAX_DATAGRAM_BYTES), DtlsUdpBackend.hpp/.cpp; verified by test_DtlsUdpBackend.cpp :: test_oversized_payload_rejected
 - REQ-6.4.5 — now implemented by DtlsUdpBackend.hpp/.cpp (tls_enabled=false plaintext fallback); verified by test_DtlsUdpBackend.cpp :: test_plaintext_loopback
+- REQ-5.1.2 — now verified by test_ImpairmentEngine.cpp :: test_jitter
+- REQ-5.1.4 — now verified by test_ImpairmentEngine.cpp :: test_duplication, test_duplication_no_fire, test_duplication_buffer_full_skip
+- REQ-5.1.5 — now verified by test_ImpairmentEngine.cpp :: test_process_inbound_passthrough, test_process_inbound_reorder, test_reorder_window_zero_enabled
+- REQ-5.1.6 — now verified by test_ImpairmentEngine.cpp :: test_partition_state_machine, test_partition_waiting_and_active
