@@ -113,11 +113,11 @@ docs/use_cases/use_case_format.txt
   UC_*.md documents; defines the quality bar and output format requirements.
 
 docs/use_cases/HIGH_LEVEL_USE_CASES.md
-  Index of 20 high-level use cases (HL-1 through HL-20) with links to the 42
+  Index of 20 high-level use cases (HL-1 through HL-20) with links to the 58
   detailed Flow-of-Control documents.
 
-docs/use_cases/UC_01 … UC_42
-  42 Flow-of-Control documents, one per use case. Each document has 15
+docs/use_cases/UC_01 … UC_58
+  58 Flow-of-Control documents, one per use case. Each document has 15
   sections: overview, entry points, step-by-step control flow, call tree, key
   components, branching logic, concurrency, memory/ownership, error handling,
   external interactions, state changes, sequence diagram (ASCII), init vs
