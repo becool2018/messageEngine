@@ -26,7 +26,10 @@
  *
  * Verifies: REQ-3.3.1, REQ-3.3.2, REQ-3.3.3
  */
-// Verification: M1 + M2 + M4 + M5 (fault injection via ITransportBackend mock)
+// Verification: M1 + M2 + M4 + M5
+// M4: all reachable branches exercised via LocalSimHarness loopback (tests 1–23).
+// M5: transport ERR_IO paths (unreachable in loopback) exercised via
+//     MockTransportInterface (tests 24–26); see MockTransportInterface.hpp.
 
 #include <cstdio>
 #include <cstring>
@@ -38,6 +41,7 @@
 #include "core/ChannelConfig.hpp"
 #include "core/DeliveryEngine.hpp"
 #include "platform/LocalSimHarness.hpp"
+#include "MockTransportInterface.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test infrastructure: fixed now_us to avoid real-clock coupling
@@ -895,6 +899,109 @@ static void test_sweep_ack_timeouts_capacity()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// M5 helper: build a minimal ChannelConfig suitable for mock-transport tests
+// ─────────────────────────────────────────────────────────────────────────────
+static void make_mock_channel_config(ChannelConfig& cfg)
+{
+    channel_config_default(cfg, 0U);
+    cfg.max_retries      = 3U;
+    cfg.retry_backoff_ms = 100U;
+    cfg.recv_timeout_ms  = 1000U;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M5 Test 24: transport send_message() returns ERR_IO (OS/hardware failure path
+// unreachable in loopback) — DeliveryEngine::send() must propagate ERR_IO.
+// Verifies: REQ-3.3.1, REQ-3.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mock_send_transport_err_io()
+{
+    MockTransportInterface mock;
+    ChannelConfig cfg;
+    make_mock_channel_config(cfg);
+
+    DeliveryEngine engine;
+    engine.init(&mock, cfg, 1U);
+
+    // Inject ERR_IO on send_message()
+    mock.fail_send_message = true;
+
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
+    Result res = engine.send(env, NOW_US);
+
+    // DeliveryEngine must propagate the transport error; never return OK
+    assert(res == Result::ERR_IO);
+    assert(mock.n_send_message == 1);
+
+    printf("PASS: test_mock_send_transport_err_io\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M5 Test 25: transport receive_message() returns ERR_IO (connection-drop path
+// unreachable in loopback) — DeliveryEngine::receive() must propagate ERR_IO.
+// Verifies: REQ-3.3.1, REQ-3.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mock_receive_transport_err_io()
+{
+    MockTransportInterface mock;
+    ChannelConfig cfg;
+    make_mock_channel_config(cfg);
+
+    DeliveryEngine engine;
+    engine.init(&mock, cfg, 1U);
+
+    // Inject ERR_IO on receive_message()
+    mock.fail_receive_message = true;
+
+    MessageEnvelope out;
+    Result res = engine.receive(out, 100U, NOW_US);
+
+    // DeliveryEngine must propagate ERR_IO; not treat it as ERR_TIMEOUT
+    assert(res == Result::ERR_IO);
+    assert(mock.n_receive_message == 1);
+
+    printf("PASS: test_mock_receive_transport_err_io\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M5 Test 26: transport send_message() returns ERR_IO during pump_retries()
+// retry resend path (unreachable in loopback without a mock).
+// pump_retries() must still count the entry as retried even though the
+// transport rejected it (retry-count decrement and logging still occur).
+// Verifies: REQ-3.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mock_pump_retries_transport_err_io()
+{
+    MockTransportInterface mock;
+    ChannelConfig cfg;
+    make_mock_channel_config(cfg);
+
+    DeliveryEngine engine;
+    engine.init(&mock, cfg, 1U);
+
+    // First send succeeds (ERR_IO not yet armed)
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_RETRY);
+    Result send_res = engine.send(env, NOW_US);
+    assert(send_res == Result::OK);
+    assert(mock.n_send_message == 1);
+
+    // Arm ERR_IO for all subsequent sends (retry path)
+    mock.fail_send_message = true;
+
+    // RetryManager::schedule() sets next_retry_us = now_us (immediate).
+    // Advance time by 1 us so the entry is due but still within the 5-second expiry.
+    uint32_t retried = engine.pump_retries(NOW_US + 1ULL);
+
+    // Entry was due; pump counted it; transport error does not suppress the count
+    assert(retried >= 1U);
+    assert(retried <= ACK_TRACKER_CAPACITY);
+
+    printf("PASS: test_mock_pump_retries_transport_err_io\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -922,6 +1029,9 @@ int main()
     test_init_timeout_buf_is_zeroed();
     test_pump_retries_capacity();
     test_sweep_ack_timeouts_capacity();
+    test_mock_send_transport_err_io();
+    test_mock_receive_transport_err_io();
+    test_mock_pump_retries_transport_err_io();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;
