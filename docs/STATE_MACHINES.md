@@ -33,7 +33,7 @@ equivalent) for all state machines documented here.
 | `FREE` | `track(env, deadline)` | `m_count < ACK_TRACKER_CAPACITY` | `PENDING` | Copy env; set deadline; increment m_count |
 | `FREE` | `track(env, deadline)` | `m_count == ACK_TRACKER_CAPACITY` | `FREE` | Return `ERR_FULL`; logging deferred to caller (DeliveryEngine logs `WARNING_HI`) |
 | `PENDING` | `on_ack(src, msg_id)` | src and msg_id match slot | `ACKED` | — |
-| `PENDING` | `on_ack(src, msg_id)` | src or msg_id does not match | `PENDING` | Returns `ERR_INVALID`; **Known bug**: in a two-node deployment, `src` in the ACK is the remote peer's node ID, but the slot stores the local node's `source_id`. These never match, so this transition is effectively unreachable in normal operation. Slot remains PENDING until `sweep_expired()` fires. |
+| `PENDING` | `on_ack(src, msg_id)` | src or msg_id does not match | `PENDING` | Returns `ERR_INVALID`; slot remains PENDING until `sweep_expired()` fires. |
 | `PENDING` | `sweep_expired()` | `now_us >= deadline_us` | `FREE` | Copy to expired_buf if space; decrement m_count |
 | `PENDING` | `sweep_expired()` | `now_us < deadline_us` | `PENDING` | No action |
 | `ACKED` | `sweep_expired()` | — | `FREE` | Decrement m_count |
