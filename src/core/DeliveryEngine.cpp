@@ -330,6 +330,11 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
             Logger::log(Severity::INFO, "DeliveryEngine",
                         "Suppressed duplicate message_id=%llu from src=%u",
                         (unsigned long long)env.message_id, env.source_id);
+            // Re-ACK the duplicate: the original ACK may have been lost in transit,
+            // causing the sender to keep retrying. Sending ACK again stops unnecessary
+            // retries without delivering the data a second time. Non-fatal on failure.
+            // Safety-critical (SC): HAZ-002 — prevents spurious retry exhaustion.
+            send_data_ack(*m_transport, env, m_local_id, now_us);
             return Result::ERR_DUPLICATE;
         }
         NEVER_COMPILED_OUT_ASSERT(dedup_res == Result::OK);  // Assert: check_and_record succeeded

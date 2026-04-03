@@ -1002,6 +1002,64 @@ static void test_mock_pump_retries_transport_err_io()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: duplicate RELIABLE_RETRY still triggers ACK resend (ACK-loss recovery).
+// First receive returns OK and sends ACK. Second receive (same envelope) returns
+// ERR_DUPLICATE and must ALSO send an ACK so the sender can stop retrying even
+// if the first ACK was lost in transit.
+// Verifies: REQ-3.2.4, REQ-3.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_receive_duplicate_resends_ack()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // DATA from node 2 → node 1, RELIABLE_RETRY with a fixed message_id
+    MessageEnvelope data_env;
+    make_data_envelope(data_env, 2U, 1U, 77777ULL, ReliabilityClass::RELIABLE_RETRY);
+
+    // Inject the same envelope twice (simulates a retry when original ACK was lost)
+    Result inj1 = harness_a.inject(data_env);
+    assert(inj1 == Result::OK);
+    Result inj2 = harness_a.inject(data_env);
+    assert(inj2 == Result::OK);
+
+    // First receive: first occurrence → OK; engine sends ACK → harness_b
+    MessageEnvelope out1;
+    Result res1 = engine.receive(out1, 100U, NOW_US);
+    assert(res1 == Result::OK);
+
+    // Second receive: duplicate → ERR_DUPLICATE; engine must STILL send ACK → harness_b
+    MessageEnvelope out2;
+    Result res2 = engine.receive(out2, 100U, NOW_US);
+    assert(res2 == Result::ERR_DUPLICATE);
+
+    // harness_b should now hold exactly 2 ACK envelopes (one from each receive call)
+    MessageEnvelope ack1;
+    Result rack1 = harness_b.receive_message(ack1, 100U);
+    assert(rack1 == Result::OK);
+    assert(ack1.message_type == MessageType::ACK);
+    assert(ack1.message_id   == 77777ULL);
+
+    MessageEnvelope ack2;
+    Result rack2 = harness_b.receive_message(ack2, 100U);
+    assert(rack2 == Result::OK);
+    assert(ack2.message_type == MessageType::ACK);
+    assert(ack2.message_id   == 77777ULL);
+
+    // No third ACK should be present
+    MessageEnvelope ack3;
+    Result rack3 = harness_b.receive_message(ack3, 10U);
+    assert(rack3 != Result::OK);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_receive_duplicate_resends_ack\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -1029,6 +1087,7 @@ int main()
     test_init_timeout_buf_is_zeroed();
     test_pump_retries_capacity();
     test_sweep_ack_timeouts_capacity();
+    test_receive_duplicate_resends_ack();
     test_mock_send_transport_err_io();
     test_mock_receive_transport_err_io();
     test_mock_pump_retries_transport_err_io();
