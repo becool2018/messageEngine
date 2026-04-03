@@ -31,8 +31,8 @@ Called from the User's application event loop. Synchronous in the caller's threa
 1. **`DeliveryEngine::pump_retries(now_us)`** — entry.
 2. `NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr)`.
 3. `MessageEnvelope due_buf[ACK_TRACKER_CAPACITY]` — 32-slot stack array for due entries.
-4. **`m_retry_mgr.collect_due(now_us, due_buf, ACK_TRACKER_CAPACITY, &due_count)`** (`RetryManager.cpp`):
-   a. `NEVER_COMPILED_OUT_ASSERT(out_buf != nullptr)` and `NEVER_COMPILED_OUT_ASSERT(max_out > 0)`.
+4. **`m_retry_mgr.collect_due(now_us, due_buf, ACK_TRACKER_CAPACITY)`** (`RetryManager.cpp`):
+   a. `NEVER_COMPILED_OUT_ASSERT(out_buf != nullptr)` and `NEVER_COMPILED_OUT_ASSERT(buf_cap > 0)`.
    b. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]`:
       - Skip inactive entries (`active == false`).
       - **Expiry check:** `slot_has_expired(entry, now_us)` — if true: `entry.active = false`; skip.
@@ -41,7 +41,7 @@ Called from the User's application event loop. Synchronous in the caller's threa
         - `entry.retry_count++`.
         - `advance_backoff(entry, now_us)`: `entry.backoff_ms = min(entry.backoff_ms * 2, 60000UL)`, `entry.next_retry_us = now_us + entry.backoff_ms * 1000ULL`.
       - If `retry_count >= max_retries`: `entry.active = false`.
-   c. Sets `*out_count = due_count`.
+   c. Returns `due_count` directly as `uint32_t`.
 5. Back in `pump_retries()`: for each `due_buf[i]` (`i` in `0..due_count-1`):
    a. **`send_via_transport(due_buf[i], now_us)`** — expiry check, then `m_transport->send_message()`.
    b. If non-OK: `Logger::log(WARNING_LO, ...)` ("retry send failed"); continue.
@@ -52,8 +52,8 @@ Called from the User's application event loop. Synchronous in the caller's threa
 ## 4. Call Tree
 
 ```
-DeliveryEngine::pump_retries(now_us)               [DeliveryEngine.cpp]
- ├── RetryManager::collect_due(now_us, due_buf, ...) [RetryManager.cpp]
+DeliveryEngine::pump_retries(now_us)                          [DeliveryEngine.cpp]
+ ├── RetryManager::collect_due(now_us, due_buf, cap)          [RetryManager.cpp]
  │    ├── slot_has_expired()
  │    └── advance_backoff()
  └── [for each due entry:]
@@ -137,9 +137,9 @@ Per due entry:
 ```
 User
   -> DeliveryEngine::pump_retries(now_us)
-       -> RetryManager::collect_due(now_us, due_buf, 32, &due_count)
+       -> RetryManager::collect_due(now_us, due_buf, MSG_RING_CAPACITY)
             [scan; collect due; advance backoff; deactivate exhausted/expired]
-            <- due_count = N
+            <- uint32_t N
        [for i in 0..N-1:]
             -> send_via_transport(due_buf[i], now_us)
                  -> TcpBackend::send_message() -> ::send()

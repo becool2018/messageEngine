@@ -30,37 +30,36 @@ Called from the User's application event loop. Synchronous in the caller's threa
 
 1. **`DeliveryEngine::sweep_ack_timeouts(now_us)`** — entry.
 2. `NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr)`.
-3. **`m_ack_tracker.sweep_expired(now_us, &expired_count)`** is called (`AckTracker.cpp`):
-   a. `NEVER_COMPILED_OUT_ASSERT(out_count != nullptr)`.
-   b. `*out_count = 0`.
-   c. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]`:
-      - For each entry: **`sweep_one_slot(entry, now_us, &count)`** is called.
-      - Inside `sweep_one_slot(entry, now_us, &count)`:
-        - If `entry.state == PENDING && now_us >= entry.deadline_us`:
-          - `Logger::log(WARNING_LO, "AckTracker", "ACK timeout for message_id=%llu", entry.message_id)`.
-          - `entry.state = FREE`.
-          - `(*count)++`.
-4. `sweep_expired()` returns `Result::OK`; `expired_count` is set.
-5. `sweep_ack_timeouts()` returns `expired_count` to the User.
+3. **`m_ack_tracker.sweep_expired(now_us, m_timeout_buf, ACK_TRACKER_CAPACITY)`** is called (`AckTracker.cpp`):
+   a. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]`:
+      - For each entry where `entry.state == PENDING && now_us >= entry.deadline_us`:
+        - Copy envelope to `expired_buf[count]`.
+        - `entry.state = FREE`.
+        - `count++`.
+   b. Returns `count` (number of expired entries removed) directly as `uint32_t`.
+4. Back in `sweep_ack_timeouts()`: `collected = sweep_expired(...)`.
+5. Log each expired entry at `WARNING_HI`: message_id and destination node.
+6. `sweep_ack_timeouts()` returns `collected` to the User.
 
 ---
 
 ## 4. Call Tree
 
 ```
-DeliveryEngine::sweep_ack_timeouts(now_us)    [DeliveryEngine.cpp]
- └── AckTracker::sweep_expired(now_us, &count) [AckTracker.cpp]
-      └── [for each entry:]
-           AckTracker::sweep_one_slot(entry, now_us, &count)  [AckTracker.cpp]
-            └── Logger::log(WARNING_LO, ...)  [Logger.hpp]  (on timeout)
+DeliveryEngine::sweep_ack_timeouts(now_us)                     [DeliveryEngine.cpp]
+ ├── AckTracker::sweep_expired(now_us, m_timeout_buf, cap)     [AckTracker.cpp]
+ │    └── [for each PENDING entry past deadline: copy to buf; FREE slot; count++]
+ │    returns uint32_t count
+ └── [for each expired entry in m_timeout_buf:]
+      Logger::log(WARNING_HI, ...)                             [Logger.hpp]
 ```
 
 ---
 
 ## 5. Key Components Involved
 
-- **`AckTracker::sweep_expired()`** — Iterates over all 32 slots calling `sweep_one_slot()` for each.
-- **`AckTracker::sweep_one_slot()`** — Per-entry expiry check (CC-reduction helper). If `PENDING && past deadline`: logs + frees the slot.
+- **`AckTracker::sweep_expired(now_us, buf, cap)`** — Iterates over all `ACK_TRACKER_CAPACITY` slots. Returns expired envelopes in caller-supplied buffer; returns count directly as `uint32_t`.
+- **`DeliveryEngine::sweep_ack_timeouts()`** — Owns the pre-allocated `m_timeout_buf[ACK_TRACKER_CAPACITY]` (zero-initialized in `init()`). Loops over the returned buffer to emit one `WARNING_HI` log per timed-out entry.
 - **`DeliveryEngine::sweep_ack_timeouts()`** — Thin wrapper; returns the count to the application so it can respond to unacknowledged messages.
 
 ---
@@ -121,13 +120,12 @@ Per expired entry:
 ```
 User
   -> DeliveryEngine::sweep_ack_timeouts(now_us)
-       -> AckTracker::sweep_expired(now_us, &count)
-            [for each of 32 slots:]
-            -> sweep_one_slot(entry, now_us, &count)
-                 [if PENDING && now_us >= deadline_us:]
-                 -> Logger::log(WARNING_LO, "ACK timeout ...")
-                 [entry.state = FREE; count++]
-            <- count = N (expired entries found)
+       -> AckTracker::sweep_expired(now_us, m_timeout_buf, ACK_TRACKER_CAPACITY)
+            [for each PENDING entry where now_us >= deadline_us:]
+            [copy env to m_timeout_buf[count]; entry.state = FREE; count++]
+            <- uint32_t count = N
+       [for i in 0..N-1:]
+       -> Logger::log(WARNING_HI, "ACK timeout for message_id=... to node=...")
   <- N
 ```
 
@@ -154,5 +152,5 @@ User
 
 ## 15. Unknowns / Assumptions
 
-- `[ASSUMPTION]` `sweep_one_slot()` is extracted as a CC-reduction helper from `sweep_expired()`. This is confirmed by the comment in `AckTracker.cpp` noting CC reduction.
+- `[CONFIRMED]` `sweep_expired()` returns `uint32_t` directly and fills a caller-supplied buffer (`m_timeout_buf` in `DeliveryEngine`). The old out-pointer `&expired_count` API has been replaced.
 - `[ASSUMPTION]` The returned count from `sweep_ack_timeouts()` equals the number of slots transitioned from PENDING to FREE during this call. No additional bookkeeping is performed.

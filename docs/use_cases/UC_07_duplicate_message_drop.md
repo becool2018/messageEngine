@@ -10,9 +10,9 @@
 
 - **Trigger:** `DeliveryEngine::receive()` dequeues a `RELIABLE_RETRY` DATA envelope and calls `m_dedup_filter.check_and_record(source_id, message_id)`. File: `src/core/DuplicateFilter.cpp`.
 - **Goal:** Silently suppress delivery of any DATA envelope whose `(source_id, message_id)` pair has already been seen within the sliding dedup window.
-- **Success outcome (duplicate detected):** `check_and_record()` returns `true` (is duplicate). `receive()` returns `Result::ERR_DUPLICATE` to the caller. No application-level delivery occurs.
-- **Success outcome (first occurrence):** `check_and_record()` returns `false`. The `(source_id, message_id)` is recorded in the circular buffer. `receive()` continues to deliver the envelope.
-- **Error outcomes:** None — `check_and_record()` never fails; it always returns a bool.
+- **Success outcome (duplicate detected):** `check_and_record()` returns `Result::ERR_DUPLICATE`. `receive()` returns `Result::ERR_DUPLICATE` to the caller. No application-level delivery occurs.
+- **Success outcome (first occurrence):** `check_and_record()` returns `Result::OK`. The `(source_id, message_id)` is recorded in the circular buffer. `receive()` continues to deliver the envelope.
+- **Error outcomes:** None — `check_and_record()` always returns `OK` or `ERR_DUPLICATE`.
 
 ---
 
@@ -20,7 +20,7 @@
 
 ```cpp
 // src/core/DuplicateFilter.cpp (called from DeliveryEngine::receive())
-bool DuplicateFilter::check_and_record(NodeId source_id, uint64_t message_id);
+Result DuplicateFilter::check_and_record(NodeId src, uint64_t msg_id);
 ```
 
 Not called directly by the User; called internally by `DeliveryEngine::receive()`.
@@ -40,17 +40,17 @@ Not called directly by the User; called internally by `DeliveryEngine::receive()
    c. **`is_duplicate(source_id, message_id)`** — linear scan of `m_buf[0..m_count-1]`:
       - For each entry: if `entry.source_id == source_id && entry.message_id == message_id` → return `true`.
       - If no match found: return `false`.
-   d. If `is_duplicate()` returns true: return `true` immediately (do NOT record again).
+   d. If `is_duplicate()` returns true: return `Result::ERR_DUPLICATE` immediately (do NOT record again).
    e. If not duplicate: **`record(source_id, message_id)`**:
       - Write `m_buf[m_write_idx] = {source_id, message_id}`.
       - `m_write_idx = (m_write_idx + 1) % DEDUP_WINDOW_SIZE`.
       - If `m_count < DEDUP_WINDOW_SIZE`: `++m_count`.
       - (When `m_count == DEDUP_WINDOW_SIZE`: oldest entry at `m_write_idx` is overwritten on next call — sliding window eviction).
-   f. Return `false`.
-7. Back in `receive()`: if `check_and_record()` returned `true`:
-   - `Logger::log(WARNING_LO, "DeliveryEngine", "Duplicate RELIABLE_RETRY message dropped ...")`.
+   f. Return `Result::OK`.
+7. Back in `receive()`: if `check_and_record()` returned `ERR_DUPLICATE`:
+   - `Logger::log(INFO, "DeliveryEngine", "Suppressed duplicate message_id=...")`.
    - Returns `Result::ERR_DUPLICATE` to the User.
-8. If returned `false`: continue with delivery.
+8. If returned `Result::OK`: continue with delivery.
 
 ---
 
@@ -79,7 +79,7 @@ DeliveryEngine::receive()                       [DeliveryEngine.cpp]
 | Condition | True branch | False branch |
 |-----------|-------------|--------------|
 | `raw.reliability_class == RELIABLE_RETRY` | Call `check_and_record()` | Skip dedup (BEST_EFFORT / RELIABLE_ACK) |
-| `is_duplicate()` returns true | Return `true`; skip `record()` | Call `record()` |
+| `is_duplicate()` returns true | Return `ERR_DUPLICATE`; skip `record()` | Call `record()`; return `OK` |
 | `m_count == DEDUP_WINDOW_SIZE` | Oldest entry overwritten on next `record()` (UC_33) | `m_count` incremented |
 
 ---
@@ -101,7 +101,7 @@ DeliveryEngine::receive()                       [DeliveryEngine.cpp]
 
 ## 9. Error Handling Flow
 
-- `check_and_record()` has no error states; it always returns a bool.
+- `check_and_record()` returns `Result::OK` or `Result::ERR_DUPLICATE`; it has no failure states.
 - If duplicate detected: `receive()` returns `ERR_DUPLICATE`. No state is modified (the duplicate entry is not recorded a second time).
 - System state remains consistent in both branches.
 
@@ -138,7 +138,7 @@ DeliveryEngine::receive()
             <- false  [first occurrence]
        -> record(source_id, message_id)
             [write m_buf[m_write_idx]; advance m_write_idx]
-       <- false  [not duplicate; proceed with delivery]
+       <- Result::OK  [not duplicate; proceed with delivery]
 
   --- OR ---
 
@@ -146,8 +146,8 @@ DeliveryEngine::receive()
        -> is_duplicate(source_id, message_id)
             [scan finds match at entry k]
             <- true
-       <- true  [is duplicate]
-  -> Logger::log(WARNING_LO, "Duplicate ... dropped")
+       <- Result::ERR_DUPLICATE
+  -> Logger::log(INFO, "Suppressed duplicate message_id=...")
   <- ERR_DUPLICATE
 ```
 

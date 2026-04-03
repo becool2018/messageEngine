@@ -8,9 +8,9 @@
 
 ## 1. Use Case Overview
 
-- **Trigger:** User calls `DeliveryEngine::receive(timeout_ms, out_env)` after a DATA envelope has arrived. File: `src/core/DeliveryEngine.cpp`.
+- **Trigger:** User calls `DeliveryEngine::receive(env, timeout_ms, now_us)` after a DATA envelope has arrived. File: `src/core/DeliveryEngine.cpp`.
 - **Goal:** Return the next available DATA envelope to the caller. The envelope must pass deduplication (not a repeated `(source_id, message_id)`) and expiry checks (not past `expiry_time_us`) before delivery.
-- **Success outcome:** `receive()` returns `Result::OK`. `*out_env` contains the delivered envelope. If the envelope's `reliability_class == RELIABLE_ACK` or `RELIABLE_RETRY`, an ACK envelope is automatically sent back to the originator.
+- **Success outcome:** `receive()` returns `Result::OK`. `env` contains the delivered envelope. If the envelope's `reliability_class == RELIABLE_ACK` or `RELIABLE_RETRY`, an ACK envelope is automatically sent back to the originator.
 - **Error outcomes:**
   - `Result::ERR_TIMEOUT` — no message available within `timeout_ms` milliseconds.
   - `Result::ERR_DROPPED` — message received but dropped (duplicate or expired); covered by UC_07 and UC_09.
@@ -21,16 +21,16 @@
 
 ```cpp
 // src/core/DeliveryEngine.cpp
-Result DeliveryEngine::receive(uint32_t timeout_ms, MessageEnvelope* out_env);
+Result DeliveryEngine::receive(MessageEnvelope& env, uint32_t timeout_ms, uint64_t now_us);
 ```
 
 ---
 
 ## 3. End-to-End Control Flow
 
-1. **`DeliveryEngine::receive(timeout_ms, out_env)`** — entry.
-2. `NEVER_COMPILED_OUT_ASSERT(m_open)`.
-3. `NEVER_COMPILED_OUT_ASSERT(out_env != nullptr)`.
+1. **`DeliveryEngine::receive(env, timeout_ms, now_us)`** — entry.
+2. `NEVER_COMPILED_OUT_ASSERT(m_initialized)`.
+3. `NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL)`.
 4. Compute deadline: `uint64_t deadline_us = timestamp_now_us() + (uint64_t)timeout_ms * 1000ULL`.
 5. **Poll loop** (bounded by `timeout_ms` deadline — Rule 2 infrastructure deviation):
    a. `m_transport->receive_message(recv_timeout_ms, &raw_env)` — block up to `recv_timeout_ms` ms waiting for a frame from the transport.
@@ -42,11 +42,11 @@ Result DeliveryEngine::receive(uint32_t timeout_ms, MessageEnvelope* out_env);
    - Other control types (NAK, HEARTBEAT): log at INFO; continue poll.
 8. **`envelope_is_data(&raw_env)`** — if true (the happy path):
 9. **Expiry check:** `timestamp_expired(raw_env.expiry_time_us)` → if expired: log WARNING_LO; continue poll (UC_09 path).
-10. **Dedup check (RELIABLE_RETRY only):** if `raw_env.reliability_class == RELIABLE_RETRY`: call `DuplicateFilter::check_and_record(raw_env.source_id, raw_env.message_id)`. If duplicate: log WARNING_LO; continue poll (UC_07 path).
+10. **Dedup check (RELIABLE_RETRY only):** if `raw_env.reliability_class == RELIABLE_RETRY`: call `DuplicateFilter::check_and_record(raw_env.source_id, raw_env.message_id)`. If `Result::ERR_DUPLICATE`: log INFO; return `ERR_DUPLICATE` (UC_07 path).
 11. **ACK generation (RELIABLE_ACK or RELIABLE_RETRY):**
-    - `envelope_make_ack(&raw_env, &ack_env)` — construct ACK with matching `message_id` and `destination_id = raw_env.source_id`.
+    - `envelope_make_ack(ack_env, raw_env, m_local_id, now_us)` — construct ACK with matching `message_id` and `destination_id = raw_env.source_id`.
     - `m_transport->send_message(ack_env)` — send ACK back. Return value checked; log WARNING_LO on failure.
-12. `*out_env = raw_env` — copy envelope to caller output.
+12. `env` already holds the delivered envelope (written in place by `m_transport->receive_message()`).
 13. Returns `Result::OK`.
 
 ---
@@ -54,18 +54,17 @@ Result DeliveryEngine::receive(uint32_t timeout_ms, MessageEnvelope* out_env);
 ## 4. Call Tree
 
 ```
-DeliveryEngine::receive(timeout_ms, out_env)       [DeliveryEngine.cpp]
- ├── timestamp_now_us()                            [Timestamp.hpp]
- ├── [poll loop]
- │    └── TransportInterface::receive_message()    [TcpBackend / UdpBackend / LocalSimHarness]
- ├── envelope_valid()                              [Envelope.hpp/cpp]
- ├── envelope_is_control()                         [Envelope.hpp/cpp]
- │    └── AckTracker::on_ack()                     [AckTracker.cpp]
- │    └── RetryManager::on_ack()                   [RetryManager.cpp]
- ├── envelope_is_data()                            [Envelope.hpp/cpp]
- ├── timestamp_expired()                           [Timestamp.hpp]
- ├── DuplicateFilter::check_and_record()           [DuplicateFilter.cpp — RELIABLE_RETRY only]
- ├── envelope_make_ack()                           [Envelope.hpp/cpp — RELIABLE_ACK/RETRY only]
+DeliveryEngine::receive(env, timeout_ms, now_us)   [DeliveryEngine.cpp]
+ ├── TransportInterface::receive_message(env, timeout_ms)  [TcpBackend / UdpBackend / LocalSimHarness]
+ ├── check_routing(env, m_local_id, now_us)        [DeliveryEngine.cpp — expiry + destination check]
+ ├── envelope_is_control()                         [MessageEnvelope.hpp]
+ │    └── process_ack(m_ack_tracker, m_retry_manager, env)  [DeliveryEngine.cpp]
+ │         ├── AckTracker::on_ack(src, msg_id)     [AckTracker.cpp]
+ │         └── RetryManager::on_ack(src, msg_id)   [RetryManager.cpp]
+ ├── envelope_is_data()                            [MessageEnvelope.hpp]
+ ├── DuplicateFilter::check_and_record(src, id)    [DuplicateFilter.cpp — RELIABLE_RETRY only]
+ ├── send_data_ack(transport, env, local_id, now_us) [DeliveryEngine.cpp — RELIABLE_ACK/RETRY only]
+ │    └── envelope_make_ack(ack, env, local_id, now_us)  [MessageEnvelope.hpp]
  └── TransportInterface::send_message(ack_env)     [sends ACK back]
 ```
 
@@ -91,7 +90,7 @@ DeliveryEngine::receive(timeout_ms, out_env)       [DeliveryEngine.cpp]
 | `envelope_is_control()` | Route to ACK/NAK handler; continue poll | Check if data |
 | `timestamp_expired()` true | Log; discard; continue poll (UC_09) | Proceed |
 | `reliability_class == RELIABLE_RETRY` | `check_and_record()` duplicate check | Skip dedup |
-| `check_and_record()` returns duplicate | Discard; continue poll (UC_07) | Deliver |
+| `check_and_record()` returns `ERR_DUPLICATE` | Return `ERR_DUPLICATE` (UC_07) | Deliver |
 | `reliability_class ∈ {RELIABLE_ACK, RELIABLE_RETRY}` | `envelope_make_ack()` + send ACK | Skip ACK generation |
 
 ---
@@ -109,7 +108,7 @@ DeliveryEngine::receive(timeout_ms, out_env)       [DeliveryEngine.cpp]
 
 - `raw_env` — stack-allocated `MessageEnvelope` (~4140 bytes) in `receive()` stack frame.
 - `ack_env` — stack-allocated `MessageEnvelope` for the ACK response.
-- `*out_env` — caller-provided output buffer; written by value copy in step 12.
+- `env` — caller-provided reference; written in place by `m_transport->receive_message()` and the routing/dedup checks operate on the same object.
 - No heap allocation. Power of 10 Rule 3 compliant.
 
 ---
@@ -143,20 +142,17 @@ DeliveryEngine::receive(timeout_ms, out_env)       [DeliveryEngine.cpp]
 ## 12. Sequence Diagram
 
 ```
-User -> DeliveryEngine::receive(timeout_ms, &out_env)
-  -> timestamp_now_us()                         [deadline = now + timeout]
-  [poll loop]
-  -> TransportInterface::receive_message()
-       <- Result::OK, raw_env
-  -> envelope_valid(&raw_env)                   <- true
-  -> envelope_is_data(&raw_env)                 <- true
-  -> timestamp_expired(raw_env.expiry_time_us)  <- false (not expired)
+User -> DeliveryEngine::receive(env, timeout_ms, now_us)
+  -> TransportInterface::receive_message(env, timeout_ms)
+       <- Result::OK, env filled
+  -> check_routing(env, m_local_id, now_us)     <- Result::OK (not expired, addressed to us)
+  -> envelope_is_data(env)                      <- true
   [if RELIABLE_RETRY]
-  -> DuplicateFilter::check_and_record(src, id) <- false (not duplicate)
+  -> DuplicateFilter::check_and_record(src, id) <- Result::OK (not duplicate)
   [if RELIABLE_ACK or RELIABLE_RETRY]
-  -> envelope_make_ack(&raw_env, &ack_env)
-  -> TransportInterface::send_message(ack_env)  [ACK sent back]
-  [*out_env = raw_env]
+  -> send_data_ack(transport, env, local_id, now_us)
+       -> envelope_make_ack(ack_env, env, local_id, now_us)
+       -> TransportInterface::send_message(ack_env)  [ACK sent back]
   <- Result::OK
 ```
 

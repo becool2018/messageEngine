@@ -8,19 +8,19 @@
 
 ## 1. Use Case Overview
 
-- **Trigger:** `DeliveryEngine::receive()` processes an incoming `ACK` envelope and calls `m_retry_mgr.on_ack(message_id)`. File: `src/core/RetryManager.cpp`.
+- **Trigger:** `DeliveryEngine::receive()` processes an incoming `ACK` envelope and calls `m_retry_mgr.on_ack(src, message_id)` (via `process_ack()`). File: `src/core/RetryManager.cpp`.
 - **Goal:** Cancel all pending retries for the acknowledged `message_id` by setting the active `RetryEntry` to `inactive`.
 - **Success outcome:** The matching active `RetryEntry` has `active` set to `false`. The slot is immediately available for a new `schedule()` call. Returns `Result::OK`.
 - **Error outcomes:**
-  - `Result::ERR_NOT_FOUND` — no active entry matches `message_id`. Logged at `WARNING_LO` by the caller; non-fatal. Can occur for RELIABLE_ACK sends (no retry entry exists) or if the ACK is a duplicate.
+  - `Result::ERR_INVALID` — no active entry matches `(src, message_id)`. Logged at `INFO` by the caller; non-fatal. Can occur for RELIABLE_ACK sends (no retry entry exists) or if the ACK is a duplicate.
 
 ---
 
 ## 2. Entry Points
 
 ```cpp
-// src/core/RetryManager.cpp (called from DeliveryEngine::receive())
-Result RetryManager::on_ack(uint64_t message_id);
+// src/core/RetryManager.cpp (called from DeliveryEngine::receive() via process_ack())
+Result RetryManager::on_ack(NodeId src, uint64_t msg_id);
 ```
 
 Not called directly by the User.
@@ -32,15 +32,15 @@ Not called directly by the User.
 1. `DeliveryEngine::receive()` pops an `ACK` envelope from the ring buffer.
 2. `envelope_is_control(raw)` — true; `raw.message_type == ACK` — true.
 3. **`m_ack_tracker.on_ack(raw.message_id)`** is called first (see UC_08 for AckTracker side).
-4. **`m_retry_mgr.on_ack(raw.message_id)`** is called (`RetryManager.cpp`).
-5. Inside `RetryManager::on_ack(message_id)`:
-   a. `NEVER_COMPILED_OUT_ASSERT(message_id != 0)`.
+4. **`m_retry_mgr.on_ack(raw.source_id, raw.message_id)`** is called (`RetryManager.cpp`) inside `process_ack()`.
+5. Inside `RetryManager::on_ack(src, msg_id)`:
+   a. `NEVER_COMPILED_OUT_ASSERT(msg_id != 0)`.
    b. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]`:
-      - For each slot: if `entry.active && entry.env.message_id == message_id`:
+      - For each slot: if `entry.active && entry.env.source_id == src && entry.env.message_id == msg_id`:
         - `entry.active = false`.
         - Returns `Result::OK`.
-   c. If no match: returns `Result::ERR_NOT_FOUND`.
-6. Back in `receive()`: `retry_on_ack_res` is checked; if `ERR_NOT_FOUND`: `Logger::log(WARNING_LO, ...)` ("no active retry for message_id").
+   c. If no match: returns `Result::ERR_INVALID`.
+6. Back in `process_ack()`: result is checked; if `ERR_INVALID`: `Logger::log(INFO, ...)` ("ACK has no matching retry slot").
 7. `receive()` copies `raw` to `out`, returns `Result::OK`.
 
 ---
@@ -48,10 +48,11 @@ Not called directly by the User.
 ## 4. Call Tree
 
 ```
-DeliveryEngine::receive()                      [DeliveryEngine.cpp]
- ├── AckTracker::on_ack(message_id)            [AckTracker.cpp]   (UC_08)
- └── RetryManager::on_ack(message_id)          [RetryManager.cpp]
-      └── [linear scan; entry.active = false on match]
+DeliveryEngine::receive()                            [DeliveryEngine.cpp]
+ └── process_ack(m_ack_tracker, m_retry_manager, env) [DeliveryEngine.cpp]
+      ├── AckTracker::on_ack(src, msg_id)            [AckTracker.cpp]   (UC_08)
+      └── RetryManager::on_ack(src, msg_id)          [RetryManager.cpp]
+           └── [linear scan; entry.active = false on match]
 ```
 
 ---
@@ -91,7 +92,7 @@ DeliveryEngine::receive()                      [DeliveryEngine.cpp]
 
 ## 9. Error Handling Flow
 
-- **`ERR_NOT_FOUND`:** Expected for `RELIABLE_ACK` sends (no retry was scheduled). Non-fatal; logged at WARNING_LO. State remains consistent.
+- **`ERR_INVALID`:** Expected for `RELIABLE_ACK` sends (no retry was scheduled). Non-fatal; logged at INFO. State remains consistent.
 - The freed slot is immediately available for the next `schedule()` call (the next RELIABLE_RETRY send).
 
 ---
@@ -117,12 +118,13 @@ All other `RetryEntry` fields are unchanged (stale values remain until the slot 
 
 ```
 [ACK envelope received by DeliveryEngine::receive()]
-  -> AckTracker::on_ack(message_id)        [UC_08: PENDING -> FREE]
-  -> RetryManager::on_ack(message_id)
-       [scan; find active entry with matching message_id]
-       [entry.active = false]
-       <- Result::OK
-  [receive() returns OK with ACK envelope copied to out]
+  -> process_ack(m_ack_tracker, m_retry_manager, env)
+       -> AckTracker::on_ack(env.source_id, env.message_id)   [UC_08: PENDING -> FREE]
+       -> RetryManager::on_ack(env.source_id, env.message_id)
+            [scan; find active entry with matching (src, message_id)]
+            [entry.active = false]
+            <- Result::OK
+  <- Result::OK
 ```
 
 ---
@@ -148,5 +150,5 @@ All other `RetryEntry` fields are unchanged (stale values remain until the slot 
 
 ## 15. Unknowns / Assumptions
 
-- `[ASSUMPTION]` `RetryManager::on_ack()` is always called regardless of whether a retry entry was scheduled. For RELIABLE_ACK sends, it returns `ERR_NOT_FOUND` which is non-fatal.
+- `[CONFIRMED]` `RetryManager::on_ack()` is always called regardless of whether a retry entry was scheduled. For RELIABLE_ACK sends, it returns `ERR_INVALID` which is non-fatal.
 - `[ASSUMPTION]` The stale `env` data in deactivated slots is not zeroed. This is inferred from the `on_ack()` implementation that only sets `active = false`.
