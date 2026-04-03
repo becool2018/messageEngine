@@ -104,7 +104,8 @@ ALL_LIB_OBJS := $(CORE_OBJS) $(PLATFORM_OBJS)
 # ─────────────────────────────────────────────────────────────────────────────
 .PHONY: all clean tests stress_tests run_stress_tests server client check_traceability \
         lint cppcheck pclint scan_build static_analysis \
-        coverage coverage_show coverage_report
+        coverage coverage_show coverage_report \
+        check_version
 
 all: server client tests
 
@@ -174,6 +175,38 @@ $(BUILD_DIR)/app/%.o: src/app/%.cpp
 $(BUILD_DIR)/tests/%.o: tests/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
+
+# ─────────────────────────────────────────────────────────────────────────────
+# check_version — pre-release gate
+#
+# Verifies that the ME_VERSION_STRING in src/core/Version.hpp matches the
+# current git tag exactly (format: vMAJOR.MINOR.PATCH).  Run this before
+# creating a GitHub Release to catch the common mistake of bumping one but
+# forgetting the other.
+#
+# Exits 0 (success) when the current HEAD is exactly at a tag that matches
+# the version string.  Exits 1 with a clear message otherwise.
+#
+# Usage:
+#   make check_version
+# ─────────────────────────────────────────────────────────────────────────────
+check_version:
+	@tag=$$(git describe --tags --exact-match 2>/dev/null || echo "untagged"); \
+	 src=$$(grep 'ME_VERSION_STRING\[\]' src/core/Version.hpp \
+	        | sed 's/.*"\(.*\)".*/\1/'); \
+	 if [ "$$tag" = "v$$src" ]; then \
+	     echo "=== check_version: OK — tag=$$tag matches src/core/Version.hpp ($$src) ==="; \
+	 else \
+	     echo ""; \
+	     echo "ERROR: Version mismatch"; \
+	     echo "  git tag              : $$tag"; \
+	     echo "  src/core/Version.hpp : $$src"; \
+	     echo ""; \
+	     echo "Fix: ensure ME_VERSION_STRING in Version.hpp equals the tag (without 'v'),"; \
+	     echo "     commit, then re-tag before running make check_version."; \
+	     echo ""; \
+	     exit 1; \
+	 fi
 
 check_traceability:
 	@bash docs/check_traceability.sh

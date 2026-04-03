@@ -1,0 +1,97 @@
+name: Release
+
+# ─────────────────────────────────────────────────────────────────────────────
+# When this workflow runs
+# ─────────────────────────────────────────────────────────────────────────────
+# Manual trigger only (workflow_dispatch).
+#
+# Rationale: messageEngine is a safety-critical library.  Releases must be
+# a deliberate act by a human engineer — not an automatic consequence of
+# pushing to main.  The engineer:
+#   1. Bumps ME_VERSION_STRING in src/core/Version.hpp.
+#   2. Commits and pushes.
+#   3. Creates and pushes the git tag:
+#        git tag -a v1.0.0 -m "Release 1.0.0"
+#        git push origin v1.0.0
+#   4. Navigates to Actions → Release → Run workflow, entering the tag.
+#
+# This workflow then:
+#   a. Checks out at the given tag.
+#   b. Verifies the tag exists on origin.
+#   c. Builds the full project (make all).
+#   d. Runs make lint (zero clang-tidy violations required).
+#   e. Runs make run_tests (all tests must pass).
+#   f. Runs make check_version (git tag must match Version.hpp exactly).
+#   g. Creates the GitHub Release with auto-generated notes.
+#
+# If any step fails the workflow aborts and no Release is created.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0) — must already be pushed to origin'
+        required: true
+        type: string
+
+permissions:
+  contents: write   # required to create a GitHub Release
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  release:
+    name: Validate and publish ${{ github.event.inputs.tag }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout at tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag }}
+          fetch-depth: 0   # full history needed for git describe in check_version
+
+      - name: Verify tag exists on origin
+        run: |
+          git fetch --tags
+          if ! git rev-parse "${{ github.event.inputs.tag }}" >/dev/null 2>&1; then
+            echo "ERROR: Tag ${{ github.event.inputs.tag }} not found on origin."
+            echo "Push the tag first: git push origin ${{ github.event.inputs.tag }}"
+            exit 1
+          fi
+          echo "Tag ${{ github.event.inputs.tag }} confirmed on origin."
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libmbedtls-dev \
+            clang \
+            clang-tidy
+
+      - name: Build (make all)
+        run: make all
+
+      - name: Lint (make lint)
+        run: make lint
+
+      - name: Unit tests (make run_tests)
+        run: make run_tests 2>/dev/null
+
+      - name: Version consistency check (make check_version)
+        # Ensures ME_VERSION_STRING in Version.hpp matches the release tag.
+        # Fails the release if someone forgot to update Version.hpp before tagging.
+        run: make check_version
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.event.inputs.tag }}" \
+            --title "messageEngine ${{ github.event.inputs.tag }}" \
+            --generate-notes \
+            --verify-tag
