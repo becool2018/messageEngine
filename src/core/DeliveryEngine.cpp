@@ -177,10 +177,21 @@ void DeliveryEngine::init(TransportInterface* transport,
 // ─────────────────────────────────────────────────────────────────────────────
 // DeliveryEngine::send_via_transport()
 // ─────────────────────────────────────────────────────────────────────────────
-Result DeliveryEngine::send_via_transport(const MessageEnvelope& env)
+Result DeliveryEngine::send_via_transport(const MessageEnvelope& env, uint64_t now_us)
 {
-    NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: engine initialized
-    NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr);  // Assert: transport valid
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);          // Assert: engine initialized
+    NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr); // Assert: transport valid
+    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);          // Assert: valid timestamp
+
+    // Safety-critical (SC): HAZ-004 / REQ-3.3.4 — drop expired messages before I/O.
+    // expiry_time_us == 0 means never-expires (handled inside timestamp_expired).
+    if (timestamp_expired(env.expiry_time_us, now_us)) {
+        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
+                    "Message expired before send; dropping. id=%llu",
+                    (unsigned long long)env.message_id);
+        return Result::ERR_EXPIRED;
+    }
+
     NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));  // Assert: valid envelope
 
     // Power of 10 rule 7: check return value from transport
@@ -214,7 +225,7 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
     env.timestamp_us = now_us;
 
     // Send via transport
-    Result res = send_via_transport(env);
+    Result res = send_via_transport(env, now_us);
     if (res != Result::OK) {
         Logger::log(Severity::WARNING_LO, "DeliveryEngine",
                     "Failed to send message_id=%llu: %u",
@@ -364,7 +375,7 @@ uint32_t DeliveryEngine::pump_retries(uint64_t now_us)
     // Power of 10 rule 2: bounded loop (collected is ≤ MSG_RING_CAPACITY)
     for (uint32_t i = 0U; i < collected; ++i) {
         // Power of 10 rule 7: check return value
-        Result send_res = send_via_transport(m_retry_buf[i]);
+        Result send_res = send_via_transport(m_retry_buf[i], now_us);
         if (send_res != Result::OK) {
             Logger::log(Severity::WARNING_LO, "DeliveryEngine",
                         "Retry send failed for message_id=%llu (result=%u)",

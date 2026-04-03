@@ -137,8 +137,9 @@ private:
     MessageEnvelope m_retry_buf[MSG_RING_CAPACITY];
     MessageEnvelope m_timeout_buf[ACK_TRACKER_CAPACITY];
 
-    // Private helper: send a message envelope via transport (checked return).
-    Result send_via_transport(const MessageEnvelope& env);
+    // Private helper: expiry-gate then send a message envelope via transport.
+    // Returns ERR_EXPIRED without touching the transport if the message has expired.
+    Result send_via_transport(const MessageEnvelope& env, uint64_t now_us);
 };
 
 #endif // CORE_DELIVERY_ENGINE_HPP
