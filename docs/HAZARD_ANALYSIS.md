@@ -41,6 +41,7 @@
 | Backoff not advanced after retry | Constant-rate retransmission; link saturation | Cat II HAZ-002 | `advance_backoff()` called in `collect_due()` | Doubling backoff capped at 60 s per `advance_backoff()` |
 | Expired slot not removed | Slot leak; `ERR_FULL` blocks new retries | Cat II HAZ-006 | `slot_has_expired()` checked before retry | Slot deactivated and logged at `WARNING_LO` on expiry |
 | `schedule()` returns `ERR_FULL` ignored | Message never retried | Cat II HAZ-002 | `ERR_FULL` return code | Power of 10 Rule 7 mandates all returns checked; logged at `WARNING_LO` |
+| `on_ack()` source_id mismatch — **fixed (DEF-003-1)**: `DeliveryEngine::receive()` previously passed `env.source_id` (remote ACK sender) to `on_ack()` instead of `env.destination_id` (local sender, matching the stored slot). Retry slots were never cancelled on ACK receipt; all retries ran to exhaustion. | Fixed: RetryManager slot now transitions to INACTIVE on receipt of matching ACK; no further retransmission. | Cat II HAZ-002 (resolved) | `on_ack()` now returns `OK` for valid ACKs; `ERR_INVALID` returned only for genuinely unmatched ACKs | `destination_id` used as lookup key in `DeliveryEngine::receive()` |
 
 ### AckTracker
 

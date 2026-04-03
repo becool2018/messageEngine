@@ -91,7 +91,7 @@ logical states are:
 | `WAITING` | `collect_due(now, buf)` | `now_us ≥ expiry_us` | `INACTIVE` | Decrement m_count; log `WARNING_LO` (expired) |
 | `WAITING` | `collect_due(now, buf)` | `retry_count ≥ max_retries` | `INACTIVE` | Decrement m_count; log `WARNING_HI` (exhausted) |
 | `WAITING` | `on_ack(src, msg_id)` | src and msg_id match | `INACTIVE` | Decrement m_count; log INFO |
-| `WAITING` | `on_ack(src, msg_id)` | src or msg_id does not match | `WAITING` | Returns `ERR_INVALID`; **Known bug**: same source_id mismatch as AckTracker (see §1). In a two-node deployment this transition is unreachable; slots remain WAITING until expired or exhausted. |
+| `WAITING` | `on_ack(src, msg_id)` | src or msg_id does not match | `WAITING` | Returns `ERR_INVALID`; no state change. |
 | `DUE` | `collect_due(now, buf)` | buf has space | `WAITING` | Copy to buf; increment retry_count; advance backoff; set next_retry_us |
 | `DUE` | `collect_due(now, buf)` | buf full | `DUE` | Not collected this sweep; will retry on next call |
 
@@ -103,7 +103,7 @@ logical states are:
 - A slot transitions to `INACTIVE` only through: ACK received, exhausted, or expired.
 - The `schedule()` call sets `next_retry_us = now_us` so the first retry fires immediately.
 
-> **Known implementation defect:** Same source_id mismatch as AckTracker §1. `on_ack()` matches `slot.env.source_id` (local node ID) against the ACK's `source_id` (remote peer ID). In a two-node deployment, ACKs never cancel retry slots via `on_ack()`. All slot reclamation occurs via exhaustion (`retry_count >= max_retries`) or expiry (`now_us >= expiry_us`). This means every RELIABLE_RETRY message will exhaust all `max_retries` attempts regardless of ACK receipt.
+> **Defect fixed (DEF-003-1):** The source_id mismatch described for AckTracker §1 applied equally to RetryManager. `DeliveryEngine::receive()` now passes `env.destination_id` (local node ID) to `RetryManager::on_ack()`, which correctly matches the stored `slot.env.source_id` (also the local node ID set at `schedule()` time). ACK receipt now cancels retry slots via `on_ack()` in both AckTracker and RetryManager as intended.
 
 ---
 
