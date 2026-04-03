@@ -466,11 +466,17 @@ Result TcpBackend::send_message(const MessageEnvelope& envelope)
         return res;
     }
 
-    // Apply impairment: process_outbound may drop the message (ERR_IO = drop silently)
+    // Apply impairment: process_outbound queues the message into the delay buffer.
+    // ERR_IO   — intentional loss-impairment drop; return OK (expected behavior).
+    // ERR_FULL — delay buffer full; message not queued; propagate to caller.
+    // OK       — message queued with release_us = now_us (no latency) or future time.
     uint64_t now_us = timestamp_now_us();
     res = m_impairment.process_outbound(envelope, now_us);
     if (res == Result::ERR_IO) {
-        return Result::OK;  // Message dropped by loss impairment
+        return Result::OK;  // intentional loss-impairment drop
+    }
+    if (res != Result::OK) {
+        return res;  // ERR_FULL: delay buffer full; message not queued
     }
 
     // Discard if no clients are connected
