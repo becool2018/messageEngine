@@ -53,7 +53,6 @@ int SocketOpsImpl::create_tcp(bool ipv6)
     // Power of 10 Rule 5: no pointer preconditions; assert post-condition
     int fd = socket_create_tcp(ipv6);
     NEVER_COMPILED_OUT_ASSERT(fd >= -1);    // fd is -1 on failure or ≥0 on success
-    NEVER_COMPILED_OUT_ASSERT(fd != 0);     // fd 0 (stdin) is never returned by socket()
     return fd;
 }
 
@@ -62,7 +61,6 @@ int SocketOpsImpl::create_udp(bool ipv6)
     // Power of 10 Rule 5: no pointer preconditions; assert post-condition
     int fd = socket_create_udp(ipv6);
     NEVER_COMPILED_OUT_ASSERT(fd >= -1);    // fd is -1 on failure or ≥0 on success
-    NEVER_COMPILED_OUT_ASSERT(fd != 0);     // fd 0 (stdin) is never returned by socket()
     return fd;
 }
 
