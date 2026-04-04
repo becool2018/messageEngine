@@ -291,6 +291,95 @@ static void test_receive_expired()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// REQ-3.2.7 dedicated tests — expiry edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Test: send() with an already-expired envelope returns ERR_EXPIRED immediately
+// (send_via_transport() expiry gate — UC_04).
+// Verifies: REQ-3.2.7, REQ-3.3.4
+static void test_send_expired_returns_err()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Expired outbound envelope: expiry_time_us is in the past relative to NOW_US
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 77777ULL, ReliabilityClass::BEST_EFFORT);
+    env.expiry_time_us = 1ULL;  // way in the past
+
+    Result res = engine.send(env, NOW_US);
+    assert(res == Result::ERR_EXPIRED);
+
+    // Nothing should have been sent to harness_b
+    MessageEnvelope dummy;
+    Result rr = harness_b.receive_message(dummy, 10U);
+    assert(rr != Result::OK);
+
+    harness_a.close();
+    harness_b.close();
+    printf("PASS: test_send_expired_returns_err\n");
+}
+
+// Test: receive() with expiry_time_us == now_us (exactly at deadline) returns
+// ERR_EXPIRED. Covers the boundary: timestamp_expired returns true when
+// now_us >= expiry_us (i.e., at-deadline is expired, not just past-deadline).
+// Verifies: REQ-3.2.7, REQ-3.3.4
+static void test_receive_expired_at_boundary()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // expiry exactly equal to NOW_US — must be treated as expired
+    MessageEnvelope env;
+    make_data_envelope(env, 2U, 1U, 88888ULL, ReliabilityClass::BEST_EFFORT);
+    env.expiry_time_us = NOW_US;
+
+    Result inj = harness_a.inject(env);
+    assert(inj == Result::OK);
+
+    MessageEnvelope out;
+    Result res = engine.receive(out, 100U, NOW_US);
+    assert(res == Result::ERR_EXPIRED);
+
+    harness_a.close();
+    harness_b.close();
+    printf("PASS: test_receive_expired_at_boundary\n");
+}
+
+// Test: receive() with expiry_time_us == 0 (never-expires sentinel) delivers
+// the message. Ensures the zero-expiry convention is honoured end-to-end on
+// the receive path and a DATA envelope is not falsely dropped.
+// Verifies: REQ-3.2.7, REQ-3.3.4
+static void test_receive_zero_expiry_never_drops()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    MessageEnvelope env;
+    make_data_envelope(env, 2U, 1U, 99999ULL, ReliabilityClass::BEST_EFFORT);
+    env.expiry_time_us = 0ULL;  // 0 == never expires
+
+    Result inj = harness_a.inject(env);
+    assert(inj == Result::OK);
+
+    MessageEnvelope out;
+    // Pass a very large now_us — should NOT be dropped despite high time value
+    Result res = engine.receive(out, 100U, UINT64_MAX / 2U);
+    assert(res == Result::OK);
+    assert(out.message_id == 99999ULL);
+
+    harness_a.close();
+    harness_b.close();
+    printf("PASS: test_receive_zero_expiry_never_drops\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test 6: send RELIABLE_RETRY; inject matching ACK; engine.receive() processes
 // the ACK (not delivered as data); pump_retries returns 0 (retry cancelled)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1154,6 +1243,9 @@ int main()
     test_send_reliable_retry();
     test_receive_data_best_effort();
     test_receive_expired();
+    test_send_expired_returns_err();
+    test_receive_expired_at_boundary();
+    test_receive_zero_expiry_never_drops();
     test_receive_ack_cancels_retry();
     test_receive_duplicate();
     test_receive_timeout();
