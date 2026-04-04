@@ -115,7 +115,7 @@ private:
     Entry           m_slots[ACK_TRACKER_CAPACITY];  ///< fixed array of tracker entries
     uint32_t        m_count;                        ///< number of non-FREE slots currently in use
     AckTrackerStats m_stats;                        ///< REQ-7.2.3 observability counters
-    bool            m_initialized;                  ///< set true by init(); guards against use before init
+    bool            m_initialized = false;          ///< false until init() is called; guards against use before init
 };
 
 #endif // CORE_ACK_TRACKER_HPP
