@@ -337,3 +337,45 @@ All items in `docs/INSPECTION_CHECKLIST.md` verified for the integration commit.
 
 Moderator: Claude Sonnet 4.6 — 2026-04-04. No CRITICAL or MAJOR defects. All entry and exit criteria satisfied. Inspection INSP-005 closed PASS.
 
+---
+
+### INSP-006 — Phase 2 Integration Inspection
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-04 |
+| Author      | Don Jessup / Claude |
+| Moderator   | Don Jessup |
+| Reviewer(s) | Claude (AI-assisted) |
+| Outcome     | PASS — no new defects |
+
+#### Scope of change
+
+Integration of `tcp-tls-inbound-impairment-parity` and
+`localsim-inbound-impairment-parity` into `tcp-tls-inbound-localsim-inbound`.
+Version bump: 1.1.0 → 1.2.0.
+
+No new hazards identified. All SC functions unchanged. inject() raw-bypass
+contract preserved with explicit test coverage (test_localsim_inject_bypasses_impairment).
+make lint and make run_tests: PASS.
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make lint` passes with zero clang-tidy violations | PASS |
+| `make run_tests` all tests green | PASS |
+| No PROTO_VERSION bump (wire format unchanged) | PASS |
+| No feature logic changed in this integration commit | PASS |
+| Version.hpp bump follows SemVer (MINOR: two new backward-compatible features) | PASS |
+
+#### Defects found
+
+| ID | File : line | Description | Severity | Disposition | Resolution |
+|----|-------------|-------------|----------|-------------|------------|
+| — | — | No new defects found during integration | — | — | — |
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-04. No CRITICAL or MAJOR defects. All entry and exit criteria satisfied. Inspection INSP-006 closed PASS.
+

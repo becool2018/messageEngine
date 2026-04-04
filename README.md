@@ -15,6 +15,8 @@ All production code is written to **JPL Power of 10**, **MISRA C++:2023**, and a
 
 The library targets **NASA-STD-8719.13C** and **NASA-STD-8739.8A** software assurance practices at **Class C** classification (infrastructure / networking library), with voluntary **Class B** rigor in testing discipline: all safety-critical functions require branch coverage, mandatory peer inspection (M1), and static analysis (M2), with MC/DC coverage as the goal for the five highest-hazard functions.
 
+**Library version: 1.2.0** — inbound impairment (`process_inbound()`) is now active on all five backend receive paths (UdpBackend, DtlsUdpBackend, TcpBackend, TlsTcpBackend, LocalSimHarness via `deliver_from_peer()`); `inject()` raw-bypass contract preserved. Wire format unchanged; no PROTO_VERSION bump.
+
 ---
 
 ## Table of Contents
@@ -92,7 +94,7 @@ A configurable network fault injection layer sits between the transport abstract
 
 All impairment decisions are driven by a seedable xorshift64 PRNG — identical seed and input produces an identical fault sequence every run.
 
-`ImpairmentEngine::process_inbound()` is now active in the `UdpBackend` and `DtlsUdpBackend` receive paths. Inbound impairments (partition drops, reordering) are applied to received messages before they are pushed to the inbound ring buffer, matching the behaviour of `process_outbound()` on the send path.
+`ImpairmentEngine::process_inbound()` is now active on the receive path of **all five backends**: `UdpBackend`, `DtlsUdpBackend`, `TcpBackend`, `TlsTcpBackend`, and `LocalSimHarness` (via `deliver_from_peer()`). Inbound impairments (partition drops, reordering) are applied to received messages before they are pushed to the inbound ring buffer, matching the behaviour of `process_outbound()` on the send path. `LocalSimHarness::inject()` remains a raw test bypass that skips impairment by contract.
 
 ### 6. Reliability Helpers
 - **Duplicate filter** — sliding window of 128 `(source_id, message_id)` pairs; evicts the oldest on overflow
