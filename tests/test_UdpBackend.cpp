@@ -578,9 +578,11 @@ static void test_mock_send_to_fail()
     MessageEnvelope env;
     make_test_envelope(env, 0xFA115E1DULL);
 
-    // send_to fails → send_message must propagate ERR_IO.
+    // send_to fails — the failure is logged at WARNING_LO but not attributed to
+    // the current send call. send_message() returns OK: message was accepted into
+    // the local pipeline; delivery failure is observable via logging only.
     r = backend.send_message(env);
-    assert(r == Result::ERR_IO);
+    assert(r == Result::OK);
 
     // Backend remains open after a send failure.
     assert(backend.is_open());

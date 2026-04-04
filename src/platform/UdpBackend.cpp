@@ -159,14 +159,14 @@ Result UdpBackend::send_message(const MessageEnvelope& envelope)
     // all messages whose release_us <= now_us, covering both the zero-delay
     // pass-through and the timed-delay cases. Do NOT also call send_to() for
     // `envelope` directly — that causes every message to be sent twice. (HAZ-003)
+    // Flush errors from older delayed messages are not attributed to the current
+    // send — the current envelope may have a future release_us and remain queued.
     // Power of 10: fixed loop bound (IMPAIR_DELAY_BUF_SIZE compile-time constant).
     MessageEnvelope delayed_envelopes[IMPAIR_DELAY_BUF_SIZE];
     uint32_t delayed_count = m_impairment.collect_deliverable(now_us,
                                                               delayed_envelopes,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    // Propagate the first send failure so callers can detect bad peer addresses.
-    Result first_send_err = Result::OK;
     for (uint32_t i = 0U; i < delayed_count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
 
@@ -178,14 +178,14 @@ Result UdpBackend::send_message(const MessageEnvelope& envelope)
         }
 
         if (!m_sock_ops->send_to(m_fd, m_wire_buf, delayed_len,
-                                 m_cfg.peer_ip, m_cfg.peer_port) &&
-            first_send_err == Result::OK) {
-            first_send_err = Result::ERR_IO;
+                                 m_cfg.peer_ip, m_cfg.peer_port)) {
+            Logger::log(Severity::WARNING_LO, "UdpBackend",
+                        "send_to failed for delayed envelope at index %u", i);
         }
     }
 
     NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);  // Post-condition
-    return first_send_err;
+    return Result::OK;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

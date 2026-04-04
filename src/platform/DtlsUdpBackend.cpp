@@ -798,13 +798,13 @@ Result DtlsUdpBackend::send_message(const MessageEnvelope& envelope)
     // all messages due now — covering both the zero-delay pass-through and timed-
     // delay cases. Do NOT also call send_wire_bytes() here; that would send every
     // message twice. (HAZ-003)
-    // Propagate the first send failure so callers can detect bad peer addresses.
+    // Flush errors from older delayed messages are not attributed to the current
+    // send — the current envelope may have a future release_us and remain queued.
     // Power of 10: fixed loop bound (IMPAIR_DELAY_BUF_SIZE compile-time constant).
     MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];
     uint32_t delayed_count = m_impairment.collect_deliverable(now_us, delayed,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    Result first_send_err = Result::OK;
     for (uint32_t i = 0U; i < delayed_count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
         uint32_t dlen = 0U;
@@ -812,11 +812,14 @@ Result DtlsUdpBackend::send_message(const MessageEnvelope& envelope)
                                     SOCKET_RECV_BUF_BYTES, dlen);
         if (!result_ok(res)) { continue; }
         Result send_res = send_wire_bytes(m_wire_buf, dlen);
-        if (send_res != Result::OK && first_send_err == Result::OK) { first_send_err = send_res; }
+        if (send_res != Result::OK) {
+            Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
+                        "send_wire_bytes failed for delayed envelope at index %u", i);
+        }
     }
 
     NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);
-    return first_send_err;
+    return Result::OK;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

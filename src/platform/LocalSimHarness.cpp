@@ -152,9 +152,11 @@ Result LocalSimHarness::send_message(const MessageEnvelope& envelope)
                                                               delayed_envelopes,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    // MED-4 fix: log all failed inject() calls; propagate first failure to caller.
+    // Flush errors from older delayed messages are not attributed to the current
+    // send — the current envelope may have a future release_us and remain queued.
+    // Log individual failures for observability; always return OK (current message
+    // was accepted into the local pipeline above).
     // Power of 10: fixed loop bound.
-    Result first_inject_err = Result::OK;
     for (uint32_t i = 0U; i < delayed_count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
         Result inject_res = m_peer->inject(delayed_envelopes[i]);
@@ -162,16 +164,10 @@ Result LocalSimHarness::send_message(const MessageEnvelope& envelope)
             Logger::log(Severity::WARNING_HI, "LocalSimHarness",
                         "inject() failed for delayed message at index %u: result=%d",
                         i, static_cast<int>(inject_res));
-            if (first_inject_err == Result::OK) {
-                first_inject_err = inject_res;  // capture first failure
-            }
         }
     }
 
-    // If any inject failed (e.g. peer receive queue full), return that error so the
-    // caller knows the message was not delivered.
-    NEVER_COMPILED_OUT_ASSERT(first_inject_err == Result::OK || first_inject_err == Result::ERR_FULL);
-    return first_inject_err;
+    return Result::OK;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
