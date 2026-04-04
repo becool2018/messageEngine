@@ -72,7 +72,6 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 ## Coverage gaps (requirements with no test)
 
 The following REQ IDs have no `Verifies:` entry. These are candidates for new tests:
-REQ-3.2.7,
 REQ-3.3.5,
 REQ-4.1.1, REQ-4.2.1, REQ-4.2.2,
 REQ-5.2.3, REQ-5.2.5,
@@ -87,7 +86,8 @@ Resolved since last generation (tests added):
 - REQ-3.3.1 — now covered by test_DeliveryEngine.cpp
 - REQ-3.3.2 — now covered by test_AckTracker.cpp + test_DeliveryEngine.cpp
 - REQ-3.3.3 — now covered by test_RetryManager.cpp + test_DeliveryEngine.cpp
-- REQ-3.3.4 — now covered by test_DeliveryEngine.cpp :: test_receive_expired
+- REQ-3.2.7 — now covered by test_DeliveryEngine.cpp :: test_receive_expired, test_send_expired_returns_err, test_receive_expired_at_boundary, test_receive_zero_expiry_never_drops
+- REQ-3.3.4 — now covered by test_DeliveryEngine.cpp :: test_receive_expired, test_send_expired_returns_err, test_receive_expired_at_boundary, test_receive_zero_expiry_never_drops
 - REQ-5.2.1 — now also covered by test_ImpairmentConfigLoader.cpp (12 tests); ImpairmentConfigLoader.hpp/.cpp added as Implements entries
 - REQ-6.3.4 — now implemented by TlsConfig.hpp, ChannelConfig.hpp, TlsTcpBackend.hpp/.cpp, DtlsUdpBackend.hpp/.cpp; verified by test_TlsTcpBackend.cpp (7 tests) and test_DtlsUdpBackend.cpp (6 tests)
 - REQ-6.4.1 — now implemented by DtlsUdpBackend.hpp/.cpp; verified by test_DtlsUdpBackend.cpp :: test_dtls_loopback
