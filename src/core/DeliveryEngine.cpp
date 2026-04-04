@@ -665,8 +665,20 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
         return Result::OK;
     }
 
-    // Handle data messages
+    // Handle data messages — CC-reduction: delegated to handle_data_path().
     NEVER_COMPILED_OUT_ASSERT(envelope_is_data(env));  // Assert: is data message
+    return handle_data_path(env, now_us);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::handle_data_path() — SC: HAZ-001, HAZ-003 private helper
+// Runs the full data-message delivery path: dedup → ordering gate → ACK → stats.
+// Extracted from receive() to reduce its cognitive complexity to ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+Result DeliveryEngine::handle_data_path(MessageEnvelope& env, uint64_t now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);          // Assert: engine initialized
+    NEVER_COMPILED_OUT_ASSERT(envelope_is_data(env));  // Assert: caller guarantees DATA
 
     // Apply duplicate suppression — CC-reduction: delegated to handle_data_dedup().
     Result dedup_res = handle_data_dedup(env, now_us);

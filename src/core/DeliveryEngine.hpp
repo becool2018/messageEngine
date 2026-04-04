@@ -305,6 +305,14 @@ private:
     // Safety-critical (SC): HAZ-003 — prevents spurious duplicate delivery.
     Result handle_data_dedup(const MessageEnvelope& env, uint64_t now_us);
 
+    // Private helper: run the full data-message delivery path after routing.
+    // Applies dedup, ordering gate, ACK generation, stats increment.
+    // Returns OK on successful delivery; ERR_DUPLICATE if suppressed;
+    // ERR_AGAIN if held by the ordering gate.
+    // Extracted from receive() to reduce its cognitive complexity to ≤ 10.
+    // Safety-critical (SC): HAZ-001, HAZ-003 — on the reliable delivery path.
+    Result handle_data_path(MessageEnvelope& env, uint64_t now_us);
+
     // Private helper: process an inbound control message (ACK/NAK/HEARTBEAT).
     // Always returns OK (control messages are never an error condition).
     // Extracted from receive() to reduce its cognitive complexity to ≤ 10.

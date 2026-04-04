@@ -283,6 +283,23 @@ Result ReassemblyBuffer::ingest(const MessageEnvelope& frag, MessageEnvelope& lo
         return Result::OK;
     }
 
+    // Multi-fragment path — CC-reduction: delegated to ingest_multifrag().
+    return ingest_multifrag(frag, logical_out);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ReassemblyBuffer::ingest_multifrag (private)
+// Handles the multi-fragment reassembly path: slot allocation, bitmask
+// duplicate detection, payload recording, and assembly on completion.
+// Precondition: frag.fragment_count > 1 and metadata already validated.
+// Extracted from ingest() to reduce its cognitive complexity to ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+Result ReassemblyBuffer::ingest_multifrag(const MessageEnvelope& frag,
+                                           MessageEnvelope&       logical_out)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);            // Assert: initialized
+    NEVER_COMPILED_OUT_ASSERT(frag.fragment_count > 1U); // Assert: caller guarantees multi-frag
+
     // Find or open a reassembly slot (CC-reduction: delegated to helper).
     uint32_t idx = 0U;
     Result slot_res = find_or_open_slot(frag, idx);
@@ -290,22 +307,22 @@ Result ReassemblyBuffer::ingest(const MessageEnvelope& frag, MessageEnvelope& lo
         return slot_res;
     }
 
-    // Check for duplicate fragment (already received this index)
+    // Check for duplicate fragment (already received this index).
     uint32_t bit = 1U << static_cast<uint32_t>(frag.fragment_index);
     if ((m_slots[idx].received_mask & bit) != 0U) {
-        // Duplicate fragment: silently discard; wait for remaining
+        // Duplicate fragment: silently discard; wait for remaining.
         return Result::ERR_AGAIN;
     }
 
-    // Record the fragment payload and update bitmask
+    // Record the fragment payload and update bitmask.
     record_fragment(idx, frag);
 
-    // Check if complete
+    // Check if all fragments have arrived.
     if (!is_complete(idx)) {
         return Result::ERR_AGAIN;
     }
 
-    // All fragments received: assemble and free slot
+    // All fragments received: assemble into logical envelope and free slot.
     assemble_and_free(idx, logical_out);
 
     NEVER_COMPILED_OUT_ASSERT(logical_out.payload_length <= MSG_MAX_PAYLOAD_BYTES);  // Assert: valid output

@@ -128,6 +128,13 @@ private:
     // Returns OK and sets idx_out on success.
     // Extracted from ingest() to reduce its cognitive complexity to ≤ 10.
     Result find_or_open_slot(const MessageEnvelope& frag, uint32_t& idx_out);
+
+    // Handle the multi-fragment path of ingest(): find/open slot, bitmask
+    // dedup, record, and assemble when complete.
+    // Precondition: frag.fragment_count > 1 and metadata already validated.
+    // Returns OK (logical_out filled), ERR_AGAIN, ERR_FULL, or ERR_INVALID.
+    // Extracted from ingest() to reduce its cognitive complexity to ≤ 10.
+    Result ingest_multifrag(const MessageEnvelope& frag, MessageEnvelope& logical_out);
 };
 
 #endif // CORE_REASSEMBLY_BUFFER_HPP
