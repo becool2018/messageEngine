@@ -32,7 +32,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: Result enum returns, event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.3.2, REQ-7.2.4
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.3.2, REQ-7.2.4
  */
 
 #ifndef PLATFORM_LOCAL_SIM_HARNESS_HPP
@@ -115,12 +115,29 @@ private:
     /// @param[in] envelope  The envelope passed to send_message (used for identity match).
     /// @param[in] batch     Array of deliverable envelopes from collect_deliverable().
     /// @param[in] count     Number of entries in @p batch.
+    /// @param[in] now_us    Current time in microseconds (passed to deliver_from_peer).
     /// @return ERR_IO if the current envelope's inject() returned ERR_IO;
     ///         ERR_FULL if the current envelope's inject() returned ERR_FULL;
     ///         OK if the current envelope succeeded or was not yet in the batch.
     Result flush_outbound_batch(const MessageEnvelope& envelope,
                                 const MessageEnvelope* batch,
-                                uint32_t count);
+                                uint32_t count,
+                                uint64_t now_us);
+
+    /// Route a linked-peer envelope through the receiver's inbound impairment
+    /// before queuing to m_recv_queue.
+    ///
+    /// NSC: routes linked-peer envelope through inbound impairment before queuing.
+    /// Called only from flush_outbound_batch(); not a public test hook.
+    /// Power of 10: ≥2 assertions, CC ≤ 10.
+    ///
+    /// @param[in] env     Envelope received from the linked peer.
+    /// @param[in] now_us  Current time in microseconds.
+    /// @return OK if the envelope was queued to m_recv_queue;
+    ///         ERR_IO if dropped by inbound partition;
+    ///         ERR_FULL if the receive queue is at capacity;
+    ///         ERR_TIMEOUT if reorder-buffered (not yet emitted — caller skips queuing).
+    Result deliver_from_peer(const MessageEnvelope& env, uint64_t now_us);
 };
 
 #endif // PLATFORM_LOCAL_SIM_HARNESS_HPP

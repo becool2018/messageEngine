@@ -25,7 +25,7 @@
  *   - F-Prime style: simple test framework using assert() and printf().
  */
 
-// Verifies: REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.3.3
+// Verifies: REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.3.3
 // Verification: M1 + M2 + M4 + M5 (fault injection via impairment config)
 
 #include <cstdio>
@@ -500,6 +500,163 @@ static bool test_init_close_without_link_stats_invariant()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 10: inbound partition on B drops linked delivery from A
+//
+// Verifies: REQ-5.1.6 (partition/intermittent outage applied inbound)
+//
+// Setup:
+//   - A (no impairment) linked to B (partition_enabled, gap=1ms, duration=5000ms).
+//   - Message 1 is sent from A to B to prime B's partition timer (gap starts).
+//   - Wait 5ms (> 1ms gap) so the partition activates.
+//   - Message 2 is sent from A to B; deliver_from_peer() on B sees the active
+//     partition and drops it without queuing to m_recv_queue.
+//   - receive_message() on B should timeout (message 2 never delivered).
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.1.6
+static bool test_localsim_inbound_partition_drops_linked_delivery()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+
+    TransportConfig cfg_a;
+    create_local_sim_config(cfg_a, 60U);
+    // A has no impairment (default config)
+
+    TransportConfig cfg_b;
+    create_local_sim_config(cfg_b, 61U);
+    // B has inbound partition: gap=1ms (minimum > 0 per ImpairmentEngine init
+    // assertion), duration=5000ms.  After the gap expires, all inbound
+    // deliver_from_peer() calls will be dropped by is_partition_active().
+    cfg_b.channels[0U].impairment.enabled              = true;
+    cfg_b.channels[0U].impairment.partition_enabled    = true;
+    cfg_b.channels[0U].impairment.partition_gap_ms     = 1U;    // 1 ms gap before partition fires
+    cfg_b.channels[0U].impairment.partition_duration_ms = 5000U; // 5 s partition (long enough)
+
+    assert(harness_a.init(cfg_a) == Result::OK);
+    assert(harness_b.init(cfg_b) == Result::OK);
+
+    // Link A → B only (we only test A-to-B delivery)
+    harness_a.link(&harness_b);
+
+    // Send message 1: primes B's partition timer (first call to is_partition_active()
+    // initialises the gap timer and returns false — no partition yet).
+    MessageEnvelope env1;
+    create_test_data_envelope(env1, 60U, 61U, "prime");
+    env1.message_id = 7001ULL;
+    Result r = harness_a.send_message(env1);
+    assert(r == Result::OK);  // Message 1 delivered (partition not yet active)
+
+    // Drain message 1 from B's queue so we get a clean baseline.
+    MessageEnvelope drain_env;
+    r = harness_b.receive_message(drain_env, 50U);
+    assert(r == Result::OK);
+    assert(drain_env.message_id == 7001ULL);
+
+    // Wait long enough for the 1ms gap to expire so the partition becomes active.
+    usleep(5000U);  // 5 ms >> 1 ms gap
+
+    // Send message 2: deliver_from_peer() on B calls is_partition_active() which
+    // now returns true; the message is dropped without reaching m_recv_queue.
+    MessageEnvelope env2;
+    create_test_data_envelope(env2, 60U, 61U, "drop me");
+    env2.message_id = 7002ULL;
+    // send_message returns ERR_IO (current envelope dropped by inbound partition)
+    r = harness_a.send_message(env2);
+    assert(r == Result::ERR_IO);
+
+    // B's receive queue is empty: non-blocking receive must time out.
+    MessageEnvelope recv_env;
+    r = harness_b.receive_message(recv_env, 0U);
+    assert(r == Result::ERR_TIMEOUT);
+
+    harness_a.close();
+    harness_b.close();
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 11: inject() bypasses inbound impairment (raw test hook contract)
+//
+// Verifies: REQ-5.3.2 (deterministic testability — inject() is the raw hook)
+//
+// Setup:
+//   - A harness with partition enabled (gap=1ms, duration=5000ms).
+//   - Prime the partition so it is active (send a dummy message via send to
+//     another linked harness, then wait > 1ms).
+//   - inject() a message directly into the harness with active partition.
+//   - receive_message() must return OK with the injected message,
+//     confirming inject() does NOT go through process_inbound() / is_partition_active().
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.1.6, REQ-5.3.2
+static bool test_localsim_inject_bypasses_impairment()
+{
+    // Set up a single harness with partition impairment active.
+    // We use two harnesses to prime the partition via deliver_from_peer(), then
+    // confirm inject() on the receiver harness is unaffected by the partition.
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+
+    TransportConfig cfg_a;
+    create_local_sim_config(cfg_a, 62U);
+    // A has no impairment (default config)
+
+    TransportConfig cfg_b;
+    create_local_sim_config(cfg_b, 63U);
+    // B has inbound partition enabled
+    cfg_b.channels[0U].impairment.enabled              = true;
+    cfg_b.channels[0U].impairment.partition_enabled    = true;
+    cfg_b.channels[0U].impairment.partition_gap_ms     = 1U;    // 1 ms gap
+    cfg_b.channels[0U].impairment.partition_duration_ms = 5000U; // 5 s partition
+
+    assert(harness_a.init(cfg_a) == Result::OK);
+    assert(harness_b.init(cfg_b) == Result::OK);
+
+    harness_a.link(&harness_b);
+
+    // Prime B's partition timer by sending once (initialises the gap timer).
+    MessageEnvelope prime_env;
+    create_test_data_envelope(prime_env, 62U, 63U, "prime");
+    prime_env.message_id = 8001ULL;
+    Result r = harness_a.send_message(prime_env);
+    assert(r == Result::OK);  // Delivered before partition fires
+
+    // Drain the primed message from B.
+    MessageEnvelope drain;
+    r = harness_b.receive_message(drain, 50U);
+    assert(r == Result::OK);
+    assert(drain.message_id == 8001ULL);
+
+    // Wait for the partition to become active.
+    usleep(5000U);  // 5 ms >> 1 ms gap
+
+    // Confirm partition is active: a linked send is dropped.
+    MessageEnvelope blocked_env;
+    create_test_data_envelope(blocked_env, 62U, 63U, "blocked");
+    blocked_env.message_id = 8002ULL;
+    r = harness_a.send_message(blocked_env);
+    assert(r == Result::ERR_IO);  // Partition dropped this
+
+    // Now inject() directly into B — bypasses deliver_from_peer() and
+    // is_partition_active() entirely.  The partition is still active but
+    // inject() pushes straight to m_recv_queue without calling process_inbound().
+    MessageEnvelope inject_env;
+    create_test_data_envelope(inject_env, 62U, 63U, "injected");
+    inject_env.message_id = 8003ULL;
+    r = harness_b.inject(inject_env);
+    assert(r == Result::OK);  // inject() must succeed regardless of partition state
+
+    // receive_message() on B must return the injected message.
+    MessageEnvelope recv_env;
+    r = harness_b.receive_message(recv_env, 0U);
+    assert(r == Result::OK);
+    assert(recv_env.message_id == 8003ULL);  // injected message delivered
+
+    harness_a.close();
+    harness_b.close();
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -569,6 +726,21 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_init_close_without_link_stats_invariant\n");
+    }
+
+    // Inbound impairment parity tests (localsim-inbound-impairment-parity)
+    if (!test_localsim_inbound_partition_drops_linked_delivery()) {
+        printf("FAIL: test_localsim_inbound_partition_drops_linked_delivery\n");
+        ++failed;
+    } else {
+        printf("PASS: test_localsim_inbound_partition_drops_linked_delivery\n");
+    }
+
+    if (!test_localsim_inject_bypasses_impairment()) {
+        printf("FAIL: test_localsim_inject_bypasses_impairment\n");
+        ++failed;
+    } else {
+        printf("PASS: test_localsim_inject_bypasses_impairment\n");
     }
 
     return (failed > 0) ? 1 : 0;

@@ -30,9 +30,10 @@ engine_b.receive(out, timeout_ms, now_us); // backed by harness_b
 1. User sets up: `harness_a.init(cfg_a)`, `harness_b.init(cfg_b)`, `harness_a.link(&harness_b)`, `harness_b.link(&harness_a)`, `engine_a.init(&harness_a, ...)`, `engine_b.init(&harness_b, ...)`.
 2. **`engine_a.send(envelope, now_us)`** — assigns message_id, calls `send_via_transport(work, now_us)` → `harness_a.send_message(work)`.
 3. `harness_a.send_message(work)`:
-   a. `m_impairment.process_outbound(work, now_us, ...)` — applies loss/dup/latency. If loss: `out_count=0`; nothing injected.
-   b. `collect_deliverable(...)` — retrieves due entries.
-   c. For each due envelope: `harness_b.inject(env)` → `RingBuffer_b.push(env)`.
+   a. `m_impairment.process_outbound(work, now_us)` — applies loss/dup/latency. ERR_IO = silent drop; OK = queued.
+   b. `collect_deliverable(now_us, ...)` — retrieves due entries.
+   c. `flush_outbound_batch(...)` → for each due envelope: `harness_b.deliver_from_peer(env, now_us)`.
+   d. Inside `deliver_from_peer()` on B: inbound partition check (`is_partition_active()`), then inbound reorder (`process_inbound()`), then `RingBuffer_b.push(env)`.
 4. **`engine_b.receive(out, timeout_ms, now_us)`** → `harness_b.receive_message(out, timeout_ms)`:
    a. `m_recv_queue.pop(out)` — returns the injected envelope.
 5. `engine_b.receive()` applies expiry check, dedup (if RELIABLE_RETRY), auto-ACK (if applicable).
@@ -46,10 +47,13 @@ engine_b.receive(out, timeout_ms, now_us); // backed by harness_b
 engine_a.send(envelope, now_us)
  └── DeliveryEngine::send_via_transport()
       └── LocalSimHarness_a::send_message()
-           ├── ImpairmentEngine::process_outbound()
-           ├── ImpairmentEngine::collect_deliverable()
-           └── LocalSimHarness_b::inject()
-                └── RingBuffer_b::push()
+           ├── ImpairmentEngine_a::process_outbound()
+           ├── ImpairmentEngine_a::collect_deliverable()
+           └── LocalSimHarness_a::flush_outbound_batch()
+                └── LocalSimHarness_b::deliver_from_peer()     [inbound impairment on B]
+                     ├── ImpairmentEngine_b::is_partition_active()
+                     ├── ImpairmentEngine_b::process_inbound()
+                     └── RingBuffer_b::push()
 
 engine_b.receive(out, timeout_ms, now_us)
  └── LocalSimHarness_b::receive_message()
@@ -70,7 +74,9 @@ engine_b.receive(out, timeout_ms, now_us)
 
 | Condition | True branch | False branch |
 |-----------|-------------|--------------|
-| Loss impairment fires | `out_count=0`; inject not called; B gets nothing | Inject to B |
+| Outbound loss impairment fires | Silent drop; B gets nothing | deliver_from_peer() called on B |
+| Inbound partition active on B | `deliver_from_peer()` returns ERR_IO; B gets nothing | Push to B's ring |
+| Inbound reorder-buffered on B | `deliver_from_peer()` returns ERR_TIMEOUT; B gets nothing yet | Push to B's ring |
 | `receive()` timeout | Return `ERR_TIMEOUT` | Return `OK` with envelope |
 | RELIABLE_RETRY duplicate | `ERR_DUPLICATE` | Normal delivery |
 
@@ -121,9 +127,13 @@ Same as UC_24 (sender side) and UC_28 (engine init). After round-trip:
 User
   -> engine_a.send(envelope, now_us)
        -> harness_a.send_message()
-            -> ImpairmentEngine::process_outbound()   [apply impairments]
-            -> harness_b.inject(env)
-                 -> RingBuffer_b.push(env)
+            -> ImpairmentEngine_a::process_outbound()    [outbound impairments]
+            -> ImpairmentEngine_a::collect_deliverable()
+            -> flush_outbound_batch()
+                 -> harness_b.deliver_from_peer(env, now_us)  [inbound impairment on B]
+                      -> ImpairmentEngine_b::is_partition_active()
+                      -> ImpairmentEngine_b::process_inbound()
+                      -> RingBuffer_b.push(env)
   -> engine_b.receive(out, timeout_ms, now_us)
        -> harness_b.receive_message()
             -> RingBuffer_b.pop(out)

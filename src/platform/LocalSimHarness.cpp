@@ -24,7 +24,7 @@
  *   - MISRA C++: no exceptions, all return values checked.
  *   - F-Prime style: event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.3.2, REQ-7.2.4
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.3.2, REQ-7.2.4
  */
 
 #include "platform/LocalSimHarness.hpp"
@@ -120,24 +120,99 @@ Result LocalSimHarness::inject(const MessageEnvelope& envelope)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// deliver_from_peer() — private helper
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Routes a linked-peer envelope through this harness's inbound impairment
+// before queuing to m_recv_queue.  Called only from flush_outbound_batch();
+// not a public test hook.
+//
+// Inbound impairment applied:
+//   1. Partition check via is_partition_active(): if active, drop → return false.
+//   2. Reordering via process_inbound(): if count==0 (buffered), return false;
+//      if count==1, push to m_recv_queue and return true.
+//
+// inject() is intentionally NOT called here; inject() is the raw test hook
+// that bypasses all impairment.
+//
+// Implements: REQ-5.1.5, REQ-5.1.6
+// Power of 10: ≥2 assertions, CC ≤ 10, no dynamic allocation.
+
+Result LocalSimHarness::deliver_from_peer(const MessageEnvelope& env, uint64_t now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_open);          // Pre-condition: receiver must be open
+    NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));  // Pre-condition: valid envelope
+
+    // REQ-5.1.6: Check inbound partition (intermittent outage) on the receiver side.
+    // If a partition is active on this harness, silently drop the arriving envelope.
+    if (m_impairment.is_partition_active(now_us)) {
+        Logger::log(Severity::WARNING_LO, "LocalSimHarness",
+                    "deliver_from_peer: inbound partition active; dropping message");
+        return Result::ERR_IO;  // Dropped by partition
+    }
+
+    // REQ-5.1.5: Apply inbound reordering via process_inbound().
+    // A 1-slot output buffer is sufficient: process_inbound() emits at most 1
+    // envelope per call (either a pass-through or a randomly released reorder entry).
+    MessageEnvelope inbound_out;
+    uint32_t        inbound_count = 0U;
+    Result res = m_impairment.process_inbound(env, now_us,
+                                              &inbound_out, 1U, inbound_count);
+    if (!result_ok(res)) {
+        Logger::log(Severity::WARNING_HI, "LocalSimHarness",
+                    "deliver_from_peer: process_inbound failed; dropping message");
+        return Result::ERR_IO;
+    }
+
+    // If count == 0, the envelope was buffered in the reorder window for later
+    // release. It will emerge on a subsequent call; do not queue now.
+    // ERR_TIMEOUT signals "not yet delivered; reorder-buffered" to flush_outbound_batch.
+    if (inbound_count == 0U) {
+        return Result::ERR_TIMEOUT;
+    }
+
+    // Invariant: process_inbound() emits at most 1 envelope into a 1-slot buffer.
+    NEVER_COMPILED_OUT_ASSERT(inbound_count <= 1U);
+
+    // Push the (possibly reordered) envelope into the receive queue.
+    Result push_res = m_recv_queue.push(inbound_out);
+    if (!result_ok(push_res)) {
+        Logger::log(Severity::WARNING_HI, "LocalSimHarness",
+                    "deliver_from_peer: recv queue full; dropping inbound message");
+        return Result::ERR_FULL;  // Queue full — report to caller
+    }
+
+    return Result::OK;  // Envelope successfully queued
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // flush_outbound_batch() — private helper
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Injects each envelope in @p batch into the peer's receive queue.
+// Routes each envelope in @p batch through the peer's inbound impairment
+// (deliver_from_peer()) before queuing.  inject() is no longer called here;
+// it remains a separate raw test hook that bypasses impairment entirely.
+//
 // Three-case attribution:
-//   Current envelope in batch and inject() returns ERR_IO or ERR_FULL
-//                                              → return that Result to caller.
+//   Current envelope in batch and deliver_from_peer() returns false
+//     AND the peer's receive queue is not the cause (partition/reorder):
+//     → return ERR_IO (consistent with outbound-loss semantics).
 //   Current envelope NOT in batch             → return OK (queued for later delivery).
-//   Non-current envelope inject fails (any error)
-//                                              → log WARNING_HI, continue, return OK.
-// In LocalSimHarness the peer's receive ring IS the network; ERR_FULL from inject()
-// is an in-process confirmation the message was NOT received.  Returning OK would
-// violate the TransportInterface::send_message() contract.
+//   Non-current envelope deliver fails        → log WARNING_HI, continue, return OK.
+//
+// Note: deliver_from_peer() returns bool (true=queued, false=dropped/buffered).
+// ERR_FULL from the peer ring is swallowed inside deliver_from_peer() and logged;
+// we cannot distinguish it from a partition drop at this layer.  If queue-full
+// attribution is needed for the current envelope, callers should monitor
+// get_transport_stats().
+//
+// Implements: REQ-5.1.5, REQ-5.1.6
 // Power of 10: fixed loop bound (count ≤ IMPAIR_DELAY_BUF_SIZE).
 
 Result LocalSimHarness::flush_outbound_batch(const MessageEnvelope& envelope,
                                               const MessageEnvelope* batch,
-                                              uint32_t count)
+                                              uint32_t count,
+                                              uint64_t now_us)
 {
     NEVER_COMPILED_OUT_ASSERT(batch != nullptr);
     NEVER_COMPILED_OUT_ASSERT(count <= IMPAIR_DELAY_BUF_SIZE);
@@ -149,26 +224,29 @@ Result LocalSimHarness::flush_outbound_batch(const MessageEnvelope& envelope,
         bool is_current = (batch[i].source_id  == envelope.source_id &&
                            batch[i].message_id == envelope.message_id);
 
-        Result inject_res = m_peer->inject(batch[i]);
-        if (inject_res == Result::ERR_IO || inject_res == Result::ERR_FULL) {
-            // ERR_IO: true send failure. ERR_FULL: peer receive ring saturated —
-            // in LocalSimHarness there is no wire; ERR_FULL means not received.
-            // Attribute to caller only if this is the current envelope.
+        // Route through the peer's inbound impairment (partition + reorder).
+        // OK        — queued to peer's m_recv_queue.
+        // ERR_IO    — dropped by inbound partition; treat as send failure.
+        // ERR_FULL  — peer receive queue saturated; confirmed not received.
+        // ERR_TIMEOUT — reorder-buffered (not yet emitted); not an error.
+        Result deliver_res = m_peer->deliver_from_peer(batch[i], now_us);
+
+        if (deliver_res == Result::ERR_IO || deliver_res == Result::ERR_FULL) {
             if (is_current) {
-                // Current envelope inject failed — propagate error to caller.
-                // No log: caller receives the error as the observable signal.
-                current_result = inject_res;
+                // Attribute delivery failure to the caller for the current envelope.
+                Logger::log(Severity::WARNING_LO, "LocalSimHarness",
+                            "flush_outbound_batch: current envelope not delivered "
+                            "(inbound impairment on peer); result=%d",
+                            static_cast<int>(deliver_res));
+                current_result = deliver_res;
             } else {
                 Logger::log(Severity::WARNING_HI, "LocalSimHarness",
-                            "inject() failed for delayed message at index %u: result=%d",
-                            i, static_cast<int>(inject_res));
+                            "flush_outbound_batch: delayed envelope at index %u "
+                            "not delivered (result=%d)", i,
+                            static_cast<int>(deliver_res));
             }
-        } else if (inject_res != Result::OK) {
-            // Other unexpected error: log and continue.
-            Logger::log(Severity::WARNING_HI, "LocalSimHarness",
-                        "inject() unexpected result for delayed message at index %u: result=%d",
-                        i, static_cast<int>(inject_res));
         }
+        // ERR_TIMEOUT (reorder-buffered) and OK need no extra handling here.
     }
     return current_result;
 }
@@ -210,9 +288,9 @@ Result LocalSimHarness::send_message(const MessageEnvelope& envelope)
                                                               delayed_envelopes,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    // flush_outbound_batch returns OK if the current envelope was delivered,
-    // ERR_FULL if the peer receive queue was full, or ERR_IO on a true send failure.
-    return flush_outbound_batch(envelope, delayed_envelopes, delayed_count);
+    // flush_outbound_batch routes each envelope through the peer's inbound
+    // impairment (deliver_from_peer), then returns OK or ERR_IO.
+    return flush_outbound_batch(envelope, delayed_envelopes, delayed_count, now_us);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
