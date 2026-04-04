@@ -22,7 +22,7 @@
  * (field added, removed, reordered, or resized).  The project version
  * (src/core/Version.hpp) is independent and must NOT be used here.
  *
- * Wire header layout (44 bytes, big-endian):
+ * Wire header layout (52 bytes, big-endian):
  *   offset  size  field
  *   0       1     message_type
  *   1       1     reliability_class
@@ -36,10 +36,16 @@
  *   36      4     payload_length
  *   40      2     PROTO_MAGIC (BE)       ← this file
  *   42      2     reserved (must be 0)
+ *   44      4     sequence_num (BE)      ← v2 addition
+ *   48      1     fragment_index         ← v2 addition
+ *   49      1     fragment_count         ← v2 addition
+ *   50      2     total_payload_length (BE) ← v2 addition
  *
  * Version history:
  *   0  — unversioned (pre-protocol-versioning builds); rejected by v1+ deserializers.
  *   1  — initial versioned wire format (proto_version + magic fields).
+ *   2  — protocol v2: sequence_num, fragment_index, fragment_count,
+ *         total_payload_length; ordering enforcement; bounded fragmentation/reassembly.
  *
  * Requirement traceability: CLAUDE.md §3.2.8
  *
@@ -57,7 +63,7 @@
 
 /// Current wire-format protocol version.
 /// Increment this on any change to the serialized field layout.
-static const uint8_t  PROTO_VERSION = 1U;
+static const uint8_t  PROTO_VERSION = 2U;
 
 /// Two-byte frame magic: ASCII 'M' (0x4D) followed by 'E' (0x45).
 /// Written at wire bytes 40–41 (big-endian high-then-low byte order).

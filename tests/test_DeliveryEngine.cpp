@@ -24,7 +24,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: simple test framework using assert() and printf().
  *
- * Verifies: REQ-3.2.4, REQ-3.2.5, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+ * Verifies: REQ-3.2.3, REQ-3.2.4, REQ-3.2.5, REQ-3.2.6, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.5, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
  */
 // Verification: M1 + M2 + M4 + M5
 // M4: all reachable branches exercised via LocalSimHarness loopback (tests 1–23).
@@ -2051,6 +2051,308 @@ static void test_event_ring_drain_events()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helper: set up two linked engines (A and B) for end-to-end integration tests.
+// Engine A is the sender (local_id=1); Engine B is the receiver (local_id=2).
+// Both harnesses are bidirectionally linked.
+// ─────────────────────────────────────────────────────────────────────────────
+static void setup_two_engines(LocalSimHarness& ha,
+                               LocalSimHarness& hb,
+                               DeliveryEngine&  engine_a,
+                               DeliveryEngine&  engine_b)
+{
+    TransportConfig cfg_a;
+    create_local_sim_config(cfg_a, 1U);
+    cfg_a.channels[0].max_retries      = 5U;
+    cfg_a.channels[0].retry_backoff_ms = 100U;
+    cfg_a.channels[0].recv_timeout_ms  = 1000U;
+    Result ra = ha.init(cfg_a);
+    assert(ra == Result::OK);
+
+    TransportConfig cfg_b;
+    create_local_sim_config(cfg_b, 2U);
+    cfg_b.channels[0].max_retries      = 5U;
+    cfg_b.channels[0].retry_backoff_ms = 100U;
+    cfg_b.channels[0].recv_timeout_ms  = 1000U;
+    Result rb = hb.init(cfg_b);
+    assert(rb == Result::OK);
+
+    ha.link(&hb);
+    hb.link(&ha);
+
+    engine_a.init(&ha, cfg_a.channels[0], 1U);
+    engine_b.init(&hb, cfg_b.channels[0], 2U);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integration Test 51: Fragmented send and receive through two engines
+// Engine A sends a 2500-byte payload; Engine B's receive() reassembles 3 frags.
+// Verifies: REQ-3.2.3, REQ-3.3.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_fragmented_send_receive()
+{
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_engines(ha, hb, engine_a, engine_b);
+
+    // Build a 2500-byte payload (spans 3 fragments of 1024+1024+452)
+    // Power of 10 Rule 3: stack-allocated fixed buffer
+    static const uint32_t PAYLOAD_LEN = 2500U;
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.source_id         = 1U;
+    env.destination_id    = 2U;
+    env.message_id        = 0ULL;
+    env.timestamp_us      = NOW_US;
+    env.expiry_time_us    = NOW_US + 5000000ULL;
+    env.priority          = 0U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    env.payload_length    = PAYLOAD_LEN;
+    env.sequence_num      = 0U;  // UNORDERED — bypass ordering gate
+    // Power of 10 Rule 2: bounded loop
+    for (uint32_t i = 0U; i < PAYLOAD_LEN; ++i) {
+        env.payload[i] = static_cast<uint8_t>(i & 0xFFU);
+    }
+
+    // Engine A sends: send_fragments() produces 3 wire frames in hb's queue
+    Result send_res = engine_a.send(env, NOW_US);
+    assert(send_res == Result::OK);
+
+    // Engine B's receive(): first two calls return ERR_AGAIN (partial reassembly)
+    MessageEnvelope out;
+    Result r0 = engine_b.receive(out, 100U, NOW_US + 1ULL);
+    assert(r0 == Result::ERR_AGAIN);
+
+    Result r1 = engine_b.receive(out, 100U, NOW_US + 2ULL);
+    assert(r1 == Result::ERR_AGAIN);
+
+    // Third call delivers the fully reassembled logical message
+    Result r2 = engine_b.receive(out, 100U, NOW_US + 3ULL);
+    assert(r2 == Result::OK);
+    assert(out.payload_length == PAYLOAD_LEN);
+    assert(out.payload[0] == static_cast<uint8_t>(0U));
+    assert(out.payload[2499] == static_cast<uint8_t>(2499U & 0xFFU));
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_de_fragmented_send_receive\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integration Test 52: Ordered delivery — sequence numbers are monotonically
+// increasing; two messages arrive at Engine B in the order they were sent.
+// Verifies: REQ-3.3.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_ordered_delivery()
+{
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_engines(ha, hb, engine_a, engine_b);
+
+    // Engine A sends two DATA messages; the engine assigns sequence_num 1 and 2
+    MessageEnvelope env1, env2;
+    make_data_envelope(env1, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
+    make_data_envelope(env2, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
+    env1.payload[0] = 0x11U;
+    env2.payload[0] = 0x22U;
+
+    Result s1 = engine_a.send(env1, NOW_US);
+    assert(s1 == Result::OK);
+    Result s2 = engine_a.send(env2, NOW_US + 1ULL);
+    assert(s2 == Result::OK);
+
+    // Engine B receives: both messages should arrive with seq 1 then seq 2
+    MessageEnvelope out1, out2;
+    Result r1 = engine_b.receive(out1, 100U, NOW_US + 10ULL);
+    assert(r1 == Result::OK);
+    assert(out1.sequence_num == 1U);
+    assert(out1.payload[0] == 0x11U);
+
+    Result r2 = engine_b.receive(out2, 100U, NOW_US + 11ULL);
+    assert(r2 == Result::OK);
+    assert(out2.sequence_num == 2U);
+    assert(out2.payload[0] == 0x22U);
+
+    // Sequence numbers are monotonically increasing
+    assert(out2.sequence_num > out1.sequence_num);
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_de_ordered_delivery\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integration Test 53: Fragmented RELIABLE_RETRY message; ACK received by
+// Engine A after Engine B receives the assembled message.
+// Verifies: REQ-3.2.3, REQ-3.2.5, REQ-3.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_fragmented_retry()
+{
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_engines(ha, hb, engine_a, engine_b);
+
+    // Build a 2048-byte payload (exactly 2 fragments of 1024 each)
+    static const uint32_t PAYLOAD_LEN = 2048U;
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.source_id         = 1U;
+    env.destination_id    = 2U;
+    env.message_id        = 0ULL;
+    env.timestamp_us      = NOW_US;
+    env.expiry_time_us    = NOW_US + 5000000ULL;
+    env.priority          = 0U;
+    env.reliability_class = ReliabilityClass::RELIABLE_RETRY;
+    env.payload_length    = PAYLOAD_LEN;
+    env.sequence_num      = 0U;  // UNORDERED — bypass ordering gate
+    for (uint32_t i = 0U; i < PAYLOAD_LEN; ++i) {
+        env.payload[i] = static_cast<uint8_t>(0xA0U | (i & 0x0FU));
+    }
+
+    Result send_res = engine_a.send(env, NOW_US);
+    assert(send_res == Result::OK);
+
+    // Retrieve the message_id assigned by engine_a (visible in fragment headers)
+    // Engine B receives 2 fragments → reassembles → delivers logical message
+    MessageEnvelope out;
+    Result r0 = engine_b.receive(out, 100U, NOW_US + 1ULL);
+    assert(r0 == Result::ERR_AGAIN);  // first fragment
+
+    Result r1 = engine_b.receive(out, 100U, NOW_US + 2ULL);
+    assert(r1 == Result::OK);  // second fragment → assembled
+    assert(out.payload_length == PAYLOAD_LEN);
+    assert(out.source_id == 1U);
+
+    // Engine A has a retry pending. Inject ACK for this message into ha's queue.
+    MessageEnvelope ack;
+    make_ack_envelope(ack, 2U, 1U, out.message_id);
+    Result inj = ha.inject(ack);
+    assert(inj == Result::OK);
+
+    // Engine A processes the ACK — retry is cancelled
+    MessageEnvelope ack_out;
+    Result rack = engine_a.receive(ack_out, 100U, NOW_US + 3ULL);
+    assert(rack == Result::OK);
+
+    // Pump retries far in the future — should be 0 (retry was cancelled)
+    uint32_t retried = engine_a.pump_retries(NOW_US + 1000000000ULL);
+    assert(retried == 0U);
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_de_fragmented_retry\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integration Test 54: Deduplication after reassembly — sending the same
+// logical message twice (RELIABLE_RETRY); second receive is suppressed by dedup.
+// Verifies: REQ-3.2.6, REQ-3.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_dedup_after_reassembly()
+{
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_engines(ha, hb, engine_a, engine_b);
+
+    // Send a small RELIABLE_RETRY message (fits in one fragment)
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_RETRY);
+    env.payload[0] = 0xDEU;
+
+    Result s1 = engine_a.send(env, NOW_US);
+    assert(s1 == Result::OK);
+
+    // Engine B receives the message (single fragment — immediate delivery)
+    MessageEnvelope out1;
+    Result r1 = engine_b.receive(out1, 100U, NOW_US + 1ULL);
+    assert(r1 == Result::OK);
+    uint64_t first_msg_id = out1.message_id;
+    assert(out1.payload[0] == 0xDEU);
+
+    // Inject the SAME envelope again (simulates a retry arriving at hb)
+    // Use the actual message_id assigned by engine_a
+    MessageEnvelope dup;
+    envelope_copy(dup, out1);
+    dup.destination_id = 2U;
+    Result inj = hb.inject(dup);
+    assert(inj == Result::OK);
+
+    // Engine B's dedup filter should suppress the duplicate
+    MessageEnvelope out2;
+    Result r2 = engine_b.receive(out2, 100U, NOW_US + 2ULL);
+    assert(r2 == Result::ERR_DUPLICATE);  // duplicate suppressed
+
+    // Verify first_msg_id was used
+    assert(first_msg_id != 0ULL);
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_de_dedup_after_reassembly\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integration Test 55: ACK per logical message — fragmented RELIABLE_ACK send;
+// one logical ACK cancels the tracking entry.
+// Verifies: REQ-3.2.4, REQ-3.3.2, REQ-3.2.3
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_ack_per_logical_message()
+{
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_engines(ha, hb, engine_a, engine_b);
+
+    // Build a 1100-byte payload (2 fragments: 1024 + 76)
+    static const uint32_t PAYLOAD_LEN = 1100U;
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.source_id         = 1U;
+    env.destination_id    = 2U;
+    env.message_id        = 0ULL;
+    env.timestamp_us      = NOW_US;
+    env.expiry_time_us    = NOW_US + 5000000ULL;
+    env.priority          = 0U;
+    env.reliability_class = ReliabilityClass::RELIABLE_ACK;
+    env.payload_length    = PAYLOAD_LEN;
+    env.sequence_num      = 0U;  // UNORDERED — bypass ordering gate
+    for (uint32_t i = 0U; i < PAYLOAD_LEN; ++i) {
+        env.payload[i] = static_cast<uint8_t>(i & 0xFFU);
+    }
+
+    Result send_res = engine_a.send(env, NOW_US);
+    assert(send_res == Result::OK);
+
+    // Engine B receives 2 fragments and reassembles
+    MessageEnvelope out;
+    Result r0 = engine_b.receive(out, 100U, NOW_US + 1ULL);
+    assert(r0 == Result::ERR_AGAIN);
+
+    Result r1 = engine_b.receive(out, 100U, NOW_US + 2ULL);
+    assert(r1 == Result::OK);
+    assert(out.payload_length == PAYLOAD_LEN);
+
+    // Inject a single ACK for the logical message_id → cancels tracking
+    MessageEnvelope ack;
+    make_ack_envelope(ack, 2U, 1U, out.message_id);
+    Result inj = ha.inject(ack);
+    assert(inj == Result::OK);
+
+    // Engine A processes the ACK
+    MessageEnvelope ack_out;
+    Result rack = engine_a.receive(ack_out, 100U, NOW_US + 3ULL);
+    assert(rack == Result::OK);
+
+    // ACK tracker should have no pending entries now — sweep returns 0
+    uint32_t timed_out = engine_a.sweep_ack_timeouts(NOW_US + 1000000000ULL);
+    assert(timed_out == 0U);
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_de_ack_per_logical_message\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -2104,6 +2406,11 @@ int main()
     test_event_ring_ack_received_emits_event();
     test_event_ring_misroute_drop_emits_event();
     test_event_ring_drain_events();
+    test_de_fragmented_send_receive();
+    test_de_ordered_delivery();
+    test_de_fragmented_retry();
+    test_de_dedup_after_reassembly();
+    test_de_ack_per_logical_message();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;

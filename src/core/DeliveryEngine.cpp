@@ -19,8 +19,9 @@
  * Applies Power of 10 rules: fixed loop bounds, ≥2 assertions per function,
  * checked return values, bounded resource usage.
  *
- * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+ * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
  */
+// Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
 
 #include "DeliveryEngine.hpp"
 #include "Assert.hpp"
@@ -169,6 +170,26 @@ void DeliveryEngine::init(TransportInterface* transport,
 
     // REQ-7.2.5: initialize the observability event ring
     m_events.init();
+
+    // REQ-3.2.3, REQ-3.3.3: initialize reassembly buffer
+    m_reassembly.init();
+
+    // REQ-3.3.5: initialize ordering buffer
+    m_ordering.init(local_id);
+
+    // REQ-3.3.5: zero outbound sequence state (bounded loop)
+    // Power of 10 Rule 2: loop bound is compile-time constant ACK_TRACKER_CAPACITY
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        m_seq_state[i].active   = false;
+        m_seq_state[i].dst      = 0U;
+        m_seq_state[i].next_seq = 1U;  // sequences start at 1
+    }
+
+    // REQ-3.2.3: zero fragment staging buffer (bounded loop)
+    // Power of 10 Rule 2: loop bound is compile-time constant FRAG_MAX_COUNT
+    for (uint32_t i = 0U; i < FRAG_MAX_COUNT; ++i) {
+        envelope_init(m_frag_buf[i]);
+    }
 
     m_initialized = true;
 
@@ -468,6 +489,18 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
     env.message_id   = m_id_gen.next();
     env.timestamp_us = now_us;
 
+    // REQ-3.3.5: assign per-destination sequence number for ORDERED DATA messages.
+    // sequence_num == 0 is reserved for UNORDERED; next_seq_for() returns >= 1.
+    if (envelope_is_data(env) && env.sequence_num == 0U) {
+        env.sequence_num = next_seq_for(env.destination_id);
+    }
+
+    // REQ-3.2.3: initialize fragment fields for a new unfragmented message.
+    // Fragmentation is applied in send_fragments(); these are the logical defaults.
+    env.fragment_index       = 0U;
+    env.fragment_count       = 1U;
+    env.total_payload_length = static_cast<uint16_t>(env.payload_length);
+
     // Step 2: validate and reserve bookkeeping capacity BEFORE touching the
     // transport.  Returns an error if any tracker is full; in that case we
     // return immediately without calling send_via_transport().
@@ -480,7 +513,9 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
     }
 
     // Step 3: all bookkeeping confirmed; now commit to I/O.
-    Result res = send_via_transport(env, now_us);
+    // REQ-3.2.3: use send_fragments() which handles both single-frame and
+    // multi-fragment sends transparently.
+    Result res = send_fragments(env, now_us);
     if (res != Result::OK) {
         // Roll back bookkeeping reserved in Step 2 so no spurious timeout or
         // retry fires for a message that was never put on the wire.
@@ -514,6 +549,66 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::handle_control_message() — NSC private helper
+// Process an inbound ACK/NAK/HEARTBEAT. Always returns (no result code).
+// Extracted from receive() to reduce its cognitive complexity to ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+void DeliveryEngine::handle_control_message(const MessageEnvelope& env, uint64_t now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);               // Assert: initialized
+    NEVER_COMPILED_OUT_ASSERT(envelope_is_control(env));    // Assert: is control message
+
+    if (env.message_type == MessageType::ACK) {
+        // REQ-7.2.1: capture RTT before on_ack() releases the tracker slot
+        update_latency_stats(env, now_us);
+        // Power of 10 rule 7: return values checked inside process_ack().
+        process_ack(m_ack_tracker, m_retry_manager, env);
+        // REQ-7.2.5: emit ACK_RECEIVED event
+        emit_event(DeliveryEventKind::ACK_RECEIVED,
+                   env.message_id, env.source_id, now_us, Result::OK);
+    }
+    // For NAK and HEARTBEAT, no additional action required.
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::handle_data_dedup() — SC: HAZ-003 private helper
+// Apply duplicate suppression for RELIABLE_RETRY DATA messages.
+// Returns ERR_DUPLICATE if suppressed; OK otherwise.
+// Extracted from receive() to reduce its cognitive complexity to ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+Result DeliveryEngine::handle_data_dedup(const MessageEnvelope& env, uint64_t now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);         // Assert: initialized
+    NEVER_COMPILED_OUT_ASSERT(envelope_is_data(env)); // Assert: is DATA message
+
+    if (env.reliability_class != ReliabilityClass::RELIABLE_RETRY) {
+        return Result::OK;  // dedup only applies to RELIABLE_RETRY
+    }
+
+    // Power of 10 rule 7: check return value
+    Result dedup_res = m_dedup.check_and_record(env.source_id, env.message_id);
+    if (dedup_res != Result::ERR_DUPLICATE) {
+        NEVER_COMPILED_OUT_ASSERT(dedup_res == Result::OK);  // Assert: no other error expected
+        return Result::OK;
+    }
+
+    // Duplicate detected: suppress delivery
+    ++m_stats.msgs_dropped_duplicate;  // REQ-7.2.3: count duplicate drop
+    Logger::log(Severity::INFO, "DeliveryEngine",
+                "Suppressed duplicate message_id=%llu from src=%u",
+                (unsigned long long)env.message_id, env.source_id);
+    // Re-ACK the duplicate: the original ACK may have been lost in transit,
+    // causing the sender to keep retrying. Sending ACK again stops unnecessary
+    // retries without delivering the data a second time. Non-fatal on failure.
+    // Safety-critical (SC): HAZ-002 — prevents spurious retry exhaustion.
+    send_data_ack(*m_transport, env, m_local_id, now_us);
+    // REQ-7.2.5: emit DUPLICATE_DROP event
+    emit_event(DeliveryEventKind::DUPLICATE_DROP,
+               env.message_id, env.source_id, now_us, Result::ERR_DUPLICATE);
+    return Result::ERR_DUPLICATE;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DeliveryEngine::receive()
 // ─────────────────────────────────────────────────────────────────────────────
 Result DeliveryEngine::receive(MessageEnvelope& env,
@@ -528,63 +623,68 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
     }
 
     // Power of 10 rule 7: check return value from transport
-    Result res = m_transport->receive_message(env, timeout_ms);
+    // wire_env holds the raw wire frame; logical_env will hold the assembled message.
+    MessageEnvelope wire_env;
+    envelope_init(wire_env);
+    Result res = m_transport->receive_message(wire_env, timeout_ms);
     if (res != Result::OK) {
         // Normal timeout case (ERR_TIMEOUT is expected)
         return res;
     }
 
     // Power of 10 rule 5: validate received envelope
-    NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));  // Assert: transport provides valid envelope
+    NEVER_COMPILED_OUT_ASSERT(envelope_valid(wire_env));  // Assert: transport provides valid envelope
 
+    // REQ-3.2.3: Reassembly gate — route through ReassemblyBuffer.
+    // For single-frame messages (fragment_count == 1), this completes immediately.
+    // For multi-frame messages, ERR_AGAIN is returned until all fragments arrive.
+    MessageEnvelope logical_env;
+    envelope_init(logical_env);
+    Result frag_res = handle_fragment_ingest(wire_env, logical_env);
+    if (frag_res != Result::OK) {
+        // ERR_AGAIN: still collecting; not an error for the caller.
+        // ERR_FULL/ERR_INVALID: fragment-level error; drop frame.
+        return frag_res;
+    }
+
+    // From here on, work with the fully-assembled logical_env.
     // Check expiry and destination in one call (HAZ-001, HAZ-004).
     // Power of 10 rule 7: check return value.
-    Result routing_res = check_routing(env, m_local_id, now_us);
+    Result routing_res = check_routing(logical_env, m_local_id, now_us);
+    // Assign env from the logical assembled envelope for downstream use.
+    envelope_copy(env, logical_env);
     if (routing_res != Result::OK) {
         record_routing_failure(routing_res);             // REQ-7.2.3: stats (CC-reduction helper)
         emit_routing_drop_event(env, routing_res, now_us);  // REQ-7.2.5: CC-reduction helper
         return routing_res;
     }
 
-    // Handle control messages (ACK/NAK/HEARTBEAT)
+    // Handle control messages (ACK/NAK/HEARTBEAT) — CC-reduction: delegated to helper.
     if (envelope_is_control(env)) {
-        if (env.message_type == MessageType::ACK) {
-            // REQ-7.2.1: capture RTT before on_ack() releases the tracker slot
-            update_latency_stats(env, now_us);
-            // Power of 10 rule 7: return values checked inside process_ack().
-            process_ack(m_ack_tracker, m_retry_manager, env);
-            // REQ-7.2.5: emit ACK_RECEIVED event
-            emit_event(DeliveryEventKind::ACK_RECEIVED,
-                       env.message_id, env.source_id, now_us, Result::OK);
-        }
-        // For other control messages (NAK, HEARTBEAT), just pass through
+        handle_control_message(env, now_us);
         return Result::OK;
     }
 
     // Handle data messages
     NEVER_COMPILED_OUT_ASSERT(envelope_is_data(env));  // Assert: is data message
 
-    // Apply duplicate suppression if RELIABLE_RETRY
-    if (env.reliability_class == ReliabilityClass::RELIABLE_RETRY) {
-        // Power of 10 rule 7: check return value
-        Result dedup_res = m_dedup.check_and_record(env.source_id, env.message_id);
-        if (dedup_res == Result::ERR_DUPLICATE) {
-            ++m_stats.msgs_dropped_duplicate;  // REQ-7.2.3: count duplicate drop
-            Logger::log(Severity::INFO, "DeliveryEngine",
-                        "Suppressed duplicate message_id=%llu from src=%u",
-                        (unsigned long long)env.message_id, env.source_id);
-            // Re-ACK the duplicate: the original ACK may have been lost in transit,
-            // causing the sender to keep retrying. Sending ACK again stops unnecessary
-            // retries without delivering the data a second time. Non-fatal on failure.
-            // Safety-critical (SC): HAZ-002 — prevents spurious retry exhaustion.
-            send_data_ack(*m_transport, env, m_local_id, now_us);
-            // REQ-7.2.5: emit DUPLICATE_DROP event
-            emit_event(DeliveryEventKind::DUPLICATE_DROP,
-                       env.message_id, env.source_id, now_us, Result::ERR_DUPLICATE);
-            return Result::ERR_DUPLICATE;
-        }
-        NEVER_COMPILED_OUT_ASSERT(dedup_res == Result::OK);  // Assert: check_and_record succeeded
+    // Apply duplicate suppression — CC-reduction: delegated to handle_data_dedup().
+    Result dedup_res = handle_data_dedup(env, now_us);
+    if (dedup_res != Result::OK) {
+        return dedup_res;
     }
+
+    // REQ-3.3.5: Ordering gate — route through OrderingBuffer for DATA messages.
+    // Control messages and UNORDERED (sequence_num==0) pass through in ingest().
+    MessageEnvelope ordered_env;
+    envelope_init(ordered_env);
+    Result ord_res = handle_ordering_gate(env, ordered_env, now_us);
+    if (ord_res != Result::OK) {
+        // ERR_AGAIN: held (out-of-order) or discarded (duplicate seq).
+        // ERR_FULL: hold buffer exhausted — log but do not crash.
+        return Result::ERR_AGAIN;
+    }
+    envelope_copy(env, ordered_env);
 
     Logger::log(Severity::INFO, "DeliveryEngine",
                 "Received data message_id=%llu from src=%u, length=%u",
@@ -593,6 +693,7 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
 
     // Generate and send ACK for RELIABLE_ACK and RELIABLE_RETRY messages.
     // Implements REQ-3.2.4 (automatic ACK on receive path).
+    // ACK is sent per logical message (post-reassembly), not per fragment.
     // ACK send failure is non-fatal; data is still delivered to the caller.
     if (envelope_needs_ack_response(env)) {
         send_data_ack(*m_transport, env, m_local_id, now_us);
@@ -624,11 +725,12 @@ uint32_t DeliveryEngine::pump_retries(uint64_t now_us)
     collected = m_retry_manager.collect_due(now_us, m_retry_buf, MSG_RING_CAPACITY);
     NEVER_COMPILED_OUT_ASSERT(collected <= MSG_RING_CAPACITY);  // Assert: bounded result
 
-    // Re-send each
+    // Re-send each (with fragmentation if needed — REQ-3.2.3)
     // Power of 10 rule 2: bounded loop (collected is ≤ MSG_RING_CAPACITY)
     for (uint32_t i = 0U; i < collected; ++i) {
         // Power of 10 rule 7: check return value
-        Result send_res = send_via_transport(m_retry_buf[i], now_us);
+        // send_fragments() re-fragments on retry as needed (REQ-3.2.3)
+        Result send_res = send_fragments(m_retry_buf[i], now_us);
         if (send_res != Result::OK) {
             Logger::log(Severity::WARNING_LO, "DeliveryEngine",
                         "Retry send failed for message_id=%llu (result=%u)",
@@ -786,6 +888,154 @@ void DeliveryEngine::record_routing_failure(Result routing_res)
     } else {
         ++m_stats.msgs_dropped_misrouted;  // REQ-7.2.3: wrong destination
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::next_seq_for() — REQ-3.3.5 private helper
+// Returns the next outbound sequence number for dst, allocating a per-destination
+// slot if needed. Returns 0 if all slots are in use (should not occur in practice
+// given ACK_TRACKER_CAPACITY >= MAX_PEER_NODES).
+// NSC: sequence counter bookkeeping only.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+uint32_t DeliveryEngine::next_seq_for(NodeId dst)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);    // Assert: engine initialized
+    NEVER_COMPILED_OUT_ASSERT(dst != 0U);         // Assert: valid destination
+
+    // Search for existing slot
+    // Power of 10 Rule 2: bounded loop — ACK_TRACKER_CAPACITY is a compile-time constant
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        if (m_seq_state[i].active && m_seq_state[i].dst == dst) {
+            uint32_t seq = m_seq_state[i].next_seq;
+            ++m_seq_state[i].next_seq;
+            // Wrap: skip 0 (reserved for UNORDERED)
+            if (m_seq_state[i].next_seq == 0U) {
+                m_seq_state[i].next_seq = 1U;
+            }
+            return seq;
+        }
+    }
+
+    // Allocate a new slot
+    // Power of 10 Rule 2: bounded loop
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        if (!m_seq_state[i].active) {
+            m_seq_state[i].active   = true;
+            m_seq_state[i].dst      = dst;
+            m_seq_state[i].next_seq = 2U;  // first call returns 1
+            NEVER_COMPILED_OUT_ASSERT(m_seq_state[i].active);  // Assert: slot allocated
+            return 1U;
+        }
+    }
+
+    // All slots in use: log and return 0 (caller treats as UNORDERED)
+    Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                "Sequence state full; cannot assign sequence for dst=%u", dst);
+    return 0U;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::send_fragments() — REQ-3.2.3, REQ-3.3.5 private helper
+// Fragments the logical envelope (if needed) and sends each wire frame via
+// send_via_transport(). Returns OK if all frames were sent, ERR_IO if any
+// frame fails.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+Result DeliveryEngine::send_fragments(const MessageEnvelope& env, uint64_t now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);          // Assert: engine initialized
+    NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));    // Assert: valid envelope
+
+    if (!needs_fragmentation(env)) {
+        // Single wire frame: send as-is
+        return send_via_transport(env, now_us);
+    }
+
+    // Fragment and send each wire frame
+    uint32_t frag_count = fragment_message(env, m_frag_buf, FRAG_MAX_COUNT);
+    if (frag_count == 0U) {
+        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                    "fragment_message failed for message_id=%llu",
+                    (unsigned long long)env.message_id);
+        return Result::ERR_INVALID;
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(frag_count <= FRAG_MAX_COUNT);  // Assert: bounded
+
+    // Power of 10 Rule 2: bounded loop — frag_count <= FRAG_MAX_COUNT
+    for (uint32_t i = 0U; i < frag_count; ++i) {
+        Result res = send_via_transport(m_frag_buf[i], now_us);
+        if (res != Result::OK) {
+            Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                        "Fragment %u/%u send failed for message_id=%llu (result=%u)",
+                        i + 1U, frag_count,
+                        (unsigned long long)env.message_id,
+                        static_cast<uint8_t>(res));
+            return Result::ERR_IO;
+        }
+    }
+
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::handle_fragment_ingest() — REQ-3.2.3 private helper
+// Routes the received wire envelope through the reassembly buffer.
+// Returns OK when logical_out is ready; ERR_AGAIN when more fragments needed;
+// ERR_FULL/ERR_INVALID on error.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+Result DeliveryEngine::handle_fragment_ingest(const MessageEnvelope& wire_env,
+                                               MessageEnvelope&       logical_out)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);           // Assert: engine initialized
+    NEVER_COMPILED_OUT_ASSERT(envelope_valid(wire_env)); // Assert: valid envelope
+
+    Result res = m_reassembly.ingest(wire_env, logical_out);
+
+    if (res == Result::ERR_AGAIN) {
+        // Normal: still collecting fragments for this message
+        return Result::ERR_AGAIN;
+    }
+
+    if (res != Result::OK) {
+        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
+                    "Reassembly failed for message_id=%llu (result=%u)",
+                    (unsigned long long)wire_env.message_id,
+                    static_cast<uint8_t>(res));
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(res == Result::OK ||
+                               res == Result::ERR_AGAIN ||
+                               res == Result::ERR_FULL ||
+                               res == Result::ERR_INVALID);  // Assert: known result code
+    return res;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::handle_ordering_gate() — REQ-3.3.5 private helper
+// Routes a fully-reassembled logical DATA message through the ordering gate.
+// Returns OK (out ready), ERR_AGAIN (held or discarded), or ERR_FULL (hold full).
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+Result DeliveryEngine::handle_ordering_gate(const MessageEnvelope& logical,
+                                             MessageEnvelope&       out,
+                                             uint64_t               now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);             // Assert: engine initialized
+    NEVER_COMPILED_OUT_ASSERT(envelope_valid(logical));    // Assert: valid envelope
+
+    Result res = m_ordering.ingest(logical, out, now_us);
+    if (res == Result::ERR_FULL) {
+        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                    "Ordering hold buffer full for src=%u", logical.source_id);
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(res == Result::OK ||
+                               res == Result::ERR_AGAIN ||
+                               res == Result::ERR_FULL);  // Assert: known result code
+    return res;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

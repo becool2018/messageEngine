@@ -15,7 +15,7 @@ All production code is written to **JPL Power of 10**, **MISRA C++:2023**, and a
 
 The library targets **NASA-STD-8719.13C** and **NASA-STD-8739.8A** software assurance practices at **Class C** classification (infrastructure / networking library), with voluntary **Class B** rigor in testing discipline: all safety-critical functions require branch coverage, mandatory peer inspection (M1), and static analysis (M2), with MC/DC coverage as the goal for the five highest-hazard functions.
 
-**Library version: 1.3.0** — phase 3 adds `RequestReplyEngine` (bounded request/response helper layer, `MAX_PENDING_REQUESTS=16`) and `drain_events()` (bulk observability event drain, all 8 event kinds covered). Wire format unchanged; no PROTO_VERSION bump.
+**Library version: 2.0.0** — protocol v2 milestone adds bounded fragmentation and reassembly (`Fragmentation`, `ReassemblyBuffer`), per-peer in-order delivery enforcement (`OrderingBuffer`), and wire-format v2 (`WIRE_HEADER_SIZE` 44→52 bytes, `PROTO_VERSION` 1→2). Phase 3 (1.3.0) adds `RequestReplyEngine` and `drain_events()`; v2 is additive on top of that.
 
 ---
 
@@ -750,8 +750,8 @@ All functions return a `Result` enum. Never ignore a return value.
 
 The [`docs/use_cases/`](docs/use_cases/) directory contains detailed use case documents that trace every user-facing capability and system-internal sub-function through the live source code.
 
-- **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 58 use cases, grouped by high-level capability (HL-1 through HL-22), Application Workflow patterns, and System Internal sub-functions.
-- **[USE_CASE_FREQUENCY.md](docs/use_cases/USE_CASE_FREQUENCY.md)** — frequency classification of all 58 use cases (hottest path → high → medium → low → system internals); use this to guide performance analysis, profiling focus, and code review prioritisation.
+- **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 61 use cases, grouped by high-level capability (HL-1 through HL-22), Application Workflow patterns, and System Internal sub-functions. (v2: UC-62 ordered delivery, UC-63 fragment send, UC-64 fragment reassembly added.)
+- **[USE_CASE_FREQUENCY.md](docs/use_cases/USE_CASE_FREQUENCY.md)** — frequency classification of all 61 use cases (hottest path → high → medium → low → system internals); use this to guide performance analysis, profiling focus, and code review prioritisation.
 
 Each individual `UC_*.md` document follows a 15-section flow-of-control format covering: entry points, end-to-end control flow, call tree, branching logic, concurrency behavior, memory ownership, error handling, external interactions, state changes, and known risks.
 

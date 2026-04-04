@@ -80,6 +80,18 @@ inline uint32_t Serializer::write_u64(uint8_t* buf, uint32_t offset, uint64_t va
     return offset + 8U;
 }
 
+/// Write 2-byte big-endian value to buffer at offset; return new offset.
+inline uint32_t Serializer::write_u16(uint8_t* buf, uint32_t offset, uint16_t val)
+{
+    NEVER_COMPILED_OUT_ASSERT(buf != nullptr);                // Assert: valid buffer pointer
+    NEVER_COMPILED_OUT_ASSERT(offset <= 0xFFFFFFFFUL - 2U);   // Assert: offset + 2 won't overflow
+
+    buf[offset + 0U] = static_cast<uint8_t>((val >> 8U) & 0xFFU);
+    buf[offset + 1U] = static_cast<uint8_t>((val >> 0U) & 0xFFU);
+
+    return offset + 2U;
+}
+
 /// Read one byte from buffer at offset; return value.
 inline uint8_t Serializer::read_u8(const uint8_t* buf, uint32_t offset)
 {
@@ -87,6 +99,18 @@ inline uint8_t Serializer::read_u8(const uint8_t* buf, uint32_t offset)
     NEVER_COMPILED_OUT_ASSERT(offset <= 0xFFFFFFFFUL - 1U); // Assert: offset won't overflow
 
     return buf[offset];
+}
+
+/// Read 2-byte big-endian value from buffer at offset; return value.
+inline uint16_t Serializer::read_u16(const uint8_t* buf, uint32_t offset)
+{
+    NEVER_COMPILED_OUT_ASSERT(buf != nullptr);                // Assert: valid buffer pointer
+    NEVER_COMPILED_OUT_ASSERT(offset <= 0xFFFFFFFFUL - 2U);   // Assert: offset + 2 won't overflow
+
+    uint16_t val = 0U;
+    val = static_cast<uint16_t>((static_cast<uint16_t>(buf[offset + 0U]) << 8U) |
+                                  static_cast<uint16_t>(buf[offset + 1U]));
+    return val;
 }
 
 /// Read 4-byte big-endian value from buffer at offset; return value.
@@ -167,6 +191,19 @@ Result Serializer::serialize(const MessageEnvelope& env,
     // Bytes 40–41: PROTO_MAGIC (BE); bytes 42–43: reserved zero (REQ-3.2.8)
     offset = write_u32(buf, offset, (static_cast<uint32_t>(PROTO_MAGIC) << 16U));
 
+    // v2 fields: sequence_num (4B), fragment_index (1B), fragment_count (1B),
+    // total_payload_length (2B). REQ-3.3.5.
+    // fragment_count == 0 is invalid on the wire; treat as 1 (unfragmented).
+    uint8_t wire_frag_count = (env.fragment_count == 0U) ? 1U : env.fragment_count;
+    // total_payload_length == 0 for unfragmented: use payload_length as default.
+    uint16_t wire_total_pl = (env.total_payload_length == 0U)
+                                 ? static_cast<uint16_t>(env.payload_length)
+                                 : env.total_payload_length;
+    offset = write_u32(buf, offset, env.sequence_num);
+    offset = write_u8(buf, offset, env.fragment_index);
+    offset = write_u8(buf, offset, wire_frag_count);
+    offset = write_u16(buf, offset, wire_total_pl);
+
     // Power of 10 rule 5: assertion after header write
     NEVER_COMPILED_OUT_ASSERT(offset == WIRE_HEADER_SIZE);  // Assert: header size matches constant
 
@@ -246,6 +283,37 @@ Result Serializer::deserialize(const uint8_t*  buf,
     offset += 4U;
     // REQ-3.2.8: reject if magic (bytes 40–41) is wrong or reserved (bytes 42–43) is non-zero
     if (magic_word != (static_cast<uint32_t>(PROTO_MAGIC) << 16U)) {
+        return Result::ERR_INVALID;
+    }
+
+    // v2 fields: sequence_num, fragment_index, fragment_count, total_payload_length
+    env.sequence_num = read_u32(buf, offset);
+    offset += 4U;
+
+    env.fragment_index = read_u8(buf, offset);
+    offset += 1U;
+
+    env.fragment_count = read_u8(buf, offset);
+    offset += 1U;
+
+    env.total_payload_length = read_u16(buf, offset);
+    offset += 2U;
+
+    // REQ-3.2.3: validate fragment metadata
+    // fragment_count == 0 is invalid (must be at least 1)
+    if (env.fragment_count == 0U) {
+        return Result::ERR_INVALID;
+    }
+    // fragment_index must be < fragment_count
+    if (env.fragment_index >= env.fragment_count) {
+        return Result::ERR_INVALID;
+    }
+    // fragment_count must not exceed FRAG_MAX_COUNT
+    if (static_cast<uint32_t>(env.fragment_count) > FRAG_MAX_COUNT) {
+        return Result::ERR_INVALID;
+    }
+    // total_payload_length must not exceed MSG_MAX_PAYLOAD_BYTES
+    if (static_cast<uint32_t>(env.total_payload_length) > MSG_MAX_PAYLOAD_BYTES) {
         return Result::ERR_INVALID;
     }
 

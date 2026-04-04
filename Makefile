@@ -75,7 +75,10 @@ CORE_SRC := \
     src/core/RetryManager.cpp \
     src/core/DeliveryEngine.cpp \
     src/core/RequestReplyEngine.cpp \
-    src/core/AssertState.cpp
+    src/core/AssertState.cpp \
+    src/core/Fragmentation.cpp \
+    src/core/ReassemblyBuffer.cpp \
+    src/core/OrderingBuffer.cpp
 
 PLATFORM_SRC := \
     src/platform/PrngEngine.cpp \
@@ -134,7 +137,10 @@ tests: \
     build/test_AssertState \
     build/test_MessageId \
     build/test_Timestamp \
-    build/test_RequestReplyEngine
+    build/test_RequestReplyEngine \
+    build/test_Fragmentation \
+    build/test_ReassemblyBuffer \
+    build/test_OrderingBuffer
 
 build/test_%: $(ALL_LIB_OBJS) build/objs/tests/test_%.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
@@ -579,4 +585,7 @@ run_tests: tests
 	@echo "=== test_MessageId ===";  build/test_MessageId
 	@echo "=== test_Timestamp ===";  build/test_Timestamp
 	@echo "=== test_RequestReplyEngine ==="; build/test_RequestReplyEngine
+	@echo "=== test_Fragmentation ==="; build/test_Fragmentation
+	@echo "=== test_ReassemblyBuffer ==="; build/test_ReassemblyBuffer
+	@echo "=== test_OrderingBuffer ==="; build/test_OrderingBuffer
 	@echo "=== ALL TESTS PASSED ==="
