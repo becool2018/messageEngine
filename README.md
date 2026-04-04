@@ -15,7 +15,7 @@ All production code is written to **JPL Power of 10**, **MISRA C++:2023**, and a
 
 The library targets **NASA-STD-8719.13C** and **NASA-STD-8739.8A** software assurance practices at **Class C** classification (infrastructure / networking library), with voluntary **Class B** rigor in testing discipline: all safety-critical functions require branch coverage, mandatory peer inspection (M1), and static analysis (M2), with MC/DC coverage as the goal for the five highest-hazard functions.
 
-**Library version: 1.2.0** — inbound impairment (`process_inbound()`) is now active on all five backend receive paths (UdpBackend, DtlsUdpBackend, TcpBackend, TlsTcpBackend, LocalSimHarness via `deliver_from_peer()`); `inject()` raw-bypass contract preserved. Wire format unchanged; no PROTO_VERSION bump.
+**Library version: 1.3.0** — phase 3 adds `RequestReplyEngine` (bounded request/response helper layer, `MAX_PENDING_REQUESTS=16`) and `drain_events()` (bulk observability event drain, all 8 event kinds covered). Wire format unchanged; no PROTO_VERSION bump.
 
 ---
 
@@ -105,8 +105,12 @@ All impairment decisions are driven by a seedable xorshift64 PRNG — identical 
 - Severity-tagged logging (`INFO`, `WARNING_LO`, `WARNING_HI`, `FATAL`) to stderr via a fixed 512-byte stack buffer
 - No heap allocation in the logger
 - **DeliveryEvent ring** — a bounded, overwrite-on-full ring buffer (`DeliveryEventRing`, capacity `DELIVERY_EVENT_RING_CAPACITY`) records 8 event kinds (SEND_OK, SEND_FAIL, ACK_RECEIVED, RETRY_FIRED, ACK_TIMEOUT, DUPLICATE_DROP, EXPIRY_DROP, MISROUTE_DROP). Events are pulled via `DeliveryEngine::poll_event()` — no callbacks, no heap, no virtual dispatch for delivery (REQ-7.2.5).
+- **drain_events()** — bulk observability drain: `DeliveryEngine::drain_events(out_buf, buf_cap)` pulls up to `buf_cap` events in one call (FIFO order); all 8 event kinds emitted from core delivery paths.
 
-### 8. Determinism and Testability
+### 8. Request/Response Helper Layer
+- **RequestReplyEngine** — bounded request/response layer on top of `DeliveryEngine`. Correlation metadata travels as a 12-byte `RRHeader` prefix inside the existing `payload` field; `MessageEnvelope`, `Serializer`, and `PROTO_VERSION` are untouched. `MAX_PENDING_REQUESTS = 16`; `send_request()` uses `RELIABLE_RETRY`; `send_response()` uses `BEST_EFFORT`; `sweep_timeouts()` frees expired pending slots.
+
+### 9. Determinism and Testability
 - All components are testable without real network hardware via `LocalSimHarness`
 - `ImpairmentEngine` is fully reproducible given the same seed
 - External dependencies are injectable via `TransportInterface` (pointer passed at `init`)

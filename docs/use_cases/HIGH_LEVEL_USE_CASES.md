@@ -213,6 +213,21 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 
 ---
 
+## HL-28: Bounded Request/Response via RequestReplyEngine
+> User creates a RequestReplyEngine on top of a DeliveryEngine, sends a request via send_request(), and polls for a correlated response via receive_response(). Correlation metadata travels as a 12-byte RRHeader prefix inside the existing payload field; MessageEnvelope, Serializer, and PROTO_VERSION are untouched. Pending request table is bounded (MAX_PENDING_REQUESTS=16).
+
+- UC_59 — send_request(): build RRHeader + application payload, send via RELIABLE_RETRY, record pending slot with correlation_id and expiry
+- UC_60 — receive_response(): drain inbound envelopes, match by correlation_id, return application payload and free the pending slot
+
+---
+
+## HL-29: Bulk Observability Event Drain via drain_events()
+> User calls DeliveryEngine::drain_events() to atomically pull all pending observability events into a caller-supplied buffer in a single call. Complements poll_event() for batch processing. Events are returned in FIFO order; the call is bounded by the caller-supplied buffer capacity and the ring capacity.
+
+- UC_61 — drain_events(): drain up to buf_cap DeliveryEvents from the ring in FIFO order; returns count written; non-blocking; never modifies delivery state
+
+---
+
 ## HL-25: TLS Session Resumption on Reconnect
 > User enables TLS session resumption via TlsConfig::session_resumption_enabled; System saves the session after the first handshake and presents it on reconnect to skip the full handshake exchange, reducing reconnection latency (RFC 5077 / TLS 1.3 PSK).
 

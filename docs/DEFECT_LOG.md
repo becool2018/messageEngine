@@ -379,3 +379,49 @@ make lint and make run_tests: PASS.
 
 Moderator: Don Jessup — 2026-04-04. No CRITICAL or MAJOR defects. All entry and exit criteria satisfied. Inspection INSP-006 closed PASS.
 
+---
+
+### INSP-007 — Phase 3 Integration Inspection
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-04 |
+| Author      | Don Jessup / Claude |
+| Moderator   | Don Jessup |
+| Reviewer(s) | Claude (AI-assisted) |
+| Outcome     | PASS — no new defects |
+
+#### Scope of change
+
+Integration of `request-response-helpers` (PR #18) and
+`observability-core-hooks-v2` (PR #19) into
+`request-response-observability-integration`.
+Version bump: 1.2.0 → 1.3.0.
+
+No new hazards identified. Wire format unchanged (PROTO_VERSION not bumped).
+RequestReplyEngine travels request/response kind + correlation ID as a
+12-byte RRHeader prefix inside the existing payload field; MessageEnvelope
+and Serializer untouched. drain_events() added to DeliveryEngine; all 8
+event kinds confirmed covered with dedicated tests.
+make lint and make run_tests: PASS.
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make lint` passes with zero clang-tidy violations | PASS |
+| `make run_tests` all tests green | PASS |
+| No PROTO_VERSION bump (wire format unchanged) | PASS |
+| No feature logic changed in this integration commit | PASS |
+| Version.hpp bump follows SemVer (MINOR: two new backward-compatible features) | PASS |
+
+#### Defects found
+
+| ID | File : line | Description | Severity | Disposition | Resolution |
+|----|-------------|-------------|----------|-------------|------------|
+| — | — | No new defects found during integration | — | — | — |
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-04. No CRITICAL or MAJOR defects. All entry and exit criteria satisfied. Inspection INSP-007 closed PASS.
+
