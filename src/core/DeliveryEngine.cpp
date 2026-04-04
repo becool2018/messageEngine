@@ -19,7 +19,7 @@
  * Applies Power of 10 rules: fixed loop bounds, ≥2 assertions per function,
  * checked return values, bounded resource usage.
  *
- * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4
+ * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
  */
 
 #include "DeliveryEngine.hpp"
@@ -167,6 +167,9 @@ void DeliveryEngine::init(TransportInterface* transport,
     // REQ-7.2.1–7.2.4: zero all aggregated delivery statistics
     delivery_stats_init(m_stats);
 
+    // REQ-7.2.5: initialize the observability event ring
+    m_events.init();
+
     m_initialized = true;
 
     // Power of 10 rule 5: post-condition assertion
@@ -176,6 +179,87 @@ void DeliveryEngine::init(TransportInterface* transport,
     Logger::log(Severity::INFO, "DeliveryEngine",
                 "Initialized channel=%u, local_id=%u",
                 cfg.channel_id, local_id);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::emit_event() — REQ-7.2.5 private helper
+// Builds a DeliveryEvent and pushes it into the ring. Overwrite-on-full ring
+// semantics ensure this is bounded and never fails.
+// NSC: observability bookkeeping only; no effect on delivery state.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+void DeliveryEngine::emit_event(DeliveryEventKind kind,
+                                uint64_t          message_id,
+                                NodeId            node_id,
+                                uint64_t          timestamp_us,
+                                Result            result)
+{
+    // Power of 10 Rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);       // Assert: engine initialized before emitting
+    NEVER_COMPILED_OUT_ASSERT(timestamp_us > 0ULL); // Assert: valid timestamp
+
+    DeliveryEvent ev;
+    ev.kind         = kind;
+    ev.message_id   = message_id;
+    ev.node_id      = node_id;
+    ev.timestamp_us = timestamp_us;
+    ev.result       = result;
+
+    m_events.push(ev);  // bounded overwrite-on-full ring push (REQ-7.2.5)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::emit_routing_drop_event() — REQ-7.2.5 CC-reduction helper
+// Emits EXPIRY_DROP or MISROUTE_DROP based on routing result.
+// Extracted from receive() to keep its CC ≤ 10.
+// NSC: observability bookkeeping only; no effect on delivery state.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+void DeliveryEngine::emit_routing_drop_event(const MessageEnvelope& env,
+                                              Result                 routing_res,
+                                              uint64_t               now_us)
+{
+    // Power of 10 Rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(routing_res != Result::OK);  // Assert: called only on drop
+    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);              // Assert: valid timestamp
+
+    if (routing_res == Result::ERR_EXPIRED) {
+        emit_event(DeliveryEventKind::EXPIRY_DROP,
+                   env.message_id, env.source_id, now_us, routing_res);
+    } else {
+        emit_event(DeliveryEventKind::MISROUTE_DROP,
+                   env.message_id, env.source_id, now_us, routing_res);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::poll_event() — REQ-7.2.5 public observability API
+// Pops one event from the ring. Returns ERR_EMPTY when no events are pending.
+// NSC: observability only; no effect on delivery state.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions.
+// ─────────────────────────────────────────────────────────────────────────────
+Result DeliveryEngine::poll_event(DeliveryEvent& out)
+{
+    // Power of 10 Rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);                                         // Assert: engine initialized
+    NEVER_COMPILED_OUT_ASSERT(m_events.size() <= DELIVERY_EVENT_RING_CAPACITY);       // Assert: ring bounded
+
+    return m_events.pop(out);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::pending_event_count() — REQ-7.2.5 public observability API
+// Returns the number of unread events in the ring.
+// NSC: read-only observability; no effect on delivery.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions.
+// ─────────────────────────────────────────────────────────────────────────────
+uint32_t DeliveryEngine::pending_event_count() const
+{
+    // Power of 10 Rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);                    // Assert: engine initialized
+    NEVER_COMPILED_OUT_ASSERT(DELIVERY_EVENT_RING_CAPACITY > 0U); // Assert: capacity invariant
+
+    return m_events.size();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -380,6 +464,10 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
     // REQ-7.2.3: count successful sends -- only after all bookkeeping AND transport succeed
     ++m_stats.msgs_sent;
 
+    // REQ-7.2.5: emit SEND_OK observability event
+    emit_event(DeliveryEventKind::SEND_OK,
+               env.message_id, env.destination_id, now_us, Result::OK);
+
     // Power of 10 rule 5: post-condition assertion
     NEVER_COMPILED_OUT_ASSERT(env.source_id == m_local_id);  // Assert: source set correctly
     NEVER_COMPILED_OUT_ASSERT(env.message_id != 0ULL);       // Assert: message_id assigned
@@ -420,7 +508,8 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
     // Power of 10 rule 7: check return value.
     Result routing_res = check_routing(env, m_local_id, now_us);
     if (routing_res != Result::OK) {
-        record_routing_failure(routing_res);  // REQ-7.2.3: stats (CC-reduction helper)
+        record_routing_failure(routing_res);             // REQ-7.2.3: stats (CC-reduction helper)
+        emit_routing_drop_event(env, routing_res, now_us);  // REQ-7.2.5: CC-reduction helper
         return routing_res;
     }
 
@@ -431,6 +520,9 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
             update_latency_stats(env, now_us);
             // Power of 10 rule 7: return values checked inside process_ack().
             process_ack(m_ack_tracker, m_retry_manager, env);
+            // REQ-7.2.5: emit ACK_RECEIVED event
+            emit_event(DeliveryEventKind::ACK_RECEIVED,
+                       env.message_id, env.source_id, now_us, Result::OK);
         }
         // For other control messages (NAK, HEARTBEAT), just pass through
         return Result::OK;
@@ -453,6 +545,9 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
             // retries without delivering the data a second time. Non-fatal on failure.
             // Safety-critical (SC): HAZ-002 — prevents spurious retry exhaustion.
             send_data_ack(*m_transport, env, m_local_id, now_us);
+            // REQ-7.2.5: emit DUPLICATE_DROP event
+            emit_event(DeliveryEventKind::DUPLICATE_DROP,
+                       env.message_id, env.source_id, now_us, Result::ERR_DUPLICATE);
             return Result::ERR_DUPLICATE;
         }
         NEVER_COMPILED_OUT_ASSERT(dedup_res == Result::OK);  // Assert: check_and_record succeeded
@@ -510,6 +605,11 @@ uint32_t DeliveryEngine::pump_retries(uint64_t now_us)
             Logger::log(Severity::INFO, "DeliveryEngine",
                         "Retried message_id=%llu",
                         (unsigned long long)m_retry_buf[i].message_id);
+            // REQ-7.2.5: emit RETRY_FIRED event for successful retry transmission
+            emit_event(DeliveryEventKind::RETRY_FIRED,
+                       m_retry_buf[i].message_id,
+                       m_retry_buf[i].destination_id,
+                       now_us, Result::OK);
         }
     }
 
@@ -544,6 +644,11 @@ uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
                     "ACK timeout for message_id=%llu sent to node=%u",
                     (unsigned long long)m_timeout_buf[i].message_id,
                     m_timeout_buf[i].destination_id);
+        // REQ-7.2.5: emit ACK_TIMEOUT event
+        emit_event(DeliveryEventKind::ACK_TIMEOUT,
+                   m_timeout_buf[i].message_id,
+                   m_timeout_buf[i].destination_id,
+                   now_us, Result::ERR_TIMEOUT);
     }
 
     // Power of 10 rule 5: post-condition assertion
@@ -604,6 +709,7 @@ void DeliveryEngine::update_latency_stats(const MessageEnvelope& ack_env,
 // DeliveryEngine::record_send_failure() — REQ-7.2.3 private helper
 // Logs a send failure warning and increments msgs_dropped_expired on ERR_EXPIRED.
 // Extracted from send() to reduce its cognitive complexity to ≤ 10.
+// Also emits a SEND_FAIL or EXPIRY_DROP observability event (REQ-7.2.5).
 // NSC: observability bookkeeping only.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -615,6 +721,13 @@ void DeliveryEngine::record_send_failure(const MessageEnvelope& env, Result res)
 
     if (res == Result::ERR_EXPIRED) {
         ++m_stats.msgs_dropped_expired;  // REQ-7.2.3: count expiry drops on send
+        // REQ-7.2.5: emit EXPIRY_DROP event for send-path expiry
+        emit_event(DeliveryEventKind::EXPIRY_DROP,
+                   env.message_id, env.destination_id, env.timestamp_us, res);
+    } else {
+        // REQ-7.2.5: emit SEND_FAIL event for non-expiry send failures
+        emit_event(DeliveryEventKind::SEND_FAIL,
+                   env.message_id, env.destination_id, env.timestamp_us, res);
     }
 
     Logger::log(Severity::WARNING_LO, "DeliveryEngine",
