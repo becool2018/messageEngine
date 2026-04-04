@@ -13,11 +13,9 @@ SRC_DIR="$REPO_ROOT/src"
 TESTS_DIR="$REPO_ROOT/tests"
 
 # ── Known unimplemented requirements ─────────────────────────────────────────
-# REQ IDs listed here are defined in CLAUDE.md but have no implementation yet.
-# They are documented gaps, not oversight. Remove an entry once it is implemented.
-# Added 2026-04-03: REQ-7.2.x metrics hooks not yet implemented; false
-#   // Implements: tags were removed to restore traceability integrity.
-KNOWN_GAPS="REQ-7.2.1 REQ-7.2.2 REQ-7.2.3 REQ-7.2.4"
+# Currently no known unimplemented requirements. Add REQ IDs here only for
+# requirements that are intentionally not yet implemented (document why).
+KNOWN_GAPS=""
 
 PASS=0
 FAIL=0

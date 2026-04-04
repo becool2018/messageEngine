@@ -40,6 +40,7 @@ void AckTracker::init()
     (void)memset(m_slots, 0, sizeof(m_slots));
 
     m_count = 0U;
+    m_initialized = true;
     ack_tracker_stats_init(m_stats);  // REQ-7.2.3: zero all observability counters
 
     // Power of 10 rule 5: post-condition assertions
@@ -218,15 +219,16 @@ Result AckTracker::get_send_timestamp(NodeId src, uint64_t msg_id, uint64_t& out
 const AckTrackerStats& AckTracker::get_stats() const
 {
     // Power of 10 rule 5: ≥2 assertions
-    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: tracker invariant holds
-    // acks_received is a monotonically increasing counter: no finite upper bound
-    // assertion is appropriate. Asserting a large multiple of capacity would be
-    // a time-bomb — reachable in any long-running system — and asserting an
-    // overflow wrap is already handled by unsigned arithmetic semantics.
-    // Instead, assert a structural relationship: the number of timeouts cannot
-    // exceed the number of ACKs received plus the capacity (since at most
-    // ACK_TRACKER_CAPACITY slots can be live and awaiting expiry at any moment,
-    // the cumulative timeouts are bounded by cumulative completions + capacity).
-    NEVER_COMPILED_OUT_ASSERT(m_stats.timeouts <= m_stats.acks_received + ACK_TRACKER_CAPACITY);  // Assert: structural timeout/ack relationship holds
+    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: slot count never exceeds capacity
+    // Second assertion: enforce the precondition that init() was called before get_stats().
+    // m_initialized is set true by init() and never reset; asserting it here guarantees
+    // get_stats() is not called on an uninitialized tracker.
+    //
+    // NOTE: any assertion comparing monotonic counters (acks_received, timeouts) against
+    // a capacity-derived bound is a time-bomb. Both counters grow without bound across
+    // rounds; a bound of the form "timeouts <= acks_received + ACK_TRACKER_CAPACITY" is
+    // violated after exactly 2 × ACK_TRACKER_CAPACITY timeouts with zero ACKs and is
+    // therefore invalid as a permanent invariant. No counter-vs-capacity bound belongs here.
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: init() has been called before get_stats()
     return m_stats;
 }

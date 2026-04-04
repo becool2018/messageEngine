@@ -226,7 +226,17 @@ static bool test_prng_deterministic()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 6: Jitter – message released after variable delay
+// Test 6: Jitter – bidirectional range [mean-variance, mean+variance]
+//
+// Parameters: mean=10 ms, variance=5 ms.
+//   Lower bound: 10 - 5 = 5 ms → 5,000 µs
+//   Upper bound: 10 + 5 = 15 ms → 15,000 µs
+//
+// Checks:
+//   (a) Lower-bound check: collecting at base + 4,000 µs (< 5,000 µs lower bound)
+//       must yield count == 0 — the message is not yet deliverable.
+//   (b) Upper-bound check: collecting at base + 16,000 µs (> 15,000 µs upper bound)
+//       must yield count == 1 — the message is always deliverable by this time.
 // ─────────────────────────────────────────────────────────────────────────────
 // Verifies: REQ-5.1.2
 static bool test_jitter()
@@ -234,11 +244,11 @@ static bool test_jitter()
     ImpairmentEngine engine;
     ImpairmentConfig cfg;
     impairment_config_default(cfg);
-    cfg.enabled = true;
-    cfg.jitter_mean_ms    = 5U;   // non-zero: enables jitter branch (line 185 True)
-    cfg.jitter_variance_ms = 10U; // max jitter = 10 ms = 10,000 µs
-    cfg.loss_probability  = 0.0;
-    cfg.fixed_latency_ms  = 0U;
+    cfg.enabled            = true;
+    cfg.jitter_mean_ms     = 10U;  // non-zero: enables jitter branch
+    cfg.jitter_variance_ms = 5U;   // bidirectional: range [5, 15] ms
+    cfg.loss_probability   = 0.0;
+    cfg.fixed_latency_ms   = 0U;
 
     engine.init(cfg);
 
@@ -249,8 +259,14 @@ static bool test_jitter()
     Result r = engine.process_outbound(env, base_us);
     assert(r == Result::OK);
 
-    // Collect well past max jitter (15 ms > 10 ms cap): message must be available
-    uint64_t late_us = base_us + 15000ULL;
+    // (a) Lower-bound check: 4 ms < 5 ms lower bound → message not yet deliverable
+    uint64_t early_us = base_us + 4000ULL;
+    MessageEnvelope early_buf[2];
+    uint32_t early_count = engine.collect_deliverable(early_us, early_buf, 2U);
+    assert(early_count == 0U);
+
+    // (b) Upper-bound check: 16 ms > 15 ms upper bound → message always deliverable
+    uint64_t late_us = base_us + 16000ULL;
     MessageEnvelope out_buf[2];
     uint32_t count = engine.collect_deliverable(late_us, out_buf, 2U);
     assert(count == 1U);

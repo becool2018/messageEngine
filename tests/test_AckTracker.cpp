@@ -367,6 +367,58 @@ static void test_stats_ack_received()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 13: multi-round timeout accumulation does NOT fire the former time-bomb
+// Regression test for the broken assertion:
+//   NEVER_COMPILED_OUT_ASSERT(timeouts <= acks_received + ACK_TRACKER_CAPACITY)
+// which was violated after exactly 2 × ACK_TRACKER_CAPACITY timeouts with zero ACKs.
+// After 3 full rounds (3 × 32 = 96 timeouts, 0 ACKs) the old assertion would fire at
+// round 2.  This test verifies get_stats() is safe across all three rounds.
+//
+// Verifies: REQ-7.2.3 — AckTracker.timeouts counter accumulates correctly across rounds
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_timeout_multiround()
+{
+    AckTracker tracker;
+    tracker.init();
+
+    // Power of 10: bounded outer loop — 3 rounds
+    static const uint32_t NUM_ROUNDS = 3U;
+    for (uint32_t round = 0U; round < NUM_ROUNDS; ++round) {
+        // Fill all slots with already-expired deadlines (deadline_us = 1)
+        // Power of 10: bounded inner loop — ACK_TRACKER_CAPACITY iterations
+        for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+            MessageEnvelope env;
+            // Use a unique msg_id per slot per round to avoid aliasing
+            uint64_t msg_id = static_cast<uint64_t>(round) * ACK_TRACKER_CAPACITY
+                              + static_cast<uint64_t>(i) + 1U;
+            make_test_envelope(env, msg_id);
+            Result r = tracker.track(env, 1ULL);  // deadline=1µs — already expired
+            assert(r == Result::OK);
+        }
+
+        // Sweep at a time well past all deadlines — expires all ACK_TRACKER_CAPACITY slots
+        MessageEnvelope expired_buf[ACK_TRACKER_CAPACITY];
+        uint32_t expired = tracker.sweep_expired(1000000ULL, expired_buf, ACK_TRACKER_CAPACITY);
+        assert(expired == ACK_TRACKER_CAPACITY);
+
+        // Call get_stats() — must NOT abort (regression: old assertion fired here on round 2)
+        const AckTrackerStats& s = tracker.get_stats();
+
+        // Verify cumulative counters
+        uint32_t expected_timeouts = (round + 1U) * ACK_TRACKER_CAPACITY;
+        assert(s.timeouts == expected_timeouts);
+        assert(s.acks_received == 0U);
+    }
+
+    // Final state: 3 × ACK_TRACKER_CAPACITY (= 96) timeouts, zero ACKs
+    const AckTrackerStats& final_s = tracker.get_stats();
+    assert(final_s.timeouts == NUM_ROUNDS * ACK_TRACKER_CAPACITY);
+    assert(final_s.acks_received == 0U);
+
+    printf("PASS: test_stats_timeout_multiround\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -383,6 +435,7 @@ int main()
     test_sweep_buf_capacity();
     test_stats_timeout();
     test_stats_ack_received();
+    test_stats_timeout_multiround();
 
     printf("ALL AckTracker tests passed.\n");
     return 0;

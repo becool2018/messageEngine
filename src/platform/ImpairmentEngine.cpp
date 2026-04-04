@@ -169,6 +169,35 @@ void ImpairmentEngine::apply_duplication(const MessageEnvelope& env,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// compute_jitter_us() — private helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+uint64_t ImpairmentEngine::compute_jitter_us()
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Power of 10: initialized
+
+    if (m_cfg.jitter_mean_ms == 0U) {
+        NEVER_COMPILED_OUT_ASSERT(m_cfg.jitter_mean_ms == 0U);  // Power of 10: guard confirmed
+        return 0ULL;
+    }
+
+    // REQ-5.1.2: bidirectional jitter centered on mean_ms with ±variance_ms range.
+    // When variance_ms <= mean_ms: range = [mean - variance, mean + variance].
+    // When variance_ms > mean_ms: lower bound clamped to 0 to avoid uint underflow;
+    //   effective range = [0, mean + variance].
+    // hi_ms >= lo_ms by construction; next_range(lo, hi) returns [lo, hi] inclusive.
+    uint32_t lo_ms = (m_cfg.jitter_variance_ms <= m_cfg.jitter_mean_ms)
+        ? (m_cfg.jitter_mean_ms - m_cfg.jitter_variance_ms)
+        : 0U;
+    uint32_t hi_ms = m_cfg.jitter_mean_ms + m_cfg.jitter_variance_ms;
+
+    NEVER_COMPILED_OUT_ASSERT(hi_ms >= lo_ms);  // Power of 10: range is non-negative
+
+    uint32_t jitter_offset_ms = m_prng.next_range(lo_ms, hi_ms);
+    return static_cast<uint64_t>(jitter_offset_ms) * 1000ULL;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // process_outbound()
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -206,19 +235,9 @@ Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env,
         return Result::ERR_IO;
     }
 
-    // Calculate release time: fixed latency + jitter
+    // Calculate release time: fixed latency + jitter (REQ-5.1.1, REQ-5.1.2)
     uint64_t base_delay_us = static_cast<uint64_t>(m_cfg.fixed_latency_ms) * 1000ULL;
-    uint64_t jitter_us = 0ULL;
-    if (m_cfg.jitter_mean_ms > 0U) {
-            // REQ-5.1.2: jitter is centered on mean_ms with up to variance_ms of additional
-            // random delay. offset = mean + uniform(0, variance) → range [mean, mean+variance].
-            // A true ±variance distribution would risk uint underflow when variance > mean;
-            // the [mean, mean+variance] interpretation is the safe, uint-compatible form used here.
-            // Previously jitter_mean_ms was used only as a gate; its value was never added.
-            uint32_t jitter_offset_ms = m_cfg.jitter_mean_ms +
-                                        m_prng.next_range(0U, m_cfg.jitter_variance_ms);
-        jitter_us = static_cast<uint64_t>(jitter_offset_ms) * 1000ULL;
-    }
+    uint64_t jitter_us = compute_jitter_us();
     uint64_t release_us = now_us + base_delay_us + jitter_us;
 
     // Queue the message in the delay buffer

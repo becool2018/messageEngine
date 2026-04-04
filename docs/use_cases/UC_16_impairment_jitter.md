@@ -32,7 +32,12 @@ Not directly user-callable. Invoked inside `process_outbound()` when computing `
 1. `process_outbound()` passes partition and loss checks.
 2. **Jitter calculation:**
    a. If `m_cfg.jitter_variance_ms == 0`: `jitter_us = (uint64_t)m_cfg.jitter_mean_ms * 1000ULL`.
-   b. If `m_cfg.jitter_variance_ms > 0`: `m_prng.next_range(0, 2 * m_cfg.jitter_variance_ms * 1000)` — draws a uniform integer in `[0, 2*variance*1000)`. Then `jitter_us = (jitter_mean_ms * 1000) - (variance * 1000) + drawn_value`.
+   b. If `m_cfg.jitter_variance_ms > 0`:
+      - `lo_ms = (variance_ms <= mean_ms) ? (mean_ms - variance_ms) : 0` (clamped to 0 when variance > mean to avoid uint underflow).
+      - `hi_ms = mean_ms + variance_ms`.
+      - `jitter_offset_ms = m_prng.next_range(lo_ms, hi_ms)` — draws a uniform integer in `[lo_ms, hi_ms]` inclusive.
+      - `jitter_us = (uint64_t)jitter_offset_ms * 1000ULL`.
+      - Effective range: `[mean - variance, mean + variance]` ms when `variance <= mean`; `[0, mean + variance]` ms when `variance > mean`.
 3. `deliver_time = now_us + (uint64_t)m_cfg.fixed_latency_ms * 1000ULL + jitter_us`.
 4. `queue_to_delay_buf(env, deliver_time)`.
 5. `collect_deliverable(now_us, ...)` — entries due immediately (if any) are returned; the jittered entry is not due yet.
@@ -53,7 +58,7 @@ ImpairmentEngine::process_outbound()         [ImpairmentEngine.cpp]
 
 ## 5. Key Components Involved
 
-- **`PrngEngine::next_range(min, max)`** — Returns a uniform integer in `[min, max)` using xorshift64 modulo. Provides per-message jitter variation.
+- **`PrngEngine::next_range(lo, hi)`** — Returns a uniform integer in `[lo, hi]` inclusive using xorshift64 modulo. Provides per-message jitter variation.
 - **`queue_to_delay_buf()`** — Stores the envelope with its jittered `deliver_time`.
 - **`collect_deliverable()`** — Time-sorted retrieval; earlier `deliver_time` values are released first, which can reorder messages that were queued in order but have different delays.
 
@@ -63,8 +68,10 @@ ImpairmentEngine::process_outbound()         [ImpairmentEngine.cpp]
 
 | Condition | True branch | False branch |
 |-----------|-------------|--------------|
-| `jitter_variance_ms > 0` | Draw random offset from PRNG | `jitter_us = mean_ms * 1000` |
-| `jitter_mean_ms == 0` | No jitter applied | Add jitter to delay |
+| `jitter_mean_ms == 0` | No jitter applied | Compute `lo_ms`, `hi_ms`, draw from PRNG |
+| `jitter_variance_ms <= jitter_mean_ms` | `lo_ms = mean_ms - variance_ms` (bidirectional range) | `lo_ms = 0` (clamped; variance > mean would underflow) |
+
+**Clamping note:** When `jitter_variance_ms > jitter_mean_ms`, the lower bound is clamped to 0 µs to prevent unsigned underflow. The effective range becomes `[0, (mean + variance) ms]` rather than `[(mean − variance) ms, (mean + variance) ms]`.
 
 ---
 
@@ -109,12 +116,14 @@ ImpairmentEngine::process_outbound()         [ImpairmentEngine.cpp]
 
 ```
 ImpairmentEngine::process_outbound(env, now_us, ...)
-  -> check_loss()                         <- false
-  -> PrngEngine::next_range(0, 2*var*1000) [draw d]
-  [jitter_us = mean*1000 - var*1000 + d]
+  -> check_loss()                                  <- false
+  [lo_ms = (variance<=mean) ? mean-variance : 0]
+  [hi_ms = mean + variance]
+  -> PrngEngine::next_range(lo_ms, hi_ms)          [draw d in [lo_ms, hi_ms]]
+  [jitter_us = d * 1000ULL]
   [deliver_time = now_us + lat_us + jitter_us]
   -> queue_to_delay_buf(env, deliver_time)
-  -> collect_deliverable(now_us, ...)     [*out_count = 0; not due yet]
+  -> collect_deliverable(now_us, ...)              [*out_count = 0; not due yet]
   <- Result::OK
 ```
 
@@ -134,10 +143,10 @@ ImpairmentEngine::process_outbound(env, now_us, ...)
 ## 14. Known Risks / Observations
 
 - **Implicit reordering:** Messages with shorter jitter draws arrive before later-queued messages with shorter delays. This is intentional but means jitter implicitly enables reordering even without `reorder_enabled = true`.
-- **Variance boundary:** `jitter_mean_ms - jitter_variance_ms` can be negative if `variance > mean`. The PRNG draw ensures the minimum delay is `(mean - variance) * 1000` microseconds, which could be zero or negative. The implementation should clamp to 0.
+- **Variance boundary:** When `jitter_variance_ms > jitter_mean_ms`, naive subtraction `mean_ms - variance_ms` would underflow as unsigned arithmetic. The implementation clamps `lo_ms` to 0 in this case (see §6 Branching Logic). The effective range becomes `[0, mean + variance]` ms instead of `[mean - variance, mean + variance]` ms.
 
 ---
 
 ## 15. Unknowns / Assumptions
 
-- `[ASSUMPTION]` The jitter range is `[mean - variance, mean + variance]` milliseconds, converted to microseconds. Negative jitter values are clamped to 0 to prevent `deliver_time` from being in the past. This clamping behavior is inferred from the ImpairmentEngine source.
+- The jitter range is `[mean - variance, mean + variance]` milliseconds when `variance <= mean`, converted to microseconds. When `variance > mean`, the lower bound is clamped to 0 ms to prevent unsigned integer underflow; `deliver_time` is therefore always ≥ `now_us`. This clamping is implemented explicitly in `ImpairmentEngine::process_outbound()` via the `lo_ms` guard (see §6).

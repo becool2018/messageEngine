@@ -171,6 +171,11 @@ private:
     /// @param[in] env        Original message envelope to duplicate.
     /// @param[in] release_us Release timestamp of the original (duplicate offset by 100 µs).
     void apply_duplication(const MessageEnvelope& env, uint64_t release_us);
+
+    /// Compute the jitter delay in microseconds using the configured mean and variance.
+    /// REQ-5.1.2: bidirectional jitter; lower bound clamped to 0 when variance > mean.
+    /// @return Jitter offset in microseconds in [lo_ms, hi_ms]*1000.
+    uint64_t compute_jitter_us();
     // ───────────────────────────────────────────────────────────────────────
     // Delay buffer entry (messages waiting for release due to latency/jitter)
     // ───────────────────────────────────────────────────────────────────────
