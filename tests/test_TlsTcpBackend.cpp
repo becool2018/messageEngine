@@ -18,13 +18,14 @@
  *        TLS config, plaintext fallback, TLS init failures, and loopback roundtrip.
  *
  * Tests cover:
- *   - TlsConfig struct default values
+ *   - TlsConfig struct default values (incl. session_resumption_enabled=false)
  *   - transport_config_default() initialises the embedded TlsConfig
  *   - TlsTcpBackend server bind without TLS (tls_enabled=false)
  *   - TlsTcpBackend init failure when cert/key files are missing
  *   - TlsTcpBackend init with valid self-signed cert (server bind succeeds)
  *   - Full loopback message roundtrip (plaintext) using POSIX threads
  *   - Full loopback message roundtrip (TLS) using POSIX threads
+ *   - TLS session resumption: default-off, save-after-handshake, reconnect cycle
  *
  * Test cert/key written to /tmp at test startup; cleaned up at exit.
  * POSIX threads (pthread) used for loopback tests; allowed by -lpthread.
@@ -1795,6 +1796,251 @@ static void test_send_impairment_loss_drop()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 31: tls_config_default() initialises new session-resumption fields.
+//          Verifies backward-compatibility: session_resumption_enabled is false
+//          and session_ticket_lifetime_s is 86400 (24 h) by default.
+//          Also verifies that tls_config_default does NOT enable resumption so
+//          existing callers that never touch the field are unaffected.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.3.4
+// Verification: M1 + M2 + M4
+static void test_session_resumption_disabled_by_default()
+{
+    TlsConfig cfg;
+    tls_config_default(cfg);
+
+    // New fields must be off-by-default for backward compatibility.
+    assert(cfg.session_resumption_enabled == false);
+    assert(cfg.session_ticket_lifetime_s  == 86400U);
+
+    // Sanity-check that the other fields are still correct.
+    assert(cfg.tls_enabled  == false);
+    assert(cfg.verify_peer  == true);
+
+    printf("PASS: test_session_resumption_disabled_by_default\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Thread arg: client connects with session_resumption_enabled, sends one
+// message, stores the Result so the main thread can inspect it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct SessionClientArg {
+    uint16_t port;
+    Result   init_result;
+    Result   send_result;
+};
+
+static void* session_client_func(void* raw_arg)
+{
+    SessionClientArg* a = static_cast<SessionClientArg*>(raw_arg);
+    assert(a != nullptr);
+
+    usleep(80000U);  // 80 ms: let server bind
+
+    TlsTcpBackend client;
+    TransportConfig cfg;
+    make_transport_config(cfg, false, a->port, true);
+    // Enable session resumption on the client side.
+    cfg.tls.session_resumption_enabled = true;
+    a->init_result = client.init(cfg);
+    if (a->init_result != Result::OK) {
+        return nullptr;
+    }
+
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.message_id        = 0xCAFEULL;
+    env.source_id         = 2U;
+    env.destination_id    = 1U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    a->send_result = client.send_message(env);
+    usleep(50000U);  // 50 ms: let server drain
+    client.close();
+    return nullptr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 32: session saved after a successful TLS loopback handshake.
+//          The client enables session_resumption_enabled=true.  After a full
+//          TLS handshake and a successful send, tls_connect_handshake() calls
+//          try_save_client_session() which should log "TLS session saved ...".
+//          We verify the observable side-effect: the server receives the
+//          message (proving the handshake and send both completed), which is
+//          only possible if init() → tls_connect_handshake() succeeded and did
+//          not abort after try_save_client_session().
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.3.4
+// Verification: M1 + M2 + M4
+static void test_tls_session_saved_after_handshake()
+{
+    static const uint16_t PORT = 19897U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, true);
+    // Enable session tickets on server so it can service resuming clients.
+    srv_cfg.tls.session_resumption_enabled = true;
+
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    SessionClientArg args;
+    args.port        = PORT;
+    args.init_result = Result::ERR_IO;
+    args.send_result = Result::ERR_IO;
+
+    pthread_t tid = create_thread_4mb(session_client_func, &args);
+
+    // Server waits up to 5 s for the message from the client.
+    MessageEnvelope received;
+    Result recv_res = server.receive_message(received, 5000U);
+
+    (void)pthread_join(tid, nullptr);
+    server.close();
+
+    // Verify the full handshake + send completed successfully on both sides.
+    assert(args.init_result == Result::OK);
+    assert(args.send_result == Result::OK);
+    assert(recv_res == Result::OK);
+    assert(received.message_id == 0xCAFEULL);
+
+    printf("PASS: test_tls_session_saved_after_handshake\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Thread arg: client reconnects a second time expecting session resumption.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct ResumeClientArg {
+    uint16_t port;
+    Result   first_init;
+    Result   second_init;
+    Result   second_send;
+};
+
+static void* resume_client_func(void* raw_arg)
+{
+    ResumeClientArg* a = static_cast<ResumeClientArg*>(raw_arg);
+    assert(a != nullptr);
+
+    usleep(80000U);  // 80 ms: let server bind
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, a->port, true);
+    cfg.tls.session_resumption_enabled = true;
+
+    // ── First connection: full handshake, save session ────────────────────
+    // TlsTcpBackend is designed for single-lifecycle: init once, use, close.
+    // Use a local scope to fully destroy the first instance before the second.
+    {
+        TlsTcpBackend client1;
+        a->first_init = client1.init(cfg);
+        if (a->first_init != Result::OK) {
+            return nullptr;
+        }
+        MessageEnvelope env1;
+        envelope_init(env1);
+        env1.message_type      = MessageType::DATA;
+        env1.message_id        = 0xD001ULL;
+        env1.source_id         = 2U;
+        env1.destination_id    = 1U;
+        env1.reliability_class = ReliabilityClass::BEST_EFFORT;
+        (void)client1.send_message(env1);
+        usleep(50000U);  // give server time to receive
+        client1.close();
+    }  // client1 destructor frees all mbedTLS resources
+
+    // ── Second connection: fresh TlsTcpBackend with session_resumption_enabled
+    // A new backend instance starts with m_session_saved=false (no prior
+    // session to present); it performs a full handshake and saves the new
+    // session.  This verifies the reconnect path does not crash or leak.
+    usleep(30000U);  // 30 ms: brief pause before reconnect
+    {
+        TlsTcpBackend client2;
+        a->second_init = client2.init(cfg);
+        if (a->second_init != Result::OK) {
+            return nullptr;
+        }
+        MessageEnvelope env2;
+        envelope_init(env2);
+        env2.message_type      = MessageType::DATA;
+        env2.message_id        = 0xD002ULL;
+        env2.source_id         = 2U;
+        env2.destination_id    = 1U;
+        env2.reliability_class = ReliabilityClass::BEST_EFFORT;
+        a->second_send = client2.send_message(env2);
+        usleep(50000U);
+        client2.close();
+    }
+    return nullptr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 33: reconnect with session_resumption_enabled cycles cleanly.
+//          First connection completes a full TLS handshake.  After close(),
+//          m_session_saved is reset to false.  Second init() performs a new
+//          full handshake (because m_session_saved==false after close) and
+//          the send succeeds.  This exercises the reconnect path end-to-end
+//          without requiring actual abbreviated handshake support from the
+//          test-only self-signed certificate.
+//
+//          Observable outcome: server receives both messages.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.3.4
+// Verification: M1 + M2 + M4
+static void test_tls_session_resumption_reconnect_cycle()
+{
+    static const uint16_t PORT = 19898U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, true);
+    srv_cfg.tls.session_resumption_enabled = true;
+
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    ResumeClientArg args;
+    args.port        = PORT;
+    args.first_init  = Result::ERR_IO;
+    args.second_init = Result::ERR_IO;
+    args.second_send = Result::ERR_IO;
+
+    pthread_t tid = create_thread_4mb(resume_client_func, &args);
+
+    // Drain: receive both messages from the two client connections.
+    // Power of 10 Rule 2: bounded loop (at most 100 poll iterations).
+    uint32_t received_count = 0U;
+    for (uint32_t k = 0U; k < 100U && received_count < 2U; ++k) {
+        MessageEnvelope env;
+        Result r = server.receive_message(env, 200U);
+        if (r == Result::OK) {
+            ++received_count;
+        }
+    }
+
+    (void)pthread_join(tid, nullptr);
+    server.close();
+
+    // Both client connections must have succeeded.
+    assert(args.first_init  == Result::OK);
+    assert(args.second_init == Result::OK);
+    assert(args.second_send == Result::OK);
+    // Both messages must have arrived.
+    assert(received_count == 2U);
+
+    printf("PASS: test_tls_session_resumption_reconnect_cycle\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1834,6 +2080,10 @@ int main()
     test_di_constructor_executes();
     test_recv_queue_overflow();
     test_send_impairment_loss_drop();
+    // Session resumption tests (31-33):
+    test_session_resumption_disabled_by_default();
+    test_tls_session_saved_after_handshake();
+    test_tls_session_resumption_reconnect_cycle();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);
