@@ -19,13 +19,13 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-3.3.2 | Reliable with ACK delivery semantic                | src/core/DeliveryEngine.cpp, src/core/AckTracker.cpp        | test_AckTracker.cpp :: all ten tests; test_DeliveryEngine.cpp :: test_send_reliable_ack, test_sweep_detects_timeout, test_send_ack_tracker_full |
 | REQ-3.3.3 | Reliable with retry and dedupe semantic            | src/core/DeliveryEngine.cpp, src/core/RetryManager.cpp, src/core/DuplicateFilter.cpp | test_RetryManager.cpp :: all twelve tests; test_DeliveryEngine.cpp :: test_send_reliable_retry, test_receive_duplicate, test_receive_ack_cancels_retry, test_pump_retries_fires, test_pump_retries_resends, test_send_retry_manager_full |
 | REQ-3.3.4 | Expiring messages delivery semantic                | src/core/DeliveryEngine.cpp, src/core/Timestamp.cpp         | test_DeliveryEngine.cpp :: test_receive_expired, test_send_expired_returns_err, test_receive_expired_at_boundary, test_receive_zero_expiry_never_drops; test_Timestamp.cpp :: test_expiry_zero_never_expires |
-| REQ-3.3.5 | Ordered / unordered channel support                | src/core/ChannelConfig.hpp                                  | — (no dedicated test)                                |
+| REQ-3.3.5 | Ordered / unordered channel support                | src/core/ChannelConfig.hpp                                  | — (not implemented: OrderingMode stored in ChannelConfig but never enforced by any transport or DeliveryEngine; no sequence-number field in MessageEnvelope; see TODO_FOR_CLASS_B_CERT.txt Item 11) |
 | REQ-4.1.1 | init(config) transport operation                   | src/core/TransportInterface.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp, src/platform/LocalSimHarness.cpp | — |
 | REQ-4.1.2 | send_message(envelope) transport operation         | src/core/TransportInterface.hpp, src/core/RingBuffer.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp, src/platform/LocalSimHarness.cpp | test_LocalSim.cpp :: basic send/receive, bidirectional, queue-full |
 | REQ-4.1.3 | receive_message(timeout) transport operation       | src/core/TransportInterface.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp, src/platform/LocalSimHarness.cpp | test_LocalSim.cpp :: basic send/receive, bidirectional, receive timeout |
 | REQ-4.1.4 | flush / close transport operation                  | src/core/TransportInterface.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp, src/platform/LocalSimHarness.cpp | test_LocalSim.cpp (implicit on teardown) |
-| REQ-4.2.1 | Logical channels with priority, reliability, order | src/core/ChannelConfig.hpp                                  | — (no dedicated test)                                |
-| REQ-4.2.2 | Transport configuration (timeouts, limits)         | src/core/ChannelConfig.hpp                                  | — (no dedicated test)                                |
+| REQ-4.2.1 | Logical channels with priority, reliability, order | src/core/ChannelConfig.hpp                                  | Priority serialised on wire (test_Serializer.cpp); reliability class fully tested; ordering not implemented (see REQ-3.3.5) |
+| REQ-4.2.2 | Transport configuration (timeouts, limits)         | src/core/ChannelConfig.hpp, src/platform/TcpBackend.cpp, src/platform/TlsTcpBackend.cpp, src/core/DeliveryEngine.cpp | send_timeout_ms consumed by TcpBackend/TlsTcpBackend; recv_timeout_ms consumed by DeliveryEngine (ack_deadline); no isolated unit test |
 | REQ-5.1.1 | Fixed latency impairment                           | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: fixed-latency gating   |
 | REQ-5.1.2 | Random jitter impairment                           | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: test_jitter             |
 | REQ-5.1.3 | Packet loss impairment                             | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: deterministic 100% loss, zero loss |
@@ -34,7 +34,7 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-5.1.6 | Partition / intermittent outage impairment         | src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: test_partition_state_machine, test_partition_waiting_and_active, test_partition_gap_ms_minimum_valid |
 | REQ-5.2.1 | Structured impairment configuration object        | src/platform/ImpairmentConfig.hpp, src/platform/ImpairmentConfigLoader.hpp, src/platform/ImpairmentConfigLoader.cpp | test_ImpairmentEngine.cpp :: disabled pass-through; test_ImpairmentConfigLoader.cpp :: all twelve tests |
 | REQ-5.2.2 | Enable / disable each impairment independently     | src/platform/ImpairmentConfig.hpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: disabled pass-through  |
-| REQ-5.2.3 | Per-channel / per-peer impairment config           | src/platform/ImpairmentConfig.hpp                           | — (no dedicated test)                                |
+| REQ-5.2.3 | Per-channel / per-peer impairment config           | src/platform/ImpairmentConfig.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp, src/platform/DtlsUdpBackend.cpp, src/platform/LocalSimHarness.cpp | Implemented: all four backends read channels[0].impairment at init; no isolated unit test |
 | REQ-5.2.4 | Deterministic PRNG mode with seed                  | src/platform/ImpairmentConfig.hpp, src/platform/PrngEngine.hpp, src/platform/PrngEngine.cpp | test_ImpairmentEngine.cpp :: deterministic 100% loss |
 | REQ-5.2.5 | Snapshot / log impairment decisions                | src/platform/ImpairmentEngine.cpp                           | — (no dedicated test)                                |
 | REQ-5.3.1 | Same seed → same impairment sequence               | src/platform/PrngEngine.hpp, src/platform/PrngEngine.cpp, src/platform/ImpairmentEngine.cpp | test_ImpairmentEngine.cpp :: PRNG reproducibility   |
@@ -71,14 +71,19 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 
 ## Coverage gaps (requirements with no test)
 
-The following REQ IDs have no `Verifies:` entry. These are candidates for new tests:
-REQ-3.3.5,
-REQ-4.1.1, REQ-4.2.1, REQ-4.2.2,
-REQ-5.2.3, REQ-5.2.5,
+Unimplemented features (no test expected until feature is built):
+REQ-3.3.5, REQ-4.2.1 (ordering enforcement) — OrderingMode field exists in
+  ChannelConfig but is never read by any transport or DeliveryEngine.
+  Requires sequence numbers in MessageEnvelope and a receiver reorder buffer.
+  See TODO_FOR_CLASS_B_CERT.txt Item 11.
+REQ-7.2.1 through REQ-7.2.4 — metrics hooks not yet implemented.
+
+Implemented but no isolated unit test (tested indirectly or via integration):
+REQ-4.1.1, REQ-4.2.2,
+REQ-5.2.5,
 REQ-6.1.1 through REQ-6.1.7, REQ-6.2.1 through REQ-6.2.4,
 REQ-6.3.1, REQ-6.3.2, REQ-6.3.5,
 REQ-7.1.1 through REQ-7.1.4
-REQ-7.2.1 through REQ-7.2.4 are unimplemented requirements (no test expected until implemented)
 
 Resolved since last generation (tests added):
 - REQ-3.2.4 — now covered by test_AckTracker.cpp (10 tests)

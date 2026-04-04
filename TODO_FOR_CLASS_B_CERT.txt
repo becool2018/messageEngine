@@ -86,9 +86,33 @@ Blocker: Requires human analysis; MC/DC cannot be demonstrated by tooling alone.
 Artifact: docs/MCDC_ANALYSIS.md (one section per function).
 
 ------------------------------------------------------------------------------
+Item 11 — Implement OrderingMode enforcement (REQ-3.3.5, REQ-4.2.1)
+------------------------------------------------------------------------------
+Requirement: CLAUDE.md §3.3.5, §4.2.1
+What:  OrderingMode (ORDERED / UNORDERED) is stored in ChannelConfig and set
+       by Client/Server but is never read by any transport or DeliveryEngine.
+       True ordered delivery requires:
+         1. A sequence_num field added to MessageEnvelope (triggers
+            PROTO_VERSION bump and Serializer updates).
+         2. A per-(source_id, channel_id) sequence counter on the sender.
+         3. A receiver-side gate in DeliveryEngine::receive() that either
+            holds out-of-order messages in a reorder buffer until gaps are
+            filled, or drops them with ERR_INVALID for strict ordering.
+         4. State machine documentation in docs/STATE_MACHINES.md §4 and
+            FMEA entries in docs/HAZARD_ANALYSIS.md §2 for the new state.
+Blocker: Wire-format change (new sequence_num field) requires coordinated
+         update of Serializer, all wire-format tests, and PROTO_VERSION bump.
+         Scope is self-contained but touches four SC-function files.
+Note:   TCP provides in-order delivery at the transport layer; ordering
+        enforcement in DeliveryEngine is needed only for UDP/DTLS channels
+        and the LocalSimHarness reordering impairment path.
+Artifact: Updated MessageEnvelope.hpp, Serializer.cpp, DeliveryEngine.cpp,
+          docs/STATE_MACHINES.md §4, docs/HAZARD_ANALYSIS.md §2.
+
+------------------------------------------------------------------------------
 Status summary
 ------------------------------------------------------------------------------
-  Engineering (programmatic) work:  COMPLETE as of 2026-03-31
+  Engineering (programmatic) work:  1 item remains (Item 11 — ordering enforcement)
   External/organizational work:     5 items remain (Items 6-10 above)
 
   Latest commits on main:
