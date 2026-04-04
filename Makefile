@@ -74,6 +74,7 @@ CORE_SRC := \
     src/core/AckTracker.cpp \
     src/core/RetryManager.cpp \
     src/core/DeliveryEngine.cpp \
+    src/core/RequestReplyEngine.cpp \
     src/core/AssertState.cpp
 
 PLATFORM_SRC := \
@@ -132,7 +133,8 @@ tests: \
     build/test_SocketUtils \
     build/test_AssertState \
     build/test_MessageId \
-    build/test_Timestamp
+    build/test_Timestamp \
+    build/test_RequestReplyEngine
 
 build/test_%: $(ALL_LIB_OBJS) build/objs/tests/test_%.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
@@ -576,4 +578,5 @@ run_tests: tests
 	@echo "=== test_AssertState ==="; build/test_AssertState
 	@echo "=== test_MessageId ===";  build/test_MessageId
 	@echo "=== test_Timestamp ===";  build/test_Timestamp
+	@echo "=== test_RequestReplyEngine ==="; build/test_RequestReplyEngine
 	@echo "=== ALL TESTS PASSED ==="
