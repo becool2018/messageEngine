@@ -312,10 +312,19 @@ Result ImpairmentEngine::process_inbound(const MessageEnvelope& in_env,
     NEVER_COMPILED_OUT_ASSERT(envelope_valid(in_env));
     NEVER_COMPILED_OUT_ASSERT(out_buf != nullptr);
     NEVER_COMPILED_OUT_ASSERT(buf_cap > 0U);
-    (void)now_us;  // Parameter unused; reordering works on buffered messages
 
     // Initialize output count
     out_count = 0U;
+
+    // REQ-5.1.6: drop inbound messages if partition is active.
+    if (m_cfg.enabled && is_partition_active(now_us)) {
+        ++m_stats.partition_drops;  // REQ-7.2.2: partition-specific drop
+        ++m_stats.loss_drops;       // REQ-7.2.2: total loss drop (partition counts as loss)
+        Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
+                   "inbound message dropped (partition active)");
+        NEVER_COMPILED_OUT_ASSERT(out_count == 0U);  // Power of 10: no output on drop
+        return Result::ERR_IO;
+    }
 
     // If reordering disabled or window size is 0, pass through immediately
     if (!m_cfg.reorder_enabled || m_cfg.reorder_window_size == 0U) {

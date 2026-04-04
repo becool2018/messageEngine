@@ -39,7 +39,7 @@
  * Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4,
  *           REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1
  */
-// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1
+// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.6, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1
 
 #include <cstdio>
 #include <cstring>
@@ -768,6 +768,82 @@ static void test_recv_wrong_source_dropped()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: inbound partition drops received datagram via process_inbound()
+// side_b is configured with partition_gap_ms=1 / partition_duration_ms=60000 so
+// the partition fires within 5 ms and stays active for the whole test.
+// side_a sends one datagram; side_b::receive_message() calls process_inbound()
+// which returns ERR_IO (partition drop), so receive_message() returns ERR_TIMEOUT.
+// Covers: recv_one_datagram() inbound-impairment branch (partition drop path)
+// Verifies: REQ-5.1.6, REQ-4.1.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-5.1.6, REQ-4.1.3
+static void test_udp_inbound_partition_drops_received()
+{
+    // Verifies: REQ-5.1.6, REQ-4.1.3
+    // Strategy: send a warm-up datagram first; side_b receives it (initialises
+    // the partition timer on the first call to is_partition_active()).  Then
+    // wait > gap_ms so the partition becomes active, and send the test datagram.
+    // side_b::receive_message() must now return ERR_TIMEOUT (partition drop).
+    static const uint16_t SIDE_A_PORT = 19690U;
+    static const uint16_t SIDE_B_PORT = 19691U;
+
+    UdpBackend side_a;  // sender — no impairment
+    UdpBackend side_b;  // receiver — partition active on inbound
+
+    TransportConfig cfg_a;
+    make_udp_cfg(cfg_a, SIDE_A_PORT, SIDE_B_PORT);
+
+    TransportConfig cfg_b;
+    make_udp_cfg(cfg_b, SIDE_B_PORT, SIDE_A_PORT);
+    cfg_b.num_channels = 1U;
+    cfg_b.channels[0U].impairment.enabled               = true;
+    cfg_b.channels[0U].impairment.partition_enabled     = true;
+    cfg_b.channels[0U].impairment.partition_gap_ms      = 10U;     // 10 ms gap
+    cfg_b.channels[0U].impairment.partition_duration_ms = 60000U;  // stays 60 s
+
+    Result r = side_a.init(cfg_a);
+    assert(r == Result::OK);
+    assert(side_a.is_open() == true);
+
+    r = side_b.init(cfg_b);
+    assert(r == Result::OK);
+    assert(side_b.is_open() == true);
+
+    // Step 1: send a warm-up datagram; side_b receives it (partition not yet
+    // active — first call to is_partition_active() just initialises the timer).
+    MessageEnvelope warmup;
+    make_test_envelope(warmup, 0xAB90ULL);
+    warmup.source_id      = 2U;
+    warmup.destination_id = 1U;
+    r = side_a.send_message(warmup);
+    assert(r == Result::OK);
+
+    MessageEnvelope warmup_recv;
+    r = side_b.receive_message(warmup_recv, 500U);
+    assert(r == Result::OK);  // warm-up message must arrive (partition not active yet)
+
+    // Step 2: wait > 10 ms so the partition gap elapses and partition becomes active
+    usleep(15000U);  // 15 ms > 10 ms gap
+
+    // Step 3: send the test datagram — process_inbound() drops it (partition active)
+    MessageEnvelope env;
+    make_test_envelope(env, 0xAB91ULL);
+    env.source_id      = 2U;
+    env.destination_id = 1U;
+    r = side_a.send_message(env);
+    assert(r == Result::OK);
+
+    MessageEnvelope recv_env;
+    r = side_b.receive_message(recv_env, 500U);
+    assert(r == Result::ERR_TIMEOUT);  // partition dropped the datagram
+
+    side_a.close();
+    side_b.close();
+    printf("PASS: test_udp_inbound_partition_drops_received\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -804,6 +880,9 @@ int main()
 
     // REQ-6.2.4: source address validation -- wrong source dropped (M5)
     test_recv_wrong_source_dropped();
+
+    // Inbound impairment wiring tests (REQ-5.1.5, REQ-5.1.6)
+    test_udp_inbound_partition_drops_received();
 
     printf("=== ALL PASSED ===\n");
     return 0;
