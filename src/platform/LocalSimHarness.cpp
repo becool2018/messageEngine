@@ -125,9 +125,13 @@ Result LocalSimHarness::inject(const MessageEnvelope& envelope)
 //
 // Injects each envelope in @p batch into the peer's receive queue.
 // Three-case attribution:
-//   Current envelope in batch and inject fails → return true (ERR_IO to caller).
-//   Current envelope NOT in batch              → return false (queued for later).
-//   Non-current envelope inject fails          → log WARNING_HI, continue, return false.
+//   Current envelope in batch and inject() returns ERR_IO → return true (ERR_IO to caller).
+//   Current envelope NOT in batch                          → return false (queued for later).
+//   Non-current envelope inject fails (any error)         → log WARNING_HI, continue, return false.
+// NOTE: ERR_FULL from inject() for the current envelope is intentionally NOT attributed
+// to the caller (by design decision in commit 03f9f23).  The prior commit 03f9f23 established
+// that peer-queue-full at the inject level is treated as a capacity warning, not a send failure
+// for the caller.  This matches test_DeliveryEngine::test_send_transport_queue_full.
 // Power of 10: fixed loop bound (count ≤ IMPAIR_DELAY_BUF_SIZE).
 
 bool LocalSimHarness::flush_outbound_batch(const MessageEnvelope& envelope,
@@ -261,8 +265,13 @@ Result LocalSimHarness::receive_message(MessageEnvelope& envelope, uint32_t time
 
 void LocalSimHarness::close()
 {
-    if (m_open) {
-        ++m_connections_closed;  // REQ-7.2.4: count close events while open
+    // Guard: only count a close when a corresponding link() was recorded.
+    // init() sets m_open=true but does NOT increment m_connections_opened;
+    // link() is the event that increments m_connections_opened.  Without this
+    // guard, init(); close() (no link()) would produce closed=1, opened=0,
+    // tripping the monotonic invariant asserted in get_transport_stats().
+    if (m_open && (m_connections_closed < m_connections_opened)) {
+        ++m_connections_closed;  // REQ-7.2.4: count close events while linked
     }
     m_peer = nullptr;
     m_open = false;

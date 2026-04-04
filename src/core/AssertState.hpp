@@ -65,9 +65,13 @@ namespace assert_state {
 extern std::atomic<bool> g_fatal_fired;
 
 /// Monotonically increasing count of fatal assertions fired.
-/// Incremented by trigger_fatal_assert() (called by NEVER_COMPILED_OUT_ASSERT
-/// and trigger_handler_for_test()). Never wraps in practice; uint32_t overflow
-/// is benign for observability (REQ-7.2.4).
+/// Incremented in two places:
+///   - Production builds (NDEBUG): incremented directly by the
+///     NEVER_COMPILED_OUT_ASSERT macro after calling the reset handler
+///     (i.e. only if the handler returns — the soft-reset path).
+///   - Test builds: incremented by trigger_handler_for_test().
+/// Never wraps in practice; uint32_t overflow is benign for observability
+/// (REQ-7.2.4).
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 extern std::atomic<uint32_t> g_fatal_count;
 

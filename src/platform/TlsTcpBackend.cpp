@@ -868,6 +868,8 @@ void TlsTcpBackend::close()
     }
     mbedtls_net_free(&m_listen_net);
     mbedtls_net_init(&m_listen_net);
+    // REQ-7.2.4: count clients still connected at graceful shutdown
+    m_connections_closed += m_client_count;
     m_client_count = 0U;
     m_open         = false;
     Logger::log(Severity::INFO, "TlsTcpBackend",

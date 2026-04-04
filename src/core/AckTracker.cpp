@@ -219,6 +219,14 @@ const AckTrackerStats& AckTracker::get_stats() const
 {
     // Power of 10 rule 5: ≥2 assertions
     NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: tracker invariant holds
-    NEVER_COMPILED_OUT_ASSERT(m_stats.acks_received <= ACK_TRACKER_CAPACITY * 1000U);  // Assert: plausible counter
+    // acks_received is a monotonically increasing counter: no finite upper bound
+    // assertion is appropriate. Asserting a large multiple of capacity would be
+    // a time-bomb — reachable in any long-running system — and asserting an
+    // overflow wrap is already handled by unsigned arithmetic semantics.
+    // Instead, assert a structural relationship: the number of timeouts cannot
+    // exceed the number of ACKs received plus the capacity (since at most
+    // ACK_TRACKER_CAPACITY slots can be live and awaiting expiry at any moment,
+    // the cumulative timeouts are bounded by cumulative completions + capacity).
+    NEVER_COMPILED_OUT_ASSERT(m_stats.timeouts <= m_stats.acks_received + ACK_TRACKER_CAPACITY);  // Assert: structural timeout/ack relationship holds
     return m_stats;
 }

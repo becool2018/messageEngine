@@ -81,6 +81,8 @@
             /* Reached only if handler returned (embedded soft-reset path). */    \
             assert_state::g_fatal_fired.store(true,                               \
                 std::memory_order_release);                                        \
+            (void)assert_state::g_fatal_count.fetch_add(1U,                       \
+                std::memory_order_relaxed);                                        \
         }                                                                          \
     } while (false)
 #else

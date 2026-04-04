@@ -554,14 +554,19 @@ void TcpBackend::close()
         m_listen_fd = -1;
     }
 
+    // REQ-7.2.4: count clients still connected at graceful shutdown
+    uint32_t closed_count = 0U;
+
     // Power of 10 rule 2: fixed loop bound
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         if (m_client_fds[i] >= 0) {
             m_sock_ops->do_close(m_client_fds[i]);
             m_client_fds[i] = -1;
+            ++closed_count;
         }
     }
 
+    m_connections_closed += closed_count;
     m_client_count = 0U;
     m_open         = false;
     Logger::log(Severity::INFO, "TcpBackend", "Transport closed");

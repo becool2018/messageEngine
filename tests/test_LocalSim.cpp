@@ -404,6 +404,103 @@ static bool test_delay_loop_body()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 8: send_message() returns OK when peer receive queue is full (by design)
+// Verifies: REQ-4.1.2
+//
+// Design decision (commit 03f9f23): ERR_FULL from inject() when the peer's
+// receive queue is full is treated as a capacity warning and is NOT attributed
+// to the send_message() caller.  This is intentional: send_message() accepted
+// the envelope into the local pipeline; the peer-side queue-full is a capacity
+// condition logged as WARNING_HI.  The caller receives OK.
+// This test pins the designed behavior so regressions are caught.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-4.1.2
+static bool test_send_ok_when_peer_queue_full()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+
+    TransportConfig cfg_a;
+    create_local_sim_config(cfg_a, 40U);
+    TransportConfig cfg_b;
+    create_local_sim_config(cfg_b, 41U);
+
+    assert(harness_a.init(cfg_a) == Result::OK);
+    assert(harness_b.init(cfg_b) == Result::OK);
+
+    // Link A → B so send_message() on A injects into B's queue.
+    harness_a.link(&harness_b);
+
+    // Fill harness_b's receive queue to capacity by injecting directly.
+    // Power of 10: bounded loop (MSG_RING_CAPACITY is a compile-time constant).
+    for (uint32_t i = 0U; i < MSG_RING_CAPACITY; ++i) {
+        MessageEnvelope fill_env;
+        envelope_init(fill_env);
+        fill_env.message_type   = MessageType::DATA;
+        fill_env.source_id      = 40U;
+        fill_env.destination_id = 41U;
+        fill_env.message_id     = static_cast<uint64_t>(i);
+        fill_env.payload_length = 0U;
+        Result r = harness_b.inject(fill_env);
+        assert(r == Result::OK);
+    }
+
+    // Now send via send_message(); the peer queue is full.
+    // By design (commit 03f9f23), ERR_FULL from inject() is NOT propagated to
+    // the send_message() caller — the result is OK (capacity warning logged).
+    MessageEnvelope overflow_env;
+    create_test_data_envelope(overflow_env, 40U, 41U, "overflow");
+    overflow_env.message_id = 8888ULL;
+
+    Result send_r = harness_a.send_message(overflow_env);
+    // Design: peer-queue-full is a WARNING_HI capacity condition, not a send error.
+    assert(send_r == Result::OK);
+
+    harness_a.close();
+    harness_b.close();
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 9: init() + close() without link() does not violate stats invariant
+// Verifies: REQ-7.2.4 (Issue 5 fix — connections_closed must never exceed
+//           connections_opened)
+//
+// Before the fix, close() always incremented m_connections_closed when m_open
+// was true, but m_connections_opened is only incremented by link().  Calling
+// init(); close() without link() produced closed=1, opened=0, which tripped
+// the assertion in get_transport_stats().
+// After the fix, close() guards the increment with
+// (m_connections_closed < m_connections_opened).
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-7.2.4
+static bool test_init_close_without_link_stats_invariant()
+{
+    LocalSimHarness harness;
+
+    TransportConfig cfg;
+    create_local_sim_config(cfg, 50U);
+    assert(harness.init(cfg) == Result::OK);
+
+    // Close without calling link().  Before the fix this produced
+    // connections_closed=1, connections_opened=0, which would fire the assertion
+    // inside get_transport_stats().
+    harness.close();
+
+    // Re-initialize so we can call get_transport_stats() (requires m_open).
+    assert(harness.init(cfg) == Result::OK);
+
+    TransportStats stats;
+    harness.get_transport_stats(stats);  // Must not abort — invariant holds.
+    // Fixed: guard in close() ensures closed never exceeds opened.
+    assert(stats.connections_opened >= stats.connections_closed);
+    assert(stats.connections_closed == 0U);  // no link() was called
+
+    harness.close();
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -458,6 +555,21 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_delay_loop_body\n");
+    }
+
+    // Bug-fix regression tests
+    if (!test_send_ok_when_peer_queue_full()) {
+        printf("FAIL: test_send_ok_when_peer_queue_full\n");
+        ++failed;
+    } else {
+        printf("PASS: test_send_ok_when_peer_queue_full\n");
+    }
+
+    if (!test_init_close_without_link_stats_invariant()) {
+        printf("FAIL: test_init_close_without_link_stats_invariant\n");
+        ++failed;
+    } else {
+        printf("PASS: test_init_close_without_link_stats_invariant\n");
     }
 
     return (failed > 0) ? 1 : 0;
