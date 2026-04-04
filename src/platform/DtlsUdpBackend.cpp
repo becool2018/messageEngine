@@ -43,10 +43,11 @@
  *   declarations are introduced.
  *
  * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4,
+ *             REQ-5.1.5, REQ-5.1.6,
  *             REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4,
  *             REQ-6.4.5, REQ-7.1.1
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1, REQ-7.2.4
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1, REQ-7.2.4
 
 #include "platform/DtlsUdpBackend.hpp"
 #include "platform/ISocketOps.hpp"
@@ -622,10 +623,44 @@ bool DtlsUdpBackend::recv_one_dtls_datagram(uint32_t timeout_ms)
         return false;
     }
 
-    res = m_recv_queue.push(env);
+    // REQ-5.1.5, REQ-5.1.6: apply inbound impairment; push to queue if deliverable
+    return apply_inbound_impairment(env);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// apply_inbound_impairment() — CC-reduction helper for recv_one_dtls_datagram
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Calls process_inbound() with the current wall-clock time.  Returns false if
+// the message is dropped (partition) or buffered (reorder); returns true when
+// the message is pushed to m_recv_queue.
+
+bool DtlsUdpBackend::apply_inbound_impairment(const MessageEnvelope& env)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_open);  // Power of 10: transport must be open
+
+    MessageEnvelope inbound_out[1U];
+    uint32_t        inbound_count = 0U;
+    uint64_t        now_us = timestamp_now_us();
+    Result res = m_impairment.process_inbound(env, now_us, inbound_out, 1U,
+                                              inbound_count);
+
+    if (res == Result::ERR_IO) {
+        // Partition dropped the message; do not queue
+        return false;
+    }
+
+    if (inbound_count == 0U) {
+        // Reorder engine buffered the message; nothing to push yet
+        return false;
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(inbound_count == 1U);  // Power of 10: exactly one output
+    res = m_recv_queue.push(inbound_out[0]);
     if (!result_ok(res)) {
         Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "recv_one_dtls_datagram: recv queue full; dropping datagram");
+                    "apply_inbound_impairment: recv queue full; dropping datagram");
+        return false;
     }
     return true;
 }

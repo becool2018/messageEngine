@@ -38,7 +38,7 @@
  *           REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4,
  *           REQ-6.4.5, REQ-7.1.1
  */
-// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1
+// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1
 // Verification: M1 + M2 + M4 + M5 (fault injection via IMbedtlsOps / ISocketOps)
 
 #include <cstdio>
@@ -1881,6 +1881,85 @@ static void test_mock_dtls_ssl_read_error()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 23: inbound partition drops received datagram via process_inbound()
+// Uses plaintext UDP (tls_enabled=false); no handshake required.
+// Strategy: send a warm-up datagram first; side_b receives it (initialises the
+// partition timer on the first call to is_partition_active()).  Then wait
+// > gap_ms so the partition becomes active, and send the test datagram.
+// side_b::receive_message() must return ERR_TIMEOUT (partition drop).
+// Covers: recv_one_dtls_datagram() inbound-impairment branch (partition drop)
+// Verifies: REQ-5.1.6, REQ-4.1.3, REQ-6.4.5
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-5.1.6, REQ-4.1.3, REQ-6.4.5
+static void test_dtls_inbound_partition_drops_received()
+{
+    // Verifies: REQ-5.1.6, REQ-4.1.3, REQ-6.4.5
+    static const uint16_t PORT = 14700U;
+
+    DtlsUdpBackend side_b;  // server / receiver — has partition active
+    DtlsUdpBackend side_a;  // client / sender   — no impairment
+
+    TransportConfig cfg_b;
+    make_dtls_config(cfg_b, true, PORT, false);  // plaintext server
+    cfg_b.num_channels = 1U;
+    cfg_b.channels[0U].impairment.enabled               = true;
+    cfg_b.channels[0U].impairment.partition_enabled     = true;
+    cfg_b.channels[0U].impairment.partition_gap_ms      = 10U;     // 10 ms gap
+    cfg_b.channels[0U].impairment.partition_duration_ms = 60000U;  // stays 60 s
+
+    TransportConfig cfg_a;
+    make_dtls_config(cfg_a, false, PORT, false);  // plaintext client
+
+    Result r = side_b.init(cfg_b);
+    assert(r == Result::OK);
+    assert(side_b.is_open() == true);
+
+    r = side_a.init(cfg_a);
+    assert(r == Result::OK);
+    assert(side_a.is_open() == true);
+
+    // Step 1: warm-up datagram initialises the partition timer in side_b
+    MessageEnvelope warmup;
+    envelope_init(warmup);
+    warmup.message_type      = MessageType::DATA;
+    warmup.message_id        = 0xD1AB5600ULL;
+    warmup.source_id         = 2U;
+    warmup.destination_id    = 1U;
+    warmup.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    r = side_a.send_message(warmup);
+    assert(r == Result::OK);
+
+    MessageEnvelope warmup_recv;
+    r = side_b.receive_message(warmup_recv, 500U);
+    assert(r == Result::OK);  // warm-up must arrive (partition not active yet)
+
+    // Step 2: wait > 10 ms so partition gap elapses and partition becomes active
+    usleep(15000U);  // 15 ms > 10 ms gap
+
+    // Step 3: send the test datagram — process_inbound() drops it (partition active)
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.message_id        = 0xD1AB5601ULL;
+    env.source_id         = 2U;
+    env.destination_id    = 1U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    r = side_a.send_message(env);
+    assert(r == Result::OK);
+
+    MessageEnvelope recv_env;
+    r = side_b.receive_message(recv_env, 500U);
+    assert(r == Result::ERR_TIMEOUT);  // partition dropped the datagram
+
+    side_a.close();
+    side_b.close();
+    printf("PASS: test_dtls_inbound_partition_drops_received\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1932,6 +2011,9 @@ int main()
     test_loss_impairment_drops_send();
     test_delay_impairment_flush_and_recv();
     test_two_delayed_messages_second_recv_prequeue();
+
+    // Inbound impairment wiring tests (REQ-5.1.5, REQ-5.1.6)
+    test_dtls_inbound_partition_drops_received();
 
     printf("=== test_DtlsUdpBackend: ALL TESTS PASSED ===\n");
     return 0;

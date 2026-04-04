@@ -24,7 +24,7 @@
  *   - MISRA C++: no exceptions, all return values checked.
  *   - F-Prime style: event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1, REQ-7.2.4
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1, REQ-7.2.4
  */
 
 #include "platform/UdpBackend.hpp"
@@ -290,11 +290,29 @@ bool UdpBackend::recv_one_datagram(uint32_t timeout_ms)
         return false;
     }
 
-    res = m_recv_queue.push(env);
+    // REQ-5.1.5, REQ-5.1.6: apply inbound impairment (partition drop / reorder)
+    MessageEnvelope inbound_out[1U];
+    uint32_t        inbound_count = 0U;
+    uint64_t        now_us = timestamp_now_us();
+    res = m_impairment.process_inbound(env, now_us, inbound_out, 1U, inbound_count);
+
+    if (res == Result::ERR_IO) {
+        // Partition dropped the message; do not queue
+        return false;
+    }
+
+    if (inbound_count == 0U) {
+        // Reorder engine buffered the message; nothing to push yet
+        return false;
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(inbound_count == 1U);  // Power of 10: exactly one output
+    res = m_recv_queue.push(inbound_out[0]);
     if (!result_ok(res)) {
         Logger::log(Severity::WARNING_HI, "UdpBackend",
                    "Recv queue full; dropping datagram from %s:%u",
                    src_ip, src_port);
+        return false;
     }
     return true;
 }

@@ -25,7 +25,7 @@
  *   - F-Prime style: simple test framework using assert() and printf().
  */
 
-// Verifies: REQ-5.1.3, REQ-5.2.1, REQ-5.2.2, REQ-5.3.1, REQ-7.2.2
+// Verifies: REQ-5.1.3, REQ-5.1.5, REQ-5.1.6, REQ-5.2.1, REQ-5.2.2, REQ-5.3.1, REQ-7.2.2
 // Verification: M1 + M2 + M4 + M5 (fault injection not required — pure logic, no external dependency)
 
 #include <cstdio>
@@ -941,6 +941,56 @@ static bool test_stats_duplicate()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test N: process_inbound() drops message when partition is active
+// Verifies REQ-5.1.6: partition applies to inbound path.
+// Strategy: call process_outbound() at now1 to initialise the partition timer,
+// then call process_inbound() at now2 > now1 + gap so the partition fires.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.1.6, REQ-5.2.1
+static bool test_process_inbound_partition_drop()
+{
+    // Verifies: REQ-5.1.6, REQ-5.2.1
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled               = true;
+    cfg.partition_enabled     = true;
+    cfg.partition_gap_ms      = 10U;   // 10 ms gap before partition starts
+    cfg.partition_duration_ms = 20U;   // 20 ms partition duration
+    cfg.loss_probability      = 0.0;
+
+    engine.init(cfg);
+
+    MessageEnvelope out_buf[4];
+    uint32_t out_count = 0U;
+
+    // Phase 1: process_outbound initialises the partition timer at now1
+    MessageEnvelope env_init;
+    create_test_envelope(env_init, 1U, 2U, 900ULL);
+    uint64_t now1 = 1000000ULL;
+    Result r_init = engine.process_outbound(env_init, now1);
+    assert(r_init == Result::OK);  // partition not yet active
+
+    // Phase 2: advance past gap so partition becomes active (now2 > now1 + 10 ms)
+    uint64_t now2 = now1 + 11000ULL;  // 11 ms past base: > 10 ms gap
+
+    // process_inbound must return ERR_IO (partition drops the inbound message)
+    MessageEnvelope env_inbound;
+    create_test_envelope(env_inbound, 1U, 2U, 901ULL);
+    out_count = 0U;
+    Result r_in = engine.process_inbound(env_inbound, now2, out_buf, 4U, out_count);
+    assert(r_in == Result::ERR_IO);  // partition drop
+    assert(out_count == 0U);         // no output on drop
+
+    // Phase 3: verify partition_drops stat incremented (REQ-7.2.2)
+    const ImpairmentStats& stats = engine.get_stats();
+    assert(stats.partition_drops >= 1U);
+    assert(stats.loss_drops >= 1U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -1106,6 +1156,13 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_stats_duplicate\n");
+    }
+
+    if (!test_process_inbound_partition_drop()) {
+        printf("FAIL: test_process_inbound_partition_drop\n");
+        ++failed;
+    } else {
+        printf("PASS: test_process_inbound_partition_drop\n");
     }
 
     return (failed > 0) ? 1 : 0;

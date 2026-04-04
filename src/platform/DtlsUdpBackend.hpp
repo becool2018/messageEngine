@@ -187,9 +187,15 @@ private:
     bool recv_one_dtls_datagram(uint32_t timeout_ms);
 
     /// Send impairment-delayed outbound messages to the wire via send_one_envelope().
-    /// NOTE: process_inbound() is not yet wired; inbound impairment is future work.
     /// @param now_us Current wall-clock time in microseconds.
     void flush_delayed_to_wire(uint64_t now_us);
+
+    /// Apply inbound impairment (partition drop / reorder) to a deserialized envelope
+    /// and push the result to m_recv_queue if deliverable.
+    /// Extracted from recv_one_dtls_datagram() to keep its CC ≤ 10.
+    /// @param[in] env  Deserialized inbound envelope.
+    /// @return true if a message was pushed to m_recv_queue; false otherwise.
+    bool apply_inbound_impairment(const MessageEnvelope& env);
 
     // ── CC-reduction helpers (extracted to keep each caller CC ≤ 10) ─────────
 
