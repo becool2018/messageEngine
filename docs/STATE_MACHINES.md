@@ -36,14 +36,18 @@ equivalent) for all state machines documented here.
 | `PENDING` | `on_ack(src, msg_id)` | src or msg_id does not match | `PENDING` | Returns `ERR_INVALID`; slot remains PENDING until `sweep_expired()` fires. |
 | `PENDING` | `sweep_expired()` | `now_us >= deadline_us` | `FREE` | Copy to expired_buf if space; decrement m_count |
 | `PENDING` | `sweep_expired()` | `now_us < deadline_us` | `PENDING` | No action |
+| `PENDING` | `cancel(src, msg_id)` | src and msg_id match slot | `FREE` | Decrement m_count; no stat bump; used for send-failure rollback only |
+| `PENDING` | `cancel(src, msg_id)` | src or msg_id does not match | `PENDING` | Returns `ERR_INVALID`; slot unchanged |
 | `ACKED` | `sweep_expired()` | — | `FREE` | Decrement m_count |
 
 ### Invariants
 
 - `0 ≤ m_count ≤ ACK_TRACKER_CAPACITY` at all times.
 - A slot in `ACKED` state is freed on the very next `sweep_expired()` call.
-- A slot in `PENDING` state is never freed without being copied to `expired_buf` (if capacity allows) or transitioning through `ACKED`.
+- A slot in `PENDING` state is freed by: (a) `sweep_expired()` when the deadline passes — copied to `expired_buf` if space available; or (b) `cancel()` on send-failure rollback — freed directly to `FREE` with no stat bump and no copy to `expired_buf`.
 - `on_ack()` never decrements `m_count` — only `sweep_expired()` does.
+
+> **Note:** `cancel()` is a rollback-only path, callable exclusively from `DeliveryEngine::send()` on transport failure before any wire I/O. It must not be called after a message has been delivered to the wire.
 
 > **Defect fixed (DEF-003-1):** `on_ack(src, msg_id)` matches on `slot.env.source_id == src`. Previously, `DeliveryEngine::receive()` passed `env.source_id` (the remote ACK sender's ID) as `src`, which never matched the locally-assigned `source_id` stored at `track()` time. Fixed by passing `env.destination_id` (the local node ID — the original message sender) instead. The PENDING→ACKED transition now fires correctly in normal two-node deployments.
 
@@ -52,11 +56,13 @@ equivalent) for all state machines documented here.
 ```
          track() [capacity ok]
 FREE ──────────────────────────► PENDING
- ▲                                  │ │
- │   sweep_expired() [expired]       │ │ on_ack()
- │◄──────────────────────────────────┘ │
- │                                     ▼
- │         sweep_expired()           ACKED
+ ▲                                  │ │ │
+ │   sweep_expired() [expired]       │ │ │ on_ack()
+ │◄──────────────────────────────────┘ │ │
+ │                                     │ ▼
+ │   cancel() [rollback]               │ ACKED
+ │◄────────────────────────────────────┘
+ │         sweep_expired()
  └◄──────────────────────────────────────
 ```
 

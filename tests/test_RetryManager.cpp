@@ -604,6 +604,46 @@ static void test_stats_ack_received()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 20: cancel() — rollback deactivates slot without bumping acks_received
+// Verifies: REQ-3.2.5, REQ-7.2.3
+// Steps:
+//   1. Schedule a message (active slot)
+//   2. Confirm acks_received == 0 before cancel
+//   3. Call cancel() — asserts OK
+//   4. Confirm acks_received still 0 (no phantom stat)
+//   5. Reschedule the same msg_id to confirm the slot is reusable
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_retry_manager_cancel()
+{
+    RetryManager mgr;
+    mgr.init();
+
+    // Step 1: Schedule a message
+    MessageEnvelope env;
+    make_test_envelope(env, 800ULL, 9999999999ULL, 1U, 2U);
+    Result sched_r = mgr.schedule(env, 5U, 100U, 1000000ULL);
+    assert(sched_r == Result::OK);
+
+    // Step 2: acks_received must be 0 before cancel
+    const RetryStats& s0 = mgr.get_stats();
+    assert(s0.acks_received == 0U);
+
+    // Step 3: cancel() must succeed
+    Result cancel_r = mgr.cancel(1U, 800ULL);
+    assert(cancel_r == Result::OK);
+
+    // Step 4: acks_received must still be 0 — no phantom stat
+    const RetryStats& s1 = mgr.get_stats();
+    assert(s1.acks_received == 0U);
+
+    // Step 5: slot is freed — reschedule same msg_id must succeed (reusable)
+    Result resched_r = mgr.schedule(env, 5U, 100U, 1000000ULL);
+    assert(resched_r == Result::OK);
+
+    printf("PASS: test_retry_manager_cancel\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -627,6 +667,7 @@ int main()
     test_stats_exhausted();
     test_stats_expired();
     test_stats_ack_received();
+    test_retry_manager_cancel();
 
     printf("ALL RetryManager tests passed.\n");
     return 0;

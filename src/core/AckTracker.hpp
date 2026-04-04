@@ -62,13 +62,13 @@ public:
     /// @return OK on success; ERR_INVALID if no matching pending message found
     Result on_ack(NodeId src, uint64_t msg_id);
 
+    // Safety-critical (SC): HAZ-002
     /// Cancel a PENDING slot without incrementing acks_received.
     /// Used for rollback when the associated send failed before hitting the wire.
     /// Transitions the slot directly FREE and decrements m_count; no stat bump.
     /// @param src    [in] source node ID of the pending message
     /// @param msg_id [in] message ID of the pending message
     /// @return OK on success; ERR_INVALID if no matching PENDING slot
-    /// NSC: bookkeeping correction only; no delivery state change.
     Result cancel(NodeId src, uint64_t msg_id);
 
     // Safety-critical (SC): HAZ-002, HAZ-006 — verified to M5

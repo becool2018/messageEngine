@@ -82,6 +82,15 @@ public:
      */
     Result on_ack(NodeId src, uint64_t msg_id);
 
+    /// Cancel an active retry slot without incrementing acks_received.
+    /// Used for rollback when the associated send failed before hitting the wire.
+    /// Transitions the slot to inactive and decrements m_count; no stat bump.
+    /// @param src    [in] source node ID of the pending message
+    /// @param msg_id [in] message ID of the pending message
+    /// @return OK on success; ERR_INVALID if no matching active slot
+    /// NSC: bookkeeping correction only; no delivery state change.
+    Result cancel(NodeId src, uint64_t msg_id);
+
     // Safety-critical (SC): HAZ-002 — verified to M5
     /**
      * @brief Collect messages due for retry and apply exponential backoff.

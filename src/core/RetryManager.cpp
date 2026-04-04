@@ -174,6 +174,47 @@ Result RetryManager::on_ack(NodeId src, uint64_t msg_id)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// RetryManager::cancel()
+// Rollback helper: deactivates a retry slot without bumping acks_received.
+// Called when a send fails before hitting the wire so no phantom stat is recorded.
+// NSC: bookkeeping correction only; no delivery state change.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions.
+// ─────────────────────────────────────────────────────────────────────────────
+Result RetryManager::cancel(NodeId src, uint64_t msg_id)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);           // Assert: manager was initialized
+    NEVER_COMPILED_OUT_ASSERT(src != NODE_ID_INVALID);  // Assert: valid source node
+
+    // Power of 10 rule 2: bounded loop (compile-time constant)
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        if (m_slots[i].active &&
+            m_slots[i].env.source_id == src &&
+            m_slots[i].env.message_id == msg_id) {
+
+            // Deactivate the slot without recording an ACK stat
+            m_slots[i].active = false;
+            --m_count;
+
+            // Power of 10 rule 5: post-condition assertion
+            NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count decremented
+
+            Logger::log(Severity::INFO, "RetryManager",
+                        "Cancelled (rollback) retry for message_id=%llu from node=%u",
+                        (unsigned long long)msg_id, src);
+
+            return Result::OK;
+        }
+    }
+
+    // Entry not found — this is expected when no slot was reserved for this message
+    Logger::log(Severity::WARNING_LO, "RetryManager",
+                "No retry entry found to cancel for message_id=%llu from node=%u",
+                (unsigned long long)msg_id, src);
+
+    return Result::ERR_INVALID;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // RetryManager::reap_terminated_slots()
 // Phase 1 of collect_due(): remove expired and exhausted entries from the table.
 // Extracted to keep collect_due() within CC ≤ 10.

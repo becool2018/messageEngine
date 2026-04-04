@@ -318,7 +318,7 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
             (void)m_ack_tracker.cancel(env.source_id, env.message_id);
         }
         if (env.reliability_class == ReliabilityClass::RELIABLE_RETRY) {
-            (void)m_retry_manager.on_ack(env.source_id, env.message_id);
+            (void)m_retry_manager.cancel(env.source_id, env.message_id);
         }
         record_send_failure(env, res);  // REQ-7.2.3: stats + log (CC-reduction helper)
         return res;

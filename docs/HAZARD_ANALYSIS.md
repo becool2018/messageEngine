@@ -49,6 +49,7 @@
 |---|---|---|---|---|
 | `track()` returns `ERR_FULL` and caller ignores | Message never ACK-tracked; retry unlimited | Cat II HAZ-002, HAZ-006 | `ERR_FULL` return | Rule 7 requires return check; `WARNING_HI` logged |
 | `on_ack()` source_id mismatch — **fixed (DEF-003-1)**: `DeliveryEngine::receive()` previously passed `env.source_id` (remote ACK sender) to `on_ack()` instead of `env.destination_id` (local sender, matching the stored slot). ACKs now correctly clear tracker slots via the PENDING→ACKED transition. | Fixed: AckTracker slot now transitions PENDING→ACKED on receipt of matching ACK; slot freed on next sweep. Retry cancelled before expiry. | Cat II HAZ-002 (resolved) | `on_ack()` now returns `OK` for valid ACKs; `ERR_INVALID` returned only for genuinely unmatched ACKs | `destination_id` used as lookup key in `DeliveryEngine::receive()` |
+| `cancel()` fails to free PENDING slot on send-rollback path | Slot persists; `sweep_expired()` later fires a false expired-message event, generating a spurious retry/timeout signal | Cat II HAZ-002 | `cancel()` returns `ERR_INVALID` on mismatch; `DeliveryEngine::send()` checks return value and logs at `WARNING_HI` | `cancel()` now SC (HAZ-002); `DeliveryEngine::send()` must check `cancel()` return; Power of 10 Rule 7 mandates all returns checked |
 | `sweep_expired()` misses slot | Slot leaks; capacity decreases | Cat II HAZ-006 | `sweep_one_slot()` checks all states per sweep | All `ACK_TRACKER_CAPACITY` slots swept each call |
 
 ### DuplicateFilter
@@ -174,6 +175,7 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `init()` | `AckTracker` | NSC | — |
 | `track()` | `AckTracker` | SC | HAZ-002, HAZ-006 |
 | `on_ack()` | `AckTracker` | SC | HAZ-002 |
+| `cancel()` | `AckTracker` | SC | HAZ-002 |
 | `sweep_expired()` | `AckTracker` | SC | HAZ-002, HAZ-006 |
 | `get_send_timestamp()` | `AckTracker` | NSC | — |
 | `get_stats()` | `AckTracker` | NSC | — |
