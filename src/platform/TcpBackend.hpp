@@ -30,7 +30,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: Result enum returns, event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-7.1.1, REQ-7.2.4
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
  */
 
 #ifndef PLATFORM_TCP_BACKEND_HPP
@@ -157,6 +157,15 @@ private:
     /// Iterate all active client fds and call recv_from_client() on each.
     /// Extracted from poll_clients_once() to reduce its CC.
     void drain_readable_clients(uint32_t timeout_ms);
+
+    /// Route a deserialized inbound envelope through the ImpairmentEngine.
+    /// Checks partition state (inbound drop) then calls process_inbound()
+    /// for reorder simulation. Pushes to m_recv_queue only if delivered.
+    /// NSC: bookkeeping helper; routes inbound envelope through impairment before queuing.
+    /// @param[in] env    Deserialized inbound envelope.
+    /// @param[in] now_us Current wall-clock time in microseconds.
+    /// @return true if envelope was pushed to m_recv_queue; false if dropped or buffered.
+    bool apply_inbound_impairment(const MessageEnvelope& env, uint64_t now_us);
 };
 
 #endif // PLATFORM_TCP_BACKEND_HPP
