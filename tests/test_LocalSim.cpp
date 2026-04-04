@@ -404,18 +404,17 @@ static bool test_delay_loop_body()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 8: send_message() returns OK when peer receive queue is full (by design)
+// Test 8: send_message() returns ERR_FULL when peer receive queue is saturated
 // Verifies: REQ-4.1.2
 //
-// Design decision (commit 03f9f23): ERR_FULL from inject() when the peer's
-// receive queue is full is treated as a capacity warning and is NOT attributed
-// to the send_message() caller.  This is intentional: send_message() accepted
-// the envelope into the local pipeline; the peer-side queue-full is a capacity
-// condition logged as WARNING_HI.  The caller receives OK.
-// This test pins the designed behavior so regressions are caught.
+// In LocalSimHarness there is no wire — the peer's receive ring IS the network.
+// ERR_FULL from inject() is an in-process confirmation the message was NOT
+// received.  Returning OK would violate the TransportInterface::send_message()
+// contract which explicitly enumerates ERR_FULL as a caller-visible error.
+// (Fixes the incorrect design decision recorded in commit 03f9f23.)
 // ─────────────────────────────────────────────────────────────────────────────
 // Verifies: REQ-4.1.2
-static bool test_send_ok_when_peer_queue_full()
+static bool test_send_peer_queue_full_returns_err_full()
 {
     LocalSimHarness harness_a;
     LocalSimHarness harness_b;
@@ -446,15 +445,15 @@ static bool test_send_ok_when_peer_queue_full()
     }
 
     // Now send via send_message(); the peer queue is full.
-    // By design (commit 03f9f23), ERR_FULL from inject() is NOT propagated to
-    // the send_message() caller — the result is OK (capacity warning logged).
+    // ERR_FULL from inject() must be propagated: the message was not received.
     MessageEnvelope overflow_env;
     create_test_data_envelope(overflow_env, 40U, 41U, "overflow");
     overflow_env.message_id = 8888ULL;
 
     Result send_r = harness_a.send_message(overflow_env);
-    // Design: peer-queue-full is a WARNING_HI capacity condition, not a send error.
-    assert(send_r == Result::OK);
+    // Peer-queue-full is a confirmed delivery failure: ERR_FULL must be returned.
+    assert(send_r == Result::ERR_FULL);
+    assert(send_r != Result::OK);
 
     harness_a.close();
     harness_b.close();
@@ -558,11 +557,11 @@ int main()
     }
 
     // Bug-fix regression tests
-    if (!test_send_ok_when_peer_queue_full()) {
-        printf("FAIL: test_send_ok_when_peer_queue_full\n");
+    if (!test_send_peer_queue_full_returns_err_full()) {
+        printf("FAIL: test_send_peer_queue_full_returns_err_full\n");
         ++failed;
     } else {
-        printf("PASS: test_send_ok_when_peer_queue_full\n");
+        printf("PASS: test_send_peer_queue_full_returns_err_full\n");
     }
 
     if (!test_init_close_without_link_stats_invariant()) {

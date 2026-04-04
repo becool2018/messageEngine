@@ -711,11 +711,10 @@ static void test_pump_retries_send_fails()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test: fill harness_b's receive queue, then send.
-// send_message() accepts the envelope into the local impairment pipeline
-// (process_outbound returns OK) and returns OK — the flush-loop inject() failure
-// is attributed to the delayed-delivery path, not to the current send call.
-// This is by design: send_message() promises "message accepted locally", not
-// "message delivered to peer". The inject failure is logged at WARNING_HI.
+// In LocalSimHarness the peer's receive ring IS the network; ERR_FULL from
+// inject() is a confirmed delivery failure.  send_message() now returns ERR_FULL
+// and DeliveryEngine::send() must propagate it to the caller.
+// (Fixes the incorrect expectation from commit 03f9f23 which asserted OK here.)
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_send_transport_queue_full()
 {
@@ -732,12 +731,13 @@ static void test_send_transport_queue_full()
         assert(r == Result::OK);
     }
 
-    // send() accepts the envelope into the local pipeline; peer delivery fails
-    // (inject ERR_FULL) but that failure is not attributed to this send call.
+    // send() calls send_message(); peer queue is full so inject() returns ERR_FULL.
+    // ERR_FULL is a confirmed delivery failure and must be propagated to the caller.
     MessageEnvelope env;
     make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
     Result res = engine.send(env, NOW_US);
-    assert(res == Result::OK);
+    assert(res == Result::ERR_FULL);
+    assert(res != Result::OK);
 
     harness_a.close();
     harness_b.close();

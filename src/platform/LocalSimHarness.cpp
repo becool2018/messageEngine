@@ -125,23 +125,24 @@ Result LocalSimHarness::inject(const MessageEnvelope& envelope)
 //
 // Injects each envelope in @p batch into the peer's receive queue.
 // Three-case attribution:
-//   Current envelope in batch and inject() returns ERR_IO → return true (ERR_IO to caller).
-//   Current envelope NOT in batch                          → return false (queued for later).
-//   Non-current envelope inject fails (any error)         → log WARNING_HI, continue, return false.
-// NOTE: ERR_FULL from inject() for the current envelope is intentionally NOT attributed
-// to the caller (by design decision in commit 03f9f23).  The prior commit 03f9f23 established
-// that peer-queue-full at the inject level is treated as a capacity warning, not a send failure
-// for the caller.  This matches test_DeliveryEngine::test_send_transport_queue_full.
+//   Current envelope in batch and inject() returns ERR_IO or ERR_FULL
+//                                              → return that Result to caller.
+//   Current envelope NOT in batch             → return OK (queued for later delivery).
+//   Non-current envelope inject fails (any error)
+//                                              → log WARNING_HI, continue, return OK.
+// In LocalSimHarness the peer's receive ring IS the network; ERR_FULL from inject()
+// is an in-process confirmation the message was NOT received.  Returning OK would
+// violate the TransportInterface::send_message() contract.
 // Power of 10: fixed loop bound (count ≤ IMPAIR_DELAY_BUF_SIZE).
 
-bool LocalSimHarness::flush_outbound_batch(const MessageEnvelope& envelope,
-                                            const MessageEnvelope* batch,
-                                            uint32_t count)
+Result LocalSimHarness::flush_outbound_batch(const MessageEnvelope& envelope,
+                                              const MessageEnvelope* batch,
+                                              uint32_t count)
 {
     NEVER_COMPILED_OUT_ASSERT(batch != nullptr);
     NEVER_COMPILED_OUT_ASSERT(count <= IMPAIR_DELAY_BUF_SIZE);
 
-    bool current_failed = false;
+    Result current_result = Result::OK;
     for (uint32_t i = 0U; i < count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
 
@@ -149,25 +150,27 @@ bool LocalSimHarness::flush_outbound_batch(const MessageEnvelope& envelope,
                            batch[i].message_id == envelope.message_id);
 
         Result inject_res = m_peer->inject(batch[i]);
-        if (inject_res == Result::ERR_IO) {
-            // ERR_IO from inject: true send failure (not a capacity condition).
+        if (inject_res == Result::ERR_IO || inject_res == Result::ERR_FULL) {
+            // ERR_IO: true send failure. ERR_FULL: peer receive ring saturated —
+            // in LocalSimHarness there is no wire; ERR_FULL means not received.
             // Attribute to caller only if this is the current envelope.
             if (is_current) {
-                // Current envelope inject failed — propagate via return value.
-                // No log: caller receives ERR_IO as the observable signal.
-                current_failed = true;
+                // Current envelope inject failed — propagate error to caller.
+                // No log: caller receives the error as the observable signal.
+                current_result = inject_res;
             } else {
                 Logger::log(Severity::WARNING_HI, "LocalSimHarness",
-                            "inject() ERR_IO for delayed message at index %u", i);
+                            "inject() failed for delayed message at index %u: result=%d",
+                            i, static_cast<int>(inject_res));
             }
         } else if (inject_res != Result::OK) {
-            // ERR_FULL or other capacity condition: not a send failure; log and continue.
+            // Other unexpected error: log and continue.
             Logger::log(Severity::WARNING_HI, "LocalSimHarness",
-                        "inject() failed for delayed message at index %u: result=%d",
+                        "inject() unexpected result for delayed message at index %u: result=%d",
                         i, static_cast<int>(inject_res));
         }
     }
-    return current_failed;
+    return current_result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -207,11 +210,9 @@ Result LocalSimHarness::send_message(const MessageEnvelope& envelope)
                                                               delayed_envelopes,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    if (flush_outbound_batch(envelope, delayed_envelopes, delayed_count)) {
-        return Result::ERR_IO;
-    }
-
-    return Result::OK;
+    // flush_outbound_batch returns OK if the current envelope was delivered,
+    // ERR_FULL if the peer receive queue was full, or ERR_IO on a true send failure.
+    return flush_outbound_batch(envelope, delayed_envelopes, delayed_count);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

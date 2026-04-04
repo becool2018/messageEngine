@@ -111,13 +111,16 @@ private:
 
     /// Inject each envelope in @p batch into the peer's receive queue.
     /// Tracks whether the current envelope (matched by source_id + message_id) failed.
+    /// Both ERR_IO and ERR_FULL from inject() on the current envelope are propagated.
     /// @param[in] envelope  The envelope passed to send_message (used for identity match).
     /// @param[in] batch     Array of deliverable envelopes from collect_deliverable().
     /// @param[in] count     Number of entries in @p batch.
-    /// @return true if the current envelope's inject failed; false otherwise.
-    bool flush_outbound_batch(const MessageEnvelope& envelope,
-                              const MessageEnvelope* batch,
-                              uint32_t count);
+    /// @return ERR_IO if the current envelope's inject() returned ERR_IO;
+    ///         ERR_FULL if the current envelope's inject() returned ERR_FULL;
+    ///         OK if the current envelope succeeded or was not yet in the batch.
+    Result flush_outbound_batch(const MessageEnvelope& envelope,
+                                const MessageEnvelope* batch,
+                                uint32_t count);
 };
 
 #endif // PLATFORM_LOCAL_SIM_HARNESS_HPP
