@@ -44,6 +44,8 @@
  *            session_ticket_lifetime_s in TlsConfig). Wire format unchanged.
  *   1.2.0 — phase 2: inbound impairment wired into TcpBackend, TlsTcpBackend,
  *            and LocalSimHarness; inject() raw-bypass contract preserved.
+ *   1.3.0 — phase 3: bounded RequestReplyEngine helper layer (UC_59/UC_60);
+ *            drain_events() bulk-drain API and full 8-kind event coverage (UC_61).
  *
  * NSC-infrastructure: compile-time version constants only; no requirement
  *   implementation belongs here. No REQ-x.x tag applies.
@@ -60,7 +62,7 @@
 #include <cstdint>
 
 static const uint32_t ME_VERSION_MAJOR  = 1U;
-static const uint32_t ME_VERSION_MINOR  = 2U;
+static const uint32_t ME_VERSION_MINOR  = 3U;
 static const uint32_t ME_VERSION_PATCH  = 0U;
 
 /// Packed single integer for compile-time range checks: (major<<16)|(minor<<8)|patch
@@ -69,6 +71,6 @@ static const uint32_t ME_VERSION_NUMBER =
 
 /// Human-readable version string — must match the git tag vMAJOR.MINOR.PATCH exactly.
 /// The `make check_version` target verifies this at release time.
-static const char ME_VERSION_STRING[] = "1.2.0";
+static const char ME_VERSION_STRING[] = "1.3.0";
 
 #endif // CORE_VERSION_HPP
