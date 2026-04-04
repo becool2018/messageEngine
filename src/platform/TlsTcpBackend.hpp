@@ -53,9 +53,9 @@
  *
  * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4,
  *             REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6,
- *             REQ-6.3.4, REQ-7.1.1
+ *             REQ-6.3.4, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #ifndef PLATFORM_TLS_TCP_BACKEND_HPP
 #define PLATFORM_TLS_TCP_BACKEND_HPP
@@ -216,6 +216,15 @@ private:
     /// Extracted from tls_recv_frame() to reduce its CC.
     bool tls_read_payload(uint32_t idx, uint8_t* buf,
                           uint32_t payload_len, uint32_t* out_len);
+
+    /// Route a deserialized inbound envelope through the ImpairmentEngine.
+    /// Checks partition state (inbound drop) then calls process_inbound()
+    /// for reorder simulation. Pushes to m_recv_queue only if delivered.
+    /// NSC: bookkeeping helper; routes inbound envelope through impairment before queuing.
+    /// @param[in] env    Deserialized inbound envelope.
+    /// @param[in] now_us Current wall-clock time in microseconds.
+    /// @return true if envelope was pushed to m_recv_queue; false if dropped or buffered.
+    bool apply_inbound_impairment(const MessageEnvelope& env, uint64_t now_us);
 };
 
 #endif // PLATFORM_TLS_TCP_BACKEND_HPP

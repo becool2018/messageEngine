@@ -35,7 +35,7 @@
  *   - Raw assert() permitted in tests/ per CLAUDE.md §9 table.
  *   - STL exempted in tests/ for test fixture setup only.
  *
- * Verifies: REQ-6.3.4
+ * Verifies: REQ-6.3.4, REQ-5.1.6
  */
 
 #include <cstdio>
@@ -2040,6 +2040,99 @@ static void test_tls_session_resumption_reconnect_cycle()
     printf("PASS: test_tls_session_resumption_reconnect_cycle\n");
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// test_tls_inbound_partition_drops_received (REQ-5.1.6)
+//
+// Configure a plaintext TlsTcpBackend server with partition_enabled=true,
+// partition_gap_ms=1 (fires after 1 ms), and a long partition_duration_ms.
+// A loopback client sends one message after the partition is active.
+// apply_inbound_impairment() detects is_partition_active()==true and drops
+// the frame.  receive_message() returns ERR_TIMEOUT.
+//
+// Verifies: REQ-5.1.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct TlsPartSrvArg {
+    uint16_t port;
+    Result   init_result;
+    Result   recv_result;
+};
+
+static void* tls_partition_srv_thread(void* raw)
+{
+    TlsPartSrvArg* a = static_cast<TlsPartSrvArg*>(raw);
+    assert(a != nullptr);
+
+    TlsTcpBackend server;
+    TransportConfig cfg;
+    make_transport_config(cfg, true, a->port, false);  // plaintext
+    cfg.channels[0U].impairment.enabled              = true;
+    cfg.channels[0U].impairment.partition_enabled     = true;
+    cfg.channels[0U].impairment.partition_gap_ms      = 10U;     // 10 ms gap
+    cfg.channels[0U].impairment.partition_duration_ms = 30000U;  // 30 s
+
+    a->init_result = server.init(cfg);
+    if (a->init_result != Result::OK) { return nullptr; }
+
+    // Prime the partition timer: call receive_message() with a short timeout
+    // so collect_deliverable() → is_partition_active() is called before the
+    // client connects.  This 10 ms poll call starts the 10 ms gap timer and
+    // returns ERR_TIMEOUT (no client yet).  After this returns the partition
+    // is guaranteed to be active (10 ms gap < 10 ms poll duration).
+    MessageEnvelope prime_env;
+    (void)server.receive_message(prime_env, 10U);
+
+    // Now wait for the client to connect and send a message.
+    // The partition must already be active by the time the frame arrives.
+    MessageEnvelope env;
+    a->recv_result = server.receive_message(env, 500U);
+
+    server.close();
+    return nullptr;
+}
+
+// Verifies: REQ-5.1.6
+static void test_tls_inbound_partition_drops_received()
+{
+    static const uint16_t PORT = 19899U;
+
+    TlsPartSrvArg srv_arg;
+    srv_arg.port        = PORT;
+    srv_arg.init_result = Result::ERR_IO;
+    srv_arg.recv_result = Result::OK;
+
+    pthread_t srv_tid = create_thread_4mb(tls_partition_srv_thread, &srv_arg);
+
+    usleep(50000U);  // 50 ms: give server time to bind and partition to activate
+
+    TlsTcpBackend client;
+    TransportConfig cli_cfg;
+    make_transport_config(cli_cfg, false, PORT, false);  // plaintext client
+    Result cli_init = client.init(cli_cfg);
+
+    if (cli_init == Result::OK) {
+        MessageEnvelope env;
+        envelope_init(env);
+        env.message_type      = MessageType::DATA;
+        env.message_id        = 0xFEED0001ULL;
+        env.source_id         = 2U;
+        env.destination_id    = 1U;
+        env.reliability_class = ReliabilityClass::BEST_EFFORT;
+        env.timestamp_us      = 1U;
+        env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+        (void)client.send_message(env);
+        client.close();
+    }
+
+    (void)pthread_join(srv_tid, nullptr);
+
+    assert(srv_arg.init_result == Result::OK);
+    // Frame dropped by inbound partition -> ERR_TIMEOUT
+    assert(srv_arg.recv_result == Result::ERR_TIMEOUT);
+
+    printf("PASS: test_tls_inbound_partition_drops_received\n");
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2084,6 +2177,9 @@ int main()
     test_session_resumption_disabled_by_default();
     test_tls_session_saved_after_handshake();
     test_tls_session_resumption_reconnect_cycle();
+
+    // Inbound impairment tests (REQ-5.1.6)
+    test_tls_inbound_partition_drops_received();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);

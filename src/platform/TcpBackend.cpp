@@ -24,7 +24,7 @@
  *   - MISRA C++: no exceptions, all return values checked.
  *   - F-Prime style: event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.3.5, REQ-7.1.1, REQ-7.2.4
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.3.5, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
  */
 
 #include "platform/TcpBackend.hpp"
@@ -263,6 +263,61 @@ void TcpBackend::remove_client_fd(int client_fd)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// apply_inbound_impairment() — CC-reduction helper for recv_from_client
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Routes a deserialized inbound envelope through ImpairmentEngine inbound
+// processing before queuing to m_recv_queue.
+//
+// Pattern (REQ-5.1.5, REQ-5.1.6):
+//   1. is_partition_active(): drop the envelope if a partition is in effect.
+//   2. process_inbound(): buffer for reorder if configured; emit immediately otherwise.
+//   3. out_count == 0: buffered by reorder; do not queue; return false.
+//   4. out_count == 1: push the emitted envelope to m_recv_queue; return true.
+
+bool TcpBackend::apply_inbound_impairment(const MessageEnvelope& env, uint64_t now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));  // Pre-condition
+    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);        // Pre-condition
+
+    // REQ-5.1.6: drop if an inbound partition is currently active.
+    if (m_impairment.is_partition_active(now_us)) {
+        Logger::log(Severity::WARNING_LO, "TcpBackend",
+                    "inbound envelope dropped (partition active)");
+        return false;
+    }
+
+    // REQ-5.1.5: apply inbound reorder simulation.
+    // 1-slot output buffer: process_inbound emits 0 or 1 envelope.
+    MessageEnvelope inbound_out;
+    uint32_t inbound_count = 0U;
+    Result res = m_impairment.process_inbound(env, now_us,
+                                               &inbound_out, 1U,
+                                               inbound_count);
+    if (!result_ok(res)) {
+        // ERR_FULL from process_inbound (logic error): treat as drop.
+        Logger::log(Severity::WARNING_LO, "TcpBackend",
+                    "process_inbound returned error; dropping envelope");
+        return false;
+    }
+
+    if (inbound_count == 0U) {
+        // Buffered by reorder engine; will be released on a future receive call.
+        return false;
+    }
+
+    // inbound_count == 1: push the released envelope into the receive queue.
+    res = m_recv_queue.push(inbound_out);
+    if (!result_ok(res)) {
+        Logger::log(Severity::WARNING_HI, "TcpBackend",
+                    "recv queue full; dropping inbound envelope");
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(inbound_count == 1U);  // Post-condition
+    return result_ok(res);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // recv_from_client()
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -278,7 +333,7 @@ Result TcpBackend::recv_from_client(int client_fd, uint32_t timeout_ms)
         return Result::ERR_IO;
     }
 
-    // Deserialize and queue the received frame
+    // Deserialize the received frame
     MessageEnvelope env;
     Result res = Serializer::deserialize(m_wire_buf, out_len, env);
     if (!result_ok(res)) {
@@ -287,10 +342,10 @@ Result TcpBackend::recv_from_client(int client_fd, uint32_t timeout_ms)
         return res;
     }
 
-    res = m_recv_queue.push(env);
-    if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend", "Recv queue full; dropping message");
-    }
+    // REQ-5.1.5, REQ-5.1.6: route through impairment before queuing.
+    // Partition drops and reorder buffering apply on the inbound path.
+    uint64_t now_us = timestamp_now_us();
+    (void)apply_inbound_impairment(env, now_us);
 
     NEVER_COMPILED_OUT_ASSERT(out_len <= SOCKET_RECV_BUF_BYTES);  // Power of 10: post-condition
     return Result::OK;
