@@ -28,6 +28,14 @@
  *   - All send/receive operations pass through mbedTLS record layer.
  *   - Message framing (4-byte big-endian length prefix) is preserved.
  *
+ * When config.tls.session_resumption_enabled is true (requires tls_enabled):
+ *   - Client: saves the negotiated session after the first handshake and
+ *     presents it on reconnect to attempt abbreviated resumption (RFC 5077).
+ *   - Server: enables session ticket support via
+ *     mbedtls_ssl_conf_session_tickets() so connecting clients may resume.
+ *   - Session state is stored in fixed-size mbedtls_ssl_session m_saved_session
+ *     (no dynamic allocation on the critical path — Power of 10 Rule 3).
+ *
  * Encryption library: mbedTLS 4.0 (PSA Crypto backend).
  *   RNG: PSA Crypto internal DRBG (psa_crypto_init() called in init()).
  *   No legacy CTR-DRBG or entropy context required.
@@ -107,6 +115,14 @@ private:
     mbedtls_net_context m_client_net[MAX_TCP_CONNECTIONS]; ///< Per-client net contexts
     mbedtls_ssl_context m_ssl[MAX_TCP_CONNECTIONS];        ///< Per-client TLS sessions
 
+    // ── TLS session resumption state (REQ-6.3.4) ─────────────────────────────
+    /// Saved TLS session for client-side resumption (session tickets, RFC 5077).
+    /// Fixed-size mbedTLS struct — no dynamic allocation (Power of 10 Rule 3).
+    /// Initialized in both constructors; freed in close() and destructor.
+    mbedtls_ssl_session m_saved_session;
+    /// true when m_saved_session contains a valid, resumable TLS session.
+    bool                m_session_saved;
+
     // ── Injected socket operations interface ─────────────────────────────────
     ISocketOps*       m_sock_ops;                          ///< Non-owning; never null after ctor
 
@@ -142,6 +158,19 @@ private:
     /// for the client socket at slot 0. Called by connect_to_server() when
     /// tls_enabled is true. Extracted to reduce connect_to_server() CC.
     Result tls_connect_handshake();
+
+    /// Save the TLS session from slot 0 into m_saved_session after a successful
+    /// client handshake.  Called only when session_resumption_enabled is true.
+    /// Failure is non-fatal: logs WARNING_LO and leaves m_session_saved false.
+    /// Extracted from tls_connect_handshake() to keep its CC ≤ 10 (REQ-6.3.4).
+    void try_save_client_session();
+
+    /// Attempt to load m_saved_session into m_ssl[0] before the TLS handshake
+    /// to enable abbreviated session resumption (RFC 5077, REQ-6.3.4).
+    /// Called only when session_resumption_enabled is true and m_session_saved
+    /// is true.  Failure is non-fatal: logs WARNING_LO and full handshake
+    /// proceeds.  Extracted from tls_connect_handshake() to reduce its CC.
+    void try_load_client_session();
 
     /// Accept one pending connection and optionally perform TLS handshake.
     /// Does nothing if no pending connection or table is full.
