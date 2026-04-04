@@ -51,7 +51,8 @@ LocalSimHarness::inject(envelope)                  [LocalSimHarness.cpp]
 
 ## 5. Key Components Involved
 
-- **`inject()`** — test-only entry point that bypasses the impairment pipeline. Enables test code to deliver specific envelopes directly for boundary-condition testing (e.g., injecting duplicates, expired messages, or specific message IDs).
+- **`inject()`** — raw test hook that bypasses ALL impairment. Does NOT call `process_inbound()`, `is_partition_active()`, or any impairment logic. Pushes directly to `m_recv_queue`. This is the deliberate test-hook contract, preserved unchanged.
+- **`deliver_from_peer()`** — the internal linked-peer delivery path used by `flush_outbound_batch()`. Unlike `inject()`, it routes through the receiver's inbound impairment (partition check + reorder). Test code should NOT call `deliver_from_peer()` directly; use `send_message()` on the linked sender instead.
 - **`RingBuffer::push()`** — SPSC lock-free push; places the envelope at the producer head slot. Atomic release store on `m_head` makes the envelope visible to the consumer.
 
 ---
@@ -137,7 +138,8 @@ User -> LocalSimHarness::inject(envelope)
 
 ## 14. Known Risks / Observations
 
-- **Bypasses impairment:** `inject()` skips the `ImpairmentEngine` entirely. Injected envelopes are not subject to loss, delay, or duplication. This is intentional for testing specific receive-path behavior.
+- **Bypasses ALL inbound impairment:** `inject()` skips `is_partition_active()`, `process_inbound()`, and the entire `ImpairmentEngine` inbound path. This is deliberate — `inject()` is a raw test hook for boundary-condition testing (e.g., testing how the receiver handles specific message patterns regardless of configured network conditions).
+- **`deliver_from_peer()` is the impaired path:** Linked-peer delivery now goes through `deliver_from_peer()` (called from `flush_outbound_batch()`), which applies inbound partition checks and reorder simulation. If you send via `send_message()` on the linked sender, inbound impairment is applied. If you want to bypass inbound impairment, use `inject()` directly.
 - **SPSC violation risk:** If multiple threads call `inject()` concurrently on the same harness, the SPSC contract is violated and the ring buffer can corrupt. Test code must ensure single-producer discipline.
 - **Capacity limit:** `MSG_RING_CAPACITY = 64`. Tests that inject more than 64 messages without consuming any will silently drop envelopes.
 
@@ -145,5 +147,6 @@ User -> LocalSimHarness::inject(envelope)
 
 ## 15. Unknowns / Assumptions
 
-- `[ASSUMPTION]` `inject()` pushes directly to `m_recv_queue` (the same ring buffer populated by the receive side of `send_message()`). This is inferred from the purpose of the function and the harness architecture.
-- `[ASSUMPTION]` `inject()` is declared as a public member of `LocalSimHarness` (not a free function) and is not part of the `TransportInterface`; it is a test-only extension.
+- `[CONFIRMED]` `inject()` pushes directly to `m_recv_queue` without calling `deliver_from_peer()` or any impairment method. This is confirmed by code review and by `test_localsim_inject_bypasses_impairment`.
+- `[CONFIRMED]` `inject()` is declared as a public member of `LocalSimHarness` (not a free function) and is not part of the `TransportInterface`; it is a test-only extension.
+- `[CONFIRMED]` `deliver_from_peer()` is a private helper called only from `flush_outbound_batch()`. It is not accessible to test code directly.

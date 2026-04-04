@@ -36,11 +36,15 @@ void   LocalSimHarness::link(LocalSimHarness* peer);
 2. `NEVER_COMPILED_OUT_ASSERT(m_open)`.
 3. `NEVER_COMPILED_OUT_ASSERT(m_peer != nullptr)` — linked.
 4. `uint64_t now_us = timestamp_now_us()`.
-5. **`m_impairment.process_outbound(envelope, now_us, delay_buf, &delay_count)`** — applies impairments. Default: `delay_buf[0] = envelope`, `delay_count = 1`.
-6. **`m_impairment.collect_deliverable(delay_buf, delay_count, now_us, out_buf, &out_count)`** — retrieves due envelopes (immediately, no latency configured).
-7. For each `out_buf[i]`: **`m_peer->inject(out_buf[i])`** — pushes the envelope directly into harness B's `m_recv_queue` via `RingBuffer::push()`.
-8. If `inject()` returns `ERR_FULL`: return `ERR_FULL`.
-9. Returns `Result::OK`.
+5. **`m_impairment.process_outbound(envelope, now_us)`** — applies outbound impairments. ERR_IO = loss-dropped; ERR_FULL = delay buffer saturated.
+6. **`m_impairment.collect_deliverable(now_us, out_buf, buf_cap)`** — retrieves due envelopes (immediately when no latency configured).
+7. **`flush_outbound_batch(envelope, out_buf, out_count, now_us)`** — for each due envelope, calls `m_peer->deliver_from_peer(env, now_us)`.
+8. Inside **`deliver_from_peer(env, now_us)`** on B:
+   a. `m_impairment.is_partition_active(now_us)` — if partition active, drops and returns `ERR_IO`.
+   b. `m_impairment.process_inbound(env, now_us, &out, 1U, &count)` — applies reorder; count=0 means buffered (`ERR_TIMEOUT`), count=1 means pass through.
+   c. `m_recv_queue.push(inbound_out)` — queue; `ERR_FULL` if ring full.
+9. `flush_outbound_batch()` propagates `ERR_IO` or `ERR_FULL` for the current envelope to the caller.
+10. Returns `Result::OK` on success.
 
 **Receive on harness B:**
 1. `LocalSimHarness::receive_message(out, timeout_ms)`.
@@ -56,11 +60,14 @@ void   LocalSimHarness::link(LocalSimHarness* peer);
 ## 4. Call Tree
 
 ```
-LocalSimHarness::send_message(envelope)          [LocalSimHarness.cpp]
- ├── ImpairmentEngine::process_outbound()        [ImpairmentEngine.cpp]
+LocalSimHarness::send_message(envelope)                [LocalSimHarness.cpp]
+ ├── ImpairmentEngine::process_outbound()              [ImpairmentEngine.cpp]
  ├── ImpairmentEngine::collect_deliverable()
- └── LocalSimHarness::inject(out_buf[i])         [peer's method]
-      └── RingBuffer::push(envelope)             [peer's m_recv_queue; RingBuffer.hpp]
+ └── LocalSimHarness::flush_outbound_batch(...)        [private helper]
+      └── LocalSimHarness_B::deliver_from_peer(env, now_us) [peer's private helper]
+           ├── ImpairmentEngine_B::is_partition_active()    [inbound partition check]
+           ├── ImpairmentEngine_B::process_inbound()        [inbound reorder]
+           └── RingBuffer_B::push(inbound_out)              [peer's m_recv_queue]
 
 LocalSimHarness::receive_message(out, timeout_ms) [LocalSimHarness.cpp]
  ├── RingBuffer::pop(out)
@@ -72,10 +79,11 @@ LocalSimHarness::receive_message(out, timeout_ms) [LocalSimHarness.cpp]
 
 ## 5. Key Components Involved
 
-- **`LocalSimHarness`** — In-process transport. `send_message()` calls `m_peer->inject()` to directly enqueue to the peer's ring buffer. No sockets involved.
-- **`ImpairmentEngine`** — Applied on the sender side (harness A). Loss/delay/duplication affect what reaches the peer.
-- **`LocalSimHarness::inject()`** — Bypasses the sender's `send_message()` path; directly pushes to `m_recv_queue`.
-- **`RingBuffer`** — SPSC lock-free queue. Producer: `inject()` on harness A's thread (same thread in this single-threaded pattern). Consumer: `pop()` on harness B's `receive_message()`.
+- **`LocalSimHarness`** — In-process transport. `send_message()` calls `m_peer->deliver_from_peer()` to route through the peer's inbound impairment before enqueuing. No sockets involved.
+- **`ImpairmentEngine`** (sender A) — Applied outbound: loss/delay/duplication affect whether and when the envelope reaches `flush_outbound_batch()`.
+- **`ImpairmentEngine`** (receiver B) — Applied inbound inside `deliver_from_peer()`: partition check via `is_partition_active()` drops the message; reorder simulation via `process_inbound()` may buffer it.
+- **`LocalSimHarness::inject()`** — Raw test hook that bypasses all impairment; pushes directly to `m_recv_queue`. NOT called during linked-peer delivery.
+- **`RingBuffer`** — SPSC lock-free queue. Producer: `deliver_from_peer()` on harness A's thread. Consumer: `pop()` on harness B's `receive_message()`.
 
 ---
 
@@ -84,8 +92,10 @@ LocalSimHarness::receive_message(out, timeout_ms) [LocalSimHarness.cpp]
 | Condition | True branch | False branch |
 |-----------|-------------|--------------|
 | `m_peer == nullptr` | Assert fires | Proceed |
-| `process_outbound()` drops | `out_count=0`; no inject | inject to peer |
-| `m_peer->inject()` returns ERR_FULL | Return ERR_FULL | Return OK |
+| `process_outbound()` drops (loss/partition outbound) | Return OK (silent drop) | Proceed to collect_deliverable |
+| `deliver_from_peer()` inbound partition active | Return ERR_IO to flush_outbound_batch | Push to recv queue |
+| `deliver_from_peer()` reorder-buffered (count==0) | Return ERR_TIMEOUT; not queued now | Continue loop |
+| `deliver_from_peer()` returns ERR_FULL (ring full) | Current: propagate ERR_FULL; non-current: log | OK |
 | `m_recv_queue.pop()` succeeds immediately | Return OK | Enter nanosleep loop |
 | Loop exhausted | Return ERR_TIMEOUT | Continue |
 
@@ -134,10 +144,15 @@ LocalSimHarness::receive_message(out, timeout_ms) [LocalSimHarness.cpp]
 ```
 User
   -> LocalSimHarness_A::send_message(envelope)
-       -> ImpairmentEngine::process_outbound()   [pass-through; no impairments]
-       -> ImpairmentEngine::collect_deliverable() [out_count=1]
-       -> LocalSimHarness_B::inject(envelope)
-            -> RingBuffer_B::push(envelope)       [atomic m_head release]
+       -> ImpairmentEngine_A::process_outbound()      [outbound impairments; pass-through if none]
+       -> ImpairmentEngine_A::collect_deliverable()   [out_count=1 when no latency]
+       -> LocalSimHarness_A::flush_outbound_batch()
+            -> LocalSimHarness_B::deliver_from_peer(envelope, now_us)
+                 -> ImpairmentEngine_B::is_partition_active() [inbound partition check]
+                 -> ImpairmentEngine_B::process_inbound()     [inbound reorder pass-through]
+                 -> RingBuffer_B::push(envelope)              [atomic m_head release]
+                 <- Result::OK
+            <- Result::OK
        <- Result::OK
 
 User
