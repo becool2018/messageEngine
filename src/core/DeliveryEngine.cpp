@@ -263,6 +263,39 @@ uint32_t DeliveryEngine::pending_event_count() const
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::drain_events() — REQ-7.2.5 bulk observability drain API
+// Pops up to buf_cap events from the ring into the caller-supplied buffer.
+// Equivalent to calling poll_event() in a bounded loop.
+// NSC: observability only; no effect on delivery state.
+// Power of 10: fixed loop bound (buf_cap or ring size, whichever is smaller);
+//   >=2 assertions; no dynamic allocation.
+// ─────────────────────────────────────────────────────────────────────────────
+uint32_t DeliveryEngine::drain_events(DeliveryEvent* out_buf, uint32_t buf_cap)
+{
+    // Power of 10 Rule 5: >=2 assertions
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);   // Assert: engine initialized
+    NEVER_COMPILED_OUT_ASSERT(out_buf != nullptr || buf_cap == 0U); // Assert: buf valid when cap > 0
+
+    uint32_t drained = 0U;
+
+    // Power of 10 Rule 2: bounded loop — at most buf_cap iterations,
+    // and at most DELIVERY_EVENT_RING_CAPACITY events can ever be present.
+    // Loop terminates when the ring is empty or buf_cap is reached.
+    for (uint32_t i = 0U; i < buf_cap; ++i) {
+        Result pop_res = m_events.pop(out_buf[drained]);
+        if (pop_res == Result::ERR_EMPTY) {
+            break;
+        }
+        ++drained;
+    }
+
+    // Power of 10 Rule 5: post-condition assertion
+    NEVER_COMPILED_OUT_ASSERT(drained <= buf_cap);  // Assert: did not overflow caller buffer
+
+    return drained;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DeliveryEngine::send_via_transport()
 // ─────────────────────────────────────────────────────────────────────────────
 Result DeliveryEngine::send_via_transport(const MessageEnvelope& env, uint64_t now_us)

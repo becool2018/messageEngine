@@ -163,6 +163,22 @@ public:
      */
     uint32_t pending_event_count() const;
 
+    // REQ-7.2.5: bulk drain of the observability event ring into a caller-supplied buffer.
+    /**
+     * @brief Drain up to buf_cap events from the ring into out_buf.
+     *
+     * Events are removed in FIFO order (oldest first). Stops when the ring is
+     * empty or buf_cap events have been written. Non-blocking; never modifies
+     * delivery state. Equivalent to calling poll_event() in a bounded loop.
+     * NSC: observability only.
+     *
+     * @param[out] out_buf  Caller-supplied array of at least buf_cap elements.
+     * @param[in]  buf_cap  Maximum number of events to drain (must be <= buf_cap
+     *                      elements allocated in out_buf).
+     * @return Number of events written to out_buf (0 ... min(pending, buf_cap)).
+     */
+    uint32_t drain_events(DeliveryEvent* out_buf, uint32_t buf_cap);
+
 private:
     TransportInterface* m_transport;
     ChannelConfig       m_cfg;
