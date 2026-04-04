@@ -62,11 +62,14 @@ enum class DeliveryEventKind : uint8_t {
 /// A single delivery-layer observability event.
 /// Pushed into DeliveryEventRing by DeliveryEngine; read via poll_event().
 /// NSC: read-only record; never modifies delivery state.
+///
+/// Field ordering is chosen for minimal padding (Power of 10 / MISRA advisory):
+///   uint64_t x2 (16), uint32_t (4), uint8_t x2 (2), implicit pad (2) = 24 bytes.
 struct DeliveryEvent {
-    DeliveryEventKind kind;         ///< What happened
     uint64_t          message_id;   ///< Which message (source or destination, context-dep.)
+    uint64_t          timestamp_us; ///< When the event occurred (us)
     NodeId            node_id;      ///< Peer node (source or dest, context-dependent)
-    uint64_t          timestamp_us; ///< When the event occurred (µs)
+    DeliveryEventKind kind;         ///< What happened
     Result            result;       ///< Associated result code (OK, ERR_*, etc.)
 };
 
