@@ -23,7 +23,7 @@
  *   - MISRA C++:2008 rule 0-1-1: every field is used.
  *   - F-Prime style: no templates, no STL, no exceptions.
  *
- * Implements: REQ-3.1
+ * Implements: REQ-3.1, REQ-3.3.5
  */
 
 #ifndef CORE_MESSAGE_ENVELOPE_HPP
@@ -46,11 +46,32 @@ struct MessageEnvelope {
     NodeId            source_id;                         ///< originating node
     NodeId            destination_id;                    ///< target node (0 = broadcast)
     uint32_t          payload_length;                    ///< bytes used in payload[]
+    uint32_t          sequence_num;          ///< per-sender sequence number; 0 = unordered/control
+    uint16_t          total_payload_length; ///< logical payload size across all fragments
     MessageType       message_type;                      ///< DATA / ACK / NAK / HEARTBEAT
     uint8_t           priority;                          ///< 0 = highest
     ReliabilityClass  reliability_class;
+    uint8_t           fragment_index;       ///< 0-based index of this fragment; 0 for unfragmented
+    uint8_t           fragment_count;       ///< total fragments in this logical message; 1 = unfragmented
     uint8_t           payload[MSG_MAX_PAYLOAD_BYTES];    ///< opaque serialized bytes
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Fragment helpers (protocol v2, REQ-3.3.5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Return true if this envelope is a fragment of a larger logical message.
+inline bool envelope_is_fragment(const MessageEnvelope& env)
+{
+    return env.fragment_count > 1U;
+}
+
+/// Return true if this is the last fragment of a multi-fragment message.
+inline bool envelope_is_last_fragment(const MessageEnvelope& env)
+{
+    return (env.fragment_count > 1U) &&
+           (env.fragment_index == static_cast<uint8_t>(env.fragment_count - 1U));
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers (no heap, no function pointers – Power of 10 rules 3, 9)

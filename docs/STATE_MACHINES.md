@@ -213,8 +213,101 @@ overlying application safety barrier), the following formal methods obligations 
 | Model checking of AckTracker state machine | TLA+ or SPIN | All states and transitions in §1 |
 | Model checking of RetryManager state machine | TLA+ or SPIN | All states and transitions in §2 |
 | Model checking of ImpairmentEngine state machine | TLA+ or SPIN | §3 partition + delay-buffer sub-state |
+| Model checking of ReassemblyBuffer state machine | TLA+ or SPIN | All states and transitions in §4 |
+| Model checking of OrderingBuffer state machine | TLA+ or SPIN | All states and transitions in §5 |
 | Theorem proving of Serializer bounds | Frama-C (WP plugin) or Coq | serialize() and deserialize() bounds checks |
 | Proof of retry termination | TLA+ liveness property | RetryManager: every WAITING slot eventually reaches INACTIVE |
 
-Pending reclassification, the state machine tables in §1–§3 of this document serve
+Pending reclassification, the state machine tables in §1–§5 of this document serve
 as the lightweight formal specification required for Class C review.
+
+---
+
+## §4 ReassemblyBuffer State Machine
+
+**Source:** src/core/ReassemblyBuffer.hpp / ReassemblyBuffer.cpp
+**Purpose:** Reassembles fragmented logical messages from up to FRAG_MAX_COUNT wire frames.
+**Hazards mitigated:** HAZ-003 (duplicate delivery via corrupt reassembly), HAZ-006 (slot exhaustion)
+
+### States (per ReassemblySlot)
+
+| State | Meaning |
+|-------|---------|
+| `INACTIVE` | Slot is free; no message in progress |
+| `COLLECTING` | At least one fragment received; waiting for remaining fragments |
+| `COMPLETE` | All fragments received (transient — slot freed immediately after assembly) |
+
+### Transition Table
+
+| From | Event | Guard | To | Action |
+|------|-------|-------|----|--------|
+| Any | `ingest(frag)` with `fragment_count <= 1` | — | INACTIVE (fast path) | Copy frag directly to logical_out; return OK |
+| INACTIVE | `ingest(frag)` with `fragment_count > 1` | Slot available | COLLECTING | `open_slot()`: record message_id, source_id, fragment_count, total_length |
+| INACTIVE | `ingest(frag)` with `fragment_count > 1` | No free slot | INACTIVE | Return ERR_FULL |
+| COLLECTING | `ingest(frag)` — same (source_id, message_id) | `fragment_count` matches | COLLECTING | `record_fragment()`: copy payload slice; set bitmask bit |
+| COLLECTING | `ingest(frag)` — same (source_id, message_id) | `fragment_count` mismatch | COLLECTING | Return ERR_INVALID; slot unchanged |
+| COLLECTING | `ingest(frag)` — duplicate fragment_index | bit already set | COLLECTING | Return ERR_AGAIN (silently discard) |
+| COLLECTING | `ingest(frag)` — completing fragment | All bits set | COMPLETE → INACTIVE | `assemble_and_free()`: copy payload to logical_out; free slot; return OK |
+| COLLECTING | `sweep_expired(now_us)` | expiry_us != 0 && expiry_us <= now_us | INACTIVE | Clear received_mask; set active=false |
+
+### Invariants
+
+- At most REASSEMBLY_SLOT_COUNT slots can be COLLECTING simultaneously.
+- `received_mask` has at most `expected_count` bits set (bits 0..FRAG_MAX_COUNT-1).
+- Once COMPLETE, slot is immediately freed; no slot persists in COMPLETE state.
+- Fragment payload is placed at byte offset `fragment_index * FRAG_MAX_PAYLOAD_BYTES` in the accumulation buffer; this is a static placement rule with no overlap for valid indices.
+
+---
+
+## §5 OrderingBuffer State Machine
+
+**Source:** src/core/OrderingBuffer.hpp / OrderingBuffer.cpp
+**Purpose:** Per-peer in-order delivery gate; holds out-of-order messages until gaps are filled.
+**Hazards mitigated:** HAZ-001 (misordered delivery), HAZ-006 (hold buffer exhaustion)
+
+### States (per HoldSlot)
+
+| State | Meaning |
+|-------|---------|
+| `FREE` | Hold slot is not in use |
+| `HELD` | Out-of-order message waiting for its sequence gap to be filled |
+
+### States (per PeerState)
+
+| Field | Meaning |
+|-------|---------|
+| `next_expected_seq` | The sequence number the peer must deliver next (starts at 1) |
+| `active` | Whether this peer slot is tracking any source |
+
+### Transition Table (ingest)
+
+| Event | Guard | Result | Action |
+|-------|-------|--------|--------|
+| `ingest(msg)` — control message | `envelope_is_control(msg)` | OK | Copy to out; bypass all ordering logic |
+| `ingest(msg)` — sequence_num == 0 | UNORDERED marker | OK | Copy to out; bypass ordering gate |
+| `ingest(msg)` — `seq == expected` | In-order | OK | Copy to out; advance next_expected |
+| `ingest(msg)` — `seq < expected` | Already delivered | ERR_AGAIN | Silently discard (duplicate sequence) |
+| `ingest(msg)` — `seq > expected` | Out-of-order | ERR_AGAIN | Store in free HoldSlot; return ERR_AGAIN |
+| `ingest(msg)` — `seq > expected` | No free HoldSlot | ERR_FULL | Return ERR_FULL; message dropped |
+
+### Transition Table (try_release_next)
+
+| Event | Guard | Result | Action |
+|-------|-------|--------|--------|
+| `try_release_next(src)` | Held message with `seq == expected` for src | OK | Copy to out; advance next_expected; free HoldSlot |
+| `try_release_next(src)` | No held message matches | ERR_AGAIN | No action |
+
+### Transition Table (advance_sequence)
+
+| Event | Guard | Action |
+|-------|-------|--------|
+| `advance_sequence(src, up_to_seq)` | `up_to_seq > next_expected` | Advance next_expected to up_to_seq (gap-skip on timeout) |
+| `advance_sequence(src, up_to_seq)` | `up_to_seq <= next_expected` | No-op |
+
+### Invariants
+
+- At most ORDERING_HOLD_COUNT messages can be HELD simultaneously (across all peers).
+- At most REASSEMBLY_SLOT_COUNT peers can be tracked simultaneously.
+- Control messages and UNORDERED messages (sequence_num == 0) are never held.
+- next_expected_seq is monotonically non-decreasing for each peer.
+- A held message is released at most once (HoldSlot freed immediately on release).

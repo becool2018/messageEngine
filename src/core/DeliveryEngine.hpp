@@ -27,9 +27,9 @@
  * Design: Owns AckTracker, RetryManager, DuplicateFilter. Applies all delivery
  * semantics based on message envelope reliability_class field.
  *
- * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+ * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
  */
-// Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+// Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
 
 #ifndef CORE_DELIVERY_ENGINE_HPP
 #define CORE_DELIVERY_ENGINE_HPP
@@ -50,6 +50,9 @@
 #include "AssertState.hpp"
 #include "DeliveryEvent.hpp"
 #include "DeliveryEventRing.hpp"
+#include "ReassemblyBuffer.hpp"
+#include "OrderingBuffer.hpp"
+#include "Fragmentation.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DeliveryEngine
@@ -57,6 +60,12 @@
 
 class DeliveryEngine {
 public:
+    /// Default constructor: zero-initializes m_initialized so that sub-components
+    /// (which assert !m_initialized in their own init()) get a clean false value
+    /// even when DeliveryEngine is stack-allocated without value-initialization.
+    /// Power of 10 Rule 3: no allocation; just sets a sentinel boolean to false.
+    DeliveryEngine() : m_transport(nullptr), m_local_id(0U), m_initialized(false) {}
+
     /**
      * @brief Initialize the delivery engine.
      *
@@ -202,6 +211,27 @@ private:
     // Power of 10 Rule 3: fixed-capacity ring; no dynamic allocation.
     DeliveryEventRing m_events;
 
+    // REQ-3.2.3, REQ-3.3.3: bounded fragment reassembly buffer (init'd in init())
+    // Power of 10 Rule 3: fixed REASSEMBLY_SLOT_COUNT slots; no dynamic allocation.
+    ReassemblyBuffer m_reassembly;
+
+    // REQ-3.3.5: per-peer in-order delivery gate (init'd in init())
+    // Power of 10 Rule 3: fixed ORDERING_HOLD_COUNT slots; no dynamic allocation.
+    OrderingBuffer m_ordering;
+
+    // REQ-3.3.5: per-destination outbound sequence counter for ORDERED DATA messages.
+    // Power of 10 Rule 3: bounded by ACK_TRACKER_CAPACITY (max peers).
+    struct SeqState {
+        NodeId   dst;
+        uint32_t next_seq;
+        bool     active;
+    };
+    SeqState m_seq_state[ACK_TRACKER_CAPACITY];
+
+    // Power of 10 Rule 3: fragment staging buffer for send/retry paths.
+    // Holds up to FRAG_MAX_COUNT wire fragments for one logical message at a time.
+    MessageEnvelope m_frag_buf[FRAG_MAX_COUNT];
+
     // Private helper: push one DeliveryEvent into m_events (REQ-7.2.5).
     // Bounded overwrite-on-full ring push; never blocks, never fails.
     // NSC: observability bookkeeping only.
@@ -238,6 +268,56 @@ private:
     // Looks up the original send timestamp and computes RTT (REQ-7.2.1).
     // NSC: observability bookkeeping only.
     void update_latency_stats(const MessageEnvelope& ack_env, uint64_t now_us);
+
+    // Private helper: get or assign the next outbound sequence number for dst.
+    // Returns the sequence number; 0 on failure (no peer slot available).
+    // REQ-3.3.5: per-destination outbound sequence counter.
+    uint32_t next_seq_for(NodeId dst);
+
+    // Private helper: send a logical envelope, fragmenting if necessary.
+    // Returns OK when all wire frames were sent; ERR_IO if any frame failed
+    // (partial send is treated as failure — bookkeeping not rolled back here,
+    // that is the caller's responsibility).
+    // REQ-3.2.3, REQ-3.3.5.
+    Result send_fragments(const MessageEnvelope& env, uint64_t now_us);
+
+    // Private helper: handle fragment ingest during receive().
+    // Returns OK when the full logical message is ready in logical_out.
+    // Returns ERR_AGAIN when more fragments are needed (caller should return).
+    // Returns ERR_INVALID/ERR_FULL on error (caller should return the error).
+    // REQ-3.2.3.
+    Result handle_fragment_ingest(const MessageEnvelope& wire_env,
+                                   MessageEnvelope&       logical_out);
+
+    // Private helper: run a logical DATA message through the ordering gate.
+    // Returns OK when the message is ready in out.
+    // Returns ERR_AGAIN if held (caller should return ERR_AGAIN).
+    // Returns ERR_FULL if the hold buffer is full.
+    // REQ-3.3.5.
+    Result handle_ordering_gate(const MessageEnvelope& logical,
+                                 MessageEnvelope&       out,
+                                 uint64_t               now_us);
+
+    // Private helper: apply duplicate suppression to a RELIABLE_RETRY DATA message.
+    // Returns ERR_DUPLICATE if suppressed (caller should return ERR_DUPLICATE).
+    // Returns OK if the message passes (not a duplicate, or not RELIABLE_RETRY).
+    // Extracted from receive() to reduce its cognitive complexity to ≤ 10.
+    // Safety-critical (SC): HAZ-003 — prevents spurious duplicate delivery.
+    Result handle_data_dedup(const MessageEnvelope& env, uint64_t now_us);
+
+    // Private helper: run the full data-message delivery path after routing.
+    // Applies dedup, ordering gate, ACK generation, stats increment.
+    // Returns OK on successful delivery; ERR_DUPLICATE if suppressed;
+    // ERR_AGAIN if held by the ordering gate.
+    // Extracted from receive() to reduce its cognitive complexity to ≤ 10.
+    // Safety-critical (SC): HAZ-001, HAZ-003 — on the reliable delivery path.
+    Result handle_data_path(MessageEnvelope& env, uint64_t now_us);
+
+    // Private helper: process an inbound control message (ACK/NAK/HEARTBEAT).
+    // Always returns OK (control messages are never an error condition).
+    // Extracted from receive() to reduce its cognitive complexity to ≤ 10.
+    // NSC: bookkeeping and ACK processing only.
+    void handle_control_message(const MessageEnvelope& env, uint64_t now_us);
 };
 
 #endif // CORE_DELIVERY_ENGINE_HPP

@@ -199,6 +199,30 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `collect_due()` | `RetryManager` | SC | HAZ-002 |
 | `get_stats()` | `RetryManager` | NSC | — |
 
+### src/core/Fragmentation.hpp
+
+| Function | Class | SC/NSC | HAZ IDs |
+|---|---|---|---|
+| `needs_fragmentation()` | — | NSC | — |
+| `fragment_message()` | — | SC | HAZ-001, HAZ-006 |
+
+### src/core/ReassemblyBuffer.hpp
+
+| Function | Class | SC/NSC | HAZ IDs |
+|---|---|---|---|
+| `init()` | `ReassemblyBuffer` | NSC | — |
+| `ingest()` | `ReassemblyBuffer` | SC | HAZ-003, HAZ-006 |
+| `sweep_expired()` | `ReassemblyBuffer` | NSC | — |
+
+### src/core/OrderingBuffer.hpp
+
+| Function | Class | SC/NSC | HAZ IDs |
+|---|---|---|---|
+| `init()` | `OrderingBuffer` | NSC | — |
+| `ingest()` | `OrderingBuffer` | SC | HAZ-001, HAZ-006 |
+| `try_release_next()` | `OrderingBuffer` | SC | HAZ-001 |
+| `advance_sequence()` | `OrderingBuffer` | NSC | — |
+
 ### src/core/DeliveryEngine.hpp
 
 | Function | Class | SC/NSC | HAZ IDs |

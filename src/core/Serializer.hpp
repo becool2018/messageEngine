@@ -45,7 +45,7 @@
 
 class Serializer {
 public:
-    /// Wire format header size in bytes.
+    /// Wire format header size in bytes (protocol v2).
     /// Layout:
     ///   1 byte   message_type
     ///   1 byte   reliability_class
@@ -59,8 +59,12 @@ public:
     ///   4 bytes  payload_length (BE)
     ///   2 bytes  PROTO_MAGIC (BE, 0x4D45 = 'ME'; from ProtocolVersion.hpp)
     ///   2 bytes  reserved (must be 0x0000)
-    /// Total: 1+1+1+1+8+8+4+4+8+4+2+2 = 44 bytes
-    static const uint32_t WIRE_HEADER_SIZE = 44U;
+    ///   4 bytes  sequence_num (BE)         [v2 addition]
+    ///   1 byte   fragment_index            [v2 addition]
+    ///   1 byte   fragment_count            [v2 addition]
+    ///   2 bytes  total_payload_length (BE) [v2 addition]
+    /// Total: 1+1+1+1+8+8+4+4+8+4+2+2+4+1+1+2 = 52 bytes
+    static const uint32_t WIRE_HEADER_SIZE = 52U;
 
     // Safety-critical (SC): HAZ-005 — verified to M5
     /// Serialize a MessageEnvelope to a buffer in big-endian wire format.
@@ -92,6 +96,12 @@ private:
 
     /// Write one byte to buffer at offset, return new offset.
     static uint32_t write_u8(uint8_t* buf, uint32_t offset, uint8_t val);
+
+    /// Write 2-byte big-endian value to buffer at offset, return new offset.
+    static uint32_t write_u16(uint8_t* buf, uint32_t offset, uint16_t val);
+
+    /// Read 2-byte big-endian value from buffer at offset, return value.
+    static uint16_t read_u16(const uint8_t* buf, uint32_t offset);
 
     /// Write 4-byte big-endian value to buffer at offset, return new offset.
     static uint32_t write_u32(uint8_t* buf, uint32_t offset, uint32_t val);

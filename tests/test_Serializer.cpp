@@ -216,17 +216,18 @@ static bool test_serialize_max_payload()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 6: Verify WIRE_HEADER_SIZE constant
+// Test 6: Verify WIRE_HEADER_SIZE constant (protocol v2)
 // ─────────────────────────────────────────────────────────────────────────────
 // Verifies: REQ-3.2.3, REQ-3.2.8
 static bool test_wire_header_size()
 {
-    // Layout (from Serializer.hpp):
+    // v2 layout (from Serializer.hpp):
     // 1 byte message_type + 1 reliability_class + 1 priority + 1 proto_version
     // + 8 message_id + 8 timestamp_us + 4 source_id + 4 destination_id
     // + 8 expiry_time_us + 4 payload_length + 2 magic + 2 reserved
-    // = 1 + 1 + 1 + 1 + 8 + 8 + 4 + 4 + 8 + 4 + 2 + 2 = 44
-    assert(Serializer::WIRE_HEADER_SIZE == 44U);
+    // + 4 sequence_num + 1 fragment_index + 1 fragment_count + 2 total_payload_length
+    // = 1+1+1+1+8+8+4+4+8+4+2+2+4+1+1+2 = 52
+    assert(Serializer::WIRE_HEADER_SIZE == 52U);
 
     return true;
 }
@@ -417,11 +418,12 @@ static bool test_deserialize_zero_payload()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 13: Deserialize rejects version 0 (old pre-versioning format)
+//          and version 1 (old v1 format now that we are at v2)
 // ─────────────────────────────────────────────────────────────────────────────
 // Verifies: REQ-3.2.8
 static bool test_deserialize_version_zero_rejected()
 {
-    // Serialize a valid message (version byte is set to PROTO_VERSION = 1)
+    // Serialize a valid message (version byte is set to PROTO_VERSION = 2)
     MessageEnvelope original;
     envelope_init(original);
     original.message_type   = MessageType::DATA;
@@ -434,13 +436,20 @@ static bool test_deserialize_version_zero_rejected()
     assert(out_len >= Serializer::WIRE_HEADER_SIZE);
 
     // Overwrite version byte at offset 3 with 0 (old unversioned format)
-    // — must be rejected by a v1 deserializer
+    // — must be rejected by a v2 deserializer
     wire_buf[3U] = 0U;
 
     MessageEnvelope env;
     envelope_init(env);
     Result r = Serializer::deserialize(wire_buf, out_len, env);
     assert(r == Result::ERR_INVALID);
+
+    // Also verify that v1 frames are rejected by a v2 deserializer
+    wire_buf[3U] = 1U;
+    MessageEnvelope env2;
+    envelope_init(env2);
+    Result r2 = Serializer::deserialize(wire_buf, out_len, env2);
+    assert(r2 == Result::ERR_INVALID);
 
     return true;
 }
@@ -472,6 +481,110 @@ static bool test_proto_version_in_wire_frame()
     // Wire bytes 42–43 must be reserved zero
     assert(wire_buf[42U] == 0U);
     assert(wire_buf[43U] == 0U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 15: Serialize and deserialize v2 fragment fields (round-trip)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3, REQ-3.2.8
+static bool test_v2_fragment_fields_round_trip()
+{
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type         = MessageType::DATA;
+    original.source_id            = 20U;
+    original.payload_length       = 10U;
+    original.sequence_num         = 42U;
+    original.fragment_index       = 1U;
+    original.fragment_count       = 3U;
+    original.total_payload_length = 3000U;
+    for (uint32_t i = 0U; i < 10U; ++i) {
+        original.payload[i] = static_cast<uint8_t>(i);
+    }
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+    assert(out_len == Serializer::WIRE_HEADER_SIZE + 10U);
+
+    MessageEnvelope deser;
+    envelope_init(deser);
+    Result dr = Serializer::deserialize(wire_buf, out_len, deser);
+    assert(dr == Result::OK);
+    assert(deser.sequence_num         == 42U);
+    assert(deser.fragment_index       == 1U);
+    assert(deser.fragment_count       == 3U);
+    assert(deser.total_payload_length == 3000U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 16: Deserialize rejects fragment_index >= fragment_count
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_v2_fragment_index_out_of_range_rejected()
+{
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type   = MessageType::DATA;
+    original.source_id      = 21U;
+    original.payload_length = 4U;
+    original.fragment_index = 0U;
+    original.fragment_count = 2U;
+    original.total_payload_length = 4U;
+    original.payload[0] = 0xAAU;
+    original.payload[1] = 0xBBU;
+    original.payload[2] = 0xCCU;
+    original.payload[3] = 0xDDU;
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+
+    // Overwrite fragment_index (offset 48) to equal fragment_count (2): must be rejected
+    wire_buf[48U] = 2U;
+
+    MessageEnvelope env;
+    envelope_init(env);
+    Result r = Serializer::deserialize(wire_buf, out_len, env);
+    assert(r == Result::ERR_INVALID);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 17: Deserialize rejects fragment_count > FRAG_MAX_COUNT
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_v2_fragment_count_too_large_rejected()
+{
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type   = MessageType::DATA;
+    original.source_id      = 22U;
+    original.payload_length = 4U;
+    original.fragment_index = 0U;
+    original.fragment_count = 1U;
+    original.total_payload_length = 4U;
+    original.payload[0] = 0x01U;
+    original.payload[1] = 0x02U;
+    original.payload[2] = 0x03U;
+    original.payload[3] = 0x04U;
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+
+    // Overwrite fragment_count (offset 49) to exceed FRAG_MAX_COUNT (4): use 5
+    wire_buf[49U] = 5U;
+
+    MessageEnvelope env;
+    envelope_init(env);
+    Result r = Serializer::deserialize(wire_buf, out_len, env);
+    assert(r == Result::ERR_INVALID);
 
     return true;
 }
@@ -579,6 +692,27 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_proto_version_in_wire_frame\n");
+    }
+
+    if (!test_v2_fragment_fields_round_trip()) {
+        printf("FAIL: test_v2_fragment_fields_round_trip\n");
+        ++failed;
+    } else {
+        printf("PASS: test_v2_fragment_fields_round_trip\n");
+    }
+
+    if (!test_v2_fragment_index_out_of_range_rejected()) {
+        printf("FAIL: test_v2_fragment_index_out_of_range_rejected\n");
+        ++failed;
+    } else {
+        printf("PASS: test_v2_fragment_index_out_of_range_rejected\n");
+    }
+
+    if (!test_v2_fragment_count_too_large_rejected()) {
+        printf("FAIL: test_v2_fragment_count_too_large_rejected\n");
+        ++failed;
+    } else {
+        printf("PASS: test_v2_fragment_count_too_large_rejected\n");
     }
 
     return (failed > 0) ? 1 : 0;

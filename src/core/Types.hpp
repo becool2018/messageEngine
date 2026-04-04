@@ -54,6 +54,25 @@ static const uint32_t DTLS_MAX_DATAGRAM_BYTES = 1400U;
 /// Power of 10 Rule 3: fixed size; no dynamic allocation after init.
 static const uint32_t DELIVERY_EVENT_RING_CAPACITY = 64U;
 
+/// Maximum payload bytes carried in a single wire fragment.
+/// Conservative enough to fit inside DTLS_MAX_DATAGRAM_BYTES with the v2 header.
+/// 1400 (DTLS_MAX_DATAGRAM_BYTES) - 52 (WIRE_HEADER_SIZE_V2) = 1348; round down.
+/// (REQ-3.2.3, REQ-3.3.5)
+static const uint32_t FRAG_MAX_PAYLOAD_BYTES = 1024U;
+
+/// Maximum number of fragments one logical message can be split into.
+/// MSG_MAX_PAYLOAD_BYTES(4096) / FRAG_MAX_PAYLOAD_BYTES(1024) = 4 exactly.
+/// (REQ-3.2.3, REQ-3.3.5)
+static const uint32_t FRAG_MAX_COUNT = 4U;
+
+/// Number of concurrent reassembly slots (one per in-flight logical message).
+/// (REQ-3.2.3, REQ-3.3.3)
+static const uint32_t REASSEMBLY_SLOT_COUNT = 8U;
+
+/// Number of slots in the ordered-hold buffer.
+/// (REQ-3.3.5)
+static const uint32_t ORDERING_HOLD_COUNT = 8U;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Error / severity model  (F-Prime style)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,7 +133,8 @@ enum class Result : uint8_t {
     ERR_IO         = 5U,
     ERR_DUPLICATE  = 6U,
     ERR_EXPIRED    = 7U,
-    ERR_OVERRUN    = 8U
+    ERR_OVERRUN    = 8U,
+    ERR_AGAIN      = 9U   ///< More data needed (reassembly or ordering) — not an error
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
