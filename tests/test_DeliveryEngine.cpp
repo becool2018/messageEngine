@@ -1900,6 +1900,156 @@ static void test_event_ring_retry_fired_emits_event()
     printf("PASS: test_event_ring_retry_fired_emits_event\n");
 }
 
+// Test: send RELIABLE_ACK; inject matching ACK from remote; receive() processes ACK;
+//       poll_event() returns ACK_RECEIVED with correct message_id.
+// Verifies: REQ-7.2.5
+static void test_event_ring_ack_received_emits_event()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Send a RELIABLE_ACK message; engine assigns message_id
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+    Result send_res = engine.send(env, NOW_US);
+    assert(send_res == Result::OK);
+    const uint64_t sent_id = env.message_id;
+
+    // Drain the SEND_OK event so the ring is clean for the ACK_RECEIVED check
+    DeliveryEvent discard;
+    Result dr = engine.poll_event(discard);
+    assert(dr == Result::OK);
+    assert(discard.kind == DeliveryEventKind::SEND_OK);
+
+    // Build an ACK from node 2 (remote) back to node 1 (local) for sent_id
+    MessageEnvelope ack_env;
+    make_ack_envelope(ack_env, 2U, 1U, sent_id);
+
+    // Inject the ACK into harness_a so engine.receive() will pick it up
+    Result inj = harness_a.inject(ack_env);
+    assert(inj == Result::OK);
+
+    // Process the ACK through the delivery engine
+    MessageEnvelope out_env;
+    Result recv_res = engine.receive(out_env, 100U, NOW_US + 1000ULL);
+    assert(recv_res == Result::OK);
+
+    // Drain ring looking for ACK_RECEIVED
+    bool found = false;
+    // Power of 10 rule 2: bounded loop
+    for (uint32_t i = 0U; i < DELIVERY_EVENT_RING_CAPACITY; ++i) {
+        DeliveryEvent ev;
+        Result pr = engine.poll_event(ev);
+        if (pr == Result::ERR_EMPTY) {
+            break;
+        }
+        assert(pr == Result::OK);
+        if (ev.kind == DeliveryEventKind::ACK_RECEIVED && ev.message_id == sent_id) {
+            assert(ev.result == Result::OK);
+            found = true;
+        }
+    }
+    assert(found);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_event_ring_ack_received_emits_event\n");
+}
+
+// Test: inject a message addressed to a different node (destination_id != local_id);
+//       engine drops it and emits MISROUTE_DROP.
+// Verifies: REQ-7.2.5
+static void test_event_ring_misroute_drop_emits_event()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);  // engine local_id = 1
+
+    // Build a DATA envelope addressed to node 3 (not local_id=1, not broadcast=0)
+    MessageEnvelope misrouted;
+    make_data_envelope(misrouted, 2U, 3U, 55555ULL, ReliabilityClass::BEST_EFFORT);
+
+    // Inject directly into harness_a so engine.receive() will pick it up
+    Result inj = harness_a.inject(misrouted);
+    assert(inj == Result::OK);
+
+    // engine.receive() should reject the misrouted message
+    MessageEnvelope out_env;
+    Result recv_res = engine.receive(out_env, 100U, NOW_US);
+    assert(recv_res == Result::ERR_INVALID);
+
+    // Drain ring looking for MISROUTE_DROP
+    bool found = false;
+    // Power of 10 rule 2: bounded loop
+    for (uint32_t i = 0U; i < DELIVERY_EVENT_RING_CAPACITY; ++i) {
+        DeliveryEvent ev;
+        Result pr = engine.poll_event(ev);
+        if (pr == Result::ERR_EMPTY) {
+            break;
+        }
+        assert(pr == Result::OK);
+        if (ev.kind == DeliveryEventKind::MISROUTE_DROP && ev.message_id == 55555ULL) {
+            assert(ev.result == Result::ERR_INVALID);
+            found = true;
+        }
+    }
+    assert(found);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_event_ring_misroute_drop_emits_event\n");
+}
+
+// Test: emit several events then drain_events() returns all of them in FIFO order.
+// Verifies: REQ-7.2.5
+static void test_event_ring_drain_events()
+{
+    MockTransportInterface mock;
+    ChannelConfig ch;
+    channel_config_default(ch, 0U);
+    DeliveryEngine engine;
+    engine.init(&mock, ch, 5U);
+
+    // Emit 4 SEND_OK events by sending 4 BEST_EFFORT messages
+    // Power of 10 rule 2: bounded loop (4 iterations, compile-time constant)
+    static const uint32_t NUM_EVENTS = 4U;
+    for (uint32_t i = 0U; i < NUM_EVENTS; ++i) {
+        MessageEnvelope env;
+        make_data_envelope(env, 5U, 6U, 0ULL, ReliabilityClass::BEST_EFFORT);
+        Result sr = engine.send(env, NOW_US + static_cast<uint64_t>(i) + 1ULL);
+        assert(sr == Result::OK);
+    }
+
+    assert(engine.pending_event_count() == NUM_EVENTS);
+
+    // drain_events() into a fixed buffer
+    // Power of 10 Rule 3: fixed-size stack array; no heap.
+    DeliveryEvent drain_buf[DELIVERY_EVENT_RING_CAPACITY];
+    uint32_t drained = engine.drain_events(drain_buf, DELIVERY_EVENT_RING_CAPACITY);
+    assert(drained == NUM_EVENTS);
+
+    // Ring should now be empty
+    assert(engine.pending_event_count() == 0U);
+
+    // All drained events must be SEND_OK (FIFO order)
+    // Power of 10 rule 2: bounded loop (NUM_EVENTS iterations)
+    for (uint32_t i = 0U; i < NUM_EVENTS; ++i) {
+        assert(drain_buf[i].kind == DeliveryEventKind::SEND_OK);
+        assert(drain_buf[i].result == Result::OK);
+    }
+
+    // drain_events() on empty ring returns 0
+    uint32_t empty_drain = engine.drain_events(drain_buf, DELIVERY_EVENT_RING_CAPACITY);
+    assert(empty_drain == 0U);
+
+    printf("PASS: test_event_ring_drain_events\n");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1951,6 +2101,9 @@ int main()
     test_event_ring_expiry_drop_emits_event();
     test_event_ring_overflow_wraps();
     test_event_ring_retry_fired_emits_event();
+    test_event_ring_ack_received_emits_event();
+    test_event_ring_misroute_drop_emits_event();
+    test_event_ring_drain_events();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;
