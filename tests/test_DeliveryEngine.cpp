@@ -24,12 +24,12 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: simple test framework using assert() and printf().
  *
- * Verifies: REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4
+ * Verifies: REQ-3.2.4, REQ-3.2.5, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4
  */
 // Verification: M1 + M2 + M4 + M5
 // M4: all reachable branches exercised via LocalSimHarness loopback (tests 1–23).
 // M5: transport ERR_IO paths (unreachable in loopback) exercised via
-//     MockTransportInterface (tests 24–26); see MockTransportInterface.hpp.
+//     MockTransportInterface (tests 24–28); see MockTransportInterface.hpp.
 
 #include <cstdio>
 #include <cstring>
@@ -1134,6 +1134,95 @@ static void test_mock_pump_retries_transport_err_io()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// M5 Test 27: RELIABLE_ACK send with transport ERR_IO rolls back AckTracker slot.
+// Verifies: REQ-3.3.2, REQ-3.2.4
+// Verification: M1 + M2 + M4 + M5 (fault injection via MockTransportInterface)
+//
+// Rationale: transport failure in send() must cancel the tentatively reserved
+// AckTracker slot.  If the slot is left PENDING, sweep_ack_timeouts() will
+// report a spurious timeout for a message that was never delivered — a false
+// failure that could trigger incorrect application-level error recovery.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mock_reliable_ack_send_err_rolls_back_ack_tracker()
+{
+    // Verifies: REQ-3.3.2, REQ-3.2.4
+    MockTransportInterface mock;
+    ChannelConfig cfg;
+    make_mock_channel_config(cfg);
+
+    DeliveryEngine engine;
+    engine.init(&mock, cfg, 1U);
+
+    // Arm ERR_IO before the send so the transport rejects it immediately
+    mock.fail_send_message = true;
+
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+    Result res = engine.send(env, NOW_US);
+
+    // Transport was called exactly once
+    assert(res == Result::ERR_IO);
+    assert(mock.n_send_message == 1);
+
+    // Sweep far into the future: if the AckTracker slot was NOT rolled back it
+    // would time out and the sweep would return >= 1.  A correct rollback leaves
+    // the slot FREE, so the sweep must return 0.
+    // Power of 10: bounded single-call; return value checked.
+    uint32_t expired = engine.sweep_ack_timeouts(NOW_US + 2000000ULL);
+    assert(expired == 0U);
+
+    printf("PASS: test_mock_reliable_ack_send_err_rolls_back_ack_tracker\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M5 Test 28: RELIABLE_RETRY send with transport ERR_IO rolls back both the
+// AckTracker slot and the RetryManager slot.
+// Verifies: REQ-3.3.3, REQ-3.2.4, REQ-3.2.5
+// Verification: M1 + M2 + M4 + M5 (fault injection via MockTransportInterface)
+//
+// Rationale: if either slot is left occupied after a failed send, subsequent
+// sweep_ack_timeouts() calls report a spurious timeout and pump_retries() would
+// attempt to re-send a message whose first transmission was never accepted by
+// the transport — corrupting the retry state machine.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mock_reliable_retry_send_err_rolls_back_both_slots()
+{
+    // Verifies: REQ-3.3.3, REQ-3.2.4, REQ-3.2.5
+    MockTransportInterface mock;
+    ChannelConfig cfg;
+    make_mock_channel_config(cfg);
+
+    DeliveryEngine engine;
+    engine.init(&mock, cfg, 1U);
+
+    // Arm ERR_IO before the send
+    mock.fail_send_message = true;
+
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_RETRY);
+    Result res = engine.send(env, NOW_US);
+
+    // Transport was called exactly once
+    assert(res == Result::ERR_IO);
+    assert(mock.n_send_message == 1);
+
+    // AckTracker rollback: sweep far into the future; must return 0 (no pending slot)
+    // Power of 10: bounded single-call; return value checked.
+    uint32_t expired = engine.sweep_ack_timeouts(NOW_US + 2000000ULL);
+    assert(expired == 0U);
+
+    // RetryManager rollback: pump far into the future; if a slot was left scheduled
+    // pump_retries() would attempt a resend and n_send_message would exceed 1.
+    // Power of 10: bounded single-call; return value checked.
+    uint32_t retried = engine.pump_retries(NOW_US + 2000000ULL);
+    assert(retried == 0U);
+    // No additional send attempt must have occurred — slot was cancelled, not retried
+    assert(mock.n_send_message == 1);
+
+    printf("PASS: test_mock_reliable_retry_send_err_rolls_back_both_slots\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test: receiving a RELIABLE_ACK DATA frame causes exactly one outbound ACK.
 // Verifies REQ-3.2.4: auto-ACK emission on the receive path for RELIABLE_ACK class.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1530,6 +1619,8 @@ int main()
     test_mock_send_transport_err_io();
     test_mock_receive_transport_err_io();
     test_mock_pump_retries_transport_err_io();
+    test_mock_reliable_ack_send_err_rolls_back_ack_tracker();
+    test_mock_reliable_retry_send_err_rolls_back_both_slots();
     test_stats_msgs_sent();
     test_stats_msgs_received();
     test_stats_dropped_expired();

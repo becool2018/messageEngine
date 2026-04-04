@@ -268,11 +268,67 @@ static Result reserve_bookkeeping(AckTracker&            ack_tracker,
                     (unsigned long long)env.message_id, static_cast<uint8_t>(sched_res));
         // Roll back AckTracker reservation: cancel() frees the slot directly
         // without incrementing acks_received (no phantom ACK stat).
-        (void)ack_tracker.cancel(env.source_id, env.message_id);
+        // Power of 10 Rule 7 / HAZ-001: check cancel() return value; log WARNING_HI
+        // on failure so a stale PENDING slot can be detected and swept later.
+        Result cancel_res = ack_tracker.cancel(env.source_id, env.message_id);
+        if (cancel_res != Result::OK) {
+            Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                        "cancel() failed during rollback for message_id=%llu (result=%u); "
+                        "stale PENDING slot may persist until sweep",
+                        (unsigned long long)env.message_id,
+                        static_cast<uint8_t>(cancel_res));
+        }
         return sched_res;
     }
 
     return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// rollback_on_transport_failure() — file-static CC-reduction helper for send().
+//
+// Called when send_via_transport() fails after bookkeeping slots have already
+// been reserved.  Cancels AckTracker and (for RELIABLE_RETRY) RetryManager
+// slots so no spurious timeout or retry fires for a message never put on wire.
+//
+// Power of 10 Rule 7 / HAZ-001: both cancel() return values are checked and
+// logged at WARNING_HI on failure so stale slots can be detected and swept.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+static void rollback_on_transport_failure(AckTracker&            ack_tracker,
+                                          RetryManager&          retry_manager,
+                                          const MessageEnvelope& env)
+{
+    NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));   // Assert: envelope fields set
+    NEVER_COMPILED_OUT_ASSERT(                        // Assert: only called for reliable classes
+        env.reliability_class == ReliabilityClass::RELIABLE_ACK ||
+        env.reliability_class == ReliabilityClass::RELIABLE_RETRY);
+
+    // Always cancel the AckTracker slot for both reliable classes.
+    // cancel() frees the slot directly without incrementing acks_received
+    // (avoids phantom ACK stat).
+    Result ack_cancel_res = ack_tracker.cancel(env.source_id, env.message_id);
+    if (ack_cancel_res != Result::OK) {
+        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                    "ack_tracker.cancel() failed during rollback for "
+                    "message_id=%llu (result=%u); stale PENDING slot may "
+                    "persist until sweep",
+                    (unsigned long long)env.message_id,
+                    static_cast<uint8_t>(ack_cancel_res));
+    }
+
+    // Also cancel the RetryManager slot for RELIABLE_RETRY messages.
+    if (env.reliability_class == ReliabilityClass::RELIABLE_RETRY) {
+        Result retry_cancel_res = retry_manager.cancel(env.source_id, env.message_id);
+        if (retry_cancel_res != Result::OK) {
+            Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                        "retry_manager.cancel() failed during rollback for "
+                        "message_id=%llu (result=%u); stale retry slot may "
+                        "persist until sweep",
+                        (unsigned long long)env.message_id,
+                        static_cast<uint8_t>(retry_cancel_res));
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -311,14 +367,11 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
     if (res != Result::OK) {
         // Roll back bookkeeping reserved in Step 2 so no spurious timeout or
         // retry fires for a message that was never put on the wire.
-        // cancel() frees the AckTracker slot directly without a phantom ACK stat.
-        // retry_manager.on_ack() marks the RetryManager slot inactive immediately.
+        // Power of 10 Rule 7 / HAZ-001: cancel() return values are checked
+        // and logged inside rollback_on_transport_failure() (CC-reduction helper).
         if (env.reliability_class == ReliabilityClass::RELIABLE_ACK ||
             env.reliability_class == ReliabilityClass::RELIABLE_RETRY) {
-            (void)m_ack_tracker.cancel(env.source_id, env.message_id);
-        }
-        if (env.reliability_class == ReliabilityClass::RELIABLE_RETRY) {
-            (void)m_retry_manager.cancel(env.source_id, env.message_id);
+            rollback_on_transport_failure(m_ack_tracker, m_retry_manager, env);
         }
         record_send_failure(env, res);  // REQ-7.2.3: stats + log (CC-reduction helper)
         return res;
