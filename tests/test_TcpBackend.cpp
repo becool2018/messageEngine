@@ -41,9 +41,10 @@
  *
  * Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4,
  *           REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4,
- *           REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.3.5, REQ-7.1.1
+ *           REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.3.5, REQ-7.1.1,
+ *           REQ-5.1.5, REQ-5.1.6
  */
-// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.3.5, REQ-7.1.1
+// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.3.5, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
 // Verification: M1 + M2 + M4 + M5 (fault injection via ISocketOps)
 
 #include <cstdio>
@@ -1355,6 +1356,184 @@ static void test_connection_limit_reached()
     printf("PASS: test_connection_limit_reached\n");
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inbound impairment tests (REQ-5.1.5, REQ-5.1.6)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// test_tcp_inbound_partition_drops_received
+//
+// Configure a plaintext TcpBackend server with partition_enabled=true,
+// partition_gap_ms=1 (fires after 1 ms), and a long partition_duration_ms.
+// Sleep 5 ms so the partition becomes active, then have a loopback client send
+// one message.  The server's recv_from_client() calls apply_inbound_impairment(),
+// which checks is_partition_active() -> true -> drops the frame before queuing.
+// receive_message() therefore returns ERR_TIMEOUT.
+//
+// Verifies: REQ-5.1.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct TcpPartSrvArg {
+    uint16_t port;
+    Result   init_result;
+    Result   recv_result;
+};
+
+static void* tcp_partition_srv_thread(void* raw)
+{
+    TcpPartSrvArg* a = static_cast<TcpPartSrvArg*>(raw);
+    assert(a != nullptr);
+
+    TcpBackend server;
+    TransportConfig cfg;
+    make_tcp_server_cfg(cfg, a->port);
+    cfg.channels[0U].impairment.enabled              = true;
+    cfg.channels[0U].impairment.partition_enabled     = true;
+    cfg.channels[0U].impairment.partition_gap_ms      = 10U;     // 10 ms gap
+    cfg.channels[0U].impairment.partition_duration_ms = 30000U;  // 30 s
+
+    a->init_result = server.init(cfg);
+    if (a->init_result != Result::OK) { return nullptr; }
+
+    // Prime the partition timer: call receive_message() with a short timeout so
+    // collect_deliverable() -> is_partition_active() fires before the client
+    // connects.  This 10 ms poll starts the 10 ms gap timer and returns
+    // ERR_TIMEOUT (no client yet).  After this returns the partition is active.
+    MessageEnvelope prime_env;
+    (void)server.receive_message(prime_env, 10U);
+
+    // Now wait for the client to connect and send; partition must already be active.
+    MessageEnvelope env;
+    a->recv_result = server.receive_message(env, 500U);
+
+    server.close();
+    return nullptr;
+}
+
+// Verifies: REQ-5.1.6
+static void test_tcp_inbound_partition_drops_received()
+{
+    static const uint16_t PORT = 19740U;
+
+    TcpPartSrvArg srv_arg;
+    srv_arg.port        = PORT;
+    srv_arg.init_result = Result::ERR_IO;
+    srv_arg.recv_result = Result::OK;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t srv_tid;
+    int rc = pthread_create(&srv_tid, &attr, tcp_partition_srv_thread, &srv_arg);
+    assert(rc == 0);
+    (void)pthread_attr_destroy(&attr);
+
+    usleep(50000U);  // 50 ms: give server time to bind and partition to activate
+
+    TcpBackend client;
+    TransportConfig cli_cfg;
+    make_tcp_client_cfg(cli_cfg, PORT);
+    Result cli_init = client.init(cli_cfg);
+
+    if (cli_init == Result::OK) {
+        MessageEnvelope env;
+        make_test_envelope(env, 0xDEAD0001ULL);
+        (void)client.send_message(env);
+        client.close();
+    }
+
+    (void)pthread_join(srv_tid, nullptr);
+
+    assert(srv_arg.init_result == Result::OK);
+    assert(srv_arg.recv_result == Result::ERR_TIMEOUT);
+
+    printf("PASS: test_tcp_inbound_partition_drops_received\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// test_tcp_inbound_reorder_buffers_message
+//
+// Configure a plaintext TcpBackend server with reorder_enabled=true,
+// reorder_window_size=2.  A loopback client sends 2 messages.  Both are
+// buffered in the reorder window (out_count==0 each time), so they are never
+// pushed into m_recv_queue.  receive_message() therefore returns ERR_TIMEOUT.
+//
+// Verifies: REQ-5.1.5
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct TcpReorderSrvArg {
+    uint16_t port;
+    Result   init_result;
+    Result   recv_result;
+};
+
+static void* tcp_reorder_srv_thread(void* raw)
+{
+    TcpReorderSrvArg* a = static_cast<TcpReorderSrvArg*>(raw);
+    assert(a != nullptr);
+
+    TcpBackend server;
+    TransportConfig cfg;
+    make_tcp_server_cfg(cfg, a->port);
+    cfg.channels[0U].impairment.enabled              = true;
+    cfg.channels[0U].impairment.reorder_enabled       = true;
+    cfg.channels[0U].impairment.reorder_window_size   = 2U;
+
+    a->init_result = server.init(cfg);
+    if (a->init_result != Result::OK) { return nullptr; }
+
+    MessageEnvelope env;
+    a->recv_result = server.receive_message(env, 500U);
+
+    server.close();
+    return nullptr;
+}
+
+// Verifies: REQ-5.1.5
+static void test_tcp_inbound_reorder_buffers_message()
+{
+    static const uint16_t PORT = 19741U;
+
+    TcpReorderSrvArg srv_arg;
+    srv_arg.port        = PORT;
+    srv_arg.init_result = Result::ERR_IO;
+    srv_arg.recv_result = Result::OK;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t srv_tid;
+    int rc = pthread_create(&srv_tid, &attr, tcp_reorder_srv_thread, &srv_arg);
+    assert(rc == 0);
+    (void)pthread_attr_destroy(&attr);
+
+    usleep(50000U);  // 50 ms: give server time to bind
+
+    TcpBackend client;
+    TransportConfig cli_cfg;
+    make_tcp_client_cfg(cli_cfg, PORT);
+    Result cli_init = client.init(cli_cfg);
+
+    if (cli_init == Result::OK) {
+        MessageEnvelope env1;
+        make_test_envelope(env1, 0xBEEF0001ULL);
+        (void)client.send_message(env1);
+
+        MessageEnvelope env2;
+        make_test_envelope(env2, 0xBEEF0002ULL);
+        (void)client.send_message(env2);
+
+        client.close();
+    }
+
+    (void)pthread_join(srv_tid, nullptr);
+
+    assert(srv_arg.init_result == Result::OK);
+    assert(srv_arg.recv_result == Result::ERR_TIMEOUT);
+
+    printf("PASS: test_tcp_inbound_reorder_buffers_message\n");
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1395,6 +1574,10 @@ int main()
     test_send_to_all_clients_send_frame_fail();
     test_send_message_loss_impairment_drop();
     test_connection_limit_reached();
+
+    // Inbound impairment tests (REQ-5.1.5, REQ-5.1.6)
+    test_tcp_inbound_partition_drops_received();
+    test_tcp_inbound_reorder_buffers_message();
 
     printf("=== ALL PASSED ===\n");
     return 0;
