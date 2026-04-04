@@ -24,7 +24,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: simple test framework using assert() and printf().
  *
- * Verifies: REQ-3.2.4, REQ-3.2.5, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4
+ * Verifies: REQ-3.2.4, REQ-3.2.5, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
  */
 // Verification: M1 + M2 + M4 + M5
 // M4: all reachable branches exercised via LocalSimHarness loopback (tests 1–23).
@@ -1583,6 +1583,324 @@ static void test_stats_latency()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// REQ-7.2.5: observability event ring tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Test: send BEST_EFFORT; poll_event() returns SEND_OK with correct message_id
+// Verifies: REQ-7.2.5
+static void test_event_ring_send_ok_emits_event()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Start with empty ring
+    assert(engine.pending_event_count() == 0U);
+
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
+    Result res = engine.send(env, NOW_US);
+    assert(res == Result::OK);
+
+    // Exactly one event should have been pushed
+    assert(engine.pending_event_count() == 1U);
+
+    DeliveryEvent ev;
+    Result pop_res = engine.poll_event(ev);
+    assert(pop_res == Result::OK);
+    assert(ev.kind == DeliveryEventKind::SEND_OK);
+    assert(ev.message_id == env.message_id);
+    assert(ev.result == Result::OK);
+    assert(ev.timestamp_us == NOW_US);
+
+    // Ring is now empty
+    assert(engine.pending_event_count() == 0U);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_event_ring_send_ok_emits_event\n");
+}
+
+// Test: trigger a send failure (transport ERR_IO); poll_event() returns SEND_FAIL
+// Verifies: REQ-7.2.5
+static void test_event_ring_send_fail_emits_event()
+{
+    MockTransportInterface mock;
+    mock.fail_send_message = true;
+
+    ChannelConfig ch;
+    channel_config_default(ch, 0U);
+    ch.max_retries      = 0U;
+    ch.recv_timeout_ms  = 1000U;
+
+    DeliveryEngine engine;
+    engine.init(&mock, ch, 1U);
+
+    // Start with empty ring
+    assert(engine.pending_event_count() == 0U);
+
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
+    Result send_res = engine.send(env, NOW_US);
+    assert(send_res == Result::ERR_IO);
+
+    // SEND_FAIL (not EXPIRY_DROP) for ERR_IO
+    assert(engine.pending_event_count() == 1U);
+
+    DeliveryEvent ev;
+    Result pop_res = engine.poll_event(ev);
+    assert(pop_res == Result::OK);
+    assert(ev.kind == DeliveryEventKind::SEND_FAIL);
+    assert(ev.message_id == env.message_id);
+    assert(ev.result == Result::ERR_IO);
+
+    printf("PASS: test_event_ring_send_fail_emits_event\n");
+}
+
+// Test: send RELIABLE_ACK, advance time past deadline, sweep_ack_timeouts()
+//       → poll_event() returns ACK_TIMEOUT with correct message_id
+// Verifies: REQ-7.2.5
+static void test_event_ring_ack_timeout_emits_event()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+    Result send_res = engine.send(env, NOW_US);
+    assert(send_res == Result::OK);
+    const uint64_t sent_id = env.message_id;
+
+    // Drain the SEND_OK event so ring is clean for the timeout check
+    DeliveryEvent discard;
+    Result dr = engine.poll_event(discard);
+    assert(dr == Result::OK);
+    assert(discard.kind == DeliveryEventKind::SEND_OK);
+
+    // Advance time well past the 1000 ms recv_timeout
+    uint64_t future_us = NOW_US + 2000000ULL;  // 2 seconds
+    uint32_t swept = engine.sweep_ack_timeouts(future_us);
+    assert(swept >= 1U);
+
+    // At least one ACK_TIMEOUT event must be present
+    bool found = false;
+    // Power of 10 rule 2: bounded loop (at most DELIVERY_EVENT_RING_CAPACITY iterations)
+    for (uint32_t i = 0U; i < DELIVERY_EVENT_RING_CAPACITY; ++i) {
+        DeliveryEvent ev;
+        Result pr = engine.poll_event(ev);
+        if (pr == Result::ERR_EMPTY) {
+            break;
+        }
+        assert(pr == Result::OK);
+        if (ev.kind == DeliveryEventKind::ACK_TIMEOUT && ev.message_id == sent_id) {
+            assert(ev.result == Result::ERR_TIMEOUT);
+            found = true;
+        }
+    }
+    assert(found);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_event_ring_ack_timeout_emits_event\n");
+}
+
+// Test: receive same RELIABLE_RETRY message twice; second receive emits DUPLICATE_DROP
+// Verifies: REQ-7.2.5
+static void test_event_ring_duplicate_drop_emits_event()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Inject the same message twice
+    MessageEnvelope inject_env;
+    make_data_envelope(inject_env, 2U, 1U, 77777ULL, ReliabilityClass::RELIABLE_RETRY);
+    Result inj1 = harness_a.inject(inject_env);
+    assert(inj1 == Result::OK);
+    Result inj2 = harness_a.inject(inject_env);
+    assert(inj2 == Result::OK);
+
+    // First receive: accepted
+    MessageEnvelope recv1;
+    Result r1 = engine.receive(recv1, 100U, NOW_US);
+    assert(r1 == Result::OK);
+
+    // Second receive: duplicate — should emit DUPLICATE_DROP
+    MessageEnvelope recv2;
+    Result r2 = engine.receive(recv2, 100U, NOW_US);
+    assert(r2 == Result::ERR_DUPLICATE);
+
+    // Drain ring looking for DUPLICATE_DROP
+    bool found = false;
+    // Power of 10 rule 2: bounded loop
+    for (uint32_t i = 0U; i < DELIVERY_EVENT_RING_CAPACITY; ++i) {
+        DeliveryEvent ev;
+        Result pr = engine.poll_event(ev);
+        if (pr == Result::ERR_EMPTY) {
+            break;
+        }
+        assert(pr == Result::OK);
+        if (ev.kind == DeliveryEventKind::DUPLICATE_DROP && ev.message_id == 77777ULL) {
+            assert(ev.result == Result::ERR_DUPLICATE);
+            found = true;
+        }
+    }
+    assert(found);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_event_ring_duplicate_drop_emits_event\n");
+}
+
+// Test: receive an expired message; EXPIRY_DROP event should be emitted
+// Verifies: REQ-7.2.5
+static void test_event_ring_expiry_drop_emits_event()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    MessageEnvelope expired_env;
+    make_expired_envelope(expired_env, 2U, 1U);
+    Result inj = harness_a.inject(expired_env);
+    assert(inj == Result::OK);
+
+    MessageEnvelope recv_out;
+    Result recv_res = engine.receive(recv_out, 100U, NOW_US);
+    assert(recv_res == Result::ERR_EXPIRED);
+
+    // Drain ring looking for EXPIRY_DROP
+    bool found = false;
+    // Power of 10 rule 2: bounded loop
+    for (uint32_t i = 0U; i < DELIVERY_EVENT_RING_CAPACITY; ++i) {
+        DeliveryEvent ev;
+        Result pr = engine.poll_event(ev);
+        if (pr == Result::ERR_EMPTY) {
+            break;
+        }
+        assert(pr == Result::OK);
+        if (ev.kind == DeliveryEventKind::EXPIRY_DROP) {
+            assert(ev.result == Result::ERR_EXPIRED);
+            found = true;
+        }
+    }
+    assert(found);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_event_ring_expiry_drop_emits_event\n");
+}
+
+// Test: push DELIVERY_EVENT_RING_CAPACITY+1 events; oldest overwritten,
+//       size stays bounded, no crash.
+// Verifies: REQ-7.2.5
+static void test_event_ring_overflow_wraps()
+{
+    MockTransportInterface mock;
+    ChannelConfig ch;
+    channel_config_default(ch, 0U);
+    DeliveryEngine engine;
+    engine.init(&mock, ch, 3U);
+
+    // Fill ring exactly to capacity by sending BEST_EFFORT messages
+    // Power of 10 rule 2: bounded loop (DELIVERY_EVENT_RING_CAPACITY iterations)
+    for (uint32_t i = 0U; i < DELIVERY_EVENT_RING_CAPACITY; ++i) {
+        MessageEnvelope env;
+        make_data_envelope(env, 3U, 4U, 0ULL, ReliabilityClass::BEST_EFFORT);
+        Result send_r = engine.send(env, NOW_US + static_cast<uint64_t>(i) + 1ULL);
+        assert(send_r == Result::OK);
+    }
+
+    // Ring should be at capacity
+    assert(engine.pending_event_count() == DELIVERY_EVENT_RING_CAPACITY);
+
+    // Push one more — triggers overwrite of oldest (ring wrap)
+    MessageEnvelope overflow_env;
+    make_data_envelope(overflow_env, 3U, 4U, 0ULL, ReliabilityClass::BEST_EFFORT);
+    Result over_r = engine.send(overflow_env, NOW_US + DELIVERY_EVENT_RING_CAPACITY + 1ULL);
+    assert(over_r == Result::OK);
+
+    // Size still bounded at capacity (not capacity+1)
+    assert(engine.pending_event_count() == DELIVERY_EVENT_RING_CAPACITY);
+
+    // Drain all events — no crash, all pops return OK, last pop returns ERR_EMPTY
+    uint32_t drained = 0U;
+    // Power of 10 rule 2: bounded loop (DELIVERY_EVENT_RING_CAPACITY+1 max iterations)
+    for (uint32_t i = 0U; i <= DELIVERY_EVENT_RING_CAPACITY; ++i) {
+        DeliveryEvent ev;
+        Result pr = engine.poll_event(ev);
+        if (pr == Result::ERR_EMPTY) {
+            break;
+        }
+        assert(pr == Result::OK);
+        assert(ev.kind == DeliveryEventKind::SEND_OK);
+        ++drained;
+    }
+    assert(drained == DELIVERY_EVENT_RING_CAPACITY);
+    assert(engine.pending_event_count() == 0U);
+
+    printf("PASS: test_event_ring_overflow_wraps\n");
+}
+
+// Test: RELIABLE_RETRY, advance time past backoff, pump_retries() → RETRY_FIRED
+// Verifies: REQ-7.2.5
+static void test_event_ring_retry_fired_emits_event()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_RETRY);
+    Result send_res = engine.send(env, NOW_US);
+    assert(send_res == Result::OK);
+    const uint64_t sent_id = env.message_id;
+
+    // Drain the SEND_OK event
+    DeliveryEvent discard;
+    Result dr = engine.poll_event(discard);
+    assert(dr == Result::OK);
+    assert(discard.kind == DeliveryEventKind::SEND_OK);
+
+    // Advance past the 100 ms retry backoff (cfg_a has retry_backoff_ms=100)
+    uint64_t retry_us = NOW_US + 200000ULL;  // 200 ms
+    uint32_t retried = engine.pump_retries(retry_us);
+    assert(retried >= 1U);
+
+    // Find the RETRY_FIRED event
+    bool found = false;
+    // Power of 10 rule 2: bounded loop
+    for (uint32_t i = 0U; i < DELIVERY_EVENT_RING_CAPACITY; ++i) {
+        DeliveryEvent ev;
+        Result pr = engine.poll_event(ev);
+        if (pr == Result::ERR_EMPTY) {
+            break;
+        }
+        assert(pr == Result::OK);
+        if (ev.kind == DeliveryEventKind::RETRY_FIRED && ev.message_id == sent_id) {
+            assert(ev.result == Result::OK);
+            found = true;
+        }
+    }
+    assert(found);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_event_ring_retry_fired_emits_event\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -1626,6 +1944,13 @@ int main()
     test_stats_dropped_expired();
     test_stats_dropped_duplicate();
     test_stats_latency();
+    test_event_ring_send_ok_emits_event();
+    test_event_ring_send_fail_emits_event();
+    test_event_ring_ack_timeout_emits_event();
+    test_event_ring_duplicate_drop_emits_event();
+    test_event_ring_expiry_drop_emits_event();
+    test_event_ring_overflow_wraps();
+    test_event_ring_retry_fired_emits_event();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;
