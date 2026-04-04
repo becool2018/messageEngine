@@ -316,10 +316,11 @@ test_MessageEnvelope.cpp
   and envelope_is_data / envelope_is_control.
 
 test_Serializer.cpp
-  12 tests: basic round-trip, undersized buffer, invalid envelope, truncated
+  14 tests: basic round-trip, undersized buffer, invalid envelope, truncated
   input, maximum-payload pattern fill, wire-header-size constant, zero-payload
   round-trip, header-too-short, bad padding1, bad padding2, oversized payload
-  field, and zero-payload deserialization.
+  field, zero-payload deserialization, deserialize_version_zero_rejected, and
+  proto_version_in_wire_frame.
 
 test_DuplicateFilter.cpp
   5 tests: basic dedup, different-source pass-through, different-ID
@@ -327,39 +328,66 @@ test_DuplicateFilter.cpp
   oldest-entry eviction.
 
 test_AckTracker.cpp
-  10 tests: init, track_ok, track_full (ERR_FULL), on_ack_ok, on_ack_wrong_src,
+  14 tests: init, track_ok, track_full (ERR_FULL), on_ack_ok, on_ack_wrong_src,
   on_ack_wrong_id, sweep_expired_pending, sweep_pending_not_expired,
-  sweep_releases_acked (slot recycled for new message), and sweep_buf_capacity.
+  sweep_releases_acked (slot recycled for new message), sweep_buf_capacity,
+  stats_timeout, stats_ack_received, stats_timeout_multiround (multi-round timeout
+  accumulation), and ack_tracker_cancel (rollback: PENDING→FREE with no
+  acks_received bump).
 
 test_RetryManager.cpp
-  12 tests: init, schedule_ok, schedule_full (ERR_FULL), on_ack_ok,
+  20 tests: init, schedule_ok, schedule_full (ERR_FULL), on_ack_ok,
   on_ack_not_found, collect_due_immediate, collect_not_due, collect_expired,
   collect_exhausted (max retries reached), backoff_doubles (interval doubles
-  each attempt), backoff_cap (interval capped at MAX_BACKOFF_MS), and
-  collect_never_expires.
+  each attempt), backoff_cap (interval capped at MAX_BACKOFF_MS),
+  on_ack_wrong_src_active, on_ack_wrong_id_active,
+  collect_due_buf_cap_limits (output buffer capacity limits collection),
+  collect_never_expires, stats_retry_sent, stats_exhausted, stats_expired,
+  stats_ack_received, and retry_manager_cancel (rollback: WAITING→INACTIVE
+  with no acks_received bump).
 
 test_DeliveryEngine.cpp
-  19 tests: send_best_effort, send_reliable_ack, send_reliable_retry,
-  receive_data_best_effort, receive_expired, receive_ack_cancels_retry,
-  receive_duplicate, receive_timeout, pump_retries_no_retries,
-  pump_retries_fires, sweep_no_timeouts, sweep_detects_timeout,
-  send_ack_tracker_full, send_retry_manager_full, pump_retries_send_fails,
-  send_transport_queue_full, receive_nak_control, receive_heartbeat_control,
-  and pump_retries_resends.
+  39 tests: send_best_effort, send_reliable_ack, send_reliable_retry,
+  receive_data_best_effort, receive_expired, send_expired_returns_err,
+  receive_expired_at_boundary, receive_zero_expiry_never_drops,
+  receive_ack_cancels_retry, receive_duplicate, receive_timeout,
+  pump_retries_no_retries, pump_retries_fires, sweep_no_timeouts,
+  sweep_detects_timeout, send_ack_tracker_full (now returns ERR_FULL before
+  I/O), send_retry_manager_full (now returns ERR_FULL before I/O),
+  pump_retries_send_fails, send_transport_queue_full, receive_nak_control,
+  receive_heartbeat_control, pump_retries_resends, init_retry_buf_is_zeroed,
+  init_timeout_buf_is_zeroed, pump_retries_capacity,
+  sweep_ack_timeouts_capacity, mock_send_transport_err_io (M5: fault
+  injection), mock_receive_transport_err_io (M5),
+  mock_pump_retries_transport_err_io (M5),
+  mock_reliable_ack_send_err_rolls_back_ack_tracker (M5: ERR rollback),
+  mock_reliable_retry_send_err_rolls_back_both_slots (M5: ERR rollback),
+  receive_reliable_ack_data_emits_ack, receive_reliable_retry_data_emits_ack,
+  receive_duplicate_resends_ack, stats_msgs_sent, stats_msgs_received,
+  stats_dropped_expired, stats_dropped_duplicate, and stats_latency.
 
 test_ImpairmentEngine.cpp
-  12 tests: disabled pass-through, deterministic 100% loss, zero loss,
+  24 tests: disabled pass-through, deterministic 100% loss, zero loss,
   fixed-latency gating (collect_deliverable timing), PRNG reproducibility,
   jitter enable path, duplication (1.0 probability yields two copies),
   partition state machine (init → start → active-drop → end), process_inbound
   passthrough (reorder disabled), process_inbound reorder window (window fills
-  then releases), delay-buffer full with impairments enabled (ERR_FULL), and
-  delay-buffer full with impairments disabled (ERR_FULL).
+  then releases), delay-buffer full with impairments enabled (ERR_FULL),
+  delay-buffer full with impairments disabled (ERR_FULL), and 12 additional
+  tests covering: test_jitter, test_duplication_no_fire,
+  test_duplication_buffer_full_skip, test_partition_waiting_and_active,
+  test_partition_gap_ms_minimum_valid, test_process_inbound_passthrough,
+  test_process_inbound_reorder, test_reorder_window_zero_enabled,
+  and other edge-case impairment paths.
 
 test_LocalSim.cpp
-  4 tests: basic send/receive round-trip, bidirectional messaging (both
+  10 tests: basic send/receive round-trip, bidirectional messaging (both
   directions simultaneously), queue-full overflow (ERR_FULL when ring buffer
-  capacity is exceeded), and receive timeout on empty queue (ERR_TIMEOUT).
+  capacity is exceeded), and receive timeout on empty queue (ERR_TIMEOUT),
+  plus 6 additional tests covering multi-message throughput, close/reopen
+  lifecycle, connections_opened/connections_closed stats, ERR_FULL on
+  flush_outbound_batch for the current envelope, impairment-engine integration
+  paths, and stats counters.
 
 test_AssertState.cpp
   8 tests: get_handler_initially_null, set_and_get_handler,
@@ -368,7 +396,7 @@ test_AssertState.cpp
   check_and_clear_true, and check_and_clear_idempotent.
 
 test_TcpBackend.cpp
-  25 tests covering the TcpBackend via MockSocketOps injection: config
+  26 tests covering the TcpBackend via MockSocketOps injection: config
   defaults, server bind/close, client connect failure, receive timeout, send
   with no clients, close-before-init, is_open lifecycle, loopback roundtrip,
   large-timeout cap, bad bind IP, num_channels_zero, garbage-frame
@@ -378,19 +406,21 @@ test_TcpBackend.cpp
   loss impairment drop).
 
 test_UdpBackend.cpp
-  18 tests covering the UdpBackend via MockSocketOps injection: config
+  19 tests covering the UdpBackend via MockSocketOps injection: config
   defaults, bind/close, receive timeout, loopback send/receive, multiple
   messages, close-before-init, is_open lifecycle, unreachable peer, bad
-  bind IP, num_channels_zero, garbage datagram, and 5 mock-injection fault
-  tests (create fail, reuseaddr fail, impairment delay paths, send loss
-  impairment, send_to fail, recv_from fail, recv queue initial pop).
+  bind IP, num_channels_zero, garbage datagram, recv_wrong_source_dropped
+  (REQ-6.2.4 source validation), and 5 mock-injection fault tests (create
+  fail, reuseaddr fail, impairment delay paths, send loss impairment,
+  send_to fail, recv_from fail, recv queue initial pop).
 
 test_SocketUtils.cpp
-  17 tests covering raw POSIX helpers in SocketUtils: create_tcp,
+  22 tests covering raw POSIX helpers in SocketUtils: create_tcp,
   create_udp, set_nonblocking, set_reuseaddr, bind_valid, bind_bad_ip,
   listen, accept, close, connect_with_timeout, tcp_frame_round_trip,
   tcp_recv_oversized_frame, send_to_bad_ip, udp_send_recv_round_trip,
-  udp_recv_timeout, tcp_send_recv_exact, and tcp_frame_zero_payload.
+  udp_recv_timeout, tcp_send_recv_exact, tcp_frame_zero_payload, plus 5
+  additional socket utility tests.
 
 MockSocketOps.hpp
   Test-only mock implementation of ISocketOps used by TcpBackend,
@@ -410,7 +440,7 @@ test_TlsTcpBackend.cpp
   TLS zero-length frame, DI constructor, and recv queue overflow.
 
 test_DtlsUdpBackend.cpp
-  37 tests covering DtlsUdpBackend via IMbedtlsOps/ISocketOps injection:
+  38 tests covering DtlsUdpBackend via IMbedtlsOps/ISocketOps injection:
   plaintext server bind, DTLS bad cert, plaintext loopback, DTLS loopback,
   oversized payload rejected (ERR_INVALID), receive timeout, bad key path,
   bad CA cert file, server init timeout (ERR_TIMEOUT), client bad peer IP,
@@ -424,10 +454,11 @@ test_DtlsUdpBackend.cpp
   net_connect fail, client ssl_setup fail, and more).
 
 test_ImpairmentConfigLoader.cpp
-  19 tests: file not found (ERR_IO), empty file, all fields parsed, partial
+  24 tests: file not found (ERR_IO), empty file, all fields parsed, partial
   file retains defaults, comment and blank lines skipped, whitespace around
   equals, malformed line skipped, unknown key logged, loss_probability
   clamp (>1.0 → 1.0), duplication_probability clamp, reorder_window_size
   clamp (>32 → 32), large prng_seed, negative duplication probability
   clamp (<0.0 → 0.0), leading space, leading tab, carriage return in line,
-  truly malformed line, over-64-lines truncation, and malformed values.
+  truly malformed line, over-64-lines truncation, malformed values, plus 5
+  additional loader tests.

@@ -13,8 +13,8 @@
 - **Success outcome:** `Result::OK` returned. The envelope is on the wire; a `RetryEntry` slot in `RetryManager` is active with `next_retry_us = now_us`, `backoff_ms` from channel config, and `max_retries` from channel config.
 - **Error outcomes:**
   - `Result::ERR_EXPIRED` — expiry check fails in `send_via_transport()`.
-  - Non-OK from transport — propagated; `RetryManager::schedule()` is NOT called.
-  - `Result::ERR_FULL` from `RetryManager::schedule()` — logged at `WARNING_LO`; send returns `OK` (schedule failure is non-fatal).
+  - `Result::ERR_FULL` from `reserve_bookkeeping()` (AckTracker or RetryManager full) — logged at `WARNING_HI`; send returns `ERR_FULL` immediately with no wire I/O.
+  - Any non-OK from transport — propagated; bookkeeping slots rolled back via `rollback_on_transport_failure()`.
 
 ---
 
@@ -22,7 +22,7 @@
 
 ```cpp
 // src/core/DeliveryEngine.cpp
-Result DeliveryEngine::send(const MessageEnvelope& envelope, uint64_t now_us);
+Result DeliveryEngine::send(MessageEnvelope& envelope, uint64_t now_us);
 ```
 
 ---
@@ -33,17 +33,18 @@ Result DeliveryEngine::send(const MessageEnvelope& envelope, uint64_t now_us);
 2. `NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr)` and `NEVER_COMPILED_OUT_ASSERT(envelope_valid(envelope))`.
 3. `m_id_gen.next()` assigns new `message_id` into `MessageEnvelope work` (stack copy).
 4. `work.reliability_class == RELIABLE_RETRY` — true.
-5. **`send_via_transport(work, now_us)`** — expiry check, then `m_transport->send_message(work)` (same TCP path as UC_01). Returns result.
-6. If `send_res != Result::OK`: return `send_res` immediately; `RetryManager` not touched.
-7. On success: **`m_retry_mgr.schedule(work, now_us, m_cfg.retry_backoff_ms, m_cfg.max_retries)`** is called (`RetryManager.cpp`).
-8. Inside `RetryManager::schedule(env, now_us, backoff_ms, max_retries)`:
-   a. `NEVER_COMPILED_OUT_ASSERT(backoff_ms > 0)` and `NEVER_COMPILED_OUT_ASSERT(max_retries > 0)`.
-   b. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]` for first slot where `!active`.
-   c. If found: `entry.env = env` (full `MessageEnvelope` copy), `entry.next_retry_us = now_us`, `entry.expiry_us = env.expiry_time_us`, `entry.retry_count = 0`, `entry.max_retries = max_retries`, `entry.backoff_ms = backoff_ms`, `entry.active = true`. Returns `Result::OK`.
-   d. If not found: returns `Result::ERR_FULL`.
-9. `sched_res != Result::OK` — logged at `WARNING_LO`; send returns `Result::OK`.
-10. `NEVER_COMPILED_OUT_ASSERT` postcondition check.
-11. Returns `Result::OK` to the User.
+5. **`reserve_bookkeeping(m_ack_tracker, m_retry_manager, work, m_cfg, now_us)`** is called (static helper, `DeliveryEngine.cpp`). For `RELIABLE_RETRY` this calls both `track()` and `schedule()`:
+   a. Calls `m_ack_tracker.track(work, ack_deadline)`. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]` for first `FREE` slot.
+      - If no free slot: logs `WARNING_HI`; returns `ERR_FULL` immediately.
+   b. On `track()` success: calls `m_retry_mgr.schedule(work, now_us, m_cfg.retry_backoff_ms, m_cfg.max_retries)`.
+      - Inside `schedule()`: `NEVER_COMPILED_OUT_ASSERT(backoff_ms > 0)` and `NEVER_COMPILED_OUT_ASSERT(max_retries > 0)`. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]` for first slot where `!active`.
+      - If found: `entry.env = work` (full `MessageEnvelope` copy), `entry.next_retry_us = now_us`, `entry.expiry_us = env.expiry_time_us`, `entry.retry_count = 0`, `entry.max_retries = max_retries`, `entry.backoff_ms = backoff_ms`, `entry.active = true`. Returns `Result::OK`.
+      - If not found: logs `WARNING_HI`; calls `m_ack_tracker.cancel(work.source_id, work.message_id)` to free the already-reserved AckTracker slot; returns `ERR_FULL`.
+6. If `book_res != OK`: `record_send_failure()` called; `send()` returns `ERR_FULL` immediately. No wire I/O occurs.
+7. On `book_res == OK` (both slots reserved): **`send_via_transport(work, now_us)`** is called. Expiry check, then `m_transport->send_message(work)` (same TCP path as UC_01).
+   - If `send_res != OK`: **`rollback_on_transport_failure()`** cancels both the `AckTracker` slot and the `RetryManager` slot (freeing both, no stat bump). `send()` returns the transport error.
+8. On `send_res == OK`: `++m_stats.msgs_sent`.
+9. Returns `Result::OK` to the User.
 
 ---
 
@@ -52,6 +53,11 @@ Result DeliveryEngine::send(const MessageEnvelope& envelope, uint64_t now_us);
 ```
 DeliveryEngine::send()                          [DeliveryEngine.cpp]
  ├── MessageIdGen::next()                       [MessageId.cpp]
+ ├── reserve_bookkeeping()                      [DeliveryEngine.cpp]
+ │    ├── AckTracker::track()                   [AckTracker.cpp]
+ │    │    └── [linear scan for FREE slot; set PENDING]
+ │    └── RetryManager::schedule()              [RetryManager.cpp]
+ │         └── [linear scan for inactive slot; copy envelope; set active]
  ├── DeliveryEngine::send_via_transport()       [DeliveryEngine.cpp]
  │    ├── timestamp_expired()
  │    └── TcpBackend::send_message()
@@ -59,15 +65,16 @@ DeliveryEngine::send()                          [DeliveryEngine.cpp]
  │         ├── ImpairmentEngine::collect_deliverable()
  │         ├── Serializer::serialize()
  │         └── send_to_all_clients() -> ::send()
- └── RetryManager::schedule()                   [RetryManager.cpp]
-      └── [linear scan for inactive slot; copy envelope]
+ └── [on transport failure] rollback_on_transport_failure()
+      ├── AckTracker::cancel()                  [AckTracker.cpp]
+      └── RetryManager::cancel()                [RetryManager.cpp]
 ```
 
 ---
 
 ## 5. Key Components Involved
 
-- **`DeliveryEngine`** — Sequences wire send then retry registration. Retry is only registered after successful wire send to avoid tracking un-sent messages.
+- **`DeliveryEngine`** — Sequences bookkeeping then wire send. Both `AckTracker` and `RetryManager` slots are reserved before any I/O so `ERR_FULL` is returned before the peer sees the message. If `send_via_transport()` fails after bookkeeping, `rollback_on_transport_failure()` cancels both slots so no spurious timeout or retry fires.
 - **`RetryManager`** — Fixed-capacity table (32 slots). Stores the full `MessageEnvelope` copy plus retry metadata. `next_retry_us = now_us` means the first retry is due immediately on the next `pump_retries()` call.
 - **`MessageIdGen`** — ID assigned here is the same ID stored in `RetryEntry.env.message_id` and used to cancel the entry when an ACK for that ID arrives.
 
@@ -77,10 +84,11 @@ DeliveryEngine::send()                          [DeliveryEngine.cpp]
 
 | Condition | True branch | False branch |
 |-----------|-------------|--------------|
-| `reliability_class == RELIABLE_RETRY` | Call schedule() after send | Not this UC |
-| `send_res != OK` | Return error; skip schedule() | Call schedule() |
-| Free slot found in RetryManager | Set active=true; schedule returns OK | Returns ERR_FULL |
-| `sched_res != OK` | Log warning; return OK | Return OK |
+| `reliability_class == RELIABLE_RETRY` | Enter `reserve_bookkeeping()` path | Not this UC |
+| AckTracker slot available (inside `reserve_bookkeeping`) | `track()` OK; proceed to `schedule()` | `track()` returns `ERR_FULL`; `send()` returns `ERR_FULL` |
+| RetryManager slot available (inside `reserve_bookkeeping`) | `schedule()` OK; proceed | `schedule()` fails; `cancel()` AckTracker slot; `send()` returns `ERR_FULL` |
+| `book_res != OK` | Return `ERR_FULL` without I/O | Proceed to `send_via_transport()` |
+| `send_res != OK` | `rollback_on_transport_failure()` (cancel both slots); return error | Proceed; `msgs_sent++` |
 | `env.expiry_time_us == 0` | Entry never expires (expiry_us=0 treated as no-expiry in collect_due) | Entry expires at expiry_us |
 
 ---
@@ -104,8 +112,8 @@ DeliveryEngine::send()                          [DeliveryEngine.cpp]
 
 ## 9. Error Handling Flow
 
-- **Transport failure before schedule():** `RetryManager` not touched; clean state.
-- **`ERR_FULL` from schedule():** Message is on the wire but will never be automatically retried. Caller has no direct indication. Logged at WARNING_LO.
+- **`ERR_FULL` from `reserve_bookkeeping()`:** `send()` returns `ERR_FULL` before any wire I/O. If `AckTracker` is full, returns immediately. If `RetryManager` is full, the already-reserved `AckTracker` slot is rolled back via `cancel()` before returning. Caller must handle `ERR_FULL`.
+- **Transport failure after bookkeeping:** `rollback_on_transport_failure()` cancels both the `AckTracker` and `RetryManager` slots (no stat bump), preventing spurious timeout sweeps or phantom retries. The transport error is returned.
 - **`ERR_EXPIRED`:** Send aborted before socket; nothing allocated.
 
 ---
@@ -136,12 +144,17 @@ DeliveryEngine::send()                          [DeliveryEngine.cpp]
 User
   -> DeliveryEngine::send(envelope, now_us)
        -> MessageIdGen::next()
+       -> reserve_bookkeeping()
+            -> AckTracker::track(work, deadline_us)
+                 [scan FREE slot; set PENDING]
+                 <- Result::OK
+            -> RetryManager::schedule(work, now_us, backoff_ms, max_retries)
+                 [scan inactive slot; copy envelope; set active=true]
+                 <- Result::OK
+            <- Result::OK
        -> DeliveryEngine::send_via_transport()
             -> TcpBackend::send_message()
                  -> Serializer::serialize() -> ::send()
-            <- Result::OK
-       -> RetryManager::schedule(work, now_us, backoff_ms, max_retries)
-            [scan inactive slot; copy envelope; set active=true]
             <- Result::OK
   <- Result::OK
 ```
@@ -163,7 +176,7 @@ User
 ## 14. Known Risks / Observations
 
 - **`next_retry_us = now_us`:** The first retry is due immediately. If `pump_retries()` is called before the peer has a chance to ACK, the message may be resent before the original copy is even delivered. Receiver-side deduplication (DuplicateFilter) is required to suppress redundant copies.
-- **RetryManager full silent failure:** Same pattern as AckTracker — `sched_res != OK` is non-fatal for the send. Message will not be retried if slot allocation failed.
+- **RetryManager full returns `ERR_FULL`:** When the `RetryManager` is full, `reserve_bookkeeping()` cancels the already-reserved `AckTracker` slot and returns `ERR_FULL`. `send()` returns `ERR_FULL` before any wire I/O — no longer a silent failure. Caller must handle `ERR_FULL`.
 - **Full envelope copy cost:** `RetryEntry::env` is a copy of the full `MessageEnvelope` (~4152 bytes). With 32 slots, `RetryManager` holds up to ~132 KB of envelope data as fixed members.
 
 ---

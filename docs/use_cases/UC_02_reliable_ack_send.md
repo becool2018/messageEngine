@@ -13,8 +13,7 @@
 - **Success outcome:** `Result::OK` returned. The serialized envelope is on the wire; an ACK slot in `AckTracker` is in state `PENDING` with a deadline of `now_us + recv_timeout_ms * 1000`.
 - **Error outcomes:**
   - `Result::ERR_EXPIRED` — expiry check fails in `send_via_transport()` before the socket write.
-  - `Result::ERR_FULL` — transport's `send_message()` returns `ERR_FULL`.
-  - `Result::ERR_FULL` from `AckTracker::track()` (tracker full) — logged at `WARNING_LO` but send still returns `OK` (track failure is non-fatal).
+  - `Result::ERR_FULL` from `reserve_bookkeeping()` (AckTracker full) — logged at `WARNING_HI`; send returns `ERR_FULL` immediately with no wire I/O and no slot wasted.
   - Any non-OK from transport propagated upward.
 
 ---
@@ -23,7 +22,7 @@
 
 ```cpp
 // src/core/DeliveryEngine.cpp
-Result DeliveryEngine::send(const MessageEnvelope& envelope, uint64_t now_us);
+Result DeliveryEngine::send(MessageEnvelope& envelope, uint64_t now_us);
 ```
 
 Synchronous call in the caller's thread.
@@ -36,18 +35,17 @@ Synchronous call in the caller's thread.
 2. `NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr)` and `NEVER_COMPILED_OUT_ASSERT(envelope_valid(envelope))`.
 3. `m_id_gen.next()` assigns a new monotonic `message_id`; written into `MessageEnvelope work` (stack copy).
 4. `work.reliability_class == RELIABLE_ACK` — true.
-5. **`send_via_transport(work, now_us)`** is called first to put the message on the wire.
-6. Inside `send_via_transport()`: expiry check; then `m_transport->send_message(work)` → `TcpBackend::send_message()`. Serialization, impairment pass-through, and `::send()` happen as in UC_01. Returns `Result::OK` on success.
-7. Back in `send()`: `send_res` is checked.
-   - If `send_res != Result::OK`: return `send_res` immediately; ACK slot is NOT allocated.
-8. On `send_res == Result::OK`:
-9. **`m_ack_tracker.track(work.message_id, work.source_id, deadline_us)`** is called (`AckTracker.cpp`). `deadline_us = now_us + (uint64_t)m_cfg.recv_timeout_ms * 1000ULL`.
+5. **`reserve_bookkeeping(m_ack_tracker, m_retry_manager, work, m_cfg, now_us)`** is called (static helper, `DeliveryEngine.cpp`). Inside: `ack_deadline = now_us + recv_timeout_ms * 1000`. Calls `m_ack_tracker.track(work, ack_deadline)`.
    - Inside `track()`: linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]` for first `FREE` slot.
-   - If found: sets `entry.state = PENDING`, `entry.message_id = message_id`, `entry.source_id = source_id`, `entry.deadline_us = deadline_us`. Returns `Result::OK`.
-   - If no free slot: returns `Result::ERR_FULL`.
-10. `track_res != Result::OK` — logged at `WARNING_LO` ("AckTracker full — send proceeds without tracking"). Send still returns `Result::OK`.
-11. `NEVER_COMPILED_OUT_ASSERT` on the postcondition in `send()`.
-12. Returns `Result::OK` to the User.
+   - If found: sets `entry.state = PENDING`, `entry.message_id`, `entry.source_id`, `entry.deadline_us`. Returns `Result::OK`.
+   - If no free slot: logs `WARNING_HI`; returns `Result::ERR_FULL`. `reserve_bookkeeping()` returns `ERR_FULL` to `send()`.
+   - For `RELIABLE_ACK`: after successful `track()`, `reserve_bookkeeping()` returns `OK` (no `schedule()` needed).
+6. `book_res != OK` — `record_send_failure()` called; `send()` returns `ERR_FULL` immediately. No wire I/O occurs.
+7. On `book_res == OK` (slot reserved): **`send_via_transport(work, now_us)`** is called. Inside: expiry check, then `m_transport->send_message(work)` → `TcpBackend::send_message()`. Serialization, impairment pass-through, and `::send()` happen as in UC_01.
+   - If `send_res != OK`: **`rollback_on_transport_failure()`** is called, which calls `m_ack_tracker.cancel(work.source_id, work.message_id)` to free the slot (PENDING→FREE, no stat bump). `send()` returns the transport error.
+8. On `send_res == OK`: `++m_stats.msgs_sent`.
+9. `NEVER_COMPILED_OUT_ASSERT(env.source_id == m_local_id)` and `NEVER_COMPILED_OUT_ASSERT(env.message_id != 0ULL)`.
+10. Returns `Result::OK` to the User.
 
 ---
 
@@ -56,6 +54,9 @@ Synchronous call in the caller's thread.
 ```
 DeliveryEngine::send()                         [DeliveryEngine.cpp]
  ├── MessageIdGen::next()                      [MessageId.cpp]
+ ├── reserve_bookkeeping()                     [DeliveryEngine.cpp]
+ │    └── AckTracker::track()                  [AckTracker.cpp]
+ │         └── [linear scan for FREE slot; set PENDING]
  ├── DeliveryEngine::send_via_transport()      [DeliveryEngine.cpp]
  │    ├── timestamp_expired()                  [Timestamp.hpp]
  │    └── TcpBackend::send_message()           [TcpBackend.cpp]
@@ -63,15 +64,15 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
  │         ├── ImpairmentEngine::collect_deliverable()
  │         ├── Serializer::serialize()
  │         └── send_to_all_clients() -> ::send()
- └── AckTracker::track()                       [AckTracker.cpp]
-      └── [linear scan for FREE slot]
+ └── [on transport failure] rollback_on_transport_failure()
+      └── AckTracker::cancel()                 [AckTracker.cpp]
 ```
 
 ---
 
 ## 5. Key Components Involved
 
-- **`DeliveryEngine`** — Coordinates send + ACK slot registration. The two steps (wire send then track) are sequenced deliberately: if the wire send fails, no slot is wasted.
+- **`DeliveryEngine`** — Coordinates send + ACK slot registration. The two steps (bookkeeping then wire send) are sequenced deliberately: `reserve_bookkeeping()` runs first so that if the tracker is full, the caller gets `ERR_FULL` before any byte is sent to the wire. If `send_via_transport()` fails after bookkeeping, `rollback_on_transport_failure()` frees the `AckTracker` slot via `cancel()` so no spurious timeout fires.
 - **`MessageIdGen`** — Assigns the unique ID that AckTracker will look for when an ACK arrives.
 - **`AckTracker`** — Fixed-capacity table (32 slots). Stores `(message_id, source_id, deadline_us)` in `PENDING` state. Required so `sweep_ack_timeouts()` and `on_ack()` can resolve outstanding sends.
 - **`TcpBackend`** — Performs the actual socket write. Identical to UC_01 path.
@@ -82,10 +83,10 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
 
 | Condition | True branch | False branch |
 |-----------|-------------|--------------|
-| `reliability_class == RELIABLE_ACK` | Proceed to track in AckTracker after send | Not this UC |
-| `send_res != OK` | Return send_res; skip AckTracker::track() | Call track() |
-| AckTracker slot found | Entry set to PENDING; track() returns OK | track() returns ERR_FULL |
-| `track_res != OK` | Log warning; return OK anyway | Return OK |
+| `reliability_class == RELIABLE_ACK` | Enter `reserve_bookkeeping()` path | Not this UC |
+| AckTracker slot available (inside `reserve_bookkeeping`) | `track()` OK; proceed | `track()` returns `ERR_FULL`; `send()` returns `ERR_FULL` |
+| `book_res != OK` | Return `ERR_FULL` without I/O | Proceed to `send_via_transport()` |
+| `send_res != OK` | `rollback_on_transport_failure()`; return error | Proceed; `msgs_sent++` |
 
 ---
 
@@ -108,9 +109,9 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
 
 ## 9. Error Handling Flow
 
-- **`ERR_EXPIRED`:** Expiry check in `send_via_transport()` fires before any socket or tracker interaction. No slot consumed. Caller should discard.
-- **Transport failure:** `send_res != OK` returned before `track()` is called — tracker is clean.
-- **`AckTracker` full:** `track_res != OK` logged and suppressed; send returns `OK`. The message is on the wire but cannot be sweep-detected for timeout. Caller has no direct notification of this condition.
+- **`ERR_EXPIRED`:** Expiry check in `send_via_transport()` fires before any socket interaction. No slot consumed. Caller should discard.
+- **`AckTracker` full:** `reserve_bookkeeping()` returns `ERR_FULL`; `send()` returns `ERR_FULL` immediately. No bytes are sent to the wire. Caller must handle the `ERR_FULL`.
+- **Transport failure after bookkeeping:** `rollback_on_transport_failure()` calls `cancel()` to free the `AckTracker` slot (PENDING→FREE), preventing a spurious timeout sweep. The transport error is returned.
 
 ---
 
@@ -139,13 +140,15 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
 User
   -> DeliveryEngine::send(envelope, now_us)
        -> MessageIdGen::next()
+       -> reserve_bookkeeping()
+            -> AckTracker::track(work, deadline_us)
+                 [scan FREE slot; set PENDING]
+                 <- Result::OK
+            <- Result::OK
        -> DeliveryEngine::send_via_transport()
             -> TcpBackend::send_message()
                  -> Serializer::serialize()
                  -> send_to_all_clients() -> ::send()
-            <- Result::OK
-       -> AckTracker::track(message_id, source_id, deadline_us)
-            [scan FREE slot; set PENDING]
             <- Result::OK
   <- Result::OK
 ```
@@ -165,7 +168,7 @@ User
 
 ## 14. Known Risks / Observations
 
-- **AckTracker slot silently lost:** When the tracker is full, `track()` failure is logged but the send returns `OK`. The caller has no indication that timeout detection is disabled for this message.
+- **AckTracker full returns `ERR_FULL`:** When the tracker is full, `send()` returns `ERR_FULL` before any wire I/O. The caller must handle `ERR_FULL` — unlike the previous behavior where tracking failure was silent.
 - **No automatic retry:** Unlike RELIABLE_RETRY, RELIABLE_ACK sends only once. If the ACK never arrives, `sweep_ack_timeouts()` will report the timeout but there is no automatic resend.
 - **Linear scan O(N):** `AckTracker::track()` uses a linear scan over 32 entries — bounded and fast, but worth noting for WCET analysis.
 

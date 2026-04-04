@@ -152,7 +152,7 @@ messageEngine uses an **explicit return-code model** — the F-Prime / MISRA app
 
 - Every non-void function that can fail returns a `Result`.
 - The caller is required by Power of 10 Rule 7 to check every return value. Unchecked returns are explicitly cast to `(void)` with an accompanying justification comment.
-- `ERR_IO` on the send path means a message was dropped (by impairment, socket error, or partition). For BEST_EFFORT this is expected and treated as a silent drop. For RELIABLE_RETRY, the retry manager will retransmit.
+- `ERR_IO` on the send path means a message was dropped (by impairment, socket error, or partition). For BEST_EFFORT this is expected and treated as a silent drop. For RELIABLE_RETRY, if the transport sends successfully but the network silently drops the packet (loss impairment, not ERR_IO), the retry manager will retransmit when the backoff timer fires. If `send_via_transport()` returns `ERR_IO` (socket error or partition), bookkeeping slots are rolled back by `rollback_on_transport_failure()` and no retry is scheduled — the caller receives `ERR_IO` and must decide whether to retry at the application level.
 - `ERR_FULL` means a fixed-capacity buffer is at capacity; the caller must decide whether to wait, discard, or escalate.
 - `ERR_DUPLICATE` is returned by `DuplicateFilter::check_and_record()` and by `DeliveryEngine::receive()` to indicate the message was already seen and should not be acted on.
 - `ERR_EXPIRED` is returned by `DeliveryEngine::receive()` when the message's `expiry_time_us` has passed.
@@ -693,18 +693,28 @@ Every impairment decision is driven by `PrngEngine`. Tests pass a known seed at 
 
 ### 13.4 Test Suite
 
-One test binary per module; 8 test suites total.
+The project has 18 test binaries. The stress test (`test_stress_capacity`) is run separately from the main suite (`make run_stress_tests`); all others run under `make run_tests`.
 
 | Test Binary | Module Under Test | Tests |
 |---|---|---|
 | `test_MessageEnvelope` | `MessageEnvelope` helpers | 5 |
-| `test_Serializer` | `Serializer` | 12 |
+| `test_MessageId` | `MessageId` / `MessageIdGen` | 4 |
+| `test_Timestamp` | `Timestamp` / expiry logic | 6 |
+| `test_Serializer` | `Serializer` | 14 |
 | `test_DuplicateFilter` | `DuplicateFilter` | 5 |
-| `test_AckTracker` | `AckTracker` | 10 |
-| `test_RetryManager` | `RetryManager` | 11 |
-| `test_DeliveryEngine` | `DeliveryEngine` | 19 |
-| `test_ImpairmentEngine` | `ImpairmentEngine` | 12 |
-| `test_LocalSim` | `LocalSimHarness` | 4 |
+| `test_AckTracker` | `AckTracker` | 14 |
+| `test_RetryManager` | `RetryManager` | 20 |
+| `test_DeliveryEngine` | `DeliveryEngine` | 39 |
+| `test_AssertState` | `AssertState` / `NEVER_COMPILED_OUT_ASSERT` | 8 |
+| `test_ImpairmentEngine` | `ImpairmentEngine` | 24 |
+| `test_ImpairmentConfigLoader` | `ImpairmentConfigLoader` | 24 |
+| `test_SocketUtils` | `SocketUtils` (POSIX helpers) | 22 |
+| `test_TcpBackend` | `TcpBackend` | 26 |
+| `test_UdpBackend` | `UdpBackend` | 19 |
+| `test_TlsTcpBackend` | `TlsTcpBackend` | 30 |
+| `test_DtlsUdpBackend` | `DtlsUdpBackend` | 38 |
+| `test_LocalSim` | `LocalSimHarness` | 10 |
+| `test_stress_capacity` | Stress: capacity limits under load | 6 |
 
 ### 13.5 Coverage Policy
 

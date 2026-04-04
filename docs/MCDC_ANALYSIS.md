@@ -2,7 +2,7 @@
 
 **Standard:** DO-178C / NASA-STD-8739.8A Modified Condition/Decision Coverage
 **Method:** Test-case review per CLAUDE.md §14 ("Demonstrate MC/DC by test-case review, not tooling alone")
-**Date:** 2026-03-30
+**Date:** 2026-04-04
 **Functions in scope:** CLAUDE.md §14 lists five highest-hazard SC functions.
 
 ---
@@ -45,29 +45,49 @@ consistent with the ceiling policy established in CLAUDE.md §14.
 
 ## 1. `DeliveryEngine::send()` — HAZ-001, HAZ-002, HAZ-006
 
-**File:** `src/core/DeliveryEngine.cpp` lines 77–144
+**Files:** `src/core/DeliveryEngine.cpp`
+- `reserve_bookkeeping()` (static helper): lines 225–285
+- `DeliveryEngine::send()`: lines 337–393
+
+The logical send path spans both functions. `reserve_bookkeeping()` is a CC-reduction helper called exclusively from `send()` before any I/O; its decisions are analysed here as part of `send()`'s MC/DC argument.
 
 ### Decision table
 
-| ID | Source line | Decision expression | Conditions | MC/DC pair — True outcome | MC/DC pair — False outcome | Test(s) |
-|----|-------------|--------------------|-----------|--------------------------|-----------------------------|---------|
-| S-D1 | L82 | `!m_initialized` | A = `m_initialized` | *Architecturally unreachable* — `NEVER_COMPILED_OUT_ASSERT` fires first | `test_send_best_effort` (A=T → branch skipped) | See ceiling note |
-| S-D2 | L94 | `res != Result::OK` | A = `res != OK` | A=T: transport fails → return error | A=F: transport succeeds → continue | T: `test_send_transport_queue_full`; F: `test_send_best_effort` |
-| S-D3 | L102–103 | `rel == RELIABLE_ACK \|\| rel == RELIABLE_RETRY` | A = `rel == RELIABLE_ACK`; B = `rel == RELIABLE_RETRY` | A=T (RELIABLE_ACK) → enters block; B=T (RELIABLE_RETRY) → enters block | A=F, B=F (BEST_EFFORT) → skips block | T(A): `test_send_reliable_ack`; T(B): `test_send_reliable_retry`; F: `test_send_best_effort` |
-| S-D4 | L111 | `track_res != Result::OK` | A = `track_res != OK` | A=T: AckTracker full → log, continue | A=F: tracked → continue | T: `test_send_ack_tracker_full`; F: `test_send_reliable_ack` |
-| S-D5 | L120 | `rel == RELIABLE_RETRY` | A = `rel == RELIABLE_RETRY` | A=T → schedule retry | A=F → skip retry | T: `test_send_reliable_retry`; F: `test_send_reliable_ack` |
-| S-D6 | L126 | `sched_res != Result::OK` | A = `sched_res != OK` | A=T: RetryManager full → log, continue | A=F: scheduled → continue | T: `test_send_retry_manager_full`; F: `test_send_reliable_retry` |
+| ID | Function | Source line | Decision expression | Conditions | MC/DC pair — True outcome | MC/DC pair — False outcome | Test(s) |
+|----|----------|-------------|--------------------|-----------|--------------------------|-----------------------------|---------|
+| S-D1 | `send()` | L342 | `!m_initialized` | A = `m_initialized` | *Architecturally unreachable* — `NEVER_COMPILED_OUT_ASSERT` fires first | `test_send_best_effort` (A=T → branch skipped) | See ceiling note |
+| S-D2 | `reserve_bookkeeping()` | L235–236 | `rel != RELIABLE_ACK && rel != RELIABLE_RETRY` | A = `rel != RELIABLE_ACK`; B = `rel != RELIABLE_RETRY` | A=T, B=T (BEST_EFFORT) → skip bookkeeping; return OK | A=F (RELIABLE_ACK) or B=F (RELIABLE_RETRY) → proceed to track() | T: `test_send_best_effort`; F(A): `test_send_reliable_ack`; F(B): `test_send_reliable_retry` |
+| S-D3 | `reserve_bookkeeping()` | L245 | `track_res != Result::OK` | A = `track_res != OK` | A=T: AckTracker full → log WARNING_HI; return ERR_FULL | A=F: tracked OK → continue | T: `test_send_ack_tracker_full`; F: `test_send_reliable_ack` |
+| S-D4 | `reserve_bookkeeping()` | L254 | `rel != RELIABLE_RETRY` | A = `rel != RELIABLE_RETRY` | A=T (RELIABLE_ACK) → skip schedule; return OK | A=F (RELIABLE_RETRY) → proceed to schedule() | T: `test_send_reliable_ack`; F: `test_send_reliable_retry` |
+| S-D5 | `reserve_bookkeeping()` | L264 | `sched_res != Result::OK` | A = `sched_res != OK` | A=T: RetryManager full → log WARNING_HI; cancel AckTracker slot; return ERR_FULL | A=F: scheduled OK → return OK | T: `test_send_retry_manager_full`; F: `test_send_reliable_retry` |
+| S-D6 | `send()` | L360 | `book_res != Result::OK` | A = `book_res != OK` | A=T: return error without any wire I/O | A=F: proceed to send_via_transport() | T: `test_send_ack_tracker_full`; F: `test_send_best_effort` |
+| S-D7 | `send()` | L367 | `res != Result::OK` | A = `res != OK` | A=T: rollback bookkeeping; return transport error | A=F: increment msgs_sent; return OK | T: `test_mock_send_transport_err_io`; F: `test_send_best_effort` |
+| S-D8 | `send()` | L372 | `rel == RELIABLE_ACK \|\| rel == RELIABLE_RETRY` | A = `rel == RELIABLE_ACK`; B = `rel == RELIABLE_RETRY` | A=T or B=T → call rollback_on_transport_failure() | A=F, B=F (BEST_EFFORT) → skip rollback | T(A): `test_mock_reliable_ack_send_err_rolls_back_ack_tracker`; T(B): `test_mock_reliable_retry_send_err_rolls_back_both_slots`; F: `test_mock_send_transport_err_io` |
 
-### MC/DC independence demonstration — S-D3 (compound `||`)
+### MC/DC independence demonstration — S-D2 (compound `&&`)
 
-`A || B` where A = `rel == RELIABLE_ACK`, B = `rel == RELIABLE_RETRY`.
+`A && B` where A = `rel != RELIABLE_ACK`, B = `rel != RELIABLE_RETRY`.
 
 | Pair | Test case | A value | B value | Outcome | Demonstrates |
 |------|-----------|---------|---------|---------|--------------|
-| A-pair-1 | `test_send_reliable_ack` | T | F | T (enters block) | A independently causes True |
-| A-pair-2 | `test_send_best_effort` | F | F | F (skips block) | Changing A from T→F flips outcome (B held F) |
-| B-pair-1 | `test_send_reliable_retry` | F | T | T (enters block) | B independently causes True |
-| B-pair-2 | `test_send_best_effort` | F | F | F (skips block) | Changing B from T→F flips outcome (A held F) |
+| A-pair-1 | `test_send_best_effort` | T | T | T (bookkeeping skipped) | When B=T, A independently causes True |
+| A-pair-2 | `test_send_reliable_ack` | F | T | F (bookkeeping entered) | Changing A from T→F flips outcome (B held T) |
+| B-pair-1 | `test_send_best_effort` | T | T | T (bookkeeping skipped) | When A=T, B independently causes True |
+| B-pair-2 | `test_send_reliable_retry` | T | F | F (bookkeeping entered) | Changing B from T→F flips outcome (A held T) |
+
+**MC/DC status: DEMONSTRATED** — all conditions independent, all outcomes exercised.
+
+### MC/DC independence demonstration — S-D8 (compound `||`)
+
+`A || B` where A = `rel == RELIABLE_ACK`, B = `rel == RELIABLE_RETRY`.
+Note: S-D8 is only reached when S-D7 is True (transport failed).
+
+| Pair | Test case | A value | B value | Outcome | Demonstrates |
+|------|-----------|---------|---------|---------|--------------|
+| A-pair-1 | `test_mock_reliable_ack_send_err_rolls_back_ack_tracker` | T | F | T (rollback called) | A independently causes True |
+| A-pair-2 | `test_mock_send_transport_err_io` (BEST_EFFORT) | F | F | F (rollback skipped) | Changing A from T→F flips outcome (B held F) |
+| B-pair-1 | `test_mock_reliable_retry_send_err_rolls_back_both_slots` | F | T | T (rollback called) | B independently causes True |
+| B-pair-2 | `test_mock_send_transport_err_io` (BEST_EFFORT) | F | F | F (rollback skipped) | Changing B from T→F flips outcome (A held F) |
 
 **MC/DC status: DEMONSTRATED** — all conditions independent, all outcomes exercised.
 
@@ -164,12 +184,12 @@ All three are analysed here as they form the single logical operation.
 
 | Function | Decisions | Conditions | Compound decisions | MC/DC status | New tests required |
 |---|---|---|---|---|---|
-| `DeliveryEngine::send` | 6 (1 unreachable) | 7 | 1 (`A\|\|B` at L102) | **DEMONSTRATED** | 0 |
+| `DeliveryEngine::send` | 8 (1 unreachable) | 10 | 2 (`A&&B` at L235; `A\|\|B` at L372) | **DEMONSTRATED** | 0 |
 | `DeliveryEngine::receive` | 7 (1 unreachable) | 7 | 0 | **DEMONSTRATED** | 0 |
 | `DuplicateFilter::check_and_record` | 3 | 5 | 1 (`A&&B&&C` at L48) | **DEMONSTRATED** | 0 |
 | `Serializer::serialize` | 3 | 3 | 0 | **DEMONSTRATED** | 0 |
 | `Serializer::deserialize` | 6 | 6 | 0 | **DEMONSTRATED** | 0 |
-| **Total** | **25 (2 unreachable)** | **28** | **2** | **ALL DEMONSTRATED** | **0** |
+| **Total** | **27 (2 unreachable)** | **31** | **3** | **ALL DEMONSTRATED** | **0** |
 
 All MC/DC requirements are satisfied by the existing test suite. No additional test cases
 are required. The two architecturally-unreachable True-outcome branches of

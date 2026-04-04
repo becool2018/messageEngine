@@ -27,7 +27,7 @@
 // src/app/Server.cpp — main event loop
 // Calls:
 Result DeliveryEngine::receive(MessageEnvelope& out, uint32_t timeout_ms, uint64_t now_us);
-Result DeliveryEngine::send(const MessageEnvelope& envelope, uint64_t now_us);
+Result DeliveryEngine::send(MessageEnvelope& envelope, uint64_t now_us);
 ```
 
 Both called sequentially in the server's main loop thread.
@@ -59,6 +59,7 @@ Server main loop                               [Server.cpp]
  │    └── [auto-ACK send for RELIABLE_ACK/RETRY]
  └── DeliveryEngine::send(reply, now_us)       [DeliveryEngine.cpp]
       ├── MessageIdGen::next()
+      ├── reserve_bookkeeping()                [DeliveryEngine.cpp] (no-op for BEST_EFFORT)
       └── send_via_transport()
            └── TcpBackend::send_message()
                 └── Serializer::serialize() -> ::send()
@@ -144,6 +145,7 @@ Server (main loop)
   [Server builds reply: swap src/dst, set payload]
   -> DeliveryEngine::send(reply, now_us)
        -> MessageIdGen::next()
+       -> reserve_bookkeeping()    [no-op for BEST_EFFORT; allocates slot for RELIABLE_ACK/RETRY]
        -> send_via_transport() -> TcpBackend::send_message() -> ::send()
        <- Result::OK
   [Server loops back to receive()]
