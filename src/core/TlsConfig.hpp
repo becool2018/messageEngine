@@ -93,6 +93,20 @@ struct TlsConfig {
     /// that the server certificate is expected to present (e.g. "example.com").
     /// Leave empty ("") only when verify_peer is false (no cert check performed).
     char peer_hostname[TLS_PATH_MAX];
+
+    /// Enable TLS session ticket resumption (REQ-6.3.4 extension point).
+    /// Client: saves the session after a successful handshake and presents it
+    ///         on reconnect to skip the full handshake (RFC 5077 / TLS 1.3 PSK).
+    /// Server: enables mbedtls_ssl_conf_session_tickets() so clients may resume.
+    /// Default false — backward-compatible with all existing callers.
+    /// Power of 10 Rule 3: session state is fixed-size (mbedtls_ssl_session).
+    bool session_resumption_enabled;
+
+    /// Server-side session ticket lifetime in seconds (RFC 5077 §3.3).
+    /// Passed to mbedtls_ssl_conf_session_tickets() on the server only.
+    /// Ignored when session_resumption_enabled is false or role is CLIENT.
+    /// Default 86400 (24 h).  Power of 10 Rule 3: no dynamic allocation.
+    uint32_t session_ticket_lifetime_s;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -110,7 +124,9 @@ inline void tls_config_default(TlsConfig& cfg)
     (void)memset(cfg.key_file,      0, TLS_PATH_MAX);
     (void)memset(cfg.ca_file,       0, TLS_PATH_MAX);
     (void)memset(cfg.peer_hostname, 0, TLS_PATH_MAX);
-    cfg.verify_peer = true;   // Secure default: always verify when TLS is on
+    cfg.verify_peer                = true;   // Secure default: always verify when TLS is on
+    cfg.session_resumption_enabled = false;  // Off by default — backward-compatible
+    cfg.session_ticket_lifetime_s  = 86400U; // 24 h default ticket lifetime
 }
 
 #endif // CORE_TLS_CONFIG_HPP

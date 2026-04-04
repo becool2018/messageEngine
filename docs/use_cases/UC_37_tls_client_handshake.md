@@ -45,10 +45,13 @@ Result TlsTcpBackend::init(const TransportConfig& config) override;
       - `mbedtls_ssl_setup(&m_ssl[0], &m_ssl_conf)`.
       - If `verify_peer && peer_hostname[0] != '\0'`: `mbedtls_ssl_set_hostname(&m_ssl[0], peer_hostname)`.
       - `mbedtls_ssl_set_bio(&m_ssl[0], &m_client_net[0], mbedtls_net_send, mbedtls_net_recv, nullptr)`.
+      - If `session_resumption_enabled && m_session_saved`: **`try_load_client_session()`** — calls `mbedtls_ssl_set_session(&m_ssl[0], &m_saved_session)` to present a saved session ticket for abbreviated resumption. Non-fatal if `ssl_set_session()` fails; full handshake proceeds.
+      - `mbedtls_ssl_set_bio(&m_ssl[0], &m_client_net[0], mbedtls_net_send, mbedtls_net_recv, nullptr)`.
       - **Handshake loop** (bounded by retry count):
         - `mbedtls_ssl_handshake(&m_ssl[0])` — retry on `WANT_READ`/`WANT_WRITE`.
         - On success (0): proceed.
         - On fatal: log `WARNING_LO`; return `ERR_IO`.
+      - If `session_resumption_enabled` and handshake succeeded: **`try_save_client_session()`** — calls `mbedtls_ssl_get_session(&m_ssl[0], &m_saved_session)` to save the negotiated session for the next connection. Sets `m_session_saved = true` on success; non-fatal on failure.
 6. `m_is_server = false; m_open = true`.
 7. Returns `Result::OK`.
 
@@ -67,17 +70,23 @@ TlsTcpBackend::init(config)                      [TlsTcpBackend.cpp]
       └── TlsTcpBackend::tls_connect_handshake()
            ├── mbedtls_ssl_setup()
            ├── mbedtls_ssl_set_hostname()
+           ├── [if resumption enabled & session saved] try_load_client_session()
+           │    └── mbedtls_ssl_set_session()
            ├── mbedtls_ssl_set_bio()
-           └── [handshake loop] mbedtls_ssl_handshake()
+           ├── [handshake loop] mbedtls_ssl_handshake()
+           └── [if resumption enabled & handshake ok] try_save_client_session()
+                └── mbedtls_ssl_get_session()
 ```
 
 ---
 
 ## 5. Key Components Involved
 
-- **`tls_connect_handshake()`** — CC-reduction helper extracted from `connect_to_server()`. Encapsulates ssl_setup, hostname, BIO, and handshake steps.
+- **`tls_connect_handshake()`** — CC-reduction helper extracted from `connect_to_server()`. Encapsulates ssl_setup, hostname, session load, BIO, and handshake steps.
+- **`try_load_client_session()`** — CC-reduction helper that calls `mbedtls_ssl_set_session()` to present a saved session ticket before the handshake. Non-fatal on failure. Guarded by `#if defined(MBEDTLS_SSL_SESSION_TICKETS)`.
+- **`try_save_client_session()`** — CC-reduction helper that calls `mbedtls_ssl_get_session()` to save the negotiated session after a successful handshake. Non-fatal on failure. Sets `m_session_saved`.
 - **`mbedtls_ssl_set_hostname()`** — Sets SNI/certificate hostname for peer verification. Required when `verify_peer == true`.
-- **mbedTLS 4.0 client mode** — Performs ClientHello → ServerHello → Certificate → Finished TLS handshake.
+- **mbedTLS 4.0 client mode** — Performs ClientHello → ServerHello → Certificate → Finished TLS handshake; may perform abbreviated resumed handshake when a valid session ticket is presented.
 
 ---
 
@@ -87,8 +96,11 @@ TlsTcpBackend::init(config)                      [TlsTcpBackend.cpp]
 |-----------|-------------|--------------|
 | `tls_enabled == false` | Plaintext TCP; skip handshake | Perform TLS handshake |
 | `verify_peer && hostname set` | `ssl_set_hostname()` called | No hostname verification |
+| `session_resumption_enabled && m_session_saved` | `try_load_client_session()` called before handshake | Full handshake without session hint |
+| `ssl_set_session()` fails in load helper | Log WARNING_LO; full handshake proceeds | Session hint presented; abbreviated handshake attempted |
 | Handshake returns WANT_READ/WRITE | Retry | Success (0) or fatal |
 | Handshake fatal | Log; return ERR_IO | `m_open = true` |
+| `session_resumption_enabled && handshake ok` | `try_save_client_session()` called; `m_session_saved = true` | Session not saved |
 
 ---
 
@@ -103,6 +115,8 @@ TlsTcpBackend::init(config)                      [TlsTcpBackend.cpp]
 ## 8. Memory & Ownership Semantics
 
 - `m_ssl[0]` — mbedTLS TLS context for the one client connection. Statically allocated as array member.
+- `m_saved_session` — fixed-size `mbedtls_ssl_session` struct allocated as a `TlsTcpBackend` member. Holds the negotiated TLS session for resumption on next connect. No dynamic allocation (Power of 10 Rule 3).
+- `m_session_saved` — bool flag; true when `m_saved_session` contains a valid resumable session.
 - **Init-phase heap allocation:** mbedTLS allocates internally during cert parsing and handshake.
 
 ---
@@ -131,6 +145,8 @@ TlsTcpBackend::init(config)                      [TlsTcpBackend.cpp]
 | `TlsTcpBackend` | `m_client_net[0]` | uninitialized | connected TCP net context |
 | `TlsTcpBackend` | `m_client_count` | 0 | 1 |
 | `TlsTcpBackend` | `m_open` | false | true |
+| `TlsTcpBackend` | `m_saved_session` | (empty) | populated with session state (if resumption enabled and handshake succeeded) |
+| `TlsTcpBackend` | `m_session_saved` | false | true (if session saved successfully) |
 
 ---
 
@@ -145,9 +161,13 @@ User -> TlsTcpBackend::init(config)  [client, tls_enabled=true]
        -> tls_connect_handshake()
             -> mbedtls_ssl_setup()
             -> mbedtls_ssl_set_hostname()  [if verify_peer]
+            -> try_load_client_session()   [if session_resumption_enabled && m_session_saved]
+                 -> mbedtls_ssl_set_session()   [presents saved session ticket]
             -> mbedtls_ssl_set_bio()
-            -> mbedtls_ssl_handshake()    [TLS exchange with server]
+            -> mbedtls_ssl_handshake()    [TLS exchange; may be abbreviated if ticket accepted]
             <- 0 (success)
+            -> try_save_client_session()  [if session_resumption_enabled]
+                 -> mbedtls_ssl_get_session()   [saves new session; m_session_saved=true]
   <- Result::OK [m_open=true; TLS session active]
 ```
 
@@ -168,10 +188,12 @@ User -> TlsTcpBackend::init(config)  [client, tls_enabled=true]
 
 - **Hostname verification:** If `verify_peer == true` but `peer_hostname` is empty, `ssl_set_hostname()` is not called, which may cause certificate CN mismatch during handshake.
 - **Blocking handshake:** The handshake loop blocks the caller until complete. Long network latency can extend `init()` duration.
-- **No renegotiation support:** TLS 1.3 disables renegotiation; session tickets or connection reuse are not implemented.
+- **Session resumption (REQ-6.3.4):** When `session_resumption_enabled == true`, the client saves the negotiated TLS session after each successful handshake (`try_save_client_session()`) and presents it on the next connect (`try_load_client_session()`). Both operations are non-fatal; failure falls back to a full handshake. Session state is stored in fixed-size `m_saved_session` (no dynamic allocation). Guarded by `#if defined(MBEDTLS_SSL_SESSION_TICKETS)` for build portability.
+- **Single-lifecycle design:** `TlsTcpBackend` is initialized once; calling `init()` a second time on the same instance (after `close()`) is not supported. Each logical reconnect should use a new instance.
 
 ---
 
 ## 15. Unknowns / Assumptions
 
 - `[ASSUMPTION]` `tls_connect_handshake()` is a CC-reduction helper extracted from `connect_to_server()`. It encapsulates the mbedTLS setup + handshake steps for the client socket at slot 0.
+- `[ASSUMPTION]` `try_load_client_session()` and `try_save_client_session()` are CC-reduction helpers extracted from `tls_connect_handshake()` to keep its cyclomatic complexity ≤ 10.

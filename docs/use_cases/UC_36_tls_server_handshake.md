@@ -42,7 +42,8 @@ Result TlsTcpBackend::init(const TransportConfig& config) override;
       - `mbedtls_pk_parse_keyfile(&m_pkey, key_file, nullptr, ...)`.
       - If `verify_peer`: `mbedtls_x509_crt_parse_file(&m_ca_cert, ca_file)`, `mbedtls_ssl_conf_ca_chain(...)`, `mbedtls_ssl_conf_authmode(REQUIRED)`.
       - `mbedtls_ssl_conf_own_cert(&m_ssl_conf, &m_cert, &m_pkey)`.
-   d. Returns `Result::OK`.
+   d. If `session_resumption_enabled`: `mbedtls_ssl_conf_session_tickets(&m_ssl_conf, MBEDTLS_SSL_SESSION_TICKETS_ENABLED)` — enables server-side session ticket support so clients may resume (RFC 5077). Guarded by `#if defined(MBEDTLS_SSL_SESSION_TICKETS)`.
+   e. Returns `Result::OK`.
 6. **`bind_and_listen(ip, port)`** — creates, configures, binds, and listens on `m_listen_net`.
 7. `m_is_server = true; m_open = true`.
 
@@ -97,6 +98,7 @@ TlsTcpBackend::accept_and_handshake()            [TlsTcpBackend.cpp]
 |-----------|-------------|--------------|
 | `tls_enabled == false` | Plaintext TCP path (no mbedTLS) | TLS setup |
 | `verify_peer == true` | Load CA cert; set AUTHMODE_REQUIRED | Skip CA; AUTHMODE_NONE |
+| `session_resumption_enabled == true` | Enable server-side session tickets via `mbedtls_ssl_conf_session_tickets()` | Session ticket support off |
 | `mbedtls_ssl_handshake()` returns WANT_READ/WRITE | Retry | Success (0) or fatal |
 | Handshake fatal error | Log; remove client | Add to table |
 
@@ -114,6 +116,7 @@ TlsTcpBackend::accept_and_handshake()            [TlsTcpBackend.cpp]
 
 - `m_ssl_conf`, `m_cert`, `m_ca_cert`, `m_pkey` — fixed-size mbedTLS contexts, statically allocated as `TlsTcpBackend` members.
 - `m_client_net[MAX_TCP_CONNECTIONS]`, `m_ssl[MAX_TCP_CONNECTIONS]` — fixed arrays for up to 8 client TLS sessions.
+- **Session resumption:** When `session_resumption_enabled == true`, the server calls `mbedtls_ssl_conf_session_tickets()` during `setup_tls_config()` so that connecting clients may present a session ticket and skip the full handshake on reconnect. No extra server-side state is stored beyond the shared `m_ssl_conf`. Guarded by `#if defined(MBEDTLS_SSL_SESSION_TICKETS)` (Power of 10 Rule 3: no additional dynamic allocation).
 - **Init-phase heap allocation:** mbedTLS allocates internally during `x509_crt_parse_file`, `pk_parse_keyfile`, and `ssl_handshake`. This is a documented Power of 10 Rule 3 deviation (init-phase only, not on send/receive critical path).
 
 ---
