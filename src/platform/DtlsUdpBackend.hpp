@@ -209,10 +209,19 @@ private:
     /// Extracted from send_message() to reduce its CC.
     Result send_wire_bytes(const uint8_t* buf, uint32_t len);
 
-    /// Serialize and send each envelope in @p delayed[0..count-1].
-    /// Best-effort: serialization or MTU failures skip the entry silently.
-    /// Extracted from send_message() to reduce its CC.
-    void send_delayed_envelopes(const MessageEnvelope* delayed, uint32_t count);
+    /// Serialize and send each envelope in @p batch[0..count-1].
+    /// Tracks whether the current envelope (matched by source_id + message_id) failed.
+    /// Non-current failures: log WARNING_LO and continue.
+    /// @return true if the current envelope's send failed; false otherwise.
+    bool flush_outbound_batch(const MessageEnvelope& envelope,
+                              const MessageEnvelope* batch,
+                              uint32_t count);
+
+    /// Serialize and send a single envelope from the deliverable batch.
+    /// @param[in] env        Envelope to serialize and send.
+    /// @param[in] is_current True if @p env is the envelope from the current send_message call.
+    /// @return true if the send failed and @p is_current is true; false otherwise.
+    bool send_one_envelope(const MessageEnvelope& env, bool is_current);
 };
 
 #endif // PLATFORM_DTLS_UDP_BACKEND_HPP

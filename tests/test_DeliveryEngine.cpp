@@ -1121,6 +1121,11 @@ static void test_receive_reliable_ack_data_emits_ack()
     assert(rack == Result::OK);
     assert(ack.message_type == MessageType::ACK);
     assert(ack.message_id   == 55555ULL);
+    // Verify ACK routing fields (P3 fix)
+    assert(ack.source_id         == 1U);                              // ACK comes from the local engine
+    assert(ack.destination_id    == data_env.source_id);             // routed back to the original sender
+    assert(ack.reliability_class == ReliabilityClass::BEST_EFFORT);  // ACKs are never reliable-retried
+    assert(ack.payload_length    == 0U);                             // ACKs carry no payload
 
     // No second ACK should be present
     MessageEnvelope extra;
@@ -1163,6 +1168,11 @@ static void test_receive_reliable_retry_data_emits_ack()
     assert(rack == Result::OK);
     assert(ack.message_type == MessageType::ACK);
     assert(ack.message_id   == 66666ULL);
+    // Verify ACK routing fields (P3 fix)
+    assert(ack.source_id         == 1U);                              // ACK comes from the local engine
+    assert(ack.destination_id    == data_env.source_id);             // routed back to the original sender
+    assert(ack.reliability_class == ReliabilityClass::BEST_EFFORT);  // ACKs are never reliable-retried
+    assert(ack.payload_length    == 0U);                             // ACKs carry no payload
 
     // No second ACK should be present
     MessageEnvelope extra;
@@ -1215,12 +1225,22 @@ static void test_receive_duplicate_resends_ack()
     assert(rack1 == Result::OK);
     assert(ack1.message_type == MessageType::ACK);
     assert(ack1.message_id   == 77777ULL);
+    // Verify ACK routing fields (P3 fix)
+    assert(ack1.source_id         == 1U);                               // ACK comes from the local engine
+    assert(ack1.destination_id    == data_env.source_id);              // routed back to the original sender
+    assert(ack1.reliability_class == ReliabilityClass::BEST_EFFORT);   // ACKs are never reliable-retried
+    assert(ack1.payload_length    == 0U);                              // ACKs carry no payload
 
     MessageEnvelope ack2;
     Result rack2 = harness_b.receive_message(ack2, 100U);
     assert(rack2 == Result::OK);
     assert(ack2.message_type == MessageType::ACK);
     assert(ack2.message_id   == 77777ULL);
+    // Verify ACK routing fields (P3 fix)
+    assert(ack2.source_id         == 1U);                               // ACK comes from the local engine
+    assert(ack2.destination_id    == data_env.source_id);              // routed back to the original sender
+    assert(ack2.reliability_class == ReliabilityClass::BEST_EFFORT);   // ACKs are never reliable-retried
+    assert(ack2.payload_length    == 0U);                              // ACKs carry no payload
 
     // No third ACK should be present
     MessageEnvelope ack3;

@@ -103,6 +103,22 @@ private:
     /// and push each to m_recv_queue.
     /// @param[in] now_us Current wall-clock time in microseconds.
     void flush_delayed_to_queue(uint64_t now_us);
+
+    /// Flush the outbound deliverable batch to the socket.
+    /// Tracks whether the current envelope (matched by source_id + message_id) failed.
+    /// @param[in] envelope  The envelope passed to send_message (used for identity match).
+    /// @param[in] batch     Array of deliverable envelopes from collect_deliverable().
+    /// @param[in] count     Number of entries in @p batch.
+    /// @return true if the current envelope's send failed; false otherwise.
+    bool flush_outbound_batch(const MessageEnvelope& envelope,
+                              const MessageEnvelope* batch,
+                              uint32_t count);
+
+    /// Serialize and send one envelope from the deliverable batch.
+    /// @param[in] env        Envelope to serialize and send.
+    /// @param[in] is_current True if @p env is the envelope from the current send_message call.
+    /// @return true if the send failed and @p is_current is true; false otherwise.
+    bool send_one_envelope(const MessageEnvelope& env, bool is_current);
 };
 
 #endif // PLATFORM_UDP_BACKEND_HPP

@@ -31,8 +31,8 @@ Not called directly by the User.
 
 1. `DeliveryEngine::receive()` pops an `ACK` envelope from the ring buffer.
 2. `envelope_is_control(raw)` — true; `raw.message_type == ACK` — true.
-3. **`m_ack_tracker.on_ack(raw.message_id)`** is called first (see UC_08 for AckTracker side).
-4. **`m_retry_mgr.on_ack(raw.source_id, raw.message_id)`** is called (`RetryManager.cpp`) inside `process_ack()`.
+3. **`m_ack_tracker.on_ack(env.destination_id, env.message_id)`** is called first (see UC_08 for AckTracker side).
+4. **`m_retry_mgr.on_ack(env.destination_id, env.message_id)`** is called (`RetryManager.cpp`) inside `process_ack()`.
 5. Inside `RetryManager::on_ack(src, msg_id)`:
    a. `NEVER_COMPILED_OUT_ASSERT(msg_id != 0)`.
    b. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]`:
@@ -69,8 +69,8 @@ DeliveryEngine::receive()                            [DeliveryEngine.cpp]
 | Condition | True branch | False branch |
 |-----------|-------------|--------------|
 | `entry.active && entry.env.message_id == message_id` | `active = false`; return OK | Continue scan |
-| No matching active entry found | Return ERR_NOT_FOUND | — |
-| `on_ack()` returns ERR_NOT_FOUND | Log warning in receive() | Silent success |
+| No matching active entry found | Return ERR_INVALID | — |
+| `on_ack()` returns ERR_INVALID | Log warning in receive() | Silent success |
 
 ---
 
@@ -100,7 +100,7 @@ DeliveryEngine::receive()                            [DeliveryEngine.cpp]
 ## 10. External Interactions
 
 - None — this flow operates entirely in process memory.
-- `Logger::log()` writes to `stderr` only on `ERR_NOT_FOUND`.
+- `Logger::log()` writes to `stderr` only on `ERR_INVALID`.
 
 ---
 
@@ -119,8 +119,8 @@ All other `RetryEntry` fields are unchanged (stale values remain until the slot 
 ```
 [ACK envelope received by DeliveryEngine::receive()]
   -> process_ack(m_ack_tracker, m_retry_manager, env)
-       -> AckTracker::on_ack(env.source_id, env.message_id)   [UC_08: PENDING -> FREE]
-       -> RetryManager::on_ack(env.source_id, env.message_id)
+       -> AckTracker::on_ack(env.destination_id, env.message_id)   [UC_08: PENDING -> FREE]
+       -> RetryManager::on_ack(env.destination_id, env.message_id)
             [scan; find active entry with matching (src, message_id)]
             [entry.active = false]
             <- Result::OK
@@ -136,13 +136,13 @@ All other `RetryEntry` fields are unchanged (stale values remain until the slot 
 - Prior `RELIABLE_RETRY` `send()` has set `entry.active = true` for the acknowledged message.
 
 **Runtime:**
-- Called on every received ACK. Idempotent — calling `on_ack()` for the same `message_id` twice returns `ERR_NOT_FOUND` on the second call (first call already cleared `active`).
+- Called on every received ACK. Idempotent — calling `on_ack()` for the same `message_id` twice returns `ERR_INVALID` on the second call (first call already cleared `active`).
 
 ---
 
 ## 14. Known Risks / Observations
 
-- **Idempotency:** If two ACKs arrive for the same `message_id`, the second produces `ERR_NOT_FOUND`. This is expected and non-fatal.
+- **Idempotency:** If two ACKs arrive for the same `message_id`, the second produces `ERR_INVALID`. This is expected and non-fatal.
 - **Stale `env` data in deactivated slot:** The stored envelope copy is not zeroed when deactivated. Sensitive payload data remains in `m_entries` until overwritten. This is a minor concern for security-sensitive deployments.
 - **Race between pump and ACK:** If `pump_retries()` collects an entry into `due_buf` just before `on_ack()` sets `active = false`, the entry is retransmitted once after the ACK was received. Receiver dedup handles the redundant copy.
 

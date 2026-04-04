@@ -736,29 +736,59 @@ Result DtlsUdpBackend::send_wire_bytes(const uint8_t* buf, uint32_t len)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// send_delayed_envelopes() — CC-reduction helper for send_message
+// send_one_envelope() — CC-reduction helper for flush_outbound_batch
 // ─────────────────────────────────────────────────────────────────────────────
 
-void DtlsUdpBackend::send_delayed_envelopes(const MessageEnvelope* delayed,
-                                             uint32_t count)
+bool DtlsUdpBackend::send_one_envelope(const MessageEnvelope& env, bool is_current)
 {
-    NEVER_COMPILED_OUT_ASSERT(delayed != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(m_sock_ops != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(m_ops     != nullptr);
+
+    uint32_t dlen = 0U;
+    Result res = Serializer::serialize(env, m_wire_buf, SOCKET_RECV_BUF_BYTES, dlen);
+    if (!result_ok(res) || dlen > DTLS_MAX_DATAGRAM_BYTES) {
+        return is_current;  // Serialize or MTU failure: attribute only if current
+    }
+
+    Result send_res = send_wire_bytes(m_wire_buf, dlen);
+    if (send_res != Result::OK) {
+        if (!is_current) {
+            Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
+                        "send_wire_bytes failed for delayed envelope");
+        }
+        return is_current;  // Send failed: attribute only if current
+    }
+    return false;  // Success
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// flush_outbound_batch() — CC-reduction helper for send_message
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Sends each envelope in @p batch to the peer via send_one_envelope().
+// Three-case attribution:
+//   Current envelope in batch and send fails  → return true (ERR_IO to caller).
+//   Current envelope NOT in batch             → return false (queued for later).
+//   Non-current envelope send fails           → log WARNING_LO, continue, return false.
+// Power of 10 Rule 2: fixed loop bound (count ≤ IMPAIR_DELAY_BUF_SIZE).
+
+bool DtlsUdpBackend::flush_outbound_batch(const MessageEnvelope& envelope,
+                                           const MessageEnvelope* batch,
+                                           uint32_t count)
+{
+    NEVER_COMPILED_OUT_ASSERT(batch != nullptr);
     NEVER_COMPILED_OUT_ASSERT(count <= IMPAIR_DELAY_BUF_SIZE);
 
-    // Power of 10 Rule 2: fixed loop bound (IMPAIR_DELAY_BUF_SIZE)
+    bool current_failed = false;
     for (uint32_t i = 0U; i < count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        uint32_t dlen = 0U;
-        Result res = Serializer::serialize(delayed[i], m_wire_buf,
-                                           SOCKET_RECV_BUF_BYTES, dlen);
-        if (!result_ok(res) || dlen > DTLS_MAX_DATAGRAM_BYTES) { continue; }
-        if (m_tls_enabled) {
-            (void)mbedtls_ssl_write(&m_ssl, m_wire_buf, static_cast<size_t>(dlen));
-        } else {
-            (void)m_sock_ops->send_to(m_sock_fd, m_wire_buf, dlen,
-                                      m_cfg.peer_ip, m_cfg.peer_port);
+        bool is_current = (batch[i].source_id  == envelope.source_id &&
+                           batch[i].message_id == envelope.message_id);
+        if (send_one_envelope(batch[i], is_current)) {
+            current_failed = true;
         }
     }
+    return current_failed;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -804,24 +834,13 @@ Result DtlsUdpBackend::send_message(const MessageEnvelope& envelope)
     // all messages due now — covering both the zero-delay pass-through and timed-
     // delay cases. Do NOT also call send_wire_bytes() here; that would send every
     // message twice. (HAZ-003)
-    // Flush errors from older delayed messages are not attributed to the current
-    // send — the current envelope may have a future release_us and remain queued.
-    // Power of 10: fixed loop bound (IMPAIR_DELAY_BUF_SIZE compile-time constant).
+    // flush_outbound_batch() handles the three-case attribution (see its comment).
     MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];
     uint32_t delayed_count = m_impairment.collect_deliverable(now_us, delayed,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    for (uint32_t i = 0U; i < delayed_count; ++i) {
-        NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        uint32_t dlen = 0U;
-        res = Serializer::serialize(delayed[i], m_wire_buf,
-                                    SOCKET_RECV_BUF_BYTES, dlen);
-        if (!result_ok(res)) { continue; }
-        Result send_res = send_wire_bytes(m_wire_buf, dlen);
-        if (send_res != Result::OK) {
-            Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
-                        "send_wire_bytes failed for delayed envelope at index %u", i);
-        }
+    if (flush_outbound_batch(envelope, delayed, delayed_count)) {
+        return Result::ERR_IO;
     }
 
     NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);

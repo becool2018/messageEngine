@@ -578,11 +578,10 @@ static void test_mock_send_to_fail()
     MessageEnvelope env;
     make_test_envelope(env, 0xFA115E1DULL);
 
-    // send_to fails — the failure is logged at WARNING_LO but not attributed to
-    // the current send call. send_message() returns OK: message was accepted into
-    // the local pipeline; delivery failure is observable via logging only.
+    // send_to fails for the current envelope — UdpBackend must propagate ERR_IO
+    // per TransportInterface contract.
     r = backend.send_message(env);
-    assert(r == Result::OK);
+    assert(r == Result::ERR_IO);
 
     // Backend remains open after a send failure.
     assert(backend.is_open());

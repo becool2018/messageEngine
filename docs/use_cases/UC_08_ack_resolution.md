@@ -32,7 +32,7 @@ Not called directly by the User.
 1. `DeliveryEngine::receive()` pops an `ACK` envelope from the transport ring buffer.
 2. `envelope_is_control(raw)` — true (ACK is a control message).
 3. **Branch:** `raw.message_type == MessageType::ACK` — true.
-4. **`m_ack_tracker.on_ack(raw.source_id, raw.message_id)`** is called (`AckTracker.cpp`) inside `process_ack()`.
+4. **`m_ack_tracker.on_ack(raw.destination_id, raw.message_id)`** is called (`AckTracker.cpp`) inside `process_ack()`.
 5. Inside `AckTracker::on_ack(src, msg_id)`:
    a. `NEVER_COMPILED_OUT_ASSERT(msg_id != 0)`.
    b. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]`:
@@ -42,7 +42,7 @@ Not called directly by the User.
         - Returns `Result::OK`.
    c. If no match: returns `Result::ERR_INVALID`.
 6. If `on_ack()` returns `ERR_INVALID`: `Logger::log(INFO, ...)` ("ACK has no matching ack_tracker slot").
-7. **`m_retry_mgr.on_ack(raw.source_id, raw.message_id)`** is also called (`RetryManager.cpp`) to cancel any pending retry for the same `(src, message_id)`:
+7. **`m_retry_mgr.on_ack(raw.destination_id, raw.message_id)`** is also called (`RetryManager.cpp`) to cancel any pending retry for the same `(src, message_id)`:
    a. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]`.
    b. If found with `active == true && entry.env.message_id == message_id`: `entry.active = false`.
 8. `receive()` copies `raw` to `out` (the caller's envelope) and returns `Result::OK`. The ACK is delivered to the caller as a control message.
@@ -108,7 +108,7 @@ DeliveryEngine::receive()                            [DeliveryEngine.cpp]
 ## 10. External Interactions
 
 - None — this flow operates entirely in process memory.
-- `Logger::log()` writes to `stderr` on `ERR_NOT_FOUND`.
+- `Logger::log()` writes to `stderr` on `ERR_INVALID`.
 
 ---
 
@@ -130,10 +130,10 @@ DeliveryEngine::receive()
   -> envelope_is_control()                    <- true
   -> [message_type == ACK]                    <- true
   -> process_ack(m_ack_tracker, m_retry_manager, env)
-       -> AckTracker::on_ack(env.source_id, env.message_id)
+       -> AckTracker::on_ack(env.destination_id, env.message_id)
             [scan; find PENDING slot; PENDING -> ACKED -> FREE]
             <- Result::OK
-       -> RetryManager::on_ack(env.source_id, env.message_id)
+       -> RetryManager::on_ack(env.destination_id, env.message_id)
             [scan; find active retry; set active=false]
   <- Result::OK   [ACK delivered to caller as control envelope]
 ```
@@ -155,7 +155,7 @@ DeliveryEngine::receive()
 
 - **ACK delivered to caller:** The caller receives the ACK envelope via `receive()` return value. The caller must check `message_type == ACK` and handle it appropriately (e.g., not treat it as a DATA envelope).
 - **ACKED state is transitional:** The code transitions `PENDING -> ACKED` and then immediately `ACKED -> FREE` in the same function call. The ACKED state has no observable duration; it exists only as a coding step.
-- **Duplicate ACK:** If two ACKs arrive for the same `message_id`, the first frees the slot; the second finds no PENDING slot and logs `ERR_NOT_FOUND` (non-fatal, expected behavior).
+- **Duplicate ACK:** If two ACKs arrive for the same `message_id`, the first frees the slot; the second finds no PENDING slot and logs `ERR_INVALID` (non-fatal, expected behavior).
 
 ---
 

@@ -120,6 +120,53 @@ Result LocalSimHarness::inject(const MessageEnvelope& envelope)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// flush_outbound_batch() — private helper
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Injects each envelope in @p batch into the peer's receive queue.
+// Three-case attribution:
+//   Current envelope in batch and inject fails → return true (ERR_IO to caller).
+//   Current envelope NOT in batch              → return false (queued for later).
+//   Non-current envelope inject fails          → log WARNING_HI, continue, return false.
+// Power of 10: fixed loop bound (count ≤ IMPAIR_DELAY_BUF_SIZE).
+
+bool LocalSimHarness::flush_outbound_batch(const MessageEnvelope& envelope,
+                                            const MessageEnvelope* batch,
+                                            uint32_t count)
+{
+    NEVER_COMPILED_OUT_ASSERT(batch != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(count <= IMPAIR_DELAY_BUF_SIZE);
+
+    bool current_failed = false;
+    for (uint32_t i = 0U; i < count; ++i) {
+        NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
+
+        bool is_current = (batch[i].source_id  == envelope.source_id &&
+                           batch[i].message_id == envelope.message_id);
+
+        Result inject_res = m_peer->inject(batch[i]);
+        if (inject_res == Result::ERR_IO) {
+            // ERR_IO from inject: true send failure (not a capacity condition).
+            // Attribute to caller only if this is the current envelope.
+            if (is_current) {
+                // Current envelope inject failed — propagate via return value.
+                // No log: caller receives ERR_IO as the observable signal.
+                current_failed = true;
+            } else {
+                Logger::log(Severity::WARNING_HI, "LocalSimHarness",
+                            "inject() ERR_IO for delayed message at index %u", i);
+            }
+        } else if (inject_res != Result::OK) {
+            // ERR_FULL or other capacity condition: not a send failure; log and continue.
+            Logger::log(Severity::WARNING_HI, "LocalSimHarness",
+                        "inject() failed for delayed message at index %u: result=%d",
+                        i, static_cast<int>(inject_res));
+        }
+    }
+    return current_failed;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // send_message()
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -150,24 +197,14 @@ Result LocalSimHarness::send_message(const MessageEnvelope& envelope)
     // impairments are disabled, since process_outbound queues it with release_us=now_us).
     // Do NOT also inject `envelope` directly — that would double-send every message
     // and bypass configured delay for the current message. (HAZ-003, HAZARD_ANALYSIS §2)
+    // flush_outbound_batch() handles the three-case attribution (see its comment).
     MessageEnvelope delayed_envelopes[IMPAIR_DELAY_BUF_SIZE];
     uint32_t delayed_count = m_impairment.collect_deliverable(now_us,
                                                               delayed_envelopes,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    // Flush errors from older delayed messages are not attributed to the current
-    // send — the current envelope may have a future release_us and remain queued.
-    // Log individual failures for observability; always return OK (current message
-    // was accepted into the local pipeline above).
-    // Power of 10: fixed loop bound.
-    for (uint32_t i = 0U; i < delayed_count; ++i) {
-        NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        Result inject_res = m_peer->inject(delayed_envelopes[i]);
-        if (inject_res != Result::OK) {
-            Logger::log(Severity::WARNING_HI, "LocalSimHarness",
-                        "inject() failed for delayed message at index %u: result=%d",
-                        i, static_cast<int>(inject_res));
-        }
+    if (flush_outbound_batch(envelope, delayed_envelopes, delayed_count)) {
+        return Result::ERR_IO;
     }
 
     return Result::OK;

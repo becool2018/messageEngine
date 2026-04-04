@@ -814,12 +814,10 @@ static void test_plaintext_send_bad_peer_ip()
     env.destination_id    = 1U;
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
 
-    // send_message() accepts the envelope into the local impairment pipeline and
-    // returns OK. The flush-loop send_to() failure (bad peer IP) is logged at
-    // WARNING_LO but not attributed to the current send call — the send contract
-    // is "accepted locally", not "delivered to peer".
+    // send_to fails for the current envelope — DtlsUdpBackend must propagate ERR_IO
+    // per TransportInterface contract.
     Result send_res = backend.send_message(env);
-    assert(send_res == Result::OK);
+    assert(send_res == Result::ERR_IO);
 
     backend.close();
     printf("PASS: test_plaintext_send_bad_peer_ip\n");
@@ -1788,11 +1786,10 @@ static void test_mock_dtls_ssl_write_fail()
     env.destination_id    = 2U;
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
 
-    // ssl_write fails — the failure is logged at WARNING_LO but not attributed to
-    // the current send call. send_message() returns OK: message was accepted into
-    // the local pipeline; delivery failure is observable via logging only.
+    // ssl_write fails for the current envelope — DtlsUdpBackend must propagate ERR_IO
+    // per TransportInterface contract.
     Result send_res = backend.send_message(env);
-    assert(send_res == Result::OK);
+    assert(send_res == Result::ERR_IO);
 
     backend.close();
     printf("PASS: test_mock_dtls_ssl_write_fail\n");

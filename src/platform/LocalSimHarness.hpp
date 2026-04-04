@@ -108,6 +108,16 @@ private:
     bool              m_open;              ///< Transport open/closed state
     uint32_t          m_connections_opened; ///< REQ-7.2.4: successful link() events
     uint32_t          m_connections_closed; ///< REQ-7.2.4: close() events while linked
+
+    /// Inject each envelope in @p batch into the peer's receive queue.
+    /// Tracks whether the current envelope (matched by source_id + message_id) failed.
+    /// @param[in] envelope  The envelope passed to send_message (used for identity match).
+    /// @param[in] batch     Array of deliverable envelopes from collect_deliverable().
+    /// @param[in] count     Number of entries in @p batch.
+    /// @return true if the current envelope's inject failed; false otherwise.
+    bool flush_outbound_batch(const MessageEnvelope& envelope,
+                              const MessageEnvelope* batch,
+                              uint32_t count);
 };
 
 #endif // PLATFORM_LOCAL_SIM_HARNESS_HPP

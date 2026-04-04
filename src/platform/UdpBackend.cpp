@@ -126,6 +126,62 @@ Result UdpBackend::init(const TransportConfig& config)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// send_one_envelope() — private helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool UdpBackend::send_one_envelope(const MessageEnvelope& env, bool is_current)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_fd >= 0);
+    NEVER_COMPILED_OUT_ASSERT(m_sock_ops != nullptr);
+
+    uint32_t dlen = 0U;
+    Result res = Serializer::serialize(env, m_wire_buf, SOCKET_RECV_BUF_BYTES, dlen);
+    if (!result_ok(res)) {
+        return is_current;  // Serialize failed: attribute to caller only if current
+    }
+
+    if (!m_sock_ops->send_to(m_fd, m_wire_buf, dlen,
+                             m_cfg.peer_ip, m_cfg.peer_port)) {
+        if (!is_current) {
+            Logger::log(Severity::WARNING_LO, "UdpBackend",
+                        "send_to failed for delayed envelope");
+        }
+        return is_current;  // Send failed: attribute to caller only if current
+    }
+    return false;  // Success
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// flush_outbound_batch() — private helper
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Sends each envelope in @p batch to the configured peer via send_one_envelope().
+// Three-case attribution:
+//   Current envelope in batch and send fails  → return true (ERR_IO to caller).
+//   Current envelope NOT in batch             → return false (queued for later).
+//   Non-current envelope send fails           → log WARNING_LO, continue, return false.
+// Power of 10: fixed loop bound (count ≤ IMPAIR_DELAY_BUF_SIZE).
+
+bool UdpBackend::flush_outbound_batch(const MessageEnvelope& envelope,
+                                       const MessageEnvelope* batch,
+                                       uint32_t count)
+{
+    NEVER_COMPILED_OUT_ASSERT(batch  != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(count <= IMPAIR_DELAY_BUF_SIZE);
+
+    bool current_failed = false;
+    for (uint32_t i = 0U; i < count; ++i) {
+        NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
+        bool is_current = (batch[i].source_id  == envelope.source_id &&
+                           batch[i].message_id == envelope.message_id);
+        if (send_one_envelope(batch[i], is_current)) {
+            current_failed = true;
+        }
+    }
+    return current_failed;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // send_message()
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -162,29 +218,14 @@ Result UdpBackend::send_message(const MessageEnvelope& envelope)
     // all messages whose release_us <= now_us, covering both the zero-delay
     // pass-through and the timed-delay cases. Do NOT also call send_to() for
     // `envelope` directly — that causes every message to be sent twice. (HAZ-003)
-    // Flush errors from older delayed messages are not attributed to the current
-    // send — the current envelope may have a future release_us and remain queued.
-    // Power of 10: fixed loop bound (IMPAIR_DELAY_BUF_SIZE compile-time constant).
+    // flush_outbound_batch() handles the three-case attribution (see its comment).
     MessageEnvelope delayed_envelopes[IMPAIR_DELAY_BUF_SIZE];
     uint32_t delayed_count = m_impairment.collect_deliverable(now_us,
                                                               delayed_envelopes,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    for (uint32_t i = 0U; i < delayed_count; ++i) {
-        NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-
-        uint32_t delayed_len = 0U;
-        res = Serializer::serialize(delayed_envelopes[i], m_wire_buf,
-                                    SOCKET_RECV_BUF_BYTES, delayed_len);
-        if (!result_ok(res)) {
-            continue;
-        }
-
-        if (!m_sock_ops->send_to(m_fd, m_wire_buf, delayed_len,
-                                 m_cfg.peer_ip, m_cfg.peer_port)) {
-            Logger::log(Severity::WARNING_LO, "UdpBackend",
-                        "send_to failed for delayed envelope at index %u", i);
-        }
+    if (flush_outbound_batch(envelope, delayed_envelopes, delayed_count)) {
+        return Result::ERR_IO;
     }
 
     NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);  // Post-condition
