@@ -50,6 +50,9 @@ static const uint32_t NODE_ID_INVALID        = 0U;
 /// DtlsUdpBackend rejects send_message() calls whose serialized length exceeds this.
 /// (REQ-6.4.4)
 static const uint32_t DTLS_MAX_DATAGRAM_BYTES = 1400U;
+/// Capacity of the bounded pull-style observability event ring (REQ-7.2.5).
+/// Power of 10 Rule 3: fixed size; no dynamic allocation after init.
+static const uint32_t DELIVERY_EVENT_RING_CAPACITY = 64U;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error / severity model  (F-Prime style)

@@ -27,8 +27,9 @@
  * Design: Owns AckTracker, RetryManager, DuplicateFilter. Applies all delivery
  * semantics based on message envelope reliability_class field.
  *
- * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4
+ * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
  */
+// Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
 
 #ifndef CORE_DELIVERY_ENGINE_HPP
 #define CORE_DELIVERY_ENGINE_HPP
@@ -47,6 +48,8 @@
 #include "Logger.hpp"
 #include "DeliveryStats.hpp"
 #include "AssertState.hpp"
+#include "DeliveryEvent.hpp"
+#include "DeliveryEventRing.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DeliveryEngine
@@ -137,6 +140,29 @@ public:
      */
     uint32_t sweep_ack_timeouts(uint64_t now_us);
 
+    // REQ-7.2.5: pull-style observability event polling API
+    /**
+     * @brief Pop the oldest pending observability event.
+     *
+     * Returns OK and fills @p out when an event is available.
+     * Returns ERR_EMPTY when no events are pending.
+     * Non-blocking; never modifies delivery state.
+     * NSC: observability only.
+     *
+     * @param[out] out  Filled with the oldest event on OK.
+     * @return OK on success; ERR_EMPTY if no events pending.
+     */
+    Result poll_event(DeliveryEvent& out);
+
+    /**
+     * @brief Return the number of unread observability events in the ring.
+     *
+     * NSC: read-only observability; no effect on delivery.
+     *
+     * @return Number of pending events (0 … DELIVERY_EVENT_RING_CAPACITY).
+     */
+    uint32_t pending_event_count() const;
+
 private:
     TransportInterface* m_transport;
     ChannelConfig       m_cfg;
@@ -155,6 +181,26 @@ private:
 
     // REQ-7.2.1–7.2.4: aggregated delivery statistics (zero-init in init())
     DeliveryStats   m_stats;
+
+    // REQ-7.2.5: bounded pull-style observability event ring (init'd in init())
+    // Power of 10 Rule 3: fixed-capacity ring; no dynamic allocation.
+    DeliveryEventRing m_events;
+
+    // Private helper: push one DeliveryEvent into m_events (REQ-7.2.5).
+    // Bounded overwrite-on-full ring push; never blocks, never fails.
+    // NSC: observability bookkeeping only.
+    void emit_event(DeliveryEventKind kind,
+                    uint64_t          message_id,
+                    NodeId            node_id,
+                    uint64_t          timestamp_us,
+                    Result            result);
+
+    // Private helper: emit EXPIRY_DROP or MISROUTE_DROP event based on routing result.
+    // Extracted from receive() to reduce its cognitive complexity to ≤ 10 (REQ-7.2.5).
+    // NSC: observability bookkeeping only.
+    void emit_routing_drop_event(const MessageEnvelope& env,
+                                 Result                 routing_res,
+                                 uint64_t               now_us);
 
     // Private helper: expiry-gate then send a message envelope via transport.
     // Returns ERR_EXPIRED without touching the transport if the message has expired.
