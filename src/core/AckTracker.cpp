@@ -124,6 +124,43 @@ Result AckTracker::on_ack(NodeId src, uint64_t msg_id)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AckTracker::cancel() — rollback a PENDING slot without a phantom ACK stat.
+// Transitions PENDING→FREE directly; does not increment acks_received.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result AckTracker::cancel(NodeId src, uint64_t msg_id)
+{
+    // Power of 10 rule 5: pre-condition assertions
+    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count is consistent
+    NEVER_COMPILED_OUT_ASSERT(src != NODE_ID_INVALID);           // Assert: valid source
+
+    // Power of 10 rule 2: bounded search (fixed loop, ACK_TRACKER_CAPACITY)
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        if ((m_slots[i].state == EntryState::PENDING) &&
+            (m_slots[i].env.source_id == src) &&
+            (m_slots[i].env.message_id == msg_id)) {
+            // Release slot directly to FREE; do NOT increment acks_received.
+            // This is a rollback path: the message was never put on the wire,
+            // so no phantom ACK stat should be recorded.
+            m_slots[i].state = EntryState::FREE;
+            if (m_count > 0U) { --m_count; }
+
+            // Power of 10 rule 5: post-condition assertions
+            NEVER_COMPILED_OUT_ASSERT(m_slots[i].state == EntryState::FREE);  // Assert: slot freed
+            NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);       // Assert: count valid
+
+            return Result::OK;
+        }
+    }
+
+    // Power of 10 rule 5: not-found assertion
+    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count still valid
+
+    return Result::ERR_INVALID;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // sweep_one_slot() — private helper (Power of 10: single-purpose, ≤1 page)
 // ─────────────────────────────────────────────────────────────────────────────
 

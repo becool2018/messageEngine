@@ -419,6 +419,45 @@ static void test_stats_timeout_multiround()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 14: cancel() frees PENDING slot without phantom ACK stat; slot reusable
+// Verifies: AckTracker::cancel() rollback path (P1b fix)
+// Verifies: REQ-3.2.4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_ack_tracker_cancel()
+{
+    AckTracker tracker;
+    tracker.init();
+
+    // Capture baseline stats — all zeroed after init
+    const AckTrackerStats& s0 = tracker.get_stats();
+    assert(s0.acks_received == 0U);
+    assert(s0.timeouts == 0U);
+
+    // Track a message (PENDING)
+    MessageEnvelope env;
+    make_test_envelope(env, 77ULL, 1U, 2U);
+    Result track_res = tracker.track(env, 9000000ULL);
+    assert(track_res == Result::OK);
+
+    // cancel() must free the slot directly (PENDING→FREE) without acks_received bump
+    Result cancel_res = tracker.cancel(1U, 77ULL);
+    assert(cancel_res == Result::OK);
+
+    // acks_received must still be 0 (no phantom ACK stat)
+    const AckTrackerStats& s1 = tracker.get_stats();
+    assert(s1.acks_received == 0U);
+    assert(s1.timeouts == 0U);
+
+    // Slot must be FREE: track() with the same message_id must succeed (reusable)
+    MessageEnvelope env2;
+    make_test_envelope(env2, 77ULL, 1U, 2U);
+    Result retrack_res = tracker.track(env2, 9000000ULL);
+    assert(retrack_res == Result::OK);
+
+    printf("PASS: test_ack_tracker_cancel\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -436,6 +475,7 @@ int main()
     test_stats_timeout();
     test_stats_ack_received();
     test_stats_timeout_multiround();
+    test_ack_tracker_cancel();
 
     printf("ALL AckTracker tests passed.\n");
     return 0;

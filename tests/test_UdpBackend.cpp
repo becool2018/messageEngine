@@ -495,6 +495,11 @@ static void test_udp_impairment_delay_paths()
     Result r = backend.receive_message(recv_env, 500U);
     assert(r == Result::ERR_TIMEOUT);
 
+    // Verify flush_delayed_to_wire() actually called send_to() — not a silent drop.
+    // send_message(env2) flushed env1 (1 send_to call); receive_message flushed env2
+    // (1 more send_to call).  Total: 2 send_to() calls at this point.
+    assert(mock.sent_count == 2U);
+
     backend.close();
     printf("PASS: test_udp_impairment_delay_paths\n");
 }
@@ -659,6 +664,11 @@ static void test_udp_recv_queue_initial_pop()
     MessageEnvelope env_a;
     r = backend.receive_message(env_a, 500U);
     assert(r == Result::ERR_TIMEOUT);
+
+    // Verify all N_SEND delayed envelopes were forwarded to the wire via send_to().
+    // No send_to() calls occurred during send_message() (delay buffer, not immediate).
+    // flush_delayed_to_wire() during receive_message() calls send_to() once per item.
+    assert(mock.sent_count == N_SEND);
 
     backend.close();
     printf("PASS: test_udp_recv_queue_initial_pop\n");

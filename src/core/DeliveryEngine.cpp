@@ -217,9 +217,9 @@ Result DeliveryEngine::send_via_transport(const MessageEnvelope& env, uint64_t n
 // I/O.  Ordering rationale: if either reservation fails we return an error and
 // the peer never sees the message, preserving the at-most-once contract.
 //
-// Rollback on RetryManager failure: on_ack() transitions the already-reserved
-// AckTracker slot PENDING→ACKED; sweep_expired() reclaims it on its next pass.
-// AckTracker has no dedicated cancel() — on_ack() is the approved rollback path.
+// Rollback on RetryManager failure: cancel() frees the already-reserved
+// AckTracker slot directly (PENDING→FREE) without incrementing acks_received.
+// This avoids the phantom ACK stat that on_ack() would have produced.
 // Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
 // ─────────────────────────────────────────────────────────────────────────────
 static Result reserve_bookkeeping(AckTracker&            ack_tracker,
@@ -266,8 +266,9 @@ static Result reserve_bookkeeping(AckTracker&            ack_tracker,
                     "Failed to schedule retry for message_id=%llu (result=%u); "
                     "aborting send to preserve at-most-once contract",
                     (unsigned long long)env.message_id, static_cast<uint8_t>(sched_res));
-        // Roll back: on_ack() moves PENDING→ACKED; sweep_expired() frees the slot.
-        (void)ack_tracker.on_ack(env.source_id, env.message_id);
+        // Roll back AckTracker reservation: cancel() frees the slot directly
+        // without incrementing acks_received (no phantom ACK stat).
+        (void)ack_tracker.cancel(env.source_id, env.message_id);
         return sched_res;
     }
 
@@ -308,6 +309,17 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
     // Step 3: all bookkeeping confirmed; now commit to I/O.
     Result res = send_via_transport(env, now_us);
     if (res != Result::OK) {
+        // Roll back bookkeeping reserved in Step 2 so no spurious timeout or
+        // retry fires for a message that was never put on the wire.
+        // cancel() frees the AckTracker slot directly without a phantom ACK stat.
+        // retry_manager.on_ack() marks the RetryManager slot inactive immediately.
+        if (env.reliability_class == ReliabilityClass::RELIABLE_ACK ||
+            env.reliability_class == ReliabilityClass::RELIABLE_RETRY) {
+            (void)m_ack_tracker.cancel(env.source_id, env.message_id);
+        }
+        if (env.reliability_class == ReliabilityClass::RELIABLE_RETRY) {
+            (void)m_retry_manager.on_ack(env.source_id, env.message_id);
+        }
         record_send_failure(env, res);  // REQ-7.2.3: stats + log (CC-reduction helper)
         return res;
     }

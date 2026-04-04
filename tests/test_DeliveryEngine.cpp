@@ -644,7 +644,16 @@ static void test_send_ack_tracker_full()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 14: fill RetryManager to capacity; next RELIABLE_RETRY send returns
-// ERR_FULL (retry manager full → reliability contract broken → ERR_FULL)
+// ERR_FULL (retry manager full → reliability contract broken → ERR_FULL).
+//
+// Strategy: fill both trackers with ACK_TRACKER_CAPACITY RELIABLE_RETRY sends,
+// then expire the AckTracker slots by advancing time past the recv_timeout_ms
+// deadline (2 s > 1 s timeout) via sweep_ack_timeouts().  RetryManager slots
+// survive because the message expiry_time_us is 5 s out.  The next send then
+// exercises the path where ack_tracker.track() succeeds (freed slot available)
+// but retry_manager.schedule() fails (still full) — the code must cancel() the
+// newly-reserved AckTracker slot without a phantom ACK stat.
+//
 // Verifies: REQ-3.3.3
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_send_retry_manager_full()
@@ -654,33 +663,42 @@ static void test_send_retry_manager_full()
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
-    // Fill the RetryManager by sending ACK_TRACKER_CAPACITY RELIABLE_RETRY messages
+    // Fill both AckTracker and RetryManager with ACK_TRACKER_CAPACITY RELIABLE_RETRY
+    // messages.  Each successful send reserves one slot in both trackers.
     // Power of 10: bounded loop
     for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
         MessageEnvelope env;
         make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_RETRY);
         Result r = engine.send(env, NOW_US);
         assert(r == Result::OK);
+        // Drain harness_b so its queue never fills
         MessageEnvelope drain;
         (void)harness_b.receive_message(drain, 10U);
     }
 
-    // RetryManager is now full; next RELIABLE_RETRY must return ERR_FULL because
-    // retry scheduling failure breaks the reliability contract (no retry will fire
-    // on timeout without a slot).
+    // Expire all AckTracker slots by advancing time 2 s past the 1 s recv_timeout_ms
+    // deadline.  sweep_ack_timeouts() calls m_ack_tracker.sweep_expired() internally.
+    // RetryManager slots are unaffected — their expiry_time_us is NOW_US + 5 s.
+    // Power of 10 rule 7: check return value
+    static const uint64_t LATER_US = NOW_US + 2000000ULL;  // 2 s after NOW_US
+    uint32_t swept = engine.sweep_ack_timeouts(LATER_US);
+    assert(swept == ACK_TRACKER_CAPACITY);  // all ACK slots should have timed out
+
+    // Now AckTracker has ACK_TRACKER_CAPACITY free slots; RetryManager is still full.
+    // The next RELIABLE_RETRY send must exercise the path:
+    //   ack_tracker.track()          → OK  (free slot available)
+    //   retry_manager.schedule()     → ERR_FULL  (no slot available)
+    //   ack_tracker.cancel()         → OK  (rollback without phantom ACK stat)
+    //   send() returns               → ERR_FULL
     MessageEnvelope overflow_env;
     make_data_envelope(overflow_env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_RETRY);
-    Result res = engine.send(overflow_env, NOW_US);
+    Result res = engine.send(overflow_env, LATER_US);
 
     // retry manager full → send returns ERR_FULL
     assert(res == Result::ERR_FULL);
 
-    // After the fix: bookkeeping is validated BEFORE send_via_transport(), so
-    // the peer must NOT have received the overflow message.  Verify harness_b
-    // queue is empty (ERR_TIMEOUT confirms no message arrived).
-    // Also verifies that the AckTracker slot reserved before the RetryManager
-    // failure was correctly rolled back (no leaked PENDING slot from this send).
-    // Verifies: at-most-once contract — ERR_FULL means peer never saw the message.
+    // The peer must NOT have received the overflow message (bookkeeping reserved
+    // before transport, rolled back after schedule() failure — at-most-once contract).
     MessageEnvelope not_sent;
     Result not_recv = harness_b.receive_message(not_sent, 10U);
     assert(not_recv != Result::OK);

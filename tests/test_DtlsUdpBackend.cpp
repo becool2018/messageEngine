@@ -1654,6 +1654,14 @@ static void test_delay_impairment_flush_and_recv()
     Result recv_res = client.receive_message(received, 500U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
+    // Verify the peer (server) actually received the delayed message.
+    // flush_delayed_to_wire() sent the envelope to the real UDP socket;
+    // server.receive_message() should return OK with the correct message.
+    MessageEnvelope server_received;
+    Result srv_res = server.receive_message(server_received, 200U);
+    assert(srv_res == Result::OK);
+    assert(server_received.message_type == MessageType::DATA);
+
     client.close();
     server.close();
 
@@ -1726,6 +1734,19 @@ static void test_two_delayed_messages_second_recv_prequeue()
     MessageEnvelope recv_1;
     Result r1 = sender.receive_message(recv_1, 500U);
     assert(r1 == Result::ERR_TIMEOUT);
+
+    // Verify the peer (server) received the first delayed message on the wire.
+    // flush_delayed_to_wire() transmitted at least one envelope to the real UDP socket.
+    MessageEnvelope srv_recv_a;
+    Result srv_r1 = server.receive_message(srv_recv_a, 200U);
+    assert(srv_r1 == Result::OK);
+    assert(srv_recv_a.message_type == MessageType::DATA);
+
+    // Verify the peer (server) received the second delayed message on the wire.
+    MessageEnvelope srv_recv_b;
+    Result srv_r2 = server.receive_message(srv_recv_b, 200U);
+    assert(srv_r2 == Result::OK);
+    assert(srv_recv_b.message_type == MessageType::DATA);
 
     // Second receive: delay buffer already drained; recv_queue still empty →
     // ERR_TIMEOUT again.

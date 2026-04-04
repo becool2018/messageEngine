@@ -69,7 +69,8 @@ struct MockSocketOps : public ISocketOps {
     uint16_t recv_src_port    = 0U;
 
     // ── Call counters ─────────────────────────────────────────────────────────
-    int n_do_close = 0;  ///< Incremented on each do_close() call.
+    int      n_do_close  = 0;    ///< Incremented on each do_close() call.
+    uint32_t sent_count  = 0U;   ///< Incremented by send_to() on each successful call.
 
     // ── Fake file descriptor returned on successful create ────────────────────
     // Must be ≥ 0 to satisfy preconditions in callers; not a real OS fd.
@@ -157,7 +158,11 @@ struct MockSocketOps : public ISocketOps {
     bool send_to(int /*fd*/, const uint8_t* /*buf*/, uint32_t /*len*/,
                  const char* /*ip*/, uint16_t /*port*/) override
     {
-        return !fail_send_to;
+        if (!fail_send_to) {
+            ++sent_count;
+            return true;
+        }
+        return false;
     }
 
     bool recv_from(int /*fd*/, uint8_t* /*buf*/, uint32_t /*buf_cap*/,
