@@ -198,6 +198,21 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 
 ---
 
+## HL-26: Inbound Impairment on TCP/TLS Receive Path
+> System calls ImpairmentEngine::process_inbound() on every framed message received by TcpBackend or TlsTcpBackend, applying partition drops and reordering before pushing the envelope to the inbound ring. Blocked messages are dropped with ERR_IO or held in the delay buffer.
+
+- UC_53 — ImpairmentEngine process_inbound — called internally by TcpBackend and TlsTcpBackend on every received frame (updated: phase 2 wiring active in both TCP backends)
+
+---
+
+## HL-27: LocalSim Inbound Impairment via deliver_from_peer()
+> System applies ImpairmentEngine::process_inbound() on all linked-peer deliveries via LocalSimHarness::deliver_from_peer(); inject() remains a raw test-hook that bypasses impairment by contract, preserving direct test access to the inbound ring without any impairment filtering.
+
+- UC_24 — LocalSimHarness: send on one harness, receive on linked peer (updated: deliver_from_peer() now applies process_inbound() before enqueue)
+- UC_42 — LocalSimHarness inject(): test code directly injects an envelope without going through send_message() or deliver_from_peer() — raw bypass; no impairment applied
+
+---
+
 ## HL-25: TLS Session Resumption on Reconnect
 > User enables TLS session resumption via TlsConfig::session_resumption_enabled; System saves the session after the first handshake and presents it on reconnect to skip the full handshake exchange, reducing reconnection latency (RFC 5077 / TLS 1.3 PSK).
 
