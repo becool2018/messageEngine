@@ -24,7 +24,7 @@
  *   - MISRA C++: no exceptions, all return values checked.
  *   - F-Prime style: event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1, REQ-7.2.4
  */
 
 #include "platform/UdpBackend.hpp"
@@ -43,7 +43,8 @@
 
 UdpBackend::UdpBackend()
     : m_sock_ops(&SocketOpsImpl::instance()),
-      m_fd(-1), m_wire_buf{}, m_cfg{}, m_open(false)
+      m_fd(-1), m_wire_buf{}, m_cfg{}, m_open(false),
+      m_connections_opened(0U), m_connections_closed(0U)
 {
     // Power of 10 rule 3: initialize to safe state
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);  // Invariant
@@ -51,7 +52,8 @@ UdpBackend::UdpBackend()
 
 UdpBackend::UdpBackend(ISocketOps& ops)
     : m_sock_ops(&ops),
-      m_fd(-1), m_wire_buf{}, m_cfg{}, m_open(false)
+      m_fd(-1), m_wire_buf{}, m_cfg{}, m_open(false),
+      m_connections_opened(0U), m_connections_closed(0U)
 {
     // Power of 10 rule 3: initialize to safe state
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);  // Invariant
@@ -114,6 +116,7 @@ Result UdpBackend::init(const TransportConfig& config)
     m_impairment.init(imp_cfg);
 
     m_open = true;
+    ++m_connections_opened;  // REQ-7.2.4: successful UDP socket bind counts as connection
     Logger::log(Severity::INFO, "UdpBackend",
                "UDP socket bound to %s:%u", config.bind_ip, config.bind_port);
 
@@ -294,6 +297,7 @@ void UdpBackend::close()
     if (m_fd >= 0) {
         m_sock_ops->do_close(m_fd);
         m_fd = -1;
+        ++m_connections_closed;  // REQ-7.2.4: socket close event
     }
 
     m_open = false;
@@ -308,4 +312,21 @@ bool UdpBackend::is_open() const
 {
     NEVER_COMPILED_OUT_ASSERT(m_open == (m_fd >= 0) || !m_open);  // Invariant
     return m_open;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// get_transport_stats() — REQ-7.2.4 / REQ-7.2.2 observability
+// NSC: read-only; no state change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void UdpBackend::get_transport_stats(TransportStats& out) const
+{
+    // Power of 10 rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(m_connections_opened >= m_connections_closed);  // Assert: monotonic counters
+    NEVER_COMPILED_OUT_ASSERT(m_connections_closed <= m_connections_opened);  // Assert: closed ≤ opened
+
+    transport_stats_init(out);
+    out.connections_opened = m_connections_opened;
+    out.connections_closed = m_connections_closed;
+    out.impairment         = m_impairment.get_stats();
 }

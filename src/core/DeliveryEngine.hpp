@@ -27,7 +27,7 @@
  * Design: Owns AckTracker, RetryManager, DuplicateFilter. Applies all delivery
  * semantics based on message envelope reliability_class field.
  *
- * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4
+ * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4
  */
 
 #ifndef CORE_DELIVERY_ENGINE_HPP
@@ -45,6 +45,8 @@
 #include "MessageId.hpp"
 #include "Timestamp.hpp"
 #include "Logger.hpp"
+#include "DeliveryStats.hpp"
+#include "AssertState.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DeliveryEngine
@@ -109,6 +111,20 @@ public:
      */
     uint32_t pump_retries(uint64_t now_us);
 
+    /**
+     * @brief Populate @p out with aggregated delivery statistics.
+     *
+     * Combines local message counters and latency tracking with sub-component
+     * stats from AckTracker, RetryManager, and the transport's get_transport_stats().
+     * Also reads the global fatal assert count (REQ-7.2.4).
+     *
+     * NSC: read-only observability; no effect on delivery.
+     * Power of 10 rule 5: ≥2 assertions enforced inside.
+     *
+     * @param[out] out DeliveryStats struct to fill.
+     */
+    void get_stats(DeliveryStats& out) const;
+
     // Safety-critical (SC): HAZ-002, HAZ-006 — verified to M5
     /**
      * @brief Check for ACK timeouts and process them.
@@ -137,9 +153,29 @@ private:
     MessageEnvelope m_retry_buf[MSG_RING_CAPACITY];
     MessageEnvelope m_timeout_buf[ACK_TRACKER_CAPACITY];
 
+    // REQ-7.2.1–7.2.4: aggregated delivery statistics (zero-init in init())
+    DeliveryStats   m_stats;
+
     // Private helper: expiry-gate then send a message envelope via transport.
     // Returns ERR_EXPIRED without touching the transport if the message has expired.
     Result send_via_transport(const MessageEnvelope& env, uint64_t now_us);
+
+    // Private helper: record a send-failure stat and log a warning.
+    // Increments msgs_dropped_expired on ERR_EXPIRED; logs at WARNING_LO.
+    // Extracted from send() to reduce its cognitive complexity (CC ≤ 10).
+    // NSC: observability bookkeeping only.
+    void record_send_failure(const MessageEnvelope& env, Result res);
+
+    // Private helper: update routing-failure stats (msgs_dropped_expired or
+    // msgs_dropped_misrouted) based on the routing result code.
+    // Extracted from receive() to reduce its cognitive complexity (CC ≤ 10).
+    // NSC: observability bookkeeping only.
+    void record_routing_failure(Result routing_res);
+
+    // Private helper: update latency stats from a received ACK.
+    // Looks up the original send timestamp and computes RTT (REQ-7.2.1).
+    // NSC: observability bookkeeping only.
+    void update_latency_stats(const MessageEnvelope& ack_env, uint64_t now_us);
 };
 
 #endif // CORE_DELIVERY_ENGINE_HPP

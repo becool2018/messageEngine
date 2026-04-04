@@ -23,7 +23,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: simple test framework using assert() and printf().
  *
- * Verifies: REQ-3.2.4, REQ-3.3.2
+ * Verifies: REQ-3.2.4, REQ-3.3.2, REQ-7.2.3
  */
 // Verification: M1 + M2 + M4 + M5 (fault injection not required — no injectable dependency)
 
@@ -302,6 +302,71 @@ static void test_sweep_buf_capacity()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 11: stats timeout counter increments when PENDING slot expires
+// Verifies: REQ-7.2.3 — AckTracker.timeouts counter
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_timeout()
+{
+    AckTracker tracker;
+    tracker.init();
+
+    // Verify stats are zeroed on init
+    const AckTrackerStats& s0 = tracker.get_stats();
+    assert(s0.timeouts == 0U);
+    assert(s0.acks_received == 0U);
+
+    // Track one message with an expired deadline
+    MessageEnvelope env;
+    make_test_envelope(env, 500U);
+    Result r = tracker.track(env, 1ULL);  // deadline = 1µs (already expired)
+    assert(r == Result::OK);
+
+    // Sweep at a time well past the deadline
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+    uint32_t count = tracker.sweep_expired(1000000ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(count == 1U);
+
+    // timeout counter must be 1; acks_received still 0
+    const AckTrackerStats& s1 = tracker.get_stats();
+    assert(s1.timeouts == 1U);
+    assert(s1.acks_received == 0U);
+
+    printf("PASS: test_stats_timeout\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 12: stats acks_received increments when on_ack() transitions PENDING→ACKED
+// Verifies: REQ-7.2.3 — AckTracker.acks_received counter
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_ack_received()
+{
+    AckTracker tracker;
+    tracker.init();
+
+    const AckTrackerStats& s0 = tracker.get_stats();
+    assert(s0.acks_received == 0U);
+    assert(s0.timeouts == 0U);
+
+    // Track a message with a future deadline
+    MessageEnvelope env;
+    make_test_envelope(env, 600U);
+    env.source_id = 1U;
+    Result track_r = tracker.track(env, 9999999999ULL);
+    assert(track_r == Result::OK);
+
+    // ACK the message
+    Result ack_r = tracker.on_ack(1U, 600U);
+    assert(ack_r == Result::OK);
+
+    // acks_received must be 1; timeouts still 0
+    const AckTrackerStats& s1 = tracker.get_stats();
+    assert(s1.acks_received == 1U);
+    assert(s1.timeouts == 0U);
+
+    printf("PASS: test_stats_ack_received\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -316,6 +381,8 @@ int main()
     test_sweep_pending_not_expired();
     test_sweep_releases_acked();
     test_sweep_buf_capacity();
+    test_stats_timeout();
+    test_stats_ack_received();
 
     printf("ALL AckTracker tests passed.\n");
     return 0;

@@ -19,7 +19,7 @@
  * Applies Power of 10 rules: fixed loop bounds, ≥2 assertions per function,
  * bounded resource usage, checked return values.
  *
- * Implements: REQ-3.2.5, REQ-3.3.3
+ * Implements: REQ-3.2.5, REQ-3.3.3, REQ-7.2.3
  */
 
 #include "RetryManager.hpp"
@@ -65,6 +65,7 @@ void RetryManager::init()
 
     m_count = 0U;
     m_initialized = true;
+    retry_stats_init(m_stats);  // REQ-7.2.3: zero all observability counters
 
     // Power of 10 rule 2: bounded loop (compile-time constant)
     for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
@@ -78,8 +79,9 @@ void RetryManager::init()
     }
 
     // Power of 10 rule 5: post-condition assertion
-    NEVER_COMPILED_OUT_ASSERT(m_count == 0U);  // Assert: count is zero after init
-    NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: marked as initialized
+    NEVER_COMPILED_OUT_ASSERT(m_count == 0U);          // Assert: count is zero after init
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);           // Assert: marked as initialized
+    NEVER_COMPILED_OUT_ASSERT(m_stats.retries_sent == 0U);  // Assert: stats zeroed
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -150,6 +152,7 @@ Result RetryManager::on_ack(NodeId src, uint64_t msg_id)
             // Cancel this retry entry
             m_slots[i].active = false;
             --m_count;
+            ++m_stats.acks_received;  // REQ-7.2.3: record ACK-cancelled retry
 
             // Power of 10 rule 5: post-condition assertion
             NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count decremented
@@ -189,6 +192,7 @@ void RetryManager::reap_terminated_slots(uint64_t now_us)
         if (slot_has_expired(m_slots[i].expiry_us, now_us)) {
             m_slots[i].active = false;
             --m_count;
+            ++m_stats.slots_expired;  // REQ-7.2.3: record expiry event
             Logger::log(Severity::WARNING_LO, "RetryManager",
                         "Expired retry entry for message_id=%llu",
                         (unsigned long long)m_slots[i].env.message_id);
@@ -197,6 +201,7 @@ void RetryManager::reap_terminated_slots(uint64_t now_us)
         if (m_slots[i].retry_count >= m_slots[i].max_retries) {
             m_slots[i].active = false;
             --m_count;
+            ++m_stats.slots_exhausted;  // REQ-7.2.3: record exhaustion event
             Logger::log(Severity::WARNING_HI, "RetryManager",
                         "Exhausted retries for message_id=%llu (count=%u, max=%u)",
                         (unsigned long long)m_slots[i].env.message_id,
@@ -242,6 +247,7 @@ uint32_t RetryManager::collect_due(uint64_t         now_us,
             envelope_copy(out_buf[collected], m_slots[i].env);
             ++collected;
             ++m_slots[i].retry_count;
+            ++m_stats.retries_sent;  // REQ-7.2.3: record retry transmission
 
             // Apply exponential backoff via helper (capped at 60 s)
             m_slots[i].backoff_ms = advance_backoff(m_slots[i].backoff_ms);
@@ -260,4 +266,17 @@ uint32_t RetryManager::collect_due(uint64_t         now_us,
     NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count bounded
 
     return collected;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RetryManager::get_stats() — REQ-7.2.3 observability accessor
+// NSC: read-only; no state change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const RetryStats& RetryManager::get_stats() const
+{
+    // Power of 10 rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: manager was initialized
+    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count bounded
+    return m_stats;
 }

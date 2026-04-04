@@ -24,7 +24,7 @@
  *   - MISRA C++: no exceptions, all return values checked.
  *   - F-Prime style: event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.3.2
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.3.2, REQ-7.2.4
  */
 
 #include "platform/LocalSimHarness.hpp"
@@ -39,10 +39,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 LocalSimHarness::LocalSimHarness()
-    : m_peer(nullptr), m_open(false)
+    : m_peer(nullptr), m_open(false),
+      m_connections_opened(0U), m_connections_closed(0U)
 {
     // Power of 10 rule 3: initialize to safe state
     NEVER_COMPILED_OUT_ASSERT(!m_open);
+    NEVER_COMPILED_OUT_ASSERT(m_connections_opened == 0U);  // Assert: counters zeroed
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -95,6 +97,7 @@ void LocalSimHarness::link(LocalSimHarness* peer)
     NEVER_COMPILED_OUT_ASSERT(peer != this);     // Pre-condition: not self-loop
 
     m_peer = peer;
+    ++m_connections_opened;  // REQ-7.2.4: link counts as connection established
     Logger::log(Severity::INFO, "LocalSimHarness", "Harness linked to peer");
 }
 
@@ -221,6 +224,9 @@ Result LocalSimHarness::receive_message(MessageEnvelope& envelope, uint32_t time
 
 void LocalSimHarness::close()
 {
+    if (m_open) {
+        ++m_connections_closed;  // REQ-7.2.4: count close events while open
+    }
     m_peer = nullptr;
     m_open = false;
     Logger::log(Severity::INFO, "LocalSimHarness", "Transport closed");
@@ -234,4 +240,21 @@ bool LocalSimHarness::is_open() const
 {
     NEVER_COMPILED_OUT_ASSERT(m_open || (m_peer == nullptr));  // Invariant: when closed, peer is null
     return m_open;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// get_transport_stats() — REQ-7.2.4 / REQ-7.2.2 observability
+// NSC: read-only; no state change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void LocalSimHarness::get_transport_stats(TransportStats& out) const
+{
+    // Power of 10 rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(m_connections_opened >= m_connections_closed);  // Assert: monotonic counters
+    NEVER_COMPILED_OUT_ASSERT(m_connections_closed <= m_connections_opened);  // Assert: closed ≤ opened
+
+    transport_stats_init(out);
+    out.connections_opened = m_connections_opened;
+    out.connections_closed = m_connections_closed;
+    out.impairment         = m_impairment.get_stats();
 }

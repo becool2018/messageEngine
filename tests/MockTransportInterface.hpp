@@ -87,6 +87,13 @@ struct MockTransportInterface : public TransportInterface {
         }
         return Result::ERR_TIMEOUT;  // default: no message available
     }
+
+    // ── Stats — NSC no-op; zeros all fields (REQ-7.2.4) ────────────────────
+
+    void get_transport_stats(TransportStats& out) const override
+    {
+        transport_stats_init(out);
+    }
 };
 
 #endif // TESTS_MOCK_TRANSPORT_INTERFACE_HPP

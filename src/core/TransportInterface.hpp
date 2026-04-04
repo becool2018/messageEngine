@@ -24,7 +24,7 @@
  *   - Architecture rule: higher layers depend on this abstraction, never on
  *     raw socket APIs.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-7.2.4
  */
 
 #ifndef CORE_TRANSPORT_INTERFACE_HPP
@@ -33,6 +33,7 @@
 #include "MessageEnvelope.hpp"
 #include "ChannelConfig.hpp"
 #include "Types.hpp"
+#include "DeliveryStats.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TransportInterface
@@ -83,6 +84,17 @@ public:
      * @brief Return true if the transport is currently open and usable.
      */
     virtual bool is_open() const = 0;
+
+    /**
+     * @brief Populate @p out with connection and impairment statistics.
+     *
+     * REQ-7.2.4 (connection counts) and REQ-7.2.2 (impairment counters).
+     * NSC: read-only observability; no effect on transport state.
+     * Implementations zero fields they do not track.
+     *
+     * @param[out] out TransportStats struct to fill.
+     */
+    virtual void get_transport_stats(TransportStats& out) const = 0;
 };
 
 #endif // CORE_TRANSPORT_INTERFACE_HPP

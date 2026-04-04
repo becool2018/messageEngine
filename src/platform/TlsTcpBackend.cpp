@@ -30,7 +30,7 @@
  *             REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6,
  *             REQ-6.3.4, REQ-7.1.1
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.3.4, REQ-7.1.1
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4
 
 #include "platform/TlsTcpBackend.hpp"
 #include "platform/ISocketOps.hpp"
@@ -111,7 +111,8 @@ TlsTcpBackend::TlsTcpBackend()
       m_listen_net{}, m_client_net{}, m_ssl{},
       m_sock_ops(&SocketOpsImpl::instance()),
       m_client_count(0U), m_wire_buf{}, m_cfg{},
-      m_open(false), m_is_server(false), m_tls_enabled(false)
+      m_open(false), m_is_server(false), m_tls_enabled(false),
+      m_connections_opened(0U), m_connections_closed(0U)
 {
     NEVER_COMPILED_OUT_ASSERT(MAX_TCP_CONNECTIONS > 0U);
     mbedtls_ssl_config_init(&m_ssl_conf);
@@ -130,7 +131,8 @@ TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops)
       m_listen_net{}, m_client_net{}, m_ssl{},
       m_sock_ops(&sock_ops),
       m_client_count(0U), m_wire_buf{}, m_cfg{},
-      m_open(false), m_is_server(false), m_tls_enabled(false)
+      m_open(false), m_is_server(false), m_tls_enabled(false),
+      m_connections_opened(0U), m_connections_closed(0U)
 {
     NEVER_COMPILED_OUT_ASSERT(MAX_TCP_CONNECTIONS > 0U);
     mbedtls_ssl_config_init(&m_ssl_conf);
@@ -371,6 +373,7 @@ Result TlsTcpBackend::connect_to_server()
 
     m_client_count = 1U;
     m_open         = true;
+    ++m_connections_opened;  // REQ-7.2.4: successful client connect
 
     Logger::log(Severity::INFO, "TlsTcpBackend",
                 "Connected to %s:%s (TLS=%s)",
@@ -441,6 +444,7 @@ Result TlsTcpBackend::accept_and_handshake()
     }
 
     ++m_client_count;
+    ++m_connections_opened;  // REQ-7.2.4: successful server accept
     Logger::log(Severity::INFO, "TlsTcpBackend",
                 "Accepted client %u (TLS=%s), total=%u",
                 slot, m_tls_enabled ? "ON" : "OFF", m_client_count);
@@ -475,6 +479,7 @@ void TlsTcpBackend::remove_client(uint32_t idx)
         mbedtls_ssl_init(&m_ssl[j + 1U]);
     }
     --m_client_count;
+    ++m_connections_closed;  // REQ-7.2.4: client connection removed
     NEVER_COMPILED_OUT_ASSERT(m_client_count < MAX_TCP_CONNECTIONS);
 }
 
@@ -878,4 +883,21 @@ bool TlsTcpBackend::is_open() const
     NEVER_COMPILED_OUT_ASSERT(
         m_open == (m_listen_net.fd >= 0 || m_client_count > 0U) || !m_open);
     return m_open;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// get_transport_stats() — REQ-7.2.4 / REQ-7.2.2 observability
+// NSC: read-only; no state change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void TlsTcpBackend::get_transport_stats(TransportStats& out) const
+{
+    // Power of 10 rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(m_connections_opened >= m_connections_closed);  // Assert: monotonic counters
+    NEVER_COMPILED_OUT_ASSERT(m_connections_closed <= m_connections_opened);  // Assert: closed ≤ opened
+
+    transport_stats_init(out);
+    out.connections_opened = m_connections_opened;
+    out.connections_closed = m_connections_closed;
+    out.impairment         = m_impairment.get_stats();
 }

@@ -27,7 +27,7 @@
  *   - MISRA C++: no STL, no exceptions, no templates, ≤1 pointer indirection.
  *   - F-Prime style: Result enum return codes, event/logging model.
  *
- * Implements: REQ-5.1.1, REQ-5.1.2, REQ-5.1.3, REQ-5.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.2.2, REQ-5.3.1, REQ-5.3.2
+ * Implements: REQ-5.1.1, REQ-5.1.2, REQ-5.1.3, REQ-5.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.2.2, REQ-5.3.1, REQ-5.3.2, REQ-7.2.2
  */
 
 #ifndef PLATFORM_IMPAIRMENT_ENGINE_HPP
@@ -37,6 +37,7 @@
 #include "core/Assert.hpp"
 #include "core/Types.hpp"
 #include "core/MessageEnvelope.hpp"
+#include "core/DeliveryStats.hpp"
 #include "platform/PrngEngine.hpp"
 #include "core/ImpairmentConfig.hpp"
 
@@ -143,6 +144,13 @@ public:
     // cppcheck-suppress unusedFunction -- called from tests/test_ImpairmentEngine.cpp
     const ImpairmentConfig& config() const { return m_cfg; }
 
+    /**
+     * @brief Return a snapshot of impairment statistics (REQ-7.2.2).
+     * NSC: read-only observability accessor.
+     * Power of 10 rule 5: ≥2 assertions enforced inside.
+     */
+    const ImpairmentStats& get_stats() const;
+
 private:
     // ───────────────────────────────────────────────────────────────────────
     // Private helper methods (Power of 10: small, single-purpose functions)
@@ -185,6 +193,7 @@ private:
     uint64_t         m_partition_start_us;                 ///< wall-clock µs partition started
     uint64_t         m_next_partition_event_us;            ///< next state-change time
     bool             m_initialized;                        ///< true after init()
+    ImpairmentStats  m_stats;                              ///< REQ-7.2.2 observability counters
 };
 
 #endif // PLATFORM_IMPAIRMENT_ENGINE_HPP

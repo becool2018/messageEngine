@@ -23,7 +23,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: simple test framework using assert() and printf().
  *
- * Verifies: REQ-3.2.5, REQ-3.3.3
+ * Verifies: REQ-3.2.5, REQ-3.3.3, REQ-7.2.3
  */
 
 #include <cstdio>
@@ -470,6 +470,140 @@ static void test_collect_never_expires()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 16: stats retries_sent increments each time collect_due fires a retry
+// Verifies: REQ-7.2.3 — RetryManager.retries_sent counter
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_retry_sent()
+{
+    RetryManager mgr;
+    mgr.init();
+
+    // Verify stats zeroed on init
+    const RetryStats& s0 = mgr.get_stats();
+    assert(s0.retries_sent == 0U);
+    assert(s0.acks_received == 0U);
+
+    const uint64_t T = 1000000ULL;
+
+    MessageEnvelope env;
+    make_test_envelope(env, 700ULL, T + 60000000ULL);
+    Result r = mgr.schedule(env, 5U, 100U, T);
+    assert(r == Result::OK);
+
+    // First collect fires immediately
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+    uint32_t count = mgr.collect_due(T + 1ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(count == 1U);
+
+    // retries_sent must be 1
+    const RetryStats& s1 = mgr.get_stats();
+    assert(s1.retries_sent == 1U);
+    assert(s1.acks_received == 0U);
+
+    printf("PASS: test_stats_retry_sent\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 17: stats slots_exhausted increments when retry count reaches max_retries
+// Verifies: REQ-7.2.3 — RetryManager.slots_exhausted counter
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_exhausted()
+{
+    RetryManager mgr;
+    mgr.init();
+
+    const RetryStats& s0 = mgr.get_stats();
+    assert(s0.slots_exhausted == 0U);
+    assert(s0.retries_sent == 0U);
+
+    const uint64_t T = 1000000ULL;
+
+    MessageEnvelope env;
+    // max_retries=1 so one collect fires the retry, then next collect exhausts it
+    make_test_envelope(env, 710ULL, T + 60000000ULL);
+    Result r = mgr.schedule(env, 1U, 100U, T);
+    assert(r == Result::OK);
+
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+
+    // First collect: retry_count becomes 1 (== max_retries), fires retry
+    uint32_t count1 = mgr.collect_due(T, buf, ACK_TRACKER_CAPACITY);
+    assert(count1 == 1U);
+
+    // Second collect at T+200001us (after backoff): slot reaps as exhausted
+    uint32_t count2 = mgr.collect_due(T + 200001ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(count2 == 0U);
+
+    // slots_exhausted must be 1
+    const RetryStats& s1 = mgr.get_stats();
+    assert(s1.slots_exhausted == 1U);
+    assert(s1.slots_expired == 0U);
+
+    printf("PASS: test_stats_exhausted\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 18: stats slots_expired increments when slot's expiry_time_us passes
+// Verifies: REQ-7.2.3 — RetryManager.slots_expired counter
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_expired()
+{
+    RetryManager mgr;
+    mgr.init();
+
+    const RetryStats& s0 = mgr.get_stats();
+    assert(s0.slots_expired == 0U);
+    assert(s0.slots_exhausted == 0U);
+
+    // expiry_time_us=1 is in the past at now_us=1000000
+    MessageEnvelope env;
+    make_test_envelope(env, 720ULL, 1ULL);
+    Result r = mgr.schedule(env, 5U, 100U, 1ULL);
+    assert(r == Result::OK);
+
+    // Collect at now_us=1000000: slot is expired, reaps silently
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+    uint32_t count = mgr.collect_due(1000000ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(count == 0U);
+
+    // slots_expired must be 1
+    const RetryStats& s1 = mgr.get_stats();
+    assert(s1.slots_expired == 1U);
+    assert(s1.slots_exhausted == 0U);
+
+    printf("PASS: test_stats_expired\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 19: stats acks_received increments when on_ack() cancels an active slot
+// Verifies: REQ-7.2.3 — RetryManager.acks_received counter
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_ack_received()
+{
+    RetryManager mgr;
+    mgr.init();
+
+    const RetryStats& s0 = mgr.get_stats();
+    assert(s0.acks_received == 0U);
+    assert(s0.retries_sent == 0U);
+
+    MessageEnvelope env;
+    make_test_envelope(env, 730ULL, 9999999999ULL, 1U, 2U);
+    Result r = mgr.schedule(env, 5U, 100U, 1000000ULL);
+    assert(r == Result::OK);
+
+    Result ack_r = mgr.on_ack(1U, 730ULL);
+    assert(ack_r == Result::OK);
+
+    // acks_received must be 1; retries_sent still 0
+    const RetryStats& s1 = mgr.get_stats();
+    assert(s1.acks_received == 1U);
+    assert(s1.retries_sent == 0U);
+
+    printf("PASS: test_stats_ack_received\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -489,6 +623,10 @@ int main()
     test_on_ack_wrong_id_active();
     test_collect_due_buf_cap_limits();
     test_collect_never_expires();
+    test_stats_retry_sent();
+    test_stats_exhausted();
+    test_stats_expired();
+    test_stats_ack_received();
 
     printf("ALL RetryManager tests passed.\n");
     return 0;

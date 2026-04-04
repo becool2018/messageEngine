@@ -29,7 +29,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: Result enum returns, event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1, REQ-7.2.4
  */
 
 #ifndef PLATFORM_UDP_BACKEND_HPP
@@ -72,6 +72,8 @@ public:
     Result receive_message(MessageEnvelope& envelope, uint32_t timeout_ms) override;
     void close() override;
     bool is_open() const override;
+    /// REQ-7.2.4 / REQ-7.2.2 — NSC observability accessor.
+    void get_transport_stats(TransportStats& out) const override;
 
 private:
     // ───────────────────────────────────────────────────────────────────────
@@ -84,6 +86,8 @@ private:
     ImpairmentEngine  m_impairment;                      ///< Impairment simulator
     RingBuffer        m_recv_queue;                      ///< Inbound message queue
     bool              m_open;                            ///< Transport open/closed state
+    uint32_t          m_connections_opened;              ///< REQ-7.2.4: bind/connect events
+    uint32_t          m_connections_closed;              ///< REQ-7.2.4: close events
 
     // ───────────────────────────────────────────────────────────────────────
     // Private helper methods (Power of 10: small, single-purpose functions)

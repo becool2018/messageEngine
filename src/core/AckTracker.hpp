@@ -25,7 +25,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 ptr indirection.
  *   - F-Prime style: simple state machine (FREE/PENDING/ACKED), deterministic behavior.
  *
- * Implements: REQ-3.2.4, REQ-3.3.2
+ * Implements: REQ-3.2.4, REQ-3.3.2, REQ-7.2.3
  */
 
 #ifndef CORE_ACK_TRACKER_HPP
@@ -36,6 +36,7 @@
 #include "Assert.hpp"
 #include "Types.hpp"
 #include "MessageEnvelope.hpp"
+#include "DeliveryStats.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AckTracker: tracks outstanding messages awaiting ACK, timeout management
@@ -71,6 +72,20 @@ public:
                           MessageEnvelope* expired_buf,
                           uint32_t         buf_cap);
 
+    /// Retrieve the send timestamp recorded for a PENDING slot.
+    /// Used by DeliveryEngine to compute send→ACK round-trip latency.
+    /// @param src      [in]  source node ID (matches env.source_id in the slot)
+    /// @param msg_id   [in]  message ID of the tracked message
+    /// @param out_ts   [out] populated with env.timestamp_us on success
+    /// @return OK if found; ERR_INVALID if no matching PENDING slot
+    /// NSC: read-only lookup; no state change.
+    Result get_send_timestamp(NodeId src, uint64_t msg_id, uint64_t& out_ts) const;
+
+    /// Return a snapshot of ACK-tracker statistics (REQ-7.2.3).
+    /// NSC: read-only observability accessor.
+    /// Power of 10 rule 5: ≥2 assertions enforced inside.
+    const AckTrackerStats& get_stats() const;
+
 private:
     /// Process one slot during sweep_expired.
     /// Copies expired PENDING envelope to buf (if space), releases ACKED slots.
@@ -97,8 +112,9 @@ private:
     };
 
     // Power of 10 rule 3: fixed-size allocation at static scope
-    Entry    m_slots[ACK_TRACKER_CAPACITY];  ///< fixed array of tracker entries
-    uint32_t m_count;                        ///< number of non-FREE slots currently in use
+    Entry           m_slots[ACK_TRACKER_CAPACITY];  ///< fixed array of tracker entries
+    uint32_t        m_count;                        ///< number of non-FREE slots currently in use
+    AckTrackerStats m_stats;                        ///< REQ-7.2.3 observability counters
 };
 
 #endif // CORE_ACK_TRACKER_HPP

@@ -24,7 +24,7 @@
  *   - MISRA C++: no exceptions, all return values checked.
  *   - F-Prime style: event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.3.5, REQ-7.1.1
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.3.5, REQ-7.1.1, REQ-7.2.4
  */
 
 #include "platform/TcpBackend.hpp"
@@ -45,7 +45,8 @@
 TcpBackend::TcpBackend()
     : m_sock_ops(&SocketOpsImpl::instance()),
       m_listen_fd(-1), m_client_count(0U), m_wire_buf{}, m_cfg{},
-      m_open(false), m_is_server(false)
+      m_open(false), m_is_server(false),
+      m_connections_opened(0U), m_connections_closed(0U)
 {
     // Power of 10 rule 3: initialize to safe state
     NEVER_COMPILED_OUT_ASSERT(MAX_TCP_CONNECTIONS > 0U);  // Invariant
@@ -57,7 +58,8 @@ TcpBackend::TcpBackend()
 TcpBackend::TcpBackend(ISocketOps& ops)
     : m_sock_ops(&ops),
       m_listen_fd(-1), m_client_count(0U), m_wire_buf{}, m_cfg{},
-      m_open(false), m_is_server(false)
+      m_open(false), m_is_server(false),
+      m_connections_opened(0U), m_connections_closed(0U)
 {
     // Power of 10 rule 3: initialize to safe state
     NEVER_COMPILED_OUT_ASSERT(MAX_TCP_CONNECTIONS > 0U);  // Invariant
@@ -191,6 +193,7 @@ Result TcpBackend::connect_to_server()
     m_client_fds[0U] = fd;
     m_client_count   = 1U;
     m_open           = true;
+    ++m_connections_opened;  // REQ-7.2.4: successful client connect
 
     Logger::log(Severity::INFO, "TcpBackend",
                "Connected to %s:%u", m_cfg.peer_ip, m_cfg.peer_port);
@@ -224,6 +227,7 @@ Result TcpBackend::accept_clients()
     NEVER_COMPILED_OUT_ASSERT(m_client_count < MAX_TCP_CONNECTIONS);
     m_client_fds[m_client_count] = client_fd;
     ++m_client_count;
+    ++m_connections_opened;  // REQ-7.2.4: successful server accept
 
     Logger::log(Severity::INFO, "TcpBackend",
                "Accepted client %u, total clients: %u", m_client_count - 1U, m_client_count);
@@ -251,6 +255,7 @@ void TcpBackend::remove_client_fd(int client_fd)
             }
             m_client_fds[m_client_count - 1U] = -1;
             --m_client_count;
+            ++m_connections_closed;  // REQ-7.2.4: connection removed
             NEVER_COMPILED_OUT_ASSERT(m_client_count < MAX_TCP_CONNECTIONS);  // Power of 10: post-condition
             return;
         }
@@ -570,4 +575,21 @@ bool TcpBackend::is_open() const
 {
     NEVER_COMPILED_OUT_ASSERT(m_open == (m_listen_fd >= 0 || m_client_count > 0U) || !m_open);
     return m_open;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// get_transport_stats() — REQ-7.2.4 / REQ-7.2.2 observability
+// NSC: read-only; no state change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void TcpBackend::get_transport_stats(TransportStats& out) const
+{
+    // Power of 10 rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(m_connections_opened >= m_connections_closed);  // Assert: monotonic counters
+    NEVER_COMPILED_OUT_ASSERT(m_connections_closed <= m_connections_opened);  // Assert: closed ≤ opened
+
+    transport_stats_init(out);
+    out.connections_opened = m_connections_opened;
+    out.connections_closed = m_connections_closed;
+    out.impairment         = m_impairment.get_stats();
 }

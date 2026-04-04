@@ -25,7 +25,7 @@
  *   - MISRA C++: no STL, no exceptions, no templates.
  *   - F-Prime style: Result enum return codes, Logger::log() for events.
  *
- * Implements: REQ-5.1.1, REQ-5.1.2, REQ-5.1.3, REQ-5.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.2.2, REQ-5.2.5, REQ-5.3.1, REQ-5.3.2
+ * Implements: REQ-5.1.1, REQ-5.1.2, REQ-5.1.3, REQ-5.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.2.2, REQ-5.2.5, REQ-5.3.1, REQ-5.3.2, REQ-7.2.2
  */
 
 #include "ImpairmentEngine.hpp"
@@ -40,7 +40,7 @@
 ImpairmentEngine::ImpairmentEngine()
     : m_cfg{}, m_delay_count(0U), m_reorder_count(0U),
       m_partition_active(false), m_partition_start_us(0ULL),
-      m_next_partition_event_us(0ULL), m_initialized(false)
+      m_next_partition_event_us(0ULL), m_initialized(false), m_stats{}
 {
     // Power of 10 rule 3: zero all statically allocated buffers
     (void)memset(m_delay_buf, 0, sizeof(m_delay_buf));
@@ -90,9 +90,13 @@ void ImpairmentEngine::init(const ImpairmentConfig& cfg)
     // Mark as initialized
     m_initialized = true;
 
+    // REQ-7.2.2: zero all observability counters on (re-)init
+    impairment_stats_init(m_stats);
+
     // Power of 10 rule 5: postcondition assertions
     NEVER_COMPILED_OUT_ASSERT(m_initialized);
     NEVER_COMPILED_OUT_ASSERT(m_delay_count == 0U);
+    NEVER_COMPILED_OUT_ASSERT(m_stats.loss_drops == 0U);  // Assert: stats zeroed
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -156,6 +160,7 @@ void ImpairmentEngine::apply_duplication(const MessageEnvelope& env,
         if (m_delay_count < IMPAIR_DELAY_BUF_SIZE) {
             Result res = queue_to_delay_buf(env, release_us + 100ULL);
             if (result_ok(res)) {
+                ++m_stats.duplicate_injects;  // REQ-7.2.2: record duplicate injection
                 Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
                            "message duplicated");
             }
@@ -186,6 +191,8 @@ Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env,
 
     // Drop if partition is active
     if (is_partition_active(now_us)) {
+        ++m_stats.partition_drops;  // REQ-7.2.2: partition-specific drop
+        ++m_stats.loss_drops;       // REQ-7.2.2: total loss drop (partition counts as loss)
         Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
                    "message dropped (partition active)");
         return Result::ERR_IO;
@@ -193,6 +200,7 @@ Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env,
 
     // Drop if loss impairment fires
     if (check_loss()) {
+        ++m_stats.loss_drops;  // REQ-7.2.2: probabilistic loss drop
         Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
                    "message dropped (loss probability)");
         return Result::ERR_IO;
@@ -303,6 +311,7 @@ Result ImpairmentEngine::process_inbound(const MessageEnvelope& in_env,
         // Buffer the new message
         envelope_copy(m_reorder_buf[m_reorder_count], in_env);
         ++m_reorder_count;
+        ++m_stats.reorder_buffered;  // REQ-7.2.2: record reorder buffer entry
         // Do not deliver yet; wait until window fills or timeout
         out_count = 0U;
         NEVER_COMPILED_OUT_ASSERT(m_reorder_count <= IMPAIR_DELAY_BUF_SIZE);
@@ -389,4 +398,17 @@ bool ImpairmentEngine::is_partition_active(uint64_t now_us)
     // Power of 10 rule 5: postcondition assertion
     NEVER_COMPILED_OUT_ASSERT(m_next_partition_event_us > 0ULL);
     return m_partition_active;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ImpairmentEngine::get_stats() — REQ-7.2.2 observability accessor
+// NSC: read-only; no state change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ImpairmentStats& ImpairmentEngine::get_stats() const
+{
+    // Power of 10 rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: engine was initialized
+    NEVER_COMPILED_OUT_ASSERT(m_stats.loss_drops >= m_stats.partition_drops);  // Assert: partition subset of loss
+    return m_stats;
 }

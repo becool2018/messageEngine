@@ -30,7 +30,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: Result enum returns, event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-7.1.1
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-7.1.1, REQ-7.2.4
  */
 
 #ifndef PLATFORM_TCP_BACKEND_HPP
@@ -71,6 +71,8 @@ public:
     Result receive_message(MessageEnvelope& envelope, uint32_t timeout_ms) override;
     void close() override;
     bool is_open() const override;
+    /// REQ-7.2.4 / REQ-7.2.2 — NSC observability accessor.
+    void get_transport_stats(TransportStats& out) const override;
 
 private:
     // ───────────────────────────────────────────────────────────────────────
@@ -86,6 +88,8 @@ private:
     RingBuffer         m_recv_queue;                          ///< Inbound message queue
     bool               m_open;                                ///< Transport open/closed state
     bool               m_is_server;                           ///< Server vs client mode
+    uint32_t           m_connections_opened;                  ///< REQ-7.2.4: successful connect/accept events
+    uint32_t           m_connections_closed;                  ///< REQ-7.2.4: disconnect events
 
     // ───────────────────────────────────────────────────────────────────────
     // Private helper methods (Power of 10: small, single-purpose functions)

@@ -47,7 +47,8 @@
  *
  * NSC-infrastructure: CLAUDE.md §10 assertion policy; no REQ-x.x applies.
  */
-// NSC-infrastructure: CLAUDE.md §10 assertion policy; no REQ-x.x applies
+// Implements: REQ-7.2.4
+// NSC-infrastructure: CLAUDE.md §10 assertion policy
 
 #ifndef CORE_ASSERT_STATE_HPP
 #define CORE_ASSERT_STATE_HPP
@@ -62,6 +63,13 @@ namespace assert_state {
 /// Remains true until cleared by check_and_clear().
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 extern std::atomic<bool> g_fatal_fired;
+
+/// Monotonically increasing count of fatal assertions fired.
+/// Incremented by trigger_fatal_assert() (called by NEVER_COMPILED_OUT_ASSERT
+/// and trigger_handler_for_test()). Never wraps in practice; uint32_t overflow
+/// is benign for observability (REQ-7.2.4).
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+extern std::atomic<uint32_t> g_fatal_count;
 
 /// Register the handler invoked by NEVER_COMPILED_OUT_ASSERT in production
 /// (NDEBUG) builds.  Must be called once during system initialisation.
@@ -86,6 +94,11 @@ bool check_and_clear() noexcept;
 void trigger_handler_for_test(const char* cond,
                                const char* file,
                                int         line) noexcept;
+
+/// Return the total number of fatal assertions fired since process start.
+/// REQ-7.2.4: fatal event count for DeliveryStats.
+/// NSC: read-only observability.
+uint32_t get_fatal_count() noexcept;
 
 } // namespace assert_state
 

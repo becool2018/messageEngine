@@ -29,7 +29,7 @@
  * retry schedule and expiry. collect_due() applies exponential backoff and
  * removes exhausted entries.
  *
- * Implements: REQ-3.2.5, REQ-3.3.3
+ * Implements: REQ-3.2.5, REQ-3.3.3, REQ-7.2.3
  */
 
 #ifndef CORE_RETRY_MANAGER_HPP
@@ -40,6 +40,7 @@
 #include <cstring>
 #include "Types.hpp"
 #include "MessageEnvelope.hpp"
+#include "DeliveryStats.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RetryManager
@@ -100,6 +101,11 @@ public:
                          MessageEnvelope*     out_buf,
                          uint32_t             buf_cap);
 
+    /// Return a snapshot of retry statistics (REQ-7.2.3).
+    /// NSC: read-only observability accessor.
+    /// Power of 10 rule 5: ≥2 assertions enforced inside.
+    const RetryStats& get_stats() const;
+
 private:
     // Phase 1 of collect_due(): reap all expired and exhausted slots across the full table.
     // Extracted to keep collect_due() within CC ≤ 10.
@@ -119,9 +125,10 @@ private:
     };
 
     // Power of 10 rule 3: fixed-capacity storage, no dynamic allocation
-    RetryEntry m_slots[ACK_TRACKER_CAPACITY];
-        uint32_t   m_count      = 0U;   ///< Number of active entries
-        bool       m_initialized = false; ///< True after init() has been called
+    RetryEntry  m_slots[ACK_TRACKER_CAPACITY];
+    uint32_t    m_count       = 0U;    ///< Number of active entries
+    bool        m_initialized = false; ///< True after init() has been called
+    RetryStats  m_stats;               ///< REQ-7.2.3 observability counters
 };
 
 #endif // CORE_RETRY_MANAGER_HPP

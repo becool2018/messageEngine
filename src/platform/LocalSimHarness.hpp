@@ -32,7 +32,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: Result enum returns, event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.3.2
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.3.2, REQ-7.2.4
  */
 
 #ifndef PLATFORM_LOCAL_SIM_HARNESS_HPP
@@ -92,14 +92,22 @@ public:
     // Safety-critical (SC): HAZ-006
     Result inject(const MessageEnvelope& envelope);
 
+    /**
+     * @brief Populate @p out with connection and impairment statistics.
+     * REQ-7.2.4 / REQ-7.2.2 — NSC observability accessor.
+     */
+    void get_transport_stats(TransportStats& out) const override;
+
 private:
     // ───────────────────────────────────────────────────────────────────────
     // Member state (Power of 10 rule 3: fixed allocation, no heap after init)
     // ───────────────────────────────────────────────────────────────────────
-    LocalSimHarness*  m_peer;             ///< Linked peer harness (nullptr if unlinked)
-    ImpairmentEngine  m_impairment;       ///< Impairment simulator
-    RingBuffer        m_recv_queue;       ///< Inbound message queue
-    bool              m_open;             ///< Transport open/closed state
+    LocalSimHarness*  m_peer;               ///< Linked peer harness (nullptr if unlinked)
+    ImpairmentEngine  m_impairment;         ///< Impairment simulator
+    RingBuffer        m_recv_queue;         ///< Inbound message queue
+    bool              m_open;              ///< Transport open/closed state
+    uint32_t          m_connections_opened; ///< REQ-7.2.4: successful link() events
+    uint32_t          m_connections_closed; ///< REQ-7.2.4: close() events while linked
 };
 
 #endif // PLATFORM_LOCAL_SIM_HARNESS_HPP

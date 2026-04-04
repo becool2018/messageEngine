@@ -46,7 +46,7 @@
  *             REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4,
  *             REQ-6.4.5, REQ-7.1.1
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1, REQ-7.2.4
 
 #include "platform/DtlsUdpBackend.hpp"
 #include "platform/ISocketOps.hpp"
@@ -98,7 +98,8 @@ DtlsUdpBackend::DtlsUdpBackend()
       m_sock_ops(&SocketOpsImpl::instance()),
       m_ops(&MbedtlsOpsImpl::instance()),
       m_sock_fd(-1), m_wire_buf{}, m_cfg{},
-      m_open(false), m_is_server(false), m_tls_enabled(false)
+      m_open(false), m_is_server(false), m_tls_enabled(false),
+      m_connections_opened(0U), m_connections_closed(0U)
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
     NEVER_COMPILED_OUT_ASSERT(DTLS_MAX_DATAGRAM_BYTES > 0U);
@@ -117,7 +118,8 @@ DtlsUdpBackend::DtlsUdpBackend(IMbedtlsOps& ops)
       m_sock_ops(&SocketOpsImpl::instance()),
       m_ops(&ops),
       m_sock_fd(-1), m_wire_buf{}, m_cfg{},
-      m_open(false), m_is_server(false), m_tls_enabled(false)
+      m_open(false), m_is_server(false), m_tls_enabled(false),
+      m_connections_opened(0U), m_connections_closed(0U)
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
     NEVER_COMPILED_OUT_ASSERT(DTLS_MAX_DATAGRAM_BYTES > 0U);
@@ -136,7 +138,8 @@ DtlsUdpBackend::DtlsUdpBackend(ISocketOps& sock_ops, IMbedtlsOps& tls_ops)
       m_sock_ops(&sock_ops),
       m_ops(&tls_ops),
       m_sock_fd(-1), m_wire_buf{}, m_cfg{},
-      m_open(false), m_is_server(false), m_tls_enabled(false)
+      m_open(false), m_is_server(false), m_tls_enabled(false),
+      m_connections_opened(0U), m_connections_closed(0U)
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
     NEVER_COMPILED_OUT_ASSERT(DTLS_MAX_DATAGRAM_BYTES > 0U);
@@ -447,6 +450,7 @@ Result DtlsUdpBackend::server_wait_and_handshake()
     }
 
     m_open = true;
+    ++m_connections_opened;  // REQ-7.2.4: DTLS server handshake complete
     Logger::log(Severity::INFO, "DtlsUdpBackend",
                 "DTLS handshake complete (server): cipher=%s",
                 mbedtls_ssl_get_ciphersuite(&m_ssl));
@@ -511,6 +515,7 @@ Result DtlsUdpBackend::client_connect_and_handshake()
     }
 
     m_open = true;
+    ++m_connections_opened;  // REQ-7.2.4: DTLS client handshake complete
     Logger::log(Severity::INFO, "DtlsUdpBackend",
                 "DTLS handshake complete (client): cipher=%s",
                 mbedtls_ssl_get_ciphersuite(&m_ssl));
@@ -661,6 +666,7 @@ Result DtlsUdpBackend::run_tls_handshake_phase(const TransportConfig& config)
     } else {
         // Plaintext UDP — no handshake; open immediately (REQ-6.4.5)
         m_open = true;
+        ++m_connections_opened;  // REQ-7.2.4: plaintext UDP bind complete
         Logger::log(Severity::INFO, "DtlsUdpBackend",
                     "Plaintext UDP %s bound to %s:%u",
                     m_is_server ? "server" : "client",
@@ -874,6 +880,7 @@ void DtlsUdpBackend::close()
     if (m_sock_fd >= 0) {
         m_sock_ops->do_close(m_sock_fd);
         m_sock_fd = -1;
+        ++m_connections_closed;  // REQ-7.2.4: socket close event
     }
 
     m_open = false;
@@ -889,4 +896,21 @@ bool DtlsUdpBackend::is_open() const
 {
     NEVER_COMPILED_OUT_ASSERT(m_open == (m_sock_fd >= 0) || !m_open);
     return m_open;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// get_transport_stats() — REQ-7.2.4 / REQ-7.2.2 observability
+// NSC: read-only; no state change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void DtlsUdpBackend::get_transport_stats(TransportStats& out) const
+{
+    // Power of 10 rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(m_connections_opened >= m_connections_closed);  // Assert: monotonic counters
+    NEVER_COMPILED_OUT_ASSERT(m_connections_closed <= m_connections_opened);  // Assert: closed ≤ opened
+
+    transport_stats_init(out);
+    out.connections_opened = m_connections_opened;
+    out.connections_closed = m_connections_closed;
+    out.impairment         = m_impairment.get_stats();
 }

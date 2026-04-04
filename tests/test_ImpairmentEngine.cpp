@@ -25,7 +25,7 @@
  *   - F-Prime style: simple test framework using assert() and printf().
  */
 
-// Verifies: REQ-5.1.3, REQ-5.2.1, REQ-5.2.2, REQ-5.3.1
+// Verifies: REQ-5.1.3, REQ-5.2.1, REQ-5.2.2, REQ-5.3.1, REQ-7.2.2
 // Verification: M1 + M2 + M4 + M5 (fault injection not required — pure logic, no external dependency)
 
 #include <cstdio>
@@ -813,6 +813,118 @@ static bool test_partition_gap_ms_minimum_valid()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 21: stats loss_drops increments when loss_probability=1.0 drops a message
+// Verifies: REQ-7.2.2 — ImpairmentStats.loss_drops counter
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_stats_loss()
+{
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled          = true;
+    cfg.loss_probability = 1.0;  // always drop
+    cfg.prng_seed        = 42ULL;
+
+    engine.init(cfg);
+
+    // Verify stats zeroed after init
+    const ImpairmentStats& s0 = engine.get_stats();
+    assert(s0.loss_drops == 0U);
+    assert(s0.partition_drops == 0U);
+
+    MessageEnvelope env;
+    create_test_envelope(env, 1U, 2U, 9000ULL);
+    uint64_t now_us = 1000000ULL;
+    Result r = engine.process_outbound(env, now_us);
+    assert(r == Result::ERR_IO);  // dropped by loss
+
+    // loss_drops must be 1; partition_drops still 0
+    const ImpairmentStats& s1 = engine.get_stats();
+    assert(s1.loss_drops == 1U);
+    assert(s1.partition_drops == 0U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 22: stats partition_drops and loss_drops both increment on partition drop
+// Verifies: REQ-7.2.2 — ImpairmentStats.partition_drops, loss_drops counters
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_stats_partition()
+{
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled               = true;
+    cfg.partition_enabled     = true;
+    cfg.partition_gap_ms      = 1U;   // 1 ms gap
+    cfg.partition_duration_ms = 20U;  // 20 ms partition
+    cfg.loss_probability      = 0.0;
+
+    engine.init(cfg);
+
+    // Phase 1: first call initialises timer; not active yet
+    uint64_t now1 = 1000000ULL;
+    MessageEnvelope env1;
+    create_test_envelope(env1, 1U, 2U, 9100ULL);
+    Result r1 = engine.process_outbound(env1, now1);
+    assert(r1 == Result::OK);
+
+    // Verify no drops yet
+    const ImpairmentStats& s0 = engine.get_stats();
+    assert(s0.loss_drops == 0U);
+    assert(s0.partition_drops == 0U);
+
+    // Phase 2: advance past gap → partition becomes active → drop
+    uint64_t now2 = now1 + 1001ULL;
+    MessageEnvelope env2;
+    create_test_envelope(env2, 1U, 2U, 9101ULL);
+    Result r2 = engine.process_outbound(env2, now2);
+    assert(r2 == Result::ERR_IO);  // dropped by partition
+
+    // Both loss_drops and partition_drops must be 1
+    const ImpairmentStats& s1 = engine.get_stats();
+    assert(s1.partition_drops == 1U);
+    assert(s1.loss_drops == 1U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 23: stats duplicate_injects increments when duplication fires
+// Verifies: REQ-7.2.2 — ImpairmentStats.duplicate_injects counter
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_stats_duplicate()
+{
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled                 = true;
+    cfg.duplication_probability = 1.0;  // always duplicate
+    cfg.loss_probability        = 0.0;
+
+    engine.init(cfg);
+
+    // Verify stats zeroed after init
+    const ImpairmentStats& s0 = engine.get_stats();
+    assert(s0.duplicate_injects == 0U);
+    assert(s0.loss_drops == 0U);
+
+    MessageEnvelope env;
+    create_test_envelope(env, 1U, 2U, 9200ULL);
+    uint64_t now_us = 2000000ULL;
+    Result r = engine.process_outbound(env, now_us);
+    assert(r == Result::OK);
+
+    // duplicate_injects must be 1
+    const ImpairmentStats& s1 = engine.get_stats();
+    assert(s1.duplicate_injects == 1U);
+    assert(s1.loss_drops == 0U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -957,6 +1069,27 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_partition_gap_ms_minimum_valid\n");
+    }
+
+    if (!test_stats_loss()) {
+        printf("FAIL: test_stats_loss\n");
+        ++failed;
+    } else {
+        printf("PASS: test_stats_loss\n");
+    }
+
+    if (!test_stats_partition()) {
+        printf("FAIL: test_stats_partition\n");
+        ++failed;
+    } else {
+        printf("PASS: test_stats_partition\n");
+    }
+
+    if (!test_stats_duplicate()) {
+        printf("FAIL: test_stats_duplicate\n");
+        ++failed;
+    } else {
+        printf("PASS: test_stats_duplicate\n");
     }
 
     return (failed > 0) ? 1 : 0;

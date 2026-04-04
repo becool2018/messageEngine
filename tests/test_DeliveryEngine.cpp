@@ -24,7 +24,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: simple test framework using assert() and printf().
  *
- * Verifies: REQ-3.3.1, REQ-3.3.2, REQ-3.3.3
+ * Verifies: REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4
  */
 // Verification: M1 + M2 + M4 + M5
 // M4: all reachable branches exercised via LocalSimHarness loopback (tests 1–23).
@@ -1234,6 +1234,205 @@ static void test_receive_duplicate_resends_ack()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: stats msgs_sent increments when send() succeeds
+// Verifies: REQ-7.2.3 — DeliveryStats.msgs_sent counter
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_msgs_sent()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Verify stats zeroed on init
+    DeliveryStats s0;
+    engine.get_stats(s0);
+    assert(s0.msgs_sent == 0U);
+    assert(s0.msgs_received == 0U);
+
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
+    Result res = engine.send(env, NOW_US);
+    assert(res == Result::OK);
+
+    // msgs_sent must be 1
+    DeliveryStats s1;
+    engine.get_stats(s1);
+    assert(s1.msgs_sent == 1U);
+    assert(s1.msgs_received == 0U);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_stats_msgs_sent\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: stats msgs_received increments when receive() delivers a DATA message
+// Verifies: REQ-7.2.3 — DeliveryStats.msgs_received counter
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_msgs_received()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Inject a DATA message directly into harness_a's inbox
+    MessageEnvelope inject;
+    make_data_envelope(inject, 2U, 1U, 50001ULL, ReliabilityClass::BEST_EFFORT);
+    Result inj = harness_b.send_message(inject);
+    assert(inj == Result::OK);
+
+    MessageEnvelope out;
+    Result res = engine.receive(out, 100U, NOW_US);
+    assert(res == Result::OK);
+
+    // msgs_received must be 1
+    DeliveryStats s;
+    engine.get_stats(s);
+    assert(s.msgs_received == 1U);
+    assert(s.msgs_sent == 0U);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_stats_msgs_received\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: stats msgs_dropped_expired increments when send() is given an expired envelope
+// Verifies: REQ-7.2.3 — DeliveryStats.msgs_dropped_expired counter
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_dropped_expired()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    DeliveryStats s0;
+    engine.get_stats(s0);
+    assert(s0.msgs_dropped_expired == 0U);
+    assert(s0.msgs_sent == 0U);
+
+    // Expired envelope: expiry_time_us=1 is in the past at now_us=NOW_US
+    MessageEnvelope expired;
+    make_expired_envelope(expired, 1U, 2U);
+    Result res = engine.send(expired, NOW_US);
+    assert(res == Result::ERR_EXPIRED);
+
+    // msgs_dropped_expired must be 1
+    DeliveryStats s1;
+    engine.get_stats(s1);
+    assert(s1.msgs_dropped_expired == 1U);
+    assert(s1.msgs_sent == 0U);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_stats_dropped_expired\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: stats msgs_dropped_duplicate increments when receive() gets a duplicate
+// Verifies: REQ-7.2.3 — DeliveryStats.msgs_dropped_duplicate counter
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_dropped_duplicate()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    DeliveryStats s0;
+    engine.get_stats(s0);
+    assert(s0.msgs_dropped_duplicate == 0U);
+    assert(s0.msgs_received == 0U);
+
+    // Inject the same RELIABLE_RETRY message twice so duplicate filter fires on second
+    MessageEnvelope env1;
+    make_data_envelope(env1, 2U, 1U, 50100ULL, ReliabilityClass::RELIABLE_RETRY);
+    MessageEnvelope env2 = env1;  // identical — same source_id + message_id
+
+    Result inj1 = harness_b.send_message(env1);
+    assert(inj1 == Result::OK);
+    Result inj2 = harness_b.send_message(env2);
+    assert(inj2 == Result::OK);
+
+    // First receive: accepted
+    MessageEnvelope out1;
+    Result r1 = engine.receive(out1, 100U, NOW_US);
+    assert(r1 == Result::OK);
+
+    // Second receive: duplicate
+    MessageEnvelope out2;
+    Result r2 = engine.receive(out2, 100U, NOW_US);
+    assert(r2 == Result::ERR_DUPLICATE);
+
+    // msgs_dropped_duplicate must be 1
+    DeliveryStats s1;
+    engine.get_stats(s1);
+    assert(s1.msgs_dropped_duplicate == 1U);
+    assert(s1.msgs_received == 1U);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_stats_dropped_duplicate\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: stats latency_sample_count increments when receive() processes an ACK
+//       for a previously sent RELIABLE_ACK message
+// Verifies: REQ-7.2.1 — DeliveryStats.latency_sample_count, latency_sum_us
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_latency()
+{
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    DeliveryStats s0;
+    engine.get_stats(s0);
+    assert(s0.latency_sample_count == 0U);
+    assert(s0.latency_sum_us == 0ULL);
+
+    // Send a RELIABLE_ACK message; engine assigns message_id=1
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+    Result send_r = engine.send(env, NOW_US);
+    assert(send_r == Result::OK);
+
+    // The assigned message_id is in env after send(); inject a matching ACK
+    const uint64_t assigned_id = env.message_id;
+    MessageEnvelope ack;
+    make_ack_envelope(ack, 2U, 1U, assigned_id);
+    // Use a slightly later timestamp to produce a non-zero RTT
+    ack.timestamp_us = NOW_US + 1000ULL;
+
+    Result inj = harness_b.send_message(ack);
+    assert(inj == Result::OK);
+
+    // receive() processes the ACK and records latency
+    MessageEnvelope recv_out;
+    Result recv_r = engine.receive(recv_out, 100U, NOW_US + 2000ULL);
+    assert(recv_r == Result::OK);
+
+    // latency_sample_count must be 1; latency_sum_us >= 0
+    DeliveryStats s1;
+    engine.get_stats(s1);
+    assert(s1.latency_sample_count == 1U);
+    assert(s1.latency_sum_us >= 0ULL);
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_stats_latency\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -1270,6 +1469,11 @@ int main()
     test_mock_send_transport_err_io();
     test_mock_receive_transport_err_io();
     test_mock_pump_retries_transport_err_io();
+    test_stats_msgs_sent();
+    test_stats_msgs_received();
+    test_stats_dropped_expired();
+    test_stats_dropped_duplicate();
+    test_stats_latency();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;

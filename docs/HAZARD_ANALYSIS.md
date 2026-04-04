@@ -175,6 +175,8 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `track()` | `AckTracker` | SC | HAZ-002, HAZ-006 |
 | `on_ack()` | `AckTracker` | SC | HAZ-002 |
 | `sweep_expired()` | `AckTracker` | SC | HAZ-002, HAZ-006 |
+| `get_send_timestamp()` | `AckTracker` | NSC | — |
+| `get_stats()` | `AckTracker` | NSC | — |
 
 ### src/core/DuplicateFilter.hpp
 
@@ -193,6 +195,7 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `schedule()` | `RetryManager` | SC | HAZ-002 |
 | `on_ack()` | `RetryManager` | SC | HAZ-002 |
 | `collect_due()` | `RetryManager` | SC | HAZ-002 |
+| `get_stats()` | `RetryManager` | NSC | — |
 
 ### src/core/DeliveryEngine.hpp
 
@@ -203,6 +206,7 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `receive()` | `DeliveryEngine` | SC | HAZ-001, HAZ-003, HAZ-004, HAZ-005 |
 | `pump_retries()` | `DeliveryEngine` | SC | HAZ-002 |
 | `sweep_ack_timeouts()` | `DeliveryEngine` | SC | HAZ-002, HAZ-006 |
+| `get_stats()` | `DeliveryEngine` | NSC | — |
 
 ### src/core/TransportInterface.hpp
 
@@ -213,6 +217,7 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `receive_message()` | `TransportInterface` | SC | HAZ-001, HAZ-004, HAZ-005 |
 | `close()` | `TransportInterface` | NSC | — |
 | `is_open()` | `TransportInterface` | NSC | — |
+| `get_transport_stats()` | `TransportInterface` | NSC | — |
 
 ### src/core/Types.hpp
 
@@ -266,6 +271,7 @@ Rationale: `impairment_config_load()` sets `loss_probability`, `partition_enable
 | `process_inbound()` | `ImpairmentEngine` | SC | HAZ-003, HAZ-007 |
 | `is_partition_active()` | `ImpairmentEngine` | SC | HAZ-007 |
 | `config()` | `ImpairmentEngine` | NSC | — |
+| `get_stats()` | `ImpairmentEngine` | NSC | — |
 
 ### src/platform/SocketUtils.hpp
 
@@ -280,6 +286,7 @@ All `SocketUtils` functions are **NSC** — raw POSIX I/O primitives with no mes
 | `receive_message()` | `TcpBackend` | SC | HAZ-004, HAZ-005 |
 | `close()` | `TcpBackend` | NSC | — |
 | `is_open()` | `TcpBackend` | NSC | — |
+| `get_transport_stats()` | `TcpBackend` | NSC | — |
 
 ### src/platform/UdpBackend.hpp
 
@@ -290,6 +297,7 @@ All `SocketUtils` functions are **NSC** — raw POSIX I/O primitives with no mes
 | `receive_message()` | `UdpBackend` | SC | HAZ-004, HAZ-005 |
 | `close()` | `UdpBackend` | NSC | — |
 | `is_open()` | `UdpBackend` | NSC | — |
+| `get_transport_stats()` | `UdpBackend` | NSC | — |
 
 ### src/platform/LocalSimHarness.hpp
 
@@ -301,6 +309,7 @@ All `SocketUtils` functions are **NSC** — raw POSIX I/O primitives with no mes
 | `send_message()` | `LocalSimHarness` | SC | HAZ-001, HAZ-003, HAZ-005, HAZ-006 |
 | `receive_message()` | `LocalSimHarness` | SC | HAZ-001, HAZ-004, HAZ-005 |
 | `close()` | `LocalSimHarness` | NSC | — |
+| `get_transport_stats()` | `LocalSimHarness` | NSC | — |
 
 Note: `LocalSimHarness` implements `TransportInterface` and is used as the transport backend in integration tests that exercise the full SC send/receive path. Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `TcpBackend`. The previous all-NSC classification was incorrect.
 
@@ -319,6 +328,7 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `receive_message()` | `TlsTcpBackend` | SC | HAZ-004, HAZ-005 |
 | `close()` | `TlsTcpBackend` | NSC | — |
 | `is_open()` | `TlsTcpBackend` | NSC | — |
+| `get_transport_stats()` | `TlsTcpBackend` | NSC | — |
 
 `TlsTcpBackend` is a drop-in replacement for `TcpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `TcpBackend`. The TLS layer (when enabled) is an init-phase concern (cert/key loading, handshake) and does not alter the SC classification of the send/receive path.
 
@@ -331,6 +341,7 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `receive_message()` | `DtlsUdpBackend` | SC | HAZ-004, HAZ-005 |
 | `close()` | `DtlsUdpBackend` | NSC | — |
 | `is_open()` | `DtlsUdpBackend` | NSC | — |
+| `get_transport_stats()` | `DtlsUdpBackend` | NSC | — |
 
 `DtlsUdpBackend` is a drop-in replacement for `UdpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `UdpBackend`. The DTLS layer (when enabled) is an init-phase concern (cert/key loading, DTLS handshake, cookie exchange); enabling or disabling TLS does not alter the SC classification of the send/receive path. The MTU enforcement in `send_message()` (returns `ERR_INVALID` for payloads exceeding `DTLS_MAX_DATAGRAM_BYTES`) is part of the HAZ-005 mitigation.
 
@@ -354,6 +365,22 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `inet_pton_ipv4()` | `MbedtlsOpsImpl` | NSC | — |
 
 `MbedtlsOpsImpl` implements `IMbedtlsOps` and is injected into `DtlsUdpBackend` via its `init()` constructor parameter. `ssl_handshake()`, `ssl_write()`, `ssl_read()`, and `recvfrom_peek()` are SC: `ssl_handshake()` establishes the DTLS session — failure to complete the handshake (or silent success without proper certificate validation) directly enables HAZ-005 (data delivered without encryption integrity) and HAZ-004/HAZ-006 (connection not established → stale/dropped delivery); `ssl_write()` and `ssl_read()` are on the run-time send/receive path; `recvfrom_peek()` determines the peer address for DTLS cookie binding. All other methods are called exclusively during `init()` (certificate loading, cookie setup, session configuration) and are NSC. `MbedtlsOpsImpl` is a pure delegation layer — each method is a precondition assertion plus one library call passthrough; no message-delivery policy is encoded here.
+
+### src/core/AssertState.hpp
+
+| Function | Class | SC/NSC | HAZ IDs |
+|---|---|---|---|
+| `assert_state::set_reset_handler()` | — | NSC | — |
+| `assert_state::get_reset_handler()` | — | NSC | — |
+| `assert_state::trigger_handler_for_test()` | — | NSC | — |
+| `assert_state::check_and_clear_fatal()` | — | NSC | — |
+| `assert_state::get_fatal_count()` | — | NSC | — |
+
+`get_fatal_count()` and `g_fatal_count` are REQ-7.2.4 observability hooks. They read the process-wide fatal assertion counter; they have no effect on delivery semantics and are classified NSC.
+
+### src/core/DeliveryStats.hpp
+
+All functions in this header are **NSC** — they are plain zero-initialisation helpers for the stats structs (`delivery_stats_init()`, `impairment_stats_init()`, `retry_stats_init()`, `ack_tracker_stats_init()`, `transport_stats_init()`). No message-delivery policy is encoded here.
 
 ---
 

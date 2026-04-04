@@ -18,7 +18,8 @@
  *
  * NSC-infrastructure: CLAUDE.md §10 assertion policy; no REQ-x.x applies.
  */
-// NSC-infrastructure: CLAUDE.md §10 assertion policy; no REQ-x.x applies
+// Implements: REQ-7.2.4
+// NSC-infrastructure: CLAUDE.md §10 assertion policy
 
 #include "core/AssertState.hpp"
 #include <cstdlib>  // ::abort()
@@ -27,6 +28,10 @@ namespace assert_state {
 
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 std::atomic<bool> g_fatal_fired{false};
+
+// REQ-7.2.4: monotonically increasing fatal event count.
+// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
+std::atomic<uint32_t> g_fatal_count{0U};
 
 // Power of 10 Rule 3: static storage, pointer to caller-owned object; no heap.
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
@@ -63,8 +68,15 @@ void trigger_handler_for_test(const char* cond,
     } else {
         ::abort();
     }
-    // If handler returned (soft-reset path), set the flag.
+    // If handler returned (soft-reset path), set the flag and bump the count.
     g_fatal_fired.store(true, std::memory_order_release);
+    // REQ-7.2.4: increment fatal event counter (relaxed: no ordering needed here)
+    (void)g_fatal_count.fetch_add(1U, std::memory_order_relaxed);
+}
+
+uint32_t get_fatal_count() noexcept
+{
+    return g_fatal_count.load(std::memory_order_acquire);
 }
 
 } // namespace assert_state

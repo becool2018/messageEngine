@@ -64,10 +64,10 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-7.1.2 | Log major state changes                            | src/core/Logger.hpp                                         | — (observable in output)                             |
 | REQ-7.1.3 | Log errors and FATAL with debug context            | src/core/Logger.hpp                                         | — (observable in output)                             |
 | REQ-7.1.4 | No full payload logging by default                 | src/core/Logger.hpp                                         | — (convention; no automated test)                    |
-| REQ-7.2.1 | Latency distribution metrics hooks                 | — (not implemented)                                         | — (not implemented)                                  |
-| REQ-7.2.2 | Loss / duplication / reordering rate metrics       | — (not implemented)                                         | — (not implemented)                                  |
-| REQ-7.2.3 | Retry / timeout / failure counters                 | — (not implemented)                                         | — (not implemented)                                  |
-| REQ-7.2.4 | Connection / restart / fatal event counters        | — (not implemented)                                         | — (not implemented)                                  |
+| REQ-7.2.1 | Latency distribution metrics hooks                 | src/core/DeliveryStats.hpp, src/core/DeliveryEngine.hpp, src/core/DeliveryEngine.cpp | test_DeliveryEngine.cpp :: test_stats_latency        |
+| REQ-7.2.2 | Loss / duplication / reordering rate metrics       | src/core/DeliveryStats.hpp, src/platform/ImpairmentEngine.hpp, src/platform/ImpairmentEngine.cpp, src/platform/LocalSimHarness.cpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp, src/platform/TlsTcpBackend.cpp, src/platform/DtlsUdpBackend.cpp | test_ImpairmentEngine.cpp :: test_stats_loss, test_stats_partition, test_stats_duplicate |
+| REQ-7.2.3 | Retry / timeout / failure counters                 | src/core/DeliveryStats.hpp, src/core/AckTracker.hpp, src/core/AckTracker.cpp, src/core/RetryManager.hpp, src/core/RetryManager.cpp, src/core/DeliveryEngine.hpp, src/core/DeliveryEngine.cpp | test_AckTracker.cpp :: test_stats_timeout, test_stats_ack_received; test_RetryManager.cpp :: test_stats_retry_sent, test_stats_exhausted, test_stats_expired, test_stats_ack_received; test_DeliveryEngine.cpp :: test_stats_msgs_sent, test_stats_msgs_received, test_stats_dropped_expired, test_stats_dropped_duplicate |
+| REQ-7.2.4 | Connection / restart / fatal event counters        | src/core/DeliveryStats.hpp, src/core/AssertState.hpp, src/core/AssertState.cpp, src/core/TransportInterface.hpp, src/platform/LocalSimHarness.hpp, src/platform/LocalSimHarness.cpp, src/platform/TcpBackend.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.hpp, src/platform/UdpBackend.cpp, src/platform/TlsTcpBackend.hpp, src/platform/TlsTcpBackend.cpp, src/platform/DtlsUdpBackend.hpp, src/platform/DtlsUdpBackend.cpp | — (fatal count verified indirectly via AssertState tests; connection counts exercised by transport integration tests) |
 
 ## Coverage gaps (requirements with no test)
 
@@ -76,7 +76,6 @@ REQ-3.3.5, REQ-4.2.1 (ordering enforcement) — OrderingMode field exists in
   ChannelConfig but is never read by any transport or DeliveryEngine.
   Requires sequence numbers in MessageEnvelope and a receiver reorder buffer.
   See TODO_FOR_CLASS_B_CERT.txt Item 11.
-REQ-7.2.1 through REQ-7.2.4 — metrics hooks not yet implemented.
 
 Implemented but no isolated unit test (tested indirectly or via integration):
 REQ-4.1.1, REQ-4.2.2,
@@ -106,3 +105,7 @@ Resolved since last generation (tests added):
 - REQ-5.1.6 — now verified by test_ImpairmentEngine.cpp :: test_partition_state_machine, test_partition_waiting_and_active, test_partition_gap_ms_minimum_valid
 - REQ-3.2.1 — now covered by test_MessageId.cpp (4 tests: seed, monotonic increment, wraparound recovery, min valid seed)
 - REQ-3.2.2 — now covered by test_Timestamp.cpp (6 tests: expired false, expired at deadline, expired past deadline, zero-expiry never-expires, deadline arithmetic, zero-duration deadline)
+- REQ-7.2.1 — now implemented by DeliveryStats.hpp, DeliveryEngine.hpp/.cpp (RTT tracking via AckTracker.get_send_timestamp()); verified by test_DeliveryEngine.cpp :: test_stats_latency
+- REQ-7.2.2 — now implemented by ImpairmentEngine.hpp/.cpp (loss_drops, partition_drops, duplicate_injects, reorder_buffered counters); verified by test_ImpairmentEngine.cpp :: test_stats_loss, test_stats_partition, test_stats_duplicate
+- REQ-7.2.3 — now implemented by AckTracker, RetryManager, DeliveryEngine (per-component stats structs in DeliveryStats.hpp); verified by test_AckTracker.cpp (2 tests), test_RetryManager.cpp (4 tests), test_DeliveryEngine.cpp (4 tests)
+- REQ-7.2.4 — now implemented by AssertState.hpp/.cpp (g_fatal_count), TransportInterface + all 5 backends (connections_opened/closed); no new dedicated unit test (exercised via existing AssertState and transport tests)

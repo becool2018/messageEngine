@@ -19,11 +19,12 @@
  * Applies Power of 10 rules: fixed loop bounds, ≥2 assertions per function,
  * checked return values, bounded resource usage.
  *
- * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4
+ * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4
  */
 
 #include "DeliveryEngine.hpp"
 #include "Assert.hpp"
+#include "AssertState.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // File-static helper: validate routing and expiry of a received envelope.
@@ -163,6 +164,9 @@ void DeliveryEngine::init(TransportInterface* transport,
         envelope_init(m_timeout_buf[i]);
     }
 
+    // REQ-7.2.1–7.2.4: zero all aggregated delivery statistics
+    delivery_stats_init(m_stats);
+
     m_initialized = true;
 
     // Power of 10 rule 5: post-condition assertion
@@ -227,11 +231,10 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
     // Send via transport
     Result res = send_via_transport(env, now_us);
     if (res != Result::OK) {
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "Failed to send message_id=%llu: %u",
-                    (unsigned long long)env.message_id, static_cast<uint8_t>(res));
+        record_send_failure(env, res);  // REQ-7.2.3: stats + log (CC-reduction helper)
         return res;
     }
+    ++m_stats.msgs_sent;  // REQ-7.2.3: count successful sends
 
     // Apply tracking based on reliability class
     if (env.reliability_class == ReliabilityClass::RELIABLE_ACK ||
@@ -306,12 +309,15 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
     // Power of 10 rule 7: check return value.
     Result routing_res = check_routing(env, m_local_id, now_us);
     if (routing_res != Result::OK) {
+        record_routing_failure(routing_res);  // REQ-7.2.3: stats (CC-reduction helper)
         return routing_res;
     }
 
     // Handle control messages (ACK/NAK/HEARTBEAT)
     if (envelope_is_control(env)) {
         if (env.message_type == MessageType::ACK) {
+            // REQ-7.2.1: capture RTT before on_ack() releases the tracker slot
+            update_latency_stats(env, now_us);
             // Power of 10 rule 7: return values checked inside process_ack().
             process_ack(m_ack_tracker, m_retry_manager, env);
         }
@@ -327,6 +333,7 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
         // Power of 10 rule 7: check return value
         Result dedup_res = m_dedup.check_and_record(env.source_id, env.message_id);
         if (dedup_res == Result::ERR_DUPLICATE) {
+            ++m_stats.msgs_dropped_duplicate;  // REQ-7.2.3: count duplicate drop
             Logger::log(Severity::INFO, "DeliveryEngine",
                         "Suppressed duplicate message_id=%llu from src=%u",
                         (unsigned long long)env.message_id, env.source_id);
@@ -351,6 +358,8 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
     if (envelope_needs_ack_response(env)) {
         send_data_ack(*m_transport, env, m_local_id, now_us);
     }
+
+    ++m_stats.msgs_received;  // REQ-7.2.3: count successful data message delivery
 
     // Power of 10 rule 5: post-condition assertion
     NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));  // Assert: envelope still valid
@@ -430,4 +439,124 @@ uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
     NEVER_COMPILED_OUT_ASSERT(collected <= ACK_TRACKER_CAPACITY);  // Assert: result bounded
 
     return collected;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::update_latency_stats() — REQ-7.2.1 private helper
+// Called before process_ack() so the tracker slot is still PENDING.
+// NSC: observability bookkeeping only.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void DeliveryEngine::update_latency_stats(const MessageEnvelope& ack_env,
+                                           uint64_t               now_us)
+{
+    // Power of 10 rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(ack_env.message_type == MessageType::ACK);  // Assert: called for ACK only
+    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);  // Assert: valid timestamp
+
+    uint64_t send_ts = 0ULL;
+    // destination_id in the ACK is the local node (original sender)
+    Result res = m_ack_tracker.get_send_timestamp(ack_env.destination_id,
+                                                   ack_env.message_id,
+                                                   send_ts);
+    if (res != Result::OK) {
+        // No matching slot found; skip latency update (not a tracked message)
+        return;
+    }
+
+    // Guard against clock anomalies (now_us should always >= send_ts)
+    if (now_us < send_ts) {
+        return;
+    }
+
+    uint64_t rtt_us = now_us - send_ts;
+
+    // Update running statistics (REQ-7.2.1)
+    ++m_stats.latency_sample_count;
+    m_stats.latency_sum_us += rtt_us;
+
+    if (m_stats.latency_sample_count == 1U) {
+        // First sample: initialize min and max
+        m_stats.latency_min_us = rtt_us;
+        m_stats.latency_max_us = rtt_us;
+    } else {
+        if (rtt_us < m_stats.latency_min_us) {
+            m_stats.latency_min_us = rtt_us;
+        }
+        if (rtt_us > m_stats.latency_max_us) {
+            m_stats.latency_max_us = rtt_us;
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::record_send_failure() — REQ-7.2.3 private helper
+// Logs a send failure warning and increments msgs_dropped_expired on ERR_EXPIRED.
+// Extracted from send() to reduce its cognitive complexity to ≤ 10.
+// NSC: observability bookkeeping only.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void DeliveryEngine::record_send_failure(const MessageEnvelope& env, Result res)
+{
+    // Power of 10 rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(res != Result::OK);      // Assert: called only on failure
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);          // Assert: engine was initialized
+
+    if (res == Result::ERR_EXPIRED) {
+        ++m_stats.msgs_dropped_expired;  // REQ-7.2.3: count expiry drops on send
+    }
+
+    Logger::log(Severity::WARNING_LO, "DeliveryEngine",
+                "Failed to send message_id=%llu: %u",
+                (unsigned long long)env.message_id, static_cast<uint8_t>(res));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::record_routing_failure() — REQ-7.2.3 private helper
+// Increments the appropriate drop counter based on routing failure type.
+// Extracted from receive() to reduce its cognitive complexity to ≤ 10.
+// NSC: observability bookkeeping only.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void DeliveryEngine::record_routing_failure(Result routing_res)
+{
+    // Power of 10 rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(routing_res != Result::OK);  // Assert: called only on failure
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);              // Assert: engine was initialized
+
+    if (routing_res == Result::ERR_EXPIRED) {
+        ++m_stats.msgs_dropped_expired;    // REQ-7.2.3: expiry drop on receive
+    } else {
+        ++m_stats.msgs_dropped_misrouted;  // REQ-7.2.3: wrong destination
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::get_stats() — REQ-7.2.1, REQ-7.2.3, REQ-7.2.4
+// NSC: read-only aggregation of all sub-component stats.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void DeliveryEngine::get_stats(DeliveryStats& out) const
+{
+    // Power of 10 rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: engine was initialized
+    NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr);  // Assert: transport valid
+
+    // Start with the local snapshot (latency, message counters)
+    out = m_stats;
+
+    // Overlay AckTracker stats (REQ-7.2.3)
+    out.ack = m_ack_tracker.get_stats();
+
+    // Overlay RetryManager stats (REQ-7.2.3)
+    out.retry = m_retry_manager.get_stats();
+
+    // Overlay transport stats (REQ-7.2.4 connections + REQ-7.2.2 impairment)
+    m_transport->get_transport_stats(out.transport);
+
+    // Copy impairment stats from transport into top-level for convenience
+    out.impairment = out.transport.impairment;
+
+    // REQ-7.2.4: fatal assertion count from process-wide global
+    out.fatal_count = assert_state::get_fatal_count();
 }

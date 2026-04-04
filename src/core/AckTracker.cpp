@@ -24,7 +24,7 @@
  *   - MISRA C++: no dynamic allocation, no exceptions.
  *   - F-Prime style: simple state machine (FREE/PENDING/ACKED), deterministic behavior.
  *
- * Implements: REQ-3.2.4, REQ-3.3.2
+ * Implements: REQ-3.2.4, REQ-3.3.2, REQ-7.2.3
  */
 
 #include "AckTracker.hpp"
@@ -40,9 +40,11 @@ void AckTracker::init()
     (void)memset(m_slots, 0, sizeof(m_slots));
 
     m_count = 0U;
+    ack_tracker_stats_init(m_stats);  // REQ-7.2.3: zero all observability counters
 
     // Power of 10 rule 5: post-condition assertions
     NEVER_COMPILED_OUT_ASSERT(m_count == 0U);  // Assert: tracker is empty
+    NEVER_COMPILED_OUT_ASSERT(m_stats.timeouts == 0U);  // Assert: stats zeroed
 
     // Verify all slots are FREE
     // Power of 10 rule 3: bounded loop (ACK_TRACKER_CAPACITY)
@@ -105,6 +107,7 @@ Result AckTracker::on_ack(NodeId src, uint64_t msg_id)
             (m_slots[i].env.message_id == msg_id)) {
             // Found the matching entry; mark as ACKED
             m_slots[i].state = EntryState::ACKED;
+            ++m_stats.acks_received;  // REQ-7.2.3: record PENDING→ACKED transition
 
             // Power of 10 rule 5: post-condition assertion
             NEVER_COMPILED_OUT_ASSERT(m_slots[i].state == EntryState::ACKED);  // Assert: slot is ACKed
@@ -140,6 +143,7 @@ uint32_t AckTracker::sweep_one_slot(uint32_t         idx,
             envelope_copy(expired_buf[expired_count], m_slots[idx].env);
             added = 1U;
         }
+        ++m_stats.timeouts;  // REQ-7.2.3: record ACK timeout event
         m_slots[idx].state = EntryState::FREE;
         if (m_count > 0U) { --m_count; }
         return added;
@@ -178,4 +182,43 @@ uint32_t AckTracker::sweep_expired(uint64_t         now_us,
     NEVER_COMPILED_OUT_ASSERT(expired_count <= buf_cap);                 // Assert: didn't exceed output capacity
 
     return expired_count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AckTracker::get_send_timestamp() — REQ-7.2.1 latency helper
+// NSC: read-only lookup; no state change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result AckTracker::get_send_timestamp(NodeId src, uint64_t msg_id, uint64_t& out_ts) const
+{
+    // Power of 10 rule 5: pre-condition assertions
+    NEVER_COMPILED_OUT_ASSERT(src != NODE_ID_INVALID);         // Assert: valid source
+    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);// Assert: count consistent
+
+    // Power of 10 rule 2: bounded search
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        if ((m_slots[i].state == EntryState::PENDING) &&
+            (m_slots[i].env.source_id == src) &&
+            (m_slots[i].env.message_id == msg_id)) {
+            out_ts = m_slots[i].env.timestamp_us;
+            NEVER_COMPILED_OUT_ASSERT(out_ts > 0ULL);  // Assert: send timestamp recorded
+            return Result::OK;
+        }
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count still valid
+    return Result::ERR_INVALID;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AckTracker::get_stats() — REQ-7.2.3 observability accessor
+// NSC: read-only; no state change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const AckTrackerStats& AckTracker::get_stats() const
+{
+    // Power of 10 rule 5: ≥2 assertions
+    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: tracker invariant holds
+    NEVER_COMPILED_OUT_ASSERT(m_stats.acks_received <= ACK_TRACKER_CAPACITY * 1000U);  // Assert: plausible counter
+    return m_stats;
 }
