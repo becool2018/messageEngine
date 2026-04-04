@@ -183,6 +183,29 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 
 ---
 
+## HL-23: Poll DeliveryEngine Observability Events
+> User calls DeliveryEngine::poll_event() in the application event loop; System returns the next unread delivery event from the bounded DeliveryEventRing (send success/failure, ACK received, retry fired, ACK timeout, duplicate drop, expiry drop, misroute drop).
+
+- UC_59 — poll_event(): dequeue one DeliveryEvent from the bounded ring; returns ERR_EMPTY when no events are pending
+- UC_60 — pending_event_count(): return the number of unread events currently held in the DeliveryEventRing
+
+---
+
+## HL-24: Inbound Impairment Applied on UDP/DTLS Receive
+> System calls ImpairmentEngine::process_inbound() on every datagram received by UdpBackend or DtlsUdpBackend, applying partition drops and reordering before pushing the envelope to the inbound ring.
+
+- UC_53 — ImpairmentEngine process_outbound/collect_deliverable/process_inbound — called internally by each backend on every send/receive; never by the user (updated: process_inbound now active in UdpBackend and DtlsUdpBackend)
+
+---
+
+## HL-25: TLS Session Resumption on Reconnect
+> User enables TLS session resumption via TlsConfig::session_resumption_enabled; System saves the session after the first handshake and presents it on reconnect to skip the full handshake exchange, reducing reconnection latency (RFC 5077 / TLS 1.3 PSK).
+
+- UC_37 — TLS client: connect to peer and complete TLS handshake before first message (updated: session ticket saved/presented when session_resumption_enabled is true)
+- UC_36 — TLS server: bind, listen, accept, and complete TLS handshake with each client (updated: session tickets enabled via mbedtls_ssl_conf_session_tickets when session_resumption_enabled is true)
+
+---
+
 ## Application Workflow (above system boundary)
 
 These use cases document patterns that combine multiple system calls and sit at

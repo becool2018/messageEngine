@@ -276,3 +276,64 @@ Before these defects can be closed FIX, the following must be satisfied:
 Moderator: Don Jessup — 2026-04-03. DEF-004-1 through DEF-004-4 formally deferred.
 Rationale accepted. No safety impact. INSP-004 closed DEFER.
 
+---
+
+### INSP-005 — Phase 1 integration merge (observability-core-hooks + inbound-impairment-wiring + tls-session-reuse)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-04 |
+| Author      | Don Jessup |
+| Moderator   | Claude Sonnet 4.6 (AI co-author; human engineer reviews all AI-generated output per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | PASS — no new defects found during integration |
+
+#### Scope of change
+
+Three feature branches merged into `phase1-integration` in dependency order using `--no-ff`. All merges were conflict-free across disjoint file sets.
+
+| Branch | Commit | What it adds |
+|--------|--------|--------------|
+| `observability-core-hooks` | `e90e82d` | Bounded `DeliveryEventRing` (overwrite-on-full, `DELIVERY_EVENT_RING_CAPACITY` slots); 8 `DeliveryEventKind` values; `DeliveryEngine::poll_event()` and `pending_event_count()` pull-style observability API; 7 new `test_DeliveryEngine.cpp` tests (46 total) |
+| `inbound-impairment-wiring` | `f42976f` | `ImpairmentEngine::process_inbound()` wired into `UdpBackend` and `DtlsUdpBackend` receive paths; 3 new tests across `test_UdpBackend.cpp` (20 total), `test_DtlsUdpBackend.cpp` (39 total), `test_ImpairmentEngine.cpp` |
+| `tls-session-reuse` | `67a9efd` | TLS session resumption in `TlsTcpBackend`; `session_resumption_enabled` and `session_ticket_lifetime_s` fields added to `TlsConfig`; 3 new `test_TlsTcpBackend.cpp` tests (33 total) |
+
+Shared documentation updated:
+- `src/core/Version.hpp` — MINOR version bump 1.0.0 → 1.1.0 (new public API; wire format unchanged)
+- `README.md` — Phase 1 API notes in Transport Abstraction, Impairment Engine, and Observability sections
+- `docs/TRACEABILITY_MATRIX.md` — new REQ-7.2.5 row; updated test lists for REQ-5.1.5, REQ-5.1.6, REQ-6.3.4; updated resolved section
+- `docs/use_cases/HIGH_LEVEL_USE_CASES.md` — added HL-23 (poll_event), HL-24 (inbound impairment), HL-25 (TLS session resumption)
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations | PASS |
+| All feature branches independently lint-clean and test-green before merge | PASS (verified per branch commit history) |
+| Merges conflict-free across disjoint file sets | PASS |
+| No changes to feature-owned implementation files (documentation only) | PASS |
+| No PROTO_VERSION bump (wire format unchanged) | PASS |
+| All new/modified `src/` files carry `// Implements: REQ-x.x` tags | PASS (tags present in all feature branch headers) |
+| All new/modified `tests/` files carry `// Verifies: REQ-x.x` tags | PASS (tags present in all feature branch tests) |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init | PASS |
+
+#### Defects found
+
+| ID | File : line | Description | Severity | Disposition | Resolution |
+|----|-------------|-------------|----------|-------------|------------|
+| — | — | No new defects found during integration | — | — | — |
+
+#### Checklist reference
+
+All items in `docs/INSPECTION_CHECKLIST.md` verified for the integration commit. Key checks:
+- No feature logic changed — integration only moves files that were independently reviewed per their feature branch.
+- Version.hpp bump follows SemVer: new backward-compatible API surface → MINOR bump (1.0.0 → 1.1.0).
+- Traceability: REQ-7.2.5 now fully traced (Implements + Verifies). REQ-5.1.5/6 and REQ-6.3.4 Verifies columns updated.
+- `make lint` and `make run_tests` both PASS after merge.
+
+#### Moderator sign-off
+
+Moderator: Claude Sonnet 4.6 — 2026-04-04. No CRITICAL or MAJOR defects. All entry and exit criteria satisfied. Inspection INSP-005 closed PASS.
+

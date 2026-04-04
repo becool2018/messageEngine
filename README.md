@@ -74,7 +74,7 @@ A single `TransportInterface` API (`init`, `send_message`, `receive_message`, `c
 |---|---|
 | **TcpBackend** | Connection-oriented; length-prefixed framing; multi-client server support |
 | **UdpBackend** | Connectionless; one datagram per message; no built-in reliability |
-| **TlsTcpBackend** | TLS-encrypted TCP (mbedTLS 4.0 PSA Crypto); per-client TLS context; plaintext fallback for tests |
+| **TlsTcpBackend** | TLS-encrypted TCP (mbedTLS 4.0 PSA Crypto); per-client TLS context; plaintext fallback for tests; TLS session resumption (`session_resumption_enabled` in `TlsConfig`) |
 | **DtlsUdpBackend** | DTLS-encrypted UDP; DTLS cookie anti-replay; MTU enforcement (1,400 bytes); plaintext fallback |
 | **LocalSimHarness** | In-process; two instances linked by pointer; no OS sockets; deterministic |
 
@@ -92,6 +92,8 @@ A configurable network fault injection layer sits between the transport abstract
 
 All impairment decisions are driven by a seedable xorshift64 PRNG — identical seed and input produces an identical fault sequence every run.
 
+`ImpairmentEngine::process_inbound()` is now active in the `UdpBackend` and `DtlsUdpBackend` receive paths. Inbound impairments (partition drops, reordering) are applied to received messages before they are pushed to the inbound ring buffer, matching the behaviour of `process_outbound()` on the send path.
+
 ### 6. Reliability Helpers
 - **Duplicate filter** — sliding window of 128 `(source_id, message_id)` pairs; evicts the oldest on overflow
 - **ACK tracker** — 32-slot fixed table; tracks pending ACKs with deadlines; sweeps timed-out entries
@@ -100,6 +102,7 @@ All impairment decisions are driven by a seedable xorshift64 PRNG — identical 
 ### 7. Observability
 - Severity-tagged logging (`INFO`, `WARNING_LO`, `WARNING_HI`, `FATAL`) to stderr via a fixed 512-byte stack buffer
 - No heap allocation in the logger
+- **DeliveryEvent ring** — a bounded, overwrite-on-full ring buffer (`DeliveryEventRing`, capacity `DELIVERY_EVENT_RING_CAPACITY`) records 8 event kinds (SEND_OK, SEND_FAIL, ACK_RECEIVED, RETRY_FIRED, ACK_TIMEOUT, DUPLICATE_DROP, EXPIRY_DROP, MISROUTE_DROP). Events are pulled via `DeliveryEngine::poll_event()` — no callbacks, no heap, no virtual dispatch for delivery (REQ-7.2.5).
 
 ### 8. Determinism and Testability
 - All components are testable without real network hardware via `LocalSimHarness`

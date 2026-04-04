@@ -37,6 +37,11 @@
  * Version history:
  *   1.0.0 — initial release: Apache 2.0 license, protocol versioning
  *            (PROTO_VERSION=1), capacity stress tests.
+ *   1.1.0 — Phase 1 integration: bounded DeliveryEvent ring (poll_event,
+ *            8 event kinds, REQ-7.2.5); process_inbound() wired into
+ *            UdpBackend and DtlsUdpBackend receive paths; TLS session
+ *            resumption in TlsTcpBackend (session_resumption_enabled,
+ *            session_ticket_lifetime_s in TlsConfig). Wire format unchanged.
  *
  * NSC-infrastructure: compile-time version constants only; no requirement
  *   implementation belongs here. No REQ-x.x tag applies.
@@ -53,7 +58,7 @@
 #include <cstdint>
 
 static const uint32_t ME_VERSION_MAJOR  = 1U;
-static const uint32_t ME_VERSION_MINOR  = 0U;
+static const uint32_t ME_VERSION_MINOR  = 1U;
 static const uint32_t ME_VERSION_PATCH  = 0U;
 
 /// Packed single integer for compile-time range checks: (major<<16)|(minor<<8)|patch
@@ -62,6 +67,6 @@ static const uint32_t ME_VERSION_NUMBER =
 
 /// Human-readable version string — must match the git tag vMAJOR.MINOR.PATCH exactly.
 /// The `make check_version` target verifies this at release time.
-static const char ME_VERSION_STRING[] = "1.0.0";
+static const char ME_VERSION_STRING[] = "1.1.0";
 
 #endif // CORE_VERSION_HPP
