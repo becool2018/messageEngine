@@ -159,9 +159,6 @@ private:
     /// Flush impairment-delayed messages out to connected clients.
     void flush_delayed_to_clients(uint64_t now_us);
 
-    /// Flush impairment-delayed inbound messages into the receive queue.
-    void flush_delayed_to_queue(uint64_t now_us);
-
     /// Accept new clients (server) and drain one frame per active client.
     void poll_clients_once(uint32_t timeout_ms);
 

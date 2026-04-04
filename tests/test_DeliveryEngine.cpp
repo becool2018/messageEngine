@@ -595,8 +595,9 @@ static void test_sweep_detects_timeout()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 13: fill AckTracker to capacity; next RELIABLE_ACK send still returns OK
-// (ACK track failure is logged but does not fail the send — line 111 True branch)
+// Test 13: fill AckTracker to capacity; next RELIABLE_ACK send returns ERR_FULL
+// (tracker full → reliability contract broken → send returns ERR_FULL)
+// Verifies: REQ-3.3.2
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_send_ack_tracker_full()
 {
@@ -617,14 +618,15 @@ static void test_send_ack_tracker_full()
         (void)harness_b.receive_message(drain, 10U);
     }
 
-    // AckTracker is now full; next RELIABLE_ACK should still succeed (track_res is ignored)
+    // AckTracker is now full; next RELIABLE_ACK must return ERR_FULL because
+    // ACK tracking failure breaks the reliability contract (no slot allocated,
+    // so the timeout sweep will never fire for this message).
     MessageEnvelope overflow_env;
     make_data_envelope(overflow_env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
     Result res = engine.send(overflow_env, NOW_US);
 
-    // Send succeeds even though AckTracker is full (track failure is not fatal)
-    assert(res == Result::OK);
-    assert(res != Result::ERR_FULL);
+    // tracker full → send returns ERR_FULL
+    assert(res == Result::ERR_FULL);
 
     harness_a.close();
     harness_b.close();
@@ -633,9 +635,9 @@ static void test_send_ack_tracker_full()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 14 (pre-NAK): fill RetryManager to capacity; next RELIABLE_RETRY send
-// still returns OK (schedule failure is logged but does not fail the send —
-// line 126 True branch)
+// Test 14: fill RetryManager to capacity; next RELIABLE_RETRY send returns
+// ERR_FULL (retry manager full → reliability contract broken → ERR_FULL)
+// Verifies: REQ-3.3.3
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_send_retry_manager_full()
 {
@@ -645,6 +647,7 @@ static void test_send_retry_manager_full()
     setup_engine(harness_a, harness_b, engine);
 
     // Fill the RetryManager by sending ACK_TRACKER_CAPACITY RELIABLE_RETRY messages
+    // Power of 10: bounded loop
     for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
         MessageEnvelope env;
         make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_RETRY);
@@ -654,13 +657,15 @@ static void test_send_retry_manager_full()
         (void)harness_b.receive_message(drain, 10U);
     }
 
-    // RetryManager is now full; next RELIABLE_RETRY should still succeed (sched_res ignored)
+    // RetryManager is now full; next RELIABLE_RETRY must return ERR_FULL because
+    // retry scheduling failure breaks the reliability contract (no retry will fire
+    // on timeout without a slot).
     MessageEnvelope overflow_env;
     make_data_envelope(overflow_env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_RETRY);
     Result res = engine.send(overflow_env, NOW_US);
 
-    assert(res == Result::OK);
-    assert(res != Result::ERR_FULL);
+    // retry manager full → send returns ERR_FULL
+    assert(res == Result::ERR_FULL);
 
     harness_a.close();
     harness_b.close();

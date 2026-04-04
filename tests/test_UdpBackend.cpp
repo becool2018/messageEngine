@@ -738,6 +738,53 @@ static void test_mock_udp_recv_from_fail()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 19: recv_from() returns datagram from wrong source — datagram dropped
+//
+// Verifies: REQ-6.2.4
+//
+// Strategy: use MockSocketOps with recv_src_ip set to a different IP than the
+// configured peer_ip.  recv_from() returns true, but validate_source() rejects
+// the source mismatch before deserialization.  receive_message() exhausts all
+// poll iterations without queuing any message and returns ERR_TIMEOUT.
+//
+// Verification method: M5 (fault injection via ISocketOps mock).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.2.4
+static void test_recv_wrong_source_dropped()
+{
+    MockSocketOps mock;
+    // Simulate datagram arriving from a different IP than the configured peer.
+    // peer_ip defaults to "127.0.0.1"; set mock to return "192.168.1.99".
+    (void)strncpy(mock.recv_src_ip, "192.168.1.99", sizeof(mock.recv_src_ip) - 1U);
+    mock.recv_src_ip[sizeof(mock.recv_src_ip) - 1U] = '\0';
+    mock.recv_src_port = 19681U;  // arbitrary port for the spoofed source
+
+    UdpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19680U, 19681U);  // peer_ip="127.0.0.1", peer_port=19681
+
+    Result r = backend.init(cfg);
+    assert(r == Result::OK);
+    assert(backend.is_open());
+
+    // receive_message: recv_from returns true (mock), validate_source sees
+    // src_ip="192.168.1.99" != peer_ip="127.0.0.1" -> drops datagram.
+    // All poll iterations exhaust without queuing -> ERR_TIMEOUT.
+    MessageEnvelope env;
+    r = backend.receive_message(env, 200U);  // 2 poll iterations
+    assert(r == Result::ERR_TIMEOUT);
+
+    // Backend remains open after source validation drop.
+    assert(backend.is_open());
+
+    backend.close();
+    printf("PASS: test_recv_wrong_source_dropped\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -771,6 +818,9 @@ int main()
 
     // M5 fault injection: recv_from OS failure path
     test_mock_udp_recv_from_fail();
+
+    // REQ-6.2.4: source address validation -- wrong source dropped (M5)
+    test_recv_wrong_source_dropped();
 
     printf("=== ALL PASSED ===\n");
     return 0;

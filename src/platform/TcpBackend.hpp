@@ -133,10 +133,6 @@ private:
     /// @param[in] now_us Current wall-clock time in microseconds.
     void flush_delayed_to_clients(uint64_t now_us);
 
-    /// Flush delayed messages from the impairment engine into m_recv_queue.
-    /// @param[in] now_us Current wall-clock time in microseconds.
-    void flush_delayed_to_queue(uint64_t now_us);
-
     /// Poll all connected clients once (accept new ones if server).
     /// Receives up to one frame per client into m_recv_queue.
     /// @param[in] timeout_ms Per-client receive timeout in milliseconds.

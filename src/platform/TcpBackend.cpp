@@ -345,26 +345,6 @@ void TcpBackend::flush_delayed_to_clients(uint64_t now_us)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// flush_delayed_to_queue() — private helper
-// ─────────────────────────────────────────────────────────────────────────────
-
-void TcpBackend::flush_delayed_to_queue(uint64_t now_us)
-{
-    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);          // Power of 10: valid timestamp
-    NEVER_COMPILED_OUT_ASSERT(m_open);                 // Power of 10: transport must be open
-
-    MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];
-    uint32_t count = m_impairment.collect_deliverable(now_us, delayed,
-                                                      IMPAIR_DELAY_BUF_SIZE);
-
-    // Power of 10 rule 2: fixed loop bound
-    for (uint32_t i = 0U; i < count; ++i) {
-        NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        (void)m_recv_queue.push(delayed[i]);
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // build_poll_fds() — CC-reduction helper for poll_clients_once
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -532,7 +512,7 @@ Result TcpBackend::receive_message(MessageEnvelope& envelope, uint32_t timeout_m
         }
 
         uint64_t now_us = timestamp_now_us();
-        flush_delayed_to_queue(now_us);
+        flush_delayed_to_clients(now_us);
 
         res = m_recv_queue.pop(envelope);
         if (result_ok(res)) {

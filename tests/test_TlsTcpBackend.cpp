@@ -1317,9 +1317,14 @@ static void test_bind_port_in_use()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 25: Server send_message with 0 clients pre-stages message in delay buffer;
-//          receive_message flushes it via flush_delayed_to_queue.
-// Covers: L592:27 True (flush_delayed_to_queue loop body executes when count>0)
-//         L731:13 True (recv_queue.pop succeeds after flush_delayed_to_queue)
+//          receive_message calls flush_delayed_to_clients — with 0 clients the
+//          delayed envelope is discarded and receive_message returns ERR_TIMEOUT.
+//
+// NOTE: The former version expected OK + message_id==0x4000 because
+//       flush_delayed_to_queue() incorrectly looped back the outbound delayed
+//       envelope into m_recv_queue (self-loop bug). After the fix,
+//       flush_delayed_to_clients() is called instead: with m_client_count==0 it
+//       sends to no one and the message is discarded.
 //
 // Sequence:
 //   server.send_message with m_client_count==0: process_outbound stages msg
@@ -1328,9 +1333,9 @@ static void test_bind_port_in_use()
 //     poll_clients_once(100ms): m_client_count==0 → waits on listen (100ms,
 //       no connection pending) → accept_and_handshake EAGAIN → 0-client loop;
 //     L724 pop empty → L725 False;
-//     flush_delayed_to_queue(now_us): collect_deliverable returns 1 →
-//       L592:27 True (loop body) → push to recv_queue;
-//     L730 pop succeeds → L731:13 True → return OK.
+//     flush_delayed_to_clients(now_us): collect_deliverable returns 1 →
+//       send_to_all_clients with 0 clients → no-op; message discarded;
+//     poll loop times out → return ERR_TIMEOUT.
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void test_server_send_before_client_connects()
@@ -1359,11 +1364,13 @@ static void test_server_send_before_client_connects()
     Result send_res = server.send_message(env);
     assert(send_res == Result::OK);
 
-    // receive_message: poll loop → flush_delayed_to_queue → L592 True + L731 True
+    // receive_message: poll loop → flush_delayed_to_clients → 0 clients → no-op;
+    // message is discarded; receive_message returns ERR_TIMEOUT (not OK).
+    // Bug fix: the former self-loop behavior (flush_delayed_to_queue pushing
+    // outbound delayed messages into m_recv_queue) is intentionally removed.
     MessageEnvelope received;
-    Result recv_res = server.receive_message(received, 3000U);
-    assert(recv_res == Result::OK);
-    assert(received.message_id == 0x4000ULL);
+    Result recv_res = server.receive_message(received, 300U);
+    assert(recv_res == Result::ERR_TIMEOUT);
 
     server.close();
     printf("PASS: test_server_send_before_client_connects\n");

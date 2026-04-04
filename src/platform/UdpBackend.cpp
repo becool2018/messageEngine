@@ -233,6 +233,33 @@ Result UdpBackend::send_message(const MessageEnvelope& envelope)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// validate_source() — private helper (REQ-6.2.4)
+//
+// Compares src_ip/src_port returned by recv_from() against the configured peer.
+// Returns true when the source matches; returns false and logs WARNING_LO when
+// it does not.  Extracted as a helper to keep recv_one_datagram CC <= 10.
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool UdpBackend::validate_source(const char* src_ip, uint16_t src_port) const
+{
+    NEVER_COMPILED_OUT_ASSERT(src_ip != nullptr);                    // Pre-condition
+    NEVER_COMPILED_OUT_ASSERT(m_cfg.peer_ip[0] != '\0');            // Pre-condition
+
+    // REQ-6.2.4: validate source address against configured peer.
+    bool ip_match   = (strncmp(src_ip, m_cfg.peer_ip, sizeof(m_cfg.peer_ip)) == 0);
+    bool port_match = (src_port == m_cfg.peer_port);
+
+    if (!ip_match || !port_match) {
+        Logger::log(Severity::WARNING_LO, "UdpBackend",
+                    "Dropped datagram from unexpected source %s:%u (expected %s:%u)",
+                    src_ip, static_cast<unsigned int>(src_port),
+                    m_cfg.peer_ip, static_cast<unsigned int>(m_cfg.peer_port));
+        return false;
+    }
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // recv_one_datagram() — private helper
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -248,6 +275,11 @@ bool UdpBackend::recv_one_datagram(uint32_t timeout_ms)
     if (!m_sock_ops->recv_from(m_fd, m_wire_buf, SOCKET_RECV_BUF_BYTES,
                                timeout_ms, &out_len, src_ip, &src_port)) {
         return false;  // Timeout or error on this poll
+    }
+
+    // REQ-6.2.4: validate source before deserialization (drop spoofed datagrams)
+    if (!validate_source(src_ip, src_port)) {
+        return false;
     }
 
     MessageEnvelope env;
@@ -268,10 +300,14 @@ bool UdpBackend::recv_one_datagram(uint32_t timeout_ms)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// flush_delayed_to_queue() — private helper
+// flush_delayed_to_wire() — private helper
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// NOTE: ImpairmentEngine::process_inbound() is not yet wired into the receive path.
+// Inbound reordering/delay impairments are tracked as a future work item.
+// This function handles only outbound delayed delivery.
 
-void UdpBackend::flush_delayed_to_queue(uint64_t now_us)
+void UdpBackend::flush_delayed_to_wire(uint64_t now_us)
 {
     NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);      // Power of 10: valid timestamp
     NEVER_COMPILED_OUT_ASSERT(m_open);             // Power of 10: transport must be open
@@ -281,6 +317,7 @@ void UdpBackend::flush_delayed_to_queue(uint64_t now_us)
                                                       IMPAIR_DELAY_BUF_SIZE);
 
     // Power of 10 rule 2: fixed loop bound
+    // Push delayed inbound envelopes into the receive queue for delivery.
     for (uint32_t i = 0U; i < count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
         (void)m_recv_queue.push(delayed[i]);
@@ -318,7 +355,7 @@ Result UdpBackend::receive_message(MessageEnvelope& envelope, uint32_t timeout_m
         }
 
         uint64_t now_us = timestamp_now_us();
-        flush_delayed_to_queue(now_us);
+        flush_delayed_to_wire(now_us);
 
         res = m_recv_queue.pop(envelope);
         if (result_ok(res)) {

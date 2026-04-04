@@ -900,13 +900,15 @@ static void test_mock_tcp_client_reuseaddr_fail()
 // Test 21: impairment delay paths (Option A — fixed_latency_ms via ChannelConfig)
 // Uses MockSocketOps in client mode (mock connect succeeds, m_client_fds[0]=FAKE_FD).
 // Covers:
-//   (a) flush_delayed_to_clients() loop body (TcpBackend.cpp L316-L325):
+//   (a) flush_delayed_to_clients() loop body in send_message (outbound path):
 //       second send triggers flush of first delayed message to all clients.
-//   (b) flush_delayed_to_queue() loop body (TcpBackend.cpp L342-L345):
-//       receive_message flushes second delayed message from impairment buffer.
-//   (c) receive_message post-flush pop True branch (L486-L488):
-//       pop succeeds after flush delivers the delayed envelope.
+//   (b) flush_delayed_to_clients() loop body in receive_message (outbound flush):
+//       receive_message calls flush_delayed_to_clients, which sends env2 to the
+//       mock fd (outbound). env2 does NOT appear in m_recv_queue (correct fix
+//       for the self-loop bug: HAZ-003 — delayed outbound messages must not loop
+//       back into the sender's own receive queue).
 // recv_from_client via mock: recv_frame returns true/0 → deserialize fails (safe).
+// receive_message returns ERR_TIMEOUT (correct: no inbound message was received).
 // Verifies: REQ-5.1.1, REQ-4.1.2, REQ-4.1.3
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -937,7 +939,7 @@ static void test_tcp_impairment_delay_paths()
     make_test_envelope(env2, 0xDC100002ULL);
 
     // Second send: process_outbound queues env2; flush_delayed_to_clients finds
-    // count=1 (env1 past its release time) — loop runs once.
+    // count=1 (env1 past its release time) — loop runs once, sending env1 outbound.
     // Covers: flush_delayed_to_clients() loop body (path (a) above).
     assert(backend.send_message(env2) == Result::OK);
 
@@ -945,12 +947,13 @@ static void test_tcp_impairment_delay_paths()
 
     // receive_message: poll_clients_once calls poll(FAKE_FD) → may return POLLNVAL
     // (handled gracefully); mock recv_frame returns true/0 → deserialize fails.
-    // flush_delayed_to_queue finds env2 and pushes it to recv_queue.
-    // Covers: flush_delayed_to_queue loop body (path (b)) and post-flush pop (path (c)).
+    // flush_delayed_to_clients sends env2 outbound (not into recv_queue).
+    // Covers: flush_delayed_to_clients() loop body inside receive_message (path (b)).
+    // Correct behavior: receive_message returns ERR_TIMEOUT because no inbound
+    // message was received (env2 was sent outbound, not looped back).
     MessageEnvelope recv_env;
     Result r = backend.receive_message(recv_env, 500U);
-    assert(r == Result::OK);
-    assert(recv_env.message_id == 0xDC100002ULL);
+    assert(r == Result::ERR_TIMEOUT);
 
     backend.close();
     printf("PASS: test_tcp_impairment_delay_paths\n");

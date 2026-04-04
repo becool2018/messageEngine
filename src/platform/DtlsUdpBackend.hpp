@@ -171,15 +171,25 @@ private:
     /// @param addr_len   Length of peer_addr in bytes.
     Result run_dtls_handshake(const void* peer_addr, uint32_t addr_len);
 
+    /// Validate that the source address of a received plaintext datagram matches
+    /// the configured peer (REQ-6.2.4).  On the DTLS path, returns true immediately
+    /// (connect() + DTLS record MAC already filter non-peer traffic).
+    /// Logs WARNING_LO and returns false on plaintext mismatch.
+    /// @param[in] src_ip    Source IP string returned by recv_from().
+    /// @param[in] src_port  Source port returned by recv_from().
+    /// @return true if source is acceptable; false otherwise.
+    bool validate_source(const char* src_ip, uint16_t src_port) const;
+
     /// Attempt to receive one datagram (DTLS or plaintext), deserialize it,
     /// and push the resulting envelope to m_recv_queue.
     /// @param timeout_ms Per-call receive timeout in milliseconds.
     /// @return true if a datagram was received and pushed successfully.
     bool recv_one_dtls_datagram(uint32_t timeout_ms);
 
-    /// Drain impairment-delayed inbound messages into m_recv_queue.
+    /// Send impairment-delayed outbound messages to the wire via send_one_envelope().
+    /// NOTE: process_inbound() is not yet wired; inbound impairment is future work.
     /// @param now_us Current wall-clock time in microseconds.
-    void flush_delayed_to_queue(uint64_t now_us);
+    void flush_delayed_to_wire(uint64_t now_us);
 
     // ── CC-reduction helpers (extracted to keep each caller CC ≤ 10) ─────────
 

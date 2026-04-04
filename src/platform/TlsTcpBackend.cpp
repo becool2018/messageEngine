@@ -662,7 +662,7 @@ void TlsTcpBackend::send_to_all_clients(const uint8_t* buf, uint32_t len)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// flush_delayed_to_clients() / flush_delayed_to_queue()
+// flush_delayed_to_clients()
 // ─────────────────────────────────────────────────────────────────────────────
 
 void TlsTcpBackend::flush_delayed_to_clients(uint64_t now_us)
@@ -682,20 +682,6 @@ void TlsTcpBackend::flush_delayed_to_clients(uint64_t now_us)
             continue;
         }
         send_to_all_clients(m_wire_buf, delayed_len);
-    }
-}
-
-void TlsTcpBackend::flush_delayed_to_queue(uint64_t now_us)
-{
-    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);
-    NEVER_COMPILED_OUT_ASSERT(m_open);
-
-    MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];
-    uint32_t count = m_impairment.collect_deliverable(now_us, delayed,
-                                                      IMPAIR_DELAY_BUF_SIZE);
-    for (uint32_t i = 0U; i < count; ++i) {
-        NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        (void)m_recv_queue.push(delayed[i]);
     }
 }
 
@@ -839,7 +825,7 @@ Result TlsTcpBackend::receive_message(MessageEnvelope& envelope, uint32_t timeou
         if (result_ok(res)) { return res; }
 
         uint64_t now_us = timestamp_now_us();
-        flush_delayed_to_queue(now_us);
+        flush_delayed_to_clients(now_us);
 
         res = m_recv_queue.pop(envelope);
         if (result_ok(res)) { return res; }

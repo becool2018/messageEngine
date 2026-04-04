@@ -93,16 +93,24 @@ private:
     // Private helper methods (Power of 10: small, single-purpose functions)
     // ───────────────────────────────────────────────────────────────────────
 
+    /// Validate that the source address of a received datagram matches the
+    /// configured peer (REQ-6.2.4).  Logs WARNING_LO and returns false on mismatch.
+    /// @param[in] src_ip    Source IP string returned by recv_from().
+    /// @param[in] src_port  Source port returned by recv_from().
+    /// @return true if source matches configured peer; false otherwise.
+    bool validate_source(const char* src_ip, uint16_t src_port) const;
+
     /// Attempt to receive one UDP datagram into m_wire_buf, deserialize,
     /// and push the resulting envelope to m_recv_queue.
     /// @param[in] timeout_ms Per-call receive timeout in milliseconds.
     /// @return true if a datagram was received and deserialized successfully.
     bool recv_one_datagram(uint32_t timeout_ms);
 
-    /// Collect deliverable delayed messages from the impairment engine
-    /// and push each to m_recv_queue.
+    /// Collect deliverable delayed outbound messages from the impairment engine
+    /// and send each to the wire via send_one_envelope().
+    /// NOTE: process_inbound() is not yet wired; inbound impairment is future work.
     /// @param[in] now_us Current wall-clock time in microseconds.
-    void flush_delayed_to_queue(uint64_t now_us);
+    void flush_delayed_to_wire(uint64_t now_us);
 
     /// Flush the outbound deliverable batch to the socket.
     /// Tracks whether the current envelope (matched by source_id + message_id) failed.

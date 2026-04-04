@@ -37,6 +37,7 @@
 #define TESTS_MOCK_SOCKET_OPS_HPP
 
 #include <cstdint>
+#include <cstring>
 #include "platform/ISocketOps.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,6 +62,11 @@ struct MockSocketOps : public ISocketOps {
     bool fail_recv_frame      = false;
     bool fail_send_to         = false;
     bool fail_recv_from       = false;
+
+    // ── Configurable source address returned by recv_from() ───────────────────
+    // Set recv_src_ip to a different IP to simulate a wrong-source datagram.
+    char     recv_src_ip[48]  = "127.0.0.1";
+    uint16_t recv_src_port    = 0U;
 
     // ── Call counters ─────────────────────────────────────────────────────────
     int n_do_close = 0;  ///< Incremented on each do_close() call.
@@ -156,10 +162,17 @@ struct MockSocketOps : public ISocketOps {
 
     bool recv_from(int /*fd*/, uint8_t* /*buf*/, uint32_t /*buf_cap*/,
                    uint32_t /*ms*/, uint32_t* out_len,
-                   char* /*out_ip*/, uint16_t* /*out_port*/) override
+                   char* out_ip, uint16_t* out_port) override
     {
         if (out_len != nullptr) {
             *out_len = 0U;
+        }
+        if (out_ip != nullptr) {
+            (void)strncpy(out_ip, recv_src_ip, 47U);
+            out_ip[47U] = '\0';
+        }
+        if (out_port != nullptr) {
+            *out_port = recv_src_port;
         }
         return !fail_recv_from;
     }

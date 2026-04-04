@@ -525,6 +525,43 @@ Result DtlsUdpBackend::client_connect_and_handshake()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// validate_source() — private helper (REQ-6.2.4)
+//
+// Plaintext path: validates src_ip/src_port against the configured peer.
+// DTLS path:      returns true immediately — connect() + DTLS record MAC already
+//                 filter non-peer datagrams at the kernel and TLS record layers.
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool DtlsUdpBackend::validate_source(const char* src_ip, uint16_t src_port) const
+{
+    NEVER_COMPILED_OUT_ASSERT(src_ip != nullptr);           // Pre-condition
+    NEVER_COMPILED_OUT_ASSERT(m_cfg.peer_ip[0] != '\0');  // Pre-condition
+
+    // REQ-6.2.4: DTLS path — connect() + DTLS record MAC already filter non-peer
+    // datagrams at the kernel and TLS record layers.  No additional check needed.
+    if (m_tls_enabled) {
+        return true;
+    }
+
+    // Plaintext path: always validate IP address.
+    bool ip_match = (strncmp(src_ip, m_cfg.peer_ip, sizeof(m_cfg.peer_ip)) == 0);
+
+    // Port validation: in client mode the server responds from its configured port;
+    // in server mode the client sends from an ephemeral bind port that differs from
+    // m_cfg.peer_port, so port validation is skipped for the server role.
+    bool port_match = m_is_server ? true : (src_port == m_cfg.peer_port);
+
+    if (!ip_match || !port_match) {
+        Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
+                    "Dropped datagram from unexpected source %s:%u (expected %s:%u)",
+                    src_ip, static_cast<unsigned int>(src_port),
+                    m_cfg.peer_ip, static_cast<unsigned int>(m_cfg.peer_port));
+        return false;
+    }
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // try_tls_recv() — CC-reduction helper for recv_one_dtls_datagram
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -569,6 +606,11 @@ bool DtlsUdpBackend::recv_one_dtls_datagram(uint32_t timeout_ms)
                                    timeout_ms, &out_len, src_ip, &src_port)) {
             return false;
         }
+
+        // REQ-6.2.4: validate source before deserialization (drop spoofed datagrams)
+        if (!validate_source(src_ip, src_port)) {
+            return false;
+        }
     }
 
     MessageEnvelope env;
@@ -589,10 +631,15 @@ bool DtlsUdpBackend::recv_one_dtls_datagram(uint32_t timeout_ms)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// flush_delayed_to_queue() — drain impairment delay buffer into receive queue
+// flush_delayed_to_wire() — drain impairment delay buffer into receive queue
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// Despite its name, this function operates on the receive path: it collects
+// impairment-delayed inbound envelopes from the delay buffer and pushes them
+// into m_recv_queue for delivery to the caller of receive_message().
+// The name is preserved for consistency with the header declaration.
 
-void DtlsUdpBackend::flush_delayed_to_queue(uint64_t now_us)
+void DtlsUdpBackend::flush_delayed_to_wire(uint64_t now_us)
 {
     NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);
     NEVER_COMPILED_OUT_ASSERT(m_open);
@@ -872,7 +919,7 @@ Result DtlsUdpBackend::receive_message(MessageEnvelope& envelope,
         if (result_ok(res)) { return res; }
 
         uint64_t now_us = timestamp_now_us();
-        flush_delayed_to_queue(now_us);
+        flush_delayed_to_wire(now_us);
 
         res = m_recv_queue.pop(envelope);
         if (result_ok(res)) { return res; }

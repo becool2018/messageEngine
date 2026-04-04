@@ -234,7 +234,6 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
         record_send_failure(env, res);  // REQ-7.2.3: stats + log (CC-reduction helper)
         return res;
     }
-    ++m_stats.msgs_sent;  // REQ-7.2.3: count successful sends
 
     // Apply tracking based on reliability class
     if (env.reliability_class == ReliabilityClass::RELIABLE_ACK ||
@@ -243,14 +242,17 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
         // Calculate ACK deadline
         uint64_t ack_deadline = timestamp_deadline_us(now_us, m_cfg.recv_timeout_ms);
 
-        // Track this message for ACK
+        // Track this message for ACK.
+        // ACK tracking failure means reliability is broken; propagate to caller.
         // Power of 10 rule 7: check return value
         Result track_res = m_ack_tracker.track(env, ack_deadline);
         if (track_res != Result::OK) {
             Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                        "Failed to track ACK for message_id=%llu (result=%u)",
+                        "Failed to track ACK for message_id=%llu (result=%u); "
+                        "reliability contract broken -- returning error",
                         (unsigned long long)env.message_id, static_cast<uint8_t>(track_res));
-            // Do not fail the send; ACK tracking is a side effect
+            record_send_failure(env, track_res);
+            return track_res;
         }
     }
 
@@ -263,11 +265,16 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
                                                      now_us);
         if (sched_res != Result::OK) {
             Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                        "Failed to schedule retry for message_id=%llu (result=%u)",
+                        "Failed to schedule retry for message_id=%llu (result=%u); "
+                        "reliability contract broken -- returning error",
                         (unsigned long long)env.message_id, static_cast<uint8_t>(sched_res));
-            // Do not fail the send; retry is a side effect
+            record_send_failure(env, sched_res);
+            return sched_res;
         }
     }
+
+    // REQ-7.2.3: count successful sends -- only after transport send AND all bookkeeping succeed
+    ++m_stats.msgs_sent;
 
     // Power of 10 rule 5: post-condition assertion
     NEVER_COMPILED_OUT_ASSERT(env.source_id == m_local_id);  // Assert: source set correctly
