@@ -446,11 +446,10 @@ static void test_mock_udp_reuseaddr_fail()
 // Test 14: impairment delay paths (Option A — fixed_latency_ms via ChannelConfig)
 // Covers:
 //   (a) send_message delayed-message loop (UdpBackend.cpp L153-L165):
-//       second send triggers flush of first delayed message.
-//   (b) flush_delayed_to_queue() loop body (UdpBackend.cpp L220-L223):
-//       receive_message flushes second delayed message from impairment buffer.
-//   (c) receive_message post-flush pop True branch (L259-L261):
-//       pop succeeds after flush delivers the delayed envelope.
+//       second send triggers flush of first delayed message to the wire.
+//   (b) flush_delayed_to_wire() loop body: receive_message sends expired delayed
+//       envelope to the wire via send_one_envelope() (NOT into recv_queue).
+//   (c) receive_message returns ERR_TIMEOUT: recv_queue stays empty after flush.
 // Uses MockSocketOps: recv_from returns true/0 → deserialize fails → no socket data.
 // Verifies: REQ-5.1.1, REQ-4.1.2, REQ-4.1.3
 // ─────────────────────────────────────────────────────────────────────────────
@@ -481,19 +480,20 @@ static void test_udp_impairment_delay_paths()
     make_test_envelope(env2, 0xDE100002ULL);
 
     // Second send: process_outbound queues env2; collect_deliverable returns 1
-    // (env1 past its release time) — delayed-message loop runs once.
+    // (env1 past its release time) — delayed-message loop runs once, sending
+    // env1 to the wire via send_one_envelope().
     // Covers: send_message delayed-message loop body (path (a) above).
     assert(backend.send_message(env2) == Result::OK);
 
     usleep(10000U);  // 10 ms >> 1 ms: env2 is now past its release time
 
     // receive_message: recv_one_datagram returns false (mock: out_len=0 → deserialize
-    // fails). flush_delayed_to_queue finds env2 and pushes it to recv_queue.
-    // Covers: flush_delayed_to_queue loop body (path (b)) and post-flush pop (path (c)).
+    // fails). flush_delayed_to_wire() sends env2 to the wire — NOT into recv_queue.
+    // recv_queue stays empty → receive_message returns ERR_TIMEOUT.
+    // Covers: flush_delayed_to_wire() loop body (path (b)).
     MessageEnvelope recv_env;
     Result r = backend.receive_message(recv_env, 500U);
-    assert(r == Result::OK);
-    assert(recv_env.message_id == 0xDE100002ULL);
+    assert(r == Result::ERR_TIMEOUT);
 
     backend.close();
     printf("PASS: test_udp_impairment_delay_paths\n");
@@ -591,10 +591,11 @@ static void test_mock_send_to_fail()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 17: receive_message() initial-queue-pop True path
+// Test 17: delayed messages are sent to wire, not looped back into recv_queue
 //
-// Covers receive_message() L238 True branch:
-//   the initial `m_recv_queue.pop()` that returns OK before the poll loop runs.
+// Verifies that flush_delayed_to_wire() sends expired outbound envelopes to
+// the wire via send_one_envelope() rather than pushing them into m_recv_queue.
+// After flushing, receive_message() finds an empty queue and returns ERR_TIMEOUT.
 //
 // Strategy (achievable via the public API):
 //   1. Use MockSocketOps so recv_from always returns true with out_len=0.
@@ -604,32 +605,14 @@ static void test_mock_send_to_fail()
 //   2. Configure impairment with fixed_latency_ms=1 (enabled=true) so that
 //      each send_message call queues the envelope in the impairment delay buffer
 //      rather than transmitting it immediately.
-//   3. Send MSG_RING_CAPACITY / 2 = 32 messages → fills the delay buffer.
+//   3. Send N_SEND messages → fills the delay buffer.
 //   4. Wait 10 ms so all items expire.
-//   5. First receive_message(500 ms):
+//   5. receive_message(500 ms):
 //        - recv_one_datagram returns false (mock, 0 bytes).
-//        - Both pops fail (queue still empty).
-//        - flush_delayed_to_queue collects all 32 expired items → queue = 32.
-//        - Second pop (post-flush) succeeds → queue = 31, returns OK.
-//   6. Second receive_message(0 ms):
-//        - poll_count = (0 + 99) / 100 = 0 → loop does NOT run.
-//        - Initial pop: queue = 31 → succeeds immediately → L238 True covered.
-//        - Returns OK.
-//
-// NOTE on Branch 3 (recv_queue_full at L199):
-//   The `if (!result_ok(m_recv_queue.push(env)))` True branch in recv_one_datagram
-//   requires the ring buffer to contain MSG_RING_CAPACITY = 64 items at push time.
-//   The maximum queue occupancy achievable through the public UdpBackend API in
-//   single-threaded use is IMPAIR_DELAY_BUF_SIZE - 1 = 31, because:
-//     (a) flush_delayed_to_queue can inject at most IMPAIR_DELAY_BUF_SIZE = 32
-//         items in one receive_message iteration, and
-//     (b) receive_message pops one item immediately after every flush, leaving
-//         at most 31 items in the queue.
-//   Since 31 < MSG_RING_CAPACITY (64), the push in recv_one_datagram never fails
-//   in single-threaded use.  This branch is an architectural ceiling: reachable
-//   only if a second producer thread bypasses the SPSC contract of RingBuffer,
-//   which would be a contract violation.  It is documented here as unreachable
-//   via the public API.  The ceiling threshold accounts for this.
+//        - flush_delayed_to_wire() collects all expired items and sends each
+//          to the wire via send_one_envelope() (MockSocketOps send_to succeeds).
+//        - recv_queue remains empty → both queue pops fail.
+//        - receive_message returns ERR_TIMEOUT.
 //
 // Verifies: REQ-4.1.3
 // ─────────────────────────────────────────────────────────────────────────────
@@ -671,21 +654,11 @@ static void test_udp_recv_queue_initial_pop()
     // Wait 10 ms >> 1 ms: all N_SEND items in the delay buffer have expired.
     usleep(10000U);
 
-    // First receive_message: recv_one_datagram fails (mock), flush collects all
-    // N_SEND expired items → queue = N_SEND; post-flush pop succeeds → returns
-    // first item with queue = N_SEND - 1 remaining.
+    // receive_message: flush_delayed_to_wire() sends expired items to the wire
+    // (not into recv_queue).  recv_queue remains empty → ERR_TIMEOUT.
     MessageEnvelope env_a;
     r = backend.receive_message(env_a, 500U);
-    assert(r == Result::OK);
-    assert(env_a.message_type == MessageType::DATA);
-
-    // Second receive_message with 0 ms timeout: poll_count = 0; loop does NOT
-    // run.  The initial queue pop finds N_SEND - 1 items → pops one → returns
-    // OK immediately.  This exercises the L238 True branch of receive_message.
-    MessageEnvelope env_b;
-    r = backend.receive_message(env_b, 0U);
-    assert(r == Result::OK);
-    assert(env_b.message_type == MessageType::DATA);
+    assert(r == Result::ERR_TIMEOUT);
 
     backend.close();
     printf("PASS: test_udp_recv_queue_initial_pop\n");

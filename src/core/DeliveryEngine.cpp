@@ -211,6 +211,70 @@ Result DeliveryEngine::send_via_transport(const MessageEnvelope& env, uint64_t n
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// reserve_bookkeeping() — file-static CC-reduction helper for send().
+//
+// Reserves AckTracker and (for RELIABLE_RETRY) RetryManager slots BEFORE any
+// I/O.  Ordering rationale: if either reservation fails we return an error and
+// the peer never sees the message, preserving the at-most-once contract.
+//
+// Rollback on RetryManager failure: on_ack() transitions the already-reserved
+// AckTracker slot PENDING→ACKED; sweep_expired() reclaims it on its next pass.
+// AckTracker has no dedicated cancel() — on_ack() is the approved rollback path.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+static Result reserve_bookkeeping(AckTracker&            ack_tracker,
+                                   RetryManager&          retry_manager,
+                                   const MessageEnvelope& env,
+                                   const ChannelConfig&   cfg,
+                                   uint64_t               now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);       // Assert: valid timestamp
+    NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));  // Assert: envelope fields set
+
+    // Only reliable classes require bookkeeping slots
+    if (env.reliability_class != ReliabilityClass::RELIABLE_ACK &&
+        env.reliability_class != ReliabilityClass::RELIABLE_RETRY) {
+        return Result::OK;
+    }
+
+    uint64_t ack_deadline = timestamp_deadline_us(now_us, cfg.recv_timeout_ms);
+
+    // Reserve AckTracker slot.  On failure: abort before any I/O.
+    // Power of 10 rule 7: check return value
+    Result track_res = ack_tracker.track(env, ack_deadline);
+    if (track_res != Result::OK) {
+        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                    "Failed to track ACK for message_id=%llu (result=%u); "
+                    "aborting send to preserve at-most-once contract",
+                    (unsigned long long)env.message_id, static_cast<uint8_t>(track_res));
+        return track_res;
+    }
+
+    // RELIABLE_ACK: only AckTracker slot needed — done.
+    if (env.reliability_class != ReliabilityClass::RELIABLE_RETRY) {
+        return Result::OK;
+    }
+
+    // RELIABLE_RETRY: also reserve a RetryManager slot.
+    // Power of 10 rule 7: check return value
+    Result sched_res = retry_manager.schedule(env,
+                                              cfg.max_retries,
+                                              cfg.retry_backoff_ms,
+                                              now_us);
+    if (sched_res != Result::OK) {
+        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                    "Failed to schedule retry for message_id=%llu (result=%u); "
+                    "aborting send to preserve at-most-once contract",
+                    (unsigned long long)env.message_id, static_cast<uint8_t>(sched_res));
+        // Roll back: on_ack() moves PENDING→ACKED; sweep_expired() frees the slot.
+        (void)ack_tracker.on_ack(env.source_id, env.message_id);
+        return sched_res;
+    }
+
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DeliveryEngine::send()
 // ─────────────────────────────────────────────────────────────────────────────
 Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
@@ -222,63 +286,38 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
         return Result::ERR_INVALID;
     }
 
+    // Step 1: assign envelope identity fields.  These must be set before any
+    // bookkeeping call because track() and schedule() read env.source_id,
+    // env.message_id, and env.timestamp_us from the envelope.
     // Power of 10 rule 7: check all function returns
-    // Assign source_id and message_id
-    env.source_id = m_local_id;
-    env.message_id = m_id_gen.next();
+    env.source_id    = m_local_id;
+    env.message_id   = m_id_gen.next();
     env.timestamp_us = now_us;
 
-    // Send via transport
+    // Step 2: validate and reserve bookkeeping capacity BEFORE touching the
+    // transport.  Returns an error if any tracker is full; in that case we
+    // return immediately without calling send_via_transport().
+    // Power of 10 rule 7: check return value
+    Result book_res = reserve_bookkeeping(m_ack_tracker, m_retry_manager,
+                                          env, m_cfg, now_us);
+    if (book_res != Result::OK) {
+        record_send_failure(env, book_res);  // REQ-7.2.3: stats + log
+        return book_res;
+    }
+
+    // Step 3: all bookkeeping confirmed; now commit to I/O.
     Result res = send_via_transport(env, now_us);
     if (res != Result::OK) {
         record_send_failure(env, res);  // REQ-7.2.3: stats + log (CC-reduction helper)
         return res;
     }
 
-    // Apply tracking based on reliability class
-    if (env.reliability_class == ReliabilityClass::RELIABLE_ACK ||
-        env.reliability_class == ReliabilityClass::RELIABLE_RETRY) {
-
-        // Calculate ACK deadline
-        uint64_t ack_deadline = timestamp_deadline_us(now_us, m_cfg.recv_timeout_ms);
-
-        // Track this message for ACK.
-        // ACK tracking failure means reliability is broken; propagate to caller.
-        // Power of 10 rule 7: check return value
-        Result track_res = m_ack_tracker.track(env, ack_deadline);
-        if (track_res != Result::OK) {
-            Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                        "Failed to track ACK for message_id=%llu (result=%u); "
-                        "reliability contract broken -- returning error",
-                        (unsigned long long)env.message_id, static_cast<uint8_t>(track_res));
-            record_send_failure(env, track_res);
-            return track_res;
-        }
-    }
-
-    // Schedule for retry if RELIABLE_RETRY
-    if (env.reliability_class == ReliabilityClass::RELIABLE_RETRY) {
-        // Power of 10 rule 7: check return value
-        Result sched_res = m_retry_manager.schedule(env,
-                                                     m_cfg.max_retries,
-                                                     m_cfg.retry_backoff_ms,
-                                                     now_us);
-        if (sched_res != Result::OK) {
-            Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                        "Failed to schedule retry for message_id=%llu (result=%u); "
-                        "reliability contract broken -- returning error",
-                        (unsigned long long)env.message_id, static_cast<uint8_t>(sched_res));
-            record_send_failure(env, sched_res);
-            return sched_res;
-        }
-    }
-
-    // REQ-7.2.3: count successful sends -- only after transport send AND all bookkeeping succeed
+    // REQ-7.2.3: count successful sends -- only after all bookkeeping AND transport succeed
     ++m_stats.msgs_sent;
 
     // Power of 10 rule 5: post-condition assertion
     NEVER_COMPILED_OUT_ASSERT(env.source_id == m_local_id);  // Assert: source set correctly
-    NEVER_COMPILED_OUT_ASSERT(env.message_id != 0ULL);  // Assert: message_id assigned
+    NEVER_COMPILED_OUT_ASSERT(env.message_id != 0ULL);       // Assert: message_id assigned
 
     Logger::log(Severity::INFO, "DeliveryEngine",
                 "Sent message_id=%llu, reliability=%u",

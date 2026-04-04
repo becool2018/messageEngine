@@ -303,9 +303,9 @@ bool UdpBackend::recv_one_datagram(uint32_t timeout_ms)
 // flush_delayed_to_wire() — private helper
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// NOTE: ImpairmentEngine::process_inbound() is not yet wired into the receive path.
-// Inbound reordering/delay impairments are tracked as a future work item.
-// This function handles only outbound delayed delivery.
+// Collects outbound envelopes whose impairment-delay timer has expired and
+// sends each one to the wire via send_one_envelope().  Failures are logged
+// by send_one_envelope() but not propagated (is_current = false).
 
 void UdpBackend::flush_delayed_to_wire(uint64_t now_us)
 {
@@ -317,10 +317,10 @@ void UdpBackend::flush_delayed_to_wire(uint64_t now_us)
                                                       IMPAIR_DELAY_BUF_SIZE);
 
     // Power of 10 rule 2: fixed loop bound
-    // Push delayed inbound envelopes into the receive queue for delivery.
+    // Send delayed outbound envelopes to the wire via send_one_envelope().
     for (uint32_t i = 0U; i < count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        (void)m_recv_queue.push(delayed[i]);
+        (void)send_one_envelope(delayed[i], false);
     }
 }
 

@@ -628,6 +628,14 @@ static void test_send_ack_tracker_full()
     // tracker full → send returns ERR_FULL
     assert(res == Result::ERR_FULL);
 
+    // After the fix: bookkeeping is validated BEFORE send_via_transport(), so
+    // the peer must NOT have received the overflow message.  Verify harness_b
+    // queue is empty (ERR_TIMEOUT confirms no message arrived).
+    // Verifies: at-most-once contract — ERR_FULL means peer never saw the message.
+    MessageEnvelope not_sent;
+    Result not_recv = harness_b.receive_message(not_sent, 10U);
+    assert(not_recv != Result::OK);
+
     harness_a.close();
     harness_b.close();
 
@@ -666,6 +674,16 @@ static void test_send_retry_manager_full()
 
     // retry manager full → send returns ERR_FULL
     assert(res == Result::ERR_FULL);
+
+    // After the fix: bookkeeping is validated BEFORE send_via_transport(), so
+    // the peer must NOT have received the overflow message.  Verify harness_b
+    // queue is empty (ERR_TIMEOUT confirms no message arrived).
+    // Also verifies that the AckTracker slot reserved before the RetryManager
+    // failure was correctly rolled back (no leaked PENDING slot from this send).
+    // Verifies: at-most-once contract — ERR_FULL means peer never saw the message.
+    MessageEnvelope not_sent;
+    Result not_recv = harness_b.receive_message(not_sent, 10U);
+    assert(not_recv != Result::OK);
 
     harness_a.close();
     harness_b.close();

@@ -643,7 +643,7 @@ Result TlsTcpBackend::recv_from_client(uint32_t idx, uint32_t timeout_ms)
 // send_to_all_clients()
 // ─────────────────────────────────────────────────────────────────────────────
 
-void TlsTcpBackend::send_to_all_clients(const uint8_t* buf, uint32_t len)
+bool TlsTcpBackend::send_to_all_clients(const uint8_t* buf, uint32_t len)
 {
     NEVER_COMPILED_OUT_ASSERT(buf != nullptr);
     NEVER_COMPILED_OUT_ASSERT(len > 0U);
@@ -652,20 +652,25 @@ void TlsTcpBackend::send_to_all_clients(const uint8_t* buf, uint32_t len)
                           ? m_cfg.channels[0U].send_timeout_ms
                           : 1000U;
 
+    bool any_failed = false;
+
     // Power of 10 Rule 2: fixed loop bound
     for (uint32_t i = 0U; i < m_client_count; ++i) {
         if (!tls_send_frame(i, buf, len, timeout_ms)) {
             Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
                         "Send frame failed on client %u", i);
+            any_failed = true;
         }
     }
+    return any_failed;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // flush_delayed_to_clients()
 // ─────────────────────────────────────────────────────────────────────────────
 
-void TlsTcpBackend::flush_delayed_to_clients(uint64_t now_us)
+Result TlsTcpBackend::flush_delayed_to_clients(const MessageEnvelope& current_env,
+                                               uint64_t now_us)
 {
     NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);
     NEVER_COMPILED_OUT_ASSERT(m_open);
@@ -673,6 +678,9 @@ void TlsTcpBackend::flush_delayed_to_clients(uint64_t now_us)
     MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];
     uint32_t count = m_impairment.collect_deliverable(now_us, delayed,
                                                       IMPAIR_DELAY_BUF_SIZE);
+
+    Result final_result = Result::OK;
+
     for (uint32_t i = 0U; i < count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
         uint32_t delayed_len = 0U;
@@ -681,8 +689,19 @@ void TlsTcpBackend::flush_delayed_to_clients(uint64_t now_us)
         if (!result_ok(res)) {
             continue;
         }
-        send_to_all_clients(m_wire_buf, delayed_len);
+        bool is_current = (delayed[i].source_id  == current_env.source_id) &&
+                          (delayed[i].message_id  == current_env.message_id);
+        bool failed = send_to_all_clients(m_wire_buf, delayed_len);
+        if (failed) {
+            if (is_current) {
+                final_result = Result::ERR_IO;
+            } else {
+                Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
+                            "flush: send failed for non-current envelope");
+            }
+        }
     }
+    return final_result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -795,10 +814,10 @@ Result TlsTcpBackend::send_message(const MessageEnvelope& envelope)
     // calls collect_deliverable() and sends everything due — covering both the
     // zero-delay pass-through and timed-delay cases. Do NOT also call
     // send_to_all_clients() here; that would send every message twice. (HAZ-003)
-    flush_delayed_to_clients(now_us);
+    res = flush_delayed_to_clients(envelope, now_us);
 
     NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);
-    return Result::OK;
+    return res;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -825,7 +844,10 @@ Result TlsTcpBackend::receive_message(MessageEnvelope& envelope, uint32_t timeou
         if (result_ok(res)) { return res; }
 
         uint64_t now_us = timestamp_now_us();
-        flush_delayed_to_clients(now_us);
+        // No current send envelope in receive context; use a zero-init sentinel
+        // so flush attribution never matches a real in-flight message.
+        MessageEnvelope no_current_env{};
+        (void)flush_delayed_to_clients(no_current_env, now_us);
 
         res = m_recv_queue.pop(envelope);
         if (result_ok(res)) { return res; }

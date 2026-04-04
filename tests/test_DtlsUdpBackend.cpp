@@ -1593,10 +1593,10 @@ static void test_loss_impairment_drops_send()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 22: fixed_latency_ms impairment → flush_delayed_to_queue loop body
-//          and post-flush recv_queue.pop() succeed
-// Covers: flush_delayed_to_queue() L531 loop body True branch (Branch 2)
-//         receive_message() L711 `if (result_ok(res))` True branch (Branch 4)
+// Test 22: delayed messages are sent to wire, not looped back into recv_queue
+// Covers: flush_delayed_to_wire() loop body — sends expired outbound envelopes
+//         to the wire via send_one_envelope() rather than pushing into recv_queue.
+//         receive_message() returns ERR_TIMEOUT because recv_queue stays empty.
 // Verifies: REQ-5.1.1
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1606,9 +1606,10 @@ static void test_delay_impairment_flush_and_recv()
     // Verifies: REQ-5.1.1
     // With fixed_latency_ms == 1 the impairment engine buffers the outbound
     // message in the delay buffer.  After sleeping 10 ms the release time has
-    // passed.  When the receiver calls receive_message(), flush_delayed_to_queue()
-    // iterates over the deliverable entries (loop body True, Branch 2), pushes
-    // the message into recv_queue, and the post-flush pop succeeds (Branch 4).
+    // passed.  When the client calls receive_message(), flush_delayed_to_wire()
+    // iterates over the deliverable entries (loop body), sends each to the wire
+    // via send_one_envelope(), and does NOT push into recv_queue.  Therefore
+    // receive_message() returns ERR_TIMEOUT (recv_queue stays empty).
     static const uint16_t SRV_PORT = 14624U;
 
     // Server (receiver): no impairment — just receives
@@ -1646,12 +1647,12 @@ static void test_delay_impairment_flush_and_recv()
     // Wait for the 1 ms latency to expire so the message is deliverable
     usleep(10000U);  // 10 ms
 
-    // receive_message calls flush_delayed_to_queue which iterates loop body
-    // (Branch 2) and pushes the message; then the post-flush pop succeeds (Branch 4)
+    // receive_message calls flush_delayed_to_wire which sends the expired
+    // envelope to the wire (not into recv_queue).  recv_queue stays empty →
+    // receive_message returns ERR_TIMEOUT.
     MessageEnvelope received;
     Result recv_res = client.receive_message(received, 500U);
-    assert(recv_res == Result::OK);
-    assert(received.message_id == 0xAB02ULL);
+    assert(recv_res == Result::ERR_TIMEOUT);
 
     client.close();
     server.close();
@@ -1660,15 +1661,12 @@ static void test_delay_impairment_flush_and_recv()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test N: Two delayed messages — second receive_message() hits pre-poll pop
-//   (L801 True branch).
+// Test N: Two delayed messages — both flushed to wire, recv_queue stays empty
 //
 //   With fixed_latency_ms=1 the impairment engine buffers both messages.
-//   After 10 ms both are deliverable.  The first receive_message() call enters
-//   the poll loop, flush_delayed_to_queue() pushes *both* A and B into
-//   recv_queue, and the immediate pop returns A.  The second call finds B
-//   already in recv_queue and returns it at L801 (the pre-loop pop), without
-//   entering the poll loop at all.
+//   After 10 ms both are deliverable.  flush_delayed_to_wire() sends both A
+//   and B to the wire via send_one_envelope(); recv_queue stays empty.
+//   Both receive_message() calls return ERR_TIMEOUT.
 //
 // Verifies: REQ-5.1.1
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1714,7 +1712,7 @@ static void test_two_delayed_messages_second_recv_prequeue()
     env_b.destination_id    = 1U;
     env_b.reliability_class = ReliabilityClass::BEST_EFFORT;
 
-    // Both sends are buffered (ERR_IO from process_outbound → not sent yet).
+    // Both sends are buffered in the delay queue.
     Result r_a = sender.send_message(env_a);
     assert(r_a == Result::OK);
     Result r_b = sender.send_message(env_b);
@@ -1723,20 +1721,17 @@ static void test_two_delayed_messages_second_recv_prequeue()
     // Wait for both 1 ms delays to expire.
     usleep(10000U);  // 10 ms
 
-    // First receive: pre-loop pop at L801 is False (queue empty).
-    // Loop iteration 0: flush_delayed_to_queue() collects both A and B (both
-    // past-due) and pushes them into recv_queue.  The immediate pop returns A.
+    // First receive: flush_delayed_to_wire() sends A and B to the wire;
+    // recv_queue stays empty → ERR_TIMEOUT.
     MessageEnvelope recv_1;
     Result r1 = sender.receive_message(recv_1, 500U);
-    assert(r1 == Result::OK);
-    assert(recv_1.message_id == 0xCC01ULL);
+    assert(r1 == Result::ERR_TIMEOUT);
 
-    // Second receive: B is still in recv_queue → pre-loop pop at L801 is True.
-    // receive_message() returns immediately without entering the poll loop.
+    // Second receive: delay buffer already drained; recv_queue still empty →
+    // ERR_TIMEOUT again.
     MessageEnvelope recv_2;
     Result r2 = sender.receive_message(recv_2, 500U);
-    assert(r2 == Result::OK);
-    assert(recv_2.message_id == 0xCC02ULL);
+    assert(r2 == Result::ERR_TIMEOUT);
 
     sender.close();
     server.close();

@@ -631,13 +631,12 @@ bool DtlsUdpBackend::recv_one_dtls_datagram(uint32_t timeout_ms)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// flush_delayed_to_wire() — drain impairment delay buffer into receive queue
+// flush_delayed_to_wire() — send expired delay-buffer envelopes to the wire
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Despite its name, this function operates on the receive path: it collects
-// impairment-delayed inbound envelopes from the delay buffer and pushes them
-// into m_recv_queue for delivery to the caller of receive_message().
-// The name is preserved for consistency with the header declaration.
+// Collects outbound envelopes whose impairment-delay timer has expired and
+// sends each one to the wire via send_one_envelope().  Failures are logged
+// by send_one_envelope() but not propagated (is_current = false).
 
 void DtlsUdpBackend::flush_delayed_to_wire(uint64_t now_us)
 {
@@ -650,7 +649,7 @@ void DtlsUdpBackend::flush_delayed_to_wire(uint64_t now_us)
     // Power of 10 Rule 2: fixed loop bound (IMPAIR_DELAY_BUF_SIZE)
     for (uint32_t i = 0U; i < count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        (void)m_recv_queue.push(delayed[i]);
+        (void)send_one_envelope(delayed[i], false);
     }
 }
 

@@ -151,13 +151,21 @@ private:
     Result recv_from_client(uint32_t idx, uint32_t timeout_ms);
 
     /// Serialize + send @p buf/@p len to all connected clients.
-    void send_to_all_clients(const uint8_t* buf, uint32_t len);
+    /// @return true if any tls_send_frame() call fails, false if all succeed.
+    bool send_to_all_clients(const uint8_t* buf, uint32_t len);
 
     /// Close and remove client at array index @p idx; compact the table.
     void remove_client(uint32_t idx);
 
     /// Flush impairment-delayed messages out to connected clients.
-    void flush_delayed_to_clients(uint64_t now_us);
+    /// Failure attribution: if the send fails for the current envelope
+    /// (matched by source_id + message_id), ERR_IO is returned.
+    /// Failures for other envelopes are logged at WARNING_LO and skipped.
+    /// @param[in] current_env The envelope just queued by send_message().
+    /// @param[in] now_us      Current wall-clock time in microseconds.
+    /// @return ERR_IO if send fails for current_env; OK otherwise.
+    Result flush_delayed_to_clients(const MessageEnvelope& current_env,
+                                    uint64_t now_us);
 
     /// Accept new clients (server) and drain one frame per active client.
     void poll_clients_once(uint32_t timeout_ms);

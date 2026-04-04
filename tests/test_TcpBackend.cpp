@@ -1188,8 +1188,9 @@ static void test_recv_queue_overflow()
 // Use MockSocketOps DI constructor in client mode so m_client_fds[0]=FAKE_FD
 // after init().  Set fail_send_frame=true before calling send_message().
 // flush_delayed_to_clients() calls send_to_all_clients() which calls
-// send_frame() — the failure is detected and logged (WARNING_LO) but
-// send_to_all_clients() is void; send_message() still returns OK.
+// send_frame() — the failure is detected; since the failing envelope is the
+// current envelope, flush_delayed_to_clients() returns ERR_IO and
+// send_message() propagates it to the caller.
 //
 // Verifies: REQ-4.1.2, REQ-6.1.4
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1214,12 +1215,12 @@ static void test_send_to_all_clients_send_frame_fail()
 
     // send_message: serialize → process_outbound (queues to delay buf) →
     // flush_delayed_to_clients → send_to_all_clients → send_frame fails →
-    // WARNING_LO logged.  send_message() swallows the error, returns OK.
+    // WARNING_LO logged.  send_frame failure propagated as ERR_IO.
     MessageEnvelope env;
     make_test_envelope(env, 0xDEAD1ULL);
     r = backend.send_message(env);
-    assert(r == Result::OK);   // send_to_all_clients is void; error swallowed
-    assert(backend.is_open()); // transport still open after send failure
+    assert(r == Result::ERR_IO);  // send_frame failure propagated as ERR_IO
+    assert(backend.is_open());    // transport still open after send failure
 
     backend.close();
     printf("PASS: test_send_to_all_clients_send_frame_fail\n");

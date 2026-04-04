@@ -123,15 +123,22 @@ private:
     Result recv_from_client(int client_fd, uint32_t timeout_ms);
 
     /// Send serialized data to all currently connected clients.
-    /// Logs a warning for each client that fails; does not abort on partial failure.
+    /// Logs a warning for each client that fails.
     /// @param[in] buf Serialized frame bytes.
     /// @param[in] len Number of bytes in buf.
-    void send_to_all_clients(const uint8_t* buf, uint32_t len);
+    /// @return true if any send_frame() call fails, false if all succeed.
+    bool send_to_all_clients(const uint8_t* buf, uint32_t len);
 
     /// Collect deliverable delayed messages from the impairment engine and
     /// serialize+send each to all clients.
-    /// @param[in] now_us Current wall-clock time in microseconds.
-    void flush_delayed_to_clients(uint64_t now_us);
+    /// Failure attribution: if the send fails for the current envelope
+    /// (matched by source_id + message_id), ERR_IO is returned.
+    /// Failures for other envelopes are logged at WARNING_LO and skipped.
+    /// @param[in] current_env The envelope just queued by send_message().
+    /// @param[in] now_us      Current wall-clock time in microseconds.
+    /// @return ERR_IO if send fails for current_env; OK otherwise.
+    Result flush_delayed_to_clients(const MessageEnvelope& current_env,
+                                    uint64_t now_us);
 
     /// Poll all connected clients once (accept new ones if server).
     /// Receives up to one frame per client into m_recv_queue.

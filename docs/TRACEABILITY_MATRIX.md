@@ -49,7 +49,7 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-6.2.1 | UDP optional ACK/NAK + retry                       | src/platform/UdpBackend.cpp                                 | — (no dedicated unit test)                           |
 | REQ-6.2.2 | UDP sequence numbers and duplicate detection       | src/platform/UdpBackend.cpp                                 | — (no dedicated unit test)                           |
 | REQ-6.2.3 | UDP message size limits                            | src/platform/UdpBackend.cpp                                 | — (no dedicated unit test)                           |
-| REQ-6.2.4 | UDP source address validation                      | src/platform/UdpBackend.cpp                                 | — (no dedicated unit test)                           |
+| REQ-6.2.4 | UDP source address validation                      | src/platform/UdpBackend.cpp                                 | tests/test_UdpBackend.cpp :: test_recv_wrong_source_dropped |
 | REQ-6.3.1 | Configurable IP/port binding with SO_REUSEADDR     | src/platform/SocketUtils.cpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp | — |
 | REQ-6.3.2 | Explicit error handling recoverable / fatal        | src/platform/SocketUtils.cpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp | — |
 | REQ-6.3.3 | Read / write timeouts                              | src/platform/SocketUtils.cpp                                | test_LocalSim.cpp :: receive timeout                 |
