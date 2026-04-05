@@ -69,6 +69,13 @@ static const uint32_t FRAG_MAX_COUNT = 4U;
 /// (REQ-3.2.3, REQ-3.3.3)
 static const uint32_t REASSEMBLY_SLOT_COUNT = 8U;
 
+/// Maximum number of source peers that the ordering gate tracks simultaneously.
+/// Must equal MAX_PEER_NODES so the ninth concurrent ordered-channel peer is
+/// never silently dropped.  Kept as a separate constant so REASSEMBLY_SLOT_COUNT
+/// (a fragment-reassembly resource) and peer-tracking capacity can evolve independently.
+/// (REQ-3.3.5)
+static const uint32_t ORDERING_PEER_COUNT = MAX_PEER_NODES;  // = 16U
+
 /// Number of slots in the ordered-hold buffer.
 /// (REQ-3.3.5)
 static const uint32_t ORDERING_HOLD_COUNT = 8U;

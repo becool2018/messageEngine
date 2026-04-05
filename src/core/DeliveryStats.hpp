@@ -111,7 +111,8 @@ struct DeliveryStats {
     uint32_t msgs_received;           ///< Data messages successfully delivered to caller
     uint32_t msgs_dropped_expired;    ///< Messages dropped because expiry_time_us passed
     uint32_t msgs_dropped_duplicate;  ///< Messages dropped by duplicate filter
-    uint32_t msgs_dropped_misrouted;  ///< Messages dropped due to wrong destination_id
+    uint32_t msgs_dropped_misrouted;      ///< Messages dropped due to wrong destination_id
+    uint32_t msgs_dropped_ordering_full;  ///< Messages dropped because ordering hold buffer was full (resource exhaustion, not routing error)
 
     // ── REQ-7.2.4 — connection / fatal event counters ────────────────────────
     TransportStats  transport;

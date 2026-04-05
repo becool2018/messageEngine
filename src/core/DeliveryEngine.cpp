@@ -752,7 +752,7 @@ Result DeliveryEngine::handle_data_path(MessageEnvelope& env, uint64_t now_us)
     if (ord_res == Result::ERR_FULL) {
         // Issue 5 fix: hard drop due to exhausted ordering resources — propagate
         // ERR_FULL so callers can distinguish a real capacity drop from a benign hold.
-        ++m_stats.msgs_dropped_misrouted;  // REQ-7.2.3: count capacity drop
+        ++m_stats.msgs_dropped_ordering_full;  // REQ-7.2.3: ordering resource exhaustion (not a routing error)
         return Result::ERR_FULL;
     }
     if (ord_res != Result::OK) {
@@ -1181,6 +1181,8 @@ Result DeliveryEngine::deliver_held_pending(MessageEnvelope& env, uint64_t now_u
                     "Held ordered message_id=%llu from src=%u expired; dropping",
                     (unsigned long long)env.message_id, env.source_id);
         ++m_stats.msgs_dropped_expired;  // REQ-7.2.3
+        emit_event(DeliveryEventKind::EXPIRY_DROP,
+                   env.message_id, env.source_id, now_us, Result::ERR_EXPIRED);
         // Still attempt to drain the next held frame so the backlog advances.
         {
             MessageEnvelope next_held;

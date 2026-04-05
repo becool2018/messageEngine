@@ -17,7 +17,7 @@
  * @brief Implementation of per-peer in-order delivery gate.
  *
  * Rules applied:
- *   - Power of 10: fixed loop bounds (ORDERING_HOLD_COUNT, REASSEMBLY_SLOT_COUNT),
+ *   - Power of 10: fixed loop bounds (ORDERING_HOLD_COUNT, ORDERING_PEER_COUNT),
  *     no dynamic allocation, ≥2 assertions per function, CC ≤ 10.
  *   - MISRA C++:2023: checked casts, no UB.
  *   - F-Prime style: explicit error codes.
@@ -37,7 +37,7 @@
 void OrderingBuffer::init(NodeId local_node)
 {
     NEVER_COMPILED_OUT_ASSERT(ORDERING_HOLD_COUNT > 0U);     // Assert: capacity constant valid
-    NEVER_COMPILED_OUT_ASSERT(REASSEMBLY_SLOT_COUNT > 0U);   // Assert: peer capacity valid
+    NEVER_COMPILED_OUT_ASSERT(ORDERING_PEER_COUNT > 0U);   // Assert: peer capacity valid
 
     // Power of 10 Rule 2: bounded loops
     for (uint32_t i = 0U; i < ORDERING_HOLD_COUNT; ++i) {
@@ -45,7 +45,7 @@ void OrderingBuffer::init(NodeId local_node)
         envelope_init(m_hold[i].env);
     }
 
-    for (uint32_t i = 0U; i < REASSEMBLY_SLOT_COUNT; ++i) {
+    for (uint32_t i = 0U; i < ORDERING_PEER_COUNT; ++i) {
         m_peers[i].active           = false;
         m_peers[i].src              = 0U;
         m_peers[i].next_expected_seq = 1U;  // sequences start at 1
@@ -66,13 +66,13 @@ uint32_t OrderingBuffer::find_peer(NodeId src) const
     NEVER_COMPILED_OUT_ASSERT(src != 0U);        // Assert: valid source
 
     // Power of 10 Rule 2: bounded loop
-    for (uint32_t i = 0U; i < REASSEMBLY_SLOT_COUNT; ++i) {
+    for (uint32_t i = 0U; i < ORDERING_PEER_COUNT; ++i) {
         if (m_peers[i].active && m_peers[i].src == src) {
             return i;
         }
     }
 
-    return REASSEMBLY_SLOT_COUNT;  // not found
+    return ORDERING_PEER_COUNT;  // not found
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -84,13 +84,13 @@ uint32_t OrderingBuffer::get_or_create_peer(NodeId src)
     NEVER_COMPILED_OUT_ASSERT(src != 0U);        // Assert: valid source
 
     uint32_t idx = find_peer(src);
-    if (idx != REASSEMBLY_SLOT_COUNT) {
+    if (idx != ORDERING_PEER_COUNT) {
         return idx;  // already tracked
     }
 
     // Allocate new peer slot
     // Power of 10 Rule 2: bounded loop
-    for (uint32_t i = 0U; i < REASSEMBLY_SLOT_COUNT; ++i) {
+    for (uint32_t i = 0U; i < ORDERING_PEER_COUNT; ++i) {
         if (!m_peers[i].active) {
             m_peers[i].active            = true;
             m_peers[i].src               = src;
@@ -99,7 +99,7 @@ uint32_t OrderingBuffer::get_or_create_peer(NodeId src)
         }
     }
 
-    return REASSEMBLY_SLOT_COUNT;  // no free peer slot
+    return ORDERING_PEER_COUNT;  // no free peer slot
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -164,7 +164,7 @@ Result OrderingBuffer::ingest(const MessageEnvelope& msg,
 
     // Ordered DATA message: apply ordering gate
     uint32_t peer_idx = get_or_create_peer(msg.source_id);
-    if (peer_idx == REASSEMBLY_SLOT_COUNT) {
+    if (peer_idx == ORDERING_PEER_COUNT) {
         // No peer slot available: ordering guarantee cannot be maintained.
         // Return ERR_FULL so the caller can log and drop the frame rather than
         // silently delivering it out of order (Issue 5 fix: honour ordering contract).
@@ -213,7 +213,7 @@ Result OrderingBuffer::try_release_next(NodeId src, MessageEnvelope& out)
     NEVER_COMPILED_OUT_ASSERT(src != 0U);        // Assert: valid source
 
     uint32_t peer_idx = find_peer(src);
-    if (peer_idx == REASSEMBLY_SLOT_COUNT) {
+    if (peer_idx == ORDERING_PEER_COUNT) {
         return Result::ERR_AGAIN;  // no tracking for this peer yet
     }
 
@@ -242,7 +242,7 @@ void OrderingBuffer::advance_sequence(NodeId src, uint32_t up_to_seq)
     NEVER_COMPILED_OUT_ASSERT(src != 0U);         // Assert: valid source
 
     uint32_t peer_idx = find_peer(src);
-    if (peer_idx == REASSEMBLY_SLOT_COUNT) {
+    if (peer_idx == ORDERING_PEER_COUNT) {
         return;  // no tracking for this peer; no-op
     }
 

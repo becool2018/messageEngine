@@ -54,6 +54,7 @@ void RequestReplyEngine::init(DeliveryEngine& engine, NodeId local_node)
     m_local_node    = local_node;
     m_initialized   = false;
     m_pending_count = 0U;
+    m_stash_head    = 0U;
     m_stash_count   = 0U;
     m_cid_gen       = 1U;   // start at 1; 0 is the sentinel "no ID"
 
@@ -331,13 +332,15 @@ void RequestReplyEngine::handle_inbound_request(NodeId         src,
     NEVER_COMPILED_OUT_ASSERT(m_initialized);        // pre: engine ready
     NEVER_COMPILED_OUT_ASSERT(correlation_id != 0U); // pre: valid ID
 
-    uint32_t slot = find_free_stash();
-    if (slot >= MAX_STASH_SIZE) {
+    // FIFO write: check count before computing the write index.
+    // Power of 10 Rule 2: m_stash_head and m_stash_count are bounded by MAX_STASH_SIZE.
+    if (m_stash_count >= MAX_STASH_SIZE) {
         Logger::log(Severity::WARNING_LO, "RequestReplyEngine",
                     "Request stash full; dropping correlation_id=%llu from src=%u",
                     (unsigned long long)correlation_id, src);
         return;
     }
+    uint32_t slot = (m_stash_head + m_stash_count) % MAX_STASH_SIZE;
 
     uint32_t copy_len = app_len;
     if (copy_len > APP_PAYLOAD_CAP) {
@@ -603,38 +606,35 @@ Result RequestReplyEngine::receive_request(uint8_t*   app_payload_buf,
     // Drain any newly arrived envelopes first.
     pump_inbound(now_us);
 
-    // Return the oldest active stash entry.
-    // Power of 10 Rule 2: bounded by MAX_STASH_SIZE.
-    for (uint32_t i = 0U; i < MAX_STASH_SIZE; ++i) {
-        if (!m_request_stash[i].active) {
-            continue;
-        }
-
-        uint32_t copy_len = m_request_stash[i].payload_len;
-        if (copy_len > buf_cap) {
-            copy_len = buf_cap;
-        }
-        if (copy_len > 0U) {
-            (void)memcpy(app_payload_buf, m_request_stash[i].payload,
-                         static_cast<size_t>(copy_len));
-        }
-        app_payload_len_out = copy_len;
-        src_out             = m_request_stash[i].src;
-        correlation_id_out  = m_request_stash[i].correlation_id;
-
-        // Free the slot.
-        m_request_stash[i].active = false;
-        if (m_stash_count > 0U) {
-            --m_stash_count;
-        }
-
-        NEVER_COMPILED_OUT_ASSERT(correlation_id_out != 0U);       // post: valid cid
-        NEVER_COMPILED_OUT_ASSERT(src_out != NODE_ID_INVALID);     // post: valid src
-
-        return Result::OK;
+    // FIFO read: return the oldest buffered request (at m_stash_head).
+    // Power of 10 Rule 2: m_stash_count bounded by MAX_STASH_SIZE.
+    if (m_stash_count == 0U) {
+        return Result::ERR_EMPTY;
     }
 
-    return Result::ERR_EMPTY;
+    NEVER_COMPILED_OUT_ASSERT(m_stash_head < MAX_STASH_SIZE);   // Assert: head in range
+
+    uint32_t copy_len = m_request_stash[m_stash_head].payload_len;
+    if (copy_len > buf_cap) {
+        copy_len = buf_cap;
+    }
+    if (copy_len > 0U) {
+        (void)memcpy(app_payload_buf, m_request_stash[m_stash_head].payload,
+                     static_cast<size_t>(copy_len));
+    }
+    app_payload_len_out = copy_len;
+    src_out             = m_request_stash[m_stash_head].src;
+    correlation_id_out  = m_request_stash[m_stash_head].correlation_id;
+
+    // Advance the FIFO head and decrement count.
+    m_request_stash[m_stash_head].active = false;
+    m_stash_head = (m_stash_head + 1U) % MAX_STASH_SIZE;
+    --m_stash_count;
+
+    NEVER_COMPILED_OUT_ASSERT(correlation_id_out != 0U);       // post: valid cid
+    NEVER_COMPILED_OUT_ASSERT(src_out != NODE_ID_INVALID);     // post: valid src
+
+    return Result::OK;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

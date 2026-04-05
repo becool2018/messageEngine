@@ -215,6 +215,7 @@ private:
     uint32_t        m_pending_count = 0U;
 
     StashedRequest  m_request_stash[MAX_STASH_SIZE];
+    uint32_t        m_stash_head    = 0U;  ///< FIFO read index for m_request_stash
     uint32_t        m_stash_count   = 0U;
 
     // REQ-3.2.4 (Issue 4 fix): stash for DATA envelopes that do not carry an RRHeader.

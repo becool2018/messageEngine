@@ -121,8 +121,9 @@ private:
     };
 
     HoldSlot  m_hold[ORDERING_HOLD_COUNT];
-    // Reuse REASSEMBLY_SLOT_COUNT as the max number of tracked peers
-    PeerState m_peers[REASSEMBLY_SLOT_COUNT];
+    // Peer table sized to ORDERING_PEER_COUNT (= MAX_PEER_NODES = 16) so all
+    // concurrent ordered-channel peers can be tracked without hitting ERR_FULL.
+    PeerState m_peers[ORDERING_PEER_COUNT];
     bool      m_initialized;
     NodeId    m_local_node;
 
