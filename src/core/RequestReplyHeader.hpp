@@ -22,7 +22,7 @@
  *
  * Layout (no padding — enforced by static_assert):
  *   Byte 0      : kind (0 = REQUEST, 1 = RESPONSE)
- *   Bytes 1-8   : correlation_id (uint64_t, native byte order in memory)
+ *   Bytes 1-8   : correlation_id (uint64_t, big-endian / network byte order)
  *   Bytes 9-11  : _pad (zero; reserved for future use)
  *
  * Rules applied:

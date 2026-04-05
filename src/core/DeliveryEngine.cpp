@@ -1097,6 +1097,13 @@ Result DeliveryEngine::handle_ordering_gate(const MessageEnvelope& logical,
     NEVER_COMPILED_OUT_ASSERT(m_initialized);             // Assert: engine initialized
     NEVER_COMPILED_OUT_ASSERT(envelope_valid(logical));    // Assert: valid envelope
 
+    // Issue 3 fix: sweep expired ordering holds on every data-receive call so that
+    // ordered BEST_EFFORT channels recover from lost gaps without requiring the caller
+    // to invoke sweep_ack_timeouts() (which has ACK-specific naming and may be skipped
+    // for BEST_EFFORT flows). ORDERING_HOLD_COUNT = 8 — bounded overhead per receive.
+    // Power of 10 Rule 7: return value checked (informational count; discard OK).
+    (void)m_ordering.sweep_expired_holds(now_us);
+
     Result res = m_ordering.ingest(logical, out, now_us);
     if (res == Result::ERR_FULL) {
         Logger::log(Severity::WARNING_HI, "DeliveryEngine",

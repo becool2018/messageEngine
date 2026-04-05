@@ -119,16 +119,24 @@ uint32_t RequestReplyEngine::build_wire_payload(RRKind         kind,
         return 0U;
     }
 
-    // Populate the packed RRHeader and copy into output buffer.
-    // MISRA C++:2023 5.2.4: memcpy to/from a packed struct via uint8_t* is
-    // permitted for serialization byte-access of an object representation.
-    RRHeader hdr;
-    hdr.kind           = static_cast<uint8_t>(kind);
-    hdr.correlation_id = correlation_id;
-    hdr._pad[0]        = 0U;
-    hdr._pad[1]        = 0U;
-    hdr._pad[2]        = 0U;
-    (void)memcpy(out_buf, &hdr, static_cast<size_t>(RR_HEADER_SIZE));
+    // Issue 5 fix: write RRHeader bytes manually in big-endian order so the wire
+    // format is platform-independent (matches the main Serializer convention).
+    // Layout: byte 0 = kind; bytes 1-8 = correlation_id BE; bytes 9-11 = zero pad.
+    // Avoids memcpy of RRHeader struct (which stored correlation_id in native order).
+    out_buf[0U] = static_cast<uint8_t>(kind);
+    // correlation_id: 8 bytes, big-endian (MSB first)
+    out_buf[1U] = static_cast<uint8_t>((correlation_id >> 56U) & 0xFFU);
+    out_buf[2U] = static_cast<uint8_t>((correlation_id >> 48U) & 0xFFU);
+    out_buf[3U] = static_cast<uint8_t>((correlation_id >> 40U) & 0xFFU);
+    out_buf[4U] = static_cast<uint8_t>((correlation_id >> 32U) & 0xFFU);
+    out_buf[5U] = static_cast<uint8_t>((correlation_id >> 24U) & 0xFFU);
+    out_buf[6U] = static_cast<uint8_t>((correlation_id >> 16U) & 0xFFU);
+    out_buf[7U] = static_cast<uint8_t>((correlation_id >> 8U)  & 0xFFU);
+    out_buf[8U] = static_cast<uint8_t>((correlation_id >> 0U)  & 0xFFU);
+    // pad bytes
+    out_buf[9U]  = 0U;
+    out_buf[10U] = 0U;
+    out_buf[11U] = 0U;
 
     if (app_len > 0U) {
         NEVER_COMPILED_OUT_ASSERT(app_payload != nullptr); // pre: ptr valid when len>0
@@ -156,12 +164,42 @@ bool RequestReplyEngine::parse_rr_header(const uint8_t* raw_payload,
         return false;
     }
 
-    (void)memcpy(&hdr_out, raw_payload, static_cast<size_t>(RR_HEADER_SIZE));
+    // Issue 5 fix: read correlation_id in big-endian order (matches build_wire_payload).
+    // Do NOT use memcpy of the full RRHeader struct — that writes correlation_id in
+    // native byte order, breaking cross-endian interoperability.
+    hdr_out.kind = raw_payload[0U];
+
+    // correlation_id: 8 bytes, big-endian (MSB first)
+    hdr_out.correlation_id =
+        (static_cast<uint64_t>(raw_payload[1U]) << 56U) |
+        (static_cast<uint64_t>(raw_payload[2U]) << 48U) |
+        (static_cast<uint64_t>(raw_payload[3U]) << 40U) |
+        (static_cast<uint64_t>(raw_payload[4U]) << 32U) |
+        (static_cast<uint64_t>(raw_payload[5U]) << 24U) |
+        (static_cast<uint64_t>(raw_payload[6U]) << 16U) |
+        (static_cast<uint64_t>(raw_payload[7U]) << 8U)  |
+        (static_cast<uint64_t>(raw_payload[8U]) << 0U);
+
+    hdr_out._pad[0] = raw_payload[9U];
+    hdr_out._pad[1] = raw_payload[10U];
+    hdr_out._pad[2] = raw_payload[11U];
 
     // Accept only known kind values.
     bool kind_ok = (hdr_out.kind == static_cast<uint8_t>(RRKind::REQUEST)) ||
                    (hdr_out.kind == static_cast<uint8_t>(RRKind::RESPONSE));
-    return kind_ok;
+    if (!kind_ok) {
+        return false;
+    }
+
+    // Issue 2 fix: reject frames with a zero correlation_id; handle_inbound_response()
+    // and handle_inbound_request() both NEVER_COMPILED_OUT_ASSERT(correlation_id != 0U).
+    // A peer can synthesise a valid-kind / zero-cid frame and trigger an always-on abort.
+    if (hdr_out.correlation_id == 0U) {
+        return false;
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(hdr_out.correlation_id != 0U);  // post: safe to pass on
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
