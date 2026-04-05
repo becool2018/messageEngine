@@ -249,6 +249,23 @@ void OrderingBuffer::advance_sequence(NodeId src, uint32_t up_to_seq)
     // Only advance if up_to_seq is strictly greater than current
     if (up_to_seq > m_peers[peer_idx].next_expected_seq) {
         m_peers[peer_idx].next_expected_seq = up_to_seq;
+
+        // Issue 4 fix: free any held frames for this source whose sequence_num is
+        // now strictly less than next_expected_seq. Those slots can never be
+        // delivered by try_release_next() once the cursor has moved past them.
+        // Leaving them active leaks hold capacity (ORDERING_HOLD_COUNT = 8 slots).
+        // Power of 10 Rule 2: bounded loop (≤ ORDERING_HOLD_COUNT iterations).
+        for (uint32_t i = 0U; i < ORDERING_HOLD_COUNT; ++i) {
+            if (m_hold[i].active &&
+                m_hold[i].env.source_id == src &&
+                m_hold[i].env.sequence_num < m_peers[peer_idx].next_expected_seq) {
+                Logger::log(Severity::WARNING_LO, "OrderingBuffer",
+                            "Freeing stale held seq=%u from src=%u (cursor advanced to %u)",
+                            m_hold[i].env.sequence_num, src,
+                            m_peers[peer_idx].next_expected_seq);
+                m_hold[i].active = false;
+            }
+        }
     }
 
     NEVER_COMPILED_OUT_ASSERT(m_peers[peer_idx].next_expected_seq >= up_to_seq);  // Assert: advanced
