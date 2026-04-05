@@ -283,7 +283,16 @@ messageEngine/
 │   │   ├── DuplicateFilter.hpp/cpp
 │   │   ├── AckTracker.hpp/cpp
 │   │   ├── RetryManager.hpp/cpp
+│   │   ├── Fragmentation.hpp/cpp         # Split large payloads into wire frames
+│   │   ├── ReassemblyBuffer.hpp/cpp      # Reassemble fragment streams
+│   │   ├── OrderingBuffer.hpp/cpp        # Sequence-number in-order delivery gate
+│   │   ├── RequestReplyEngine.hpp/cpp    # Correlated request/reply over DeliveryEngine
+│   │   ├── RequestReplyHeader.hpp        # 12-byte RR wire prefix (big-endian CID)
+│   │   ├── DeliveryEvent.hpp             # DeliveryEventKind enum (8 event types)
+│   │   ├── DeliveryEventRing.hpp         # Fixed-capacity observability event ring
+│   │   ├── DeliveryStats.hpp             # Per-engine send/receive/drop counters
 │   │   ├── DeliveryEngine.hpp/cpp
+│   │   ├── Version.hpp                   # ME_VERSION_STRING ("2.0.0")
 │   │   ├── Assert.hpp            # NEVER_COMPILED_OUT_ASSERT macro
 │   │   ├── AssertState.hpp/cpp   # Global assert handler registry
 │   │   ├── IResetHandler.hpp     # Abstract fatal-assert handler interface
@@ -309,11 +318,18 @@ messageEngine/
 │       └── Client.cpp
 ├── tests/                # Unit tests (one binary per module)
 │   ├── MockSocketOps.hpp           # Injectable ISocketOps stub for TcpBackend/UdpBackend tests
+│   ├── MockTransportInterface.hpp  # Injectable TransportInterface stub for DeliveryEngine M5 tests
 │   ├── test_MessageEnvelope.cpp
+│   ├── test_MessageId.cpp
+│   ├── test_Timestamp.cpp
 │   ├── test_Serializer.cpp
 │   ├── test_DuplicateFilter.cpp
 │   ├── test_AckTracker.cpp
 │   ├── test_RetryManager.cpp
+│   ├── test_Fragmentation.cpp
+│   ├── test_ReassemblyBuffer.cpp
+│   ├── test_OrderingBuffer.cpp
+│   ├── test_RequestReplyEngine.cpp
 │   ├── test_DeliveryEngine.cpp
 │   ├── test_ImpairmentEngine.cpp
 │   ├── test_ImpairmentConfigLoader.cpp
@@ -323,7 +339,8 @@ messageEngine/
 │   ├── test_TcpBackend.cpp
 │   ├── test_UdpBackend.cpp
 │   ├── test_TlsTcpBackend.cpp
-│   └── test_DtlsUdpBackend.cpp
+│   ├── test_DtlsUdpBackend.cpp
+│   └── test_stress_capacity.cpp    # Stress suite (run via make run_stress_tests)
 ├── docs/                 # Requirements, design, and analysis documents
 ├── Makefile
 ├── .cppcheck-suppress
@@ -343,7 +360,7 @@ messageEngine/
 | **GCC** or **Clang** | GCC 8+ / Clang 7+ | C++17 compiler; must support `-std=c++17 -fno-exceptions -fno-rtti` |
 | **GNU Make** | 3.81+ | Build system; no CMake required |
 | **pthreads** | POSIX | TCP/UDP receiver threads; linked via `-lpthread` |
-| **mbedTLS** | 3.x / 4.x | TLS and DTLS backends (`TlsTcpBackend`, `DtlsUdpBackend`); located via `pkg-config` with Homebrew fallback |
+| **mbedTLS** | 4.0 (PSA Crypto) | TLS and DTLS backends (`TlsTcpBackend`, `DtlsUdpBackend`); located via `pkg-config` with Homebrew fallback; the code targets the mbedTLS 4.0 PSA Crypto API |
 
 ### Optional Tools (static analysis and coverage)
 
@@ -400,10 +417,16 @@ Individual test binaries can also be run directly:
 
 ```bash
 build/test_MessageEnvelope
+build/test_MessageId
+build/test_Timestamp
 build/test_Serializer
 build/test_DuplicateFilter
 build/test_AckTracker
 build/test_RetryManager
+build/test_Fragmentation
+build/test_ReassemblyBuffer
+build/test_OrderingBuffer
+build/test_RequestReplyEngine
 build/test_DeliveryEngine
 build/test_ImpairmentEngine
 build/test_ImpairmentConfigLoader
@@ -745,6 +768,8 @@ All functions return a `Result` enum. Never ignore a return value.
 | `ERR_EXPIRED` | Message TTL has elapsed |
 | `ERR_DUPLICATE` | Message was already seen (silently filtered) |
 | `ERR_OVERRUN` | Internal buffer overrun |
+| `ERR_AGAIN` | More data needed — reassembly or ordering in progress; not an error |
+| `ERR_IO_PARTIAL` | Partial fragmented send: ≥1 fragment already on wire; do not cancel AckTracker/RetryManager slots |
 
 ---
 
@@ -768,7 +793,7 @@ NASA-STD-8719.13C / NASA-STD-8739.8A compliance artifacts maintained in [`docs/`
 | [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md) | Software Safety Hazard Analysis (HAZ-001–HAZ-007), Failure Mode and Effects Analysis (FMEA) for every major component, and Safety-Critical (SC) vs Non-Safety-Critical (NSC) classification for every public function in `src/`. |
 | [STATE_MACHINES.md](docs/STATE_MACHINES.md) | Formal state-transition tables and invariants for the three safety-critical state machines: `AckTracker`, `RetryManager`, and `ImpairmentEngine` (including the partition sub-state). |
 | [TRACEABILITY_MATRIX.md](docs/TRACEABILITY_MATRIX.md) | Bidirectional requirements traceability matrix mapping every `[REQ-x.x]` ID from `CLAUDE.md` to the `src/` file that implements it and the `tests/` file that verifies it. |
-| [STACK_ANALYSIS.md](docs/STACK_ANALYSIS.md) | Worst-case stack depth analysis across four call chains; worst-case frame depth is 10 frames (retry pump), worst-case stack size is ~748 bytes (outbound send). |
+| [STACK_ANALYSIS.md](docs/STACK_ANALYSIS.md) | Worst-case stack depth analysis across five call chains; worst-case frame depth is 10 frames, worst-case stack size is ~764 bytes (DTLS outbound send). |
 | [WCET_ANALYSIS.md](docs/WCET_ANALYSIS.md) | Worst-case execution time analysis expressed as closed-form operation counts for every SC function, derived from the compile-time capacity constants in `src/core/Types.hpp`. |
 | [MCDC_ANALYSIS.md](docs/MCDC_ANALYSIS.md) | MC/DC coverage analysis for the five highest-hazard SC functions: `DeliveryEngine::send`, `DeliveryEngine::receive`, `DuplicateFilter::check_and_record`, `Serializer::serialize`, `Serializer::deserialize`. |
 | [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md) | Moderator-led formal inspection checklist (NPR 7150.2D §3 / NASA-STD-8739.8); entry/exit criteria, severity definitions, and waiver policy for all `src/` changes. |
@@ -824,7 +849,7 @@ Each Safety & Assurance document depends on the following inputs. Update the lis
 | Field | Value |
 |---|---|
 | **Normative policy** | `CLAUDE.md` §14 §2 (DO-178C, NASA-STD-8739.8A) |
-| **Source files** | `DeliveryEngine.cpp` (lines 77–222), `DuplicateFilter.cpp` (lines 44–110), `Serializer.cpp` (lines 117–259), `Assert.hpp`; `tests/test_DeliveryEngine.cpp`, `tests/test_DuplicateFilter.cpp`, `tests/test_Serializer.cpp` |
+| **Source files** | `DeliveryEngine.cpp`, `DuplicateFilter.cpp`, `Serializer.cpp`, `Assert.hpp`; `tests/test_DeliveryEngine.cpp`, `tests/test_DuplicateFilter.cpp`, `tests/test_Serializer.cpp` |
 | **Other docs** | [`HAZARD_ANALYSIS.md`](docs/HAZARD_ANALYSIS.md) §3 (five highest-hazard SC functions); [`VERIFICATION_POLICY.md`](docs/VERIFICATION_POLICY.md) (architectural ceiling rules); `CLAUDE.md` §14 |
 
 #### [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md)
@@ -1013,11 +1038,11 @@ All nine documents are validated simultaneously using three dependency-ordered w
 
 | Category | Lines |
 |---|---|
-| `src/` (production + headers) | 9,578 |
-| `tests/` | 11,457 |
-| **Total** | **21,035** |
+| `src/` (production + headers) | 15,899 |
+| `tests/` | 19,467 |
+| **Total** | **35,366** |
 
-54 source files across 3 layers; 15 test suites + 1 shared mock header (16 test files).
+68 source files across 3 layers; 21 test suites + 1 stress suite + 2 shared mock headers (24 test files).
 
 ---
 
