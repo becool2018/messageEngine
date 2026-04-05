@@ -51,6 +51,13 @@ struct MockTransportInterface : public TransportInterface {
     bool fail_send_message    = false;
     bool fail_receive_message = false;
 
+    // ── Partial-send failure injection ────────────────────────────────────────
+    // When fail_send_after_n >= 0, send_message() succeeds for the first
+    // fail_send_after_n calls and returns ERR_IO on the (fail_send_after_n+1)th
+    // call.  Set to -1 (default) to disable.  This simulates a transport failure
+    // that occurs after some fragments of a fragmented message have been sent.
+    int fail_send_after_n = -1;  ///< -1 = disabled; ≥0 = fail after this many successes
+
     // ── Call counters ─────────────────────────────────────────────────────────
     int n_send_message    = 0;   ///< Incremented on each send_message() call.
     int n_receive_message = 0;   ///< Incremented on each receive_message() call.
@@ -73,6 +80,10 @@ struct MockTransportInterface : public TransportInterface {
     Result send_message(const MessageEnvelope& /*envelope*/) override
     {
         ++n_send_message;
+        // Partial-send injection: fail after N successful sends
+        if (fail_send_after_n >= 0 && n_send_message > fail_send_after_n) {
+            return Result::ERR_IO;
+        }
         return fail_send_message ? Result::ERR_IO : Result::OK;
     }
 

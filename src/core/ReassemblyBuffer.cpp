@@ -110,6 +110,12 @@ void ReassemblyBuffer::open_slot(uint32_t idx, const MessageEnvelope& frag)
     m_slots[idx].expiry_us      = frag.expiry_time_us;
     envelope_copy(m_slots[idx].header, frag);
 
+    // Bug fix: zero the accumulation buffer so that any fragment slice shorter
+    // than FRAG_MAX_PAYLOAD_BYTES does not expose stale bytes from a prior
+    // message that occupied this slot.  assemble_and_free copies total_length
+    // bytes out, which may span gaps never written by short payload fragments.
+    (void)memset(m_slots[idx].buf, 0, sizeof(m_slots[idx].buf));
+
     NEVER_COMPILED_OUT_ASSERT(m_slots[idx].active);  // Assert: slot is now active
 }
 

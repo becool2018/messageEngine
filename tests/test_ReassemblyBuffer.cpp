@@ -345,6 +345,95 @@ static bool test_reassembly_payload_too_large_rejected()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 8: Short per-fragment payloads do not expose stale bytes on reassembly
+//
+// Verifies the Bug 1 fix: open_slot() must zero the accumulation buffer so
+// that when a second message reuses the slot, bytes from the first message are
+// not visible in the output even if the new message's fragments carry fewer
+// payload bytes than FRAG_MAX_PAYLOAD_BYTES.
+//
+// Scenario:
+//   1. Send a 2-fragment message (msg A) that fills the slot with 0xFF bytes.
+//      Each fragment is FRAG_MAX_PAYLOAD_BYTES long; total = 2 * FRAG_MAX_PAYLOAD_BYTES.
+//   2. Reassemble msg A → slot is freed.
+//   3. Send a 2-fragment message (msg B) using the same slot.
+//      Fragment 0 carries FRAG_MAX_PAYLOAD_BYTES bytes of 0xAA.
+//      Fragment 1 carries only 4 bytes of 0xBB (short last fragment).
+//      total_payload_length = FRAG_MAX_PAYLOAD_BYTES + 4.
+//   4. After reassembly, bytes [FRAG_MAX_PAYLOAD_BYTES .. FRAG_MAX_PAYLOAD_BYTES+3]
+//      must all be 0xBB.  Without the fix they would be 0xFF (stale from msg A).
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3, REQ-3.3.3
+static bool test_reassembly_short_last_frag_no_stale_bytes()
+{
+    ReassemblyBuffer buf;
+    buf.init();
+
+    // ── Message A: two full-size fragments, fill 0xFF ────────────────────────
+    static uint8_t fa_payload[FRAG_MAX_PAYLOAD_BYTES];
+    for (uint32_t i = 0U; i < FRAG_MAX_PAYLOAD_BYTES; ++i) {
+        fa_payload[i] = 0xFFU;
+    }
+    static const uint32_t TOTAL_A = 2U * FRAG_MAX_PAYLOAD_BYTES;
+
+    MessageEnvelope fa0;
+    make_fragment(fa0, 800ULL, 11U, 0U, 2U, static_cast<uint16_t>(TOTAL_A),
+                  fa_payload, FRAG_MAX_PAYLOAD_BYTES);
+    MessageEnvelope fa1;
+    make_fragment(fa1, 800ULL, 11U, 1U, 2U, static_cast<uint16_t>(TOTAL_A),
+                  fa_payload, FRAG_MAX_PAYLOAD_BYTES);
+
+    MessageEnvelope out;
+    envelope_init(out);
+
+    Result ra0 = buf.ingest(fa0, out);
+    assert(ra0 == Result::ERR_AGAIN);  // Assert: first fragment held
+    Result ra1 = buf.ingest(fa1, out);
+    assert(ra1 == Result::OK);         // Assert: message A assembled
+    assert(out.payload_length == TOTAL_A);
+    assert(out.payload[0] == 0xFFU);
+    assert(out.payload[FRAG_MAX_PAYLOAD_BYTES - 1U] == 0xFFU);
+
+    // ── Message B: fragment 0 full-size (0xAA), fragment 1 short (0xBB) ─────
+    static const uint32_t SHORT_LEN = 4U;
+    static const uint32_t TOTAL_B   = FRAG_MAX_PAYLOAD_BYTES + SHORT_LEN;
+
+    static uint8_t fb0_payload[FRAG_MAX_PAYLOAD_BYTES];
+    for (uint32_t i = 0U; i < FRAG_MAX_PAYLOAD_BYTES; ++i) {
+        fb0_payload[i] = 0xAAU;
+    }
+    static const uint8_t fb1_payload[SHORT_LEN] = { 0xBBU, 0xBBU, 0xBBU, 0xBBU };
+
+    MessageEnvelope fb0;
+    make_fragment(fb0, 801ULL, 11U, 0U, 2U, static_cast<uint16_t>(TOTAL_B),
+                  fb0_payload, FRAG_MAX_PAYLOAD_BYTES);
+    MessageEnvelope fb1;
+    make_fragment(fb1, 801ULL, 11U, 1U, 2U, static_cast<uint16_t>(TOTAL_B),
+                  fb1_payload, SHORT_LEN);
+
+    envelope_init(out);
+    Result rb0 = buf.ingest(fb0, out);
+    assert(rb0 == Result::ERR_AGAIN);  // Assert: fragment 0 held
+
+    Result rb1 = buf.ingest(fb1, out);
+    assert(rb1 == Result::OK);         // Assert: message B assembled
+
+    assert(out.payload_length == TOTAL_B);  // Assert: correct total length
+
+    // Fragment 0 bytes must be 0xAA
+    assert(out.payload[0] == 0xAAU);
+    assert(out.payload[FRAG_MAX_PAYLOAD_BYTES - 1U] == 0xAAU);
+
+    // Fragment 1 bytes: without the fix these would be 0xFF (stale from message A)
+    assert(out.payload[FRAG_MAX_PAYLOAD_BYTES + 0U] == 0xBBU);
+    assert(out.payload[FRAG_MAX_PAYLOAD_BYTES + 1U] == 0xBBU);
+    assert(out.payload[FRAG_MAX_PAYLOAD_BYTES + 2U] == 0xBBU);
+    assert(out.payload[FRAG_MAX_PAYLOAD_BYTES + 3U] == 0xBBU);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -378,6 +467,10 @@ int main()
     if (!test_reassembly_payload_too_large_rejected()) {
         printf("FAIL: test_reassembly_payload_too_large_rejected\n"); ++failed;
     } else { printf("PASS: test_reassembly_payload_too_large_rejected\n"); }
+
+    if (!test_reassembly_short_last_frag_no_stale_bytes()) {
+        printf("FAIL: test_reassembly_short_last_frag_no_stale_bytes\n"); ++failed;
+    } else { printf("PASS: test_reassembly_short_last_frag_no_stale_bytes\n"); }
 
     return (failed > 0) ? 1 : 0;
 }

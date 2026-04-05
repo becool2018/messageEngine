@@ -187,7 +187,18 @@ Result OrderingBuffer::ingest(const MessageEnvelope& msg,
         return Result::OK;
     }
 
-    // Out of order: hold for later delivery
+    // Out of order: hold for later delivery.
+    // Bug fix: check whether this (src, seq) pair is already held before
+    // allocating a new slot.  Without this check a retransmitted out-of-order
+    // frame would consume a second hold slot, exhausting ORDERING_HOLD_COUNT
+    // capacity and causing ERR_FULL for legitimate new messages.
+    uint32_t existing_hold = find_held(msg.source_id, msg.sequence_num);
+    if (existing_hold != ORDERING_HOLD_COUNT) {
+        // Already held: silently discard the duplicate (same behaviour as the
+        // already-delivered duplicate path above).
+        return Result::ERR_AGAIN;
+    }
+
     uint32_t hold_idx = find_free_hold();
     if (hold_idx == ORDERING_HOLD_COUNT) {
         return Result::ERR_FULL;

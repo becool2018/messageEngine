@@ -320,6 +320,74 @@ static bool test_ordering_sixteen_peers()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 8: Repeated duplicate out-of-order messages do not exhaust hold capacity
+//
+// Verifies the Bug 3 fix: when an out-of-order (src, seq) pair is already held,
+// a retransmitted duplicate must be silently discarded (ERR_AGAIN) rather than
+// consuming a second hold slot.  Without the fix, N duplicates of the same
+// out-of-order frame would use N slots, causing ERR_FULL for legitimate messages.
+//
+// Scenario:
+//   1. seq=2 arrives before seq=1 → held (one slot used).
+//   2. seq=2 arrives again (retransmit) → must return ERR_AGAIN, not consume
+//      another slot.
+//   3. A third distinct out-of-order sequence (seq=3) must still be holdable
+//      (only one slot occupied, not two).
+//   4. seq=1 arrives → delivered; try_release_next() delivers seq=2; seq=3 is
+//      then released as well.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.3.5
+static bool test_ordering_ooo_duplicate_does_not_exhaust_hold()
+{
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    MessageEnvelope m1, m2, m3;
+    make_ordered(m1, 70U, 1U, 0x11U);
+    make_ordered(m2, 70U, 2U, 0x22U);
+    make_ordered(m3, 70U, 3U, 0x33U);
+
+    MessageEnvelope out;
+    envelope_init(out);
+
+    // seq=2 arrives out-of-order → held (one hold slot consumed)
+    Result r2a = buf.ingest(m2, out, 1000000ULL);
+    assert(r2a == Result::ERR_AGAIN);  // Assert: held, not delivered
+
+    // Duplicate seq=2 → must NOT consume another hold slot
+    Result r2b = buf.ingest(m2, out, 1000001ULL);
+    assert(r2b == Result::ERR_AGAIN);  // Assert: silently discarded
+
+    // seq=3 arrives out-of-order → must succeed (only 1 slot used, not 2)
+    Result r3 = buf.ingest(m3, out, 1000002ULL);
+    assert(r3 == Result::ERR_AGAIN);   // Assert: held; capacity not exhausted
+
+    // seq=1 arrives → delivered; next_expected advances to 2
+    Result r1 = buf.ingest(m1, out, 1000003ULL);
+    assert(r1 == Result::OK);          // Assert: seq=1 delivered in order
+    assert(out.sequence_num == 1U);
+    assert(out.payload[0] == 0x11U);
+
+    // try_release_next delivers seq=2
+    Result rr2 = buf.try_release_next(70U, out);
+    assert(rr2 == Result::OK);         // Assert: seq=2 released from hold
+    assert(out.sequence_num == 2U);
+    assert(out.payload[0] == 0x22U);
+
+    // try_release_next delivers seq=3
+    Result rr3 = buf.try_release_next(70U, out);
+    assert(rr3 == Result::OK);         // Assert: seq=3 released from hold
+    assert(out.sequence_num == 3U);
+    assert(out.payload[0] == 0x33U);
+
+    // No more held messages
+    Result rr_none = buf.try_release_next(70U, out);
+    assert(rr_none == Result::ERR_AGAIN);  // Assert: hold buffer empty
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -353,6 +421,10 @@ int main()
     if (!test_ordering_sixteen_peers()) {
         printf("FAIL: test_ordering_sixteen_peers\n"); ++failed;
     } else { printf("PASS: test_ordering_sixteen_peers\n"); }
+
+    if (!test_ordering_ooo_duplicate_does_not_exhaust_hold()) {
+        printf("FAIL: test_ordering_ooo_duplicate_does_not_exhaust_hold\n"); ++failed;
+    } else { printf("PASS: test_ordering_ooo_duplicate_does_not_exhaust_hold\n"); }
 
     return (failed > 0) ? 1 : 0;
 }

@@ -466,8 +466,12 @@ static Result reserve_bookkeeping(AckTracker&            ack_tracker,
 // rollback_on_transport_failure() — file-static CC-reduction helper for send().
 //
 // Called when send_via_transport() fails after bookkeeping slots have already
-// been reserved.  Cancels AckTracker and (for RELIABLE_RETRY) RetryManager
-// slots so no spurious timeout or retry fires for a message never put on wire.
+// been reserved AND no fragment reached the wire.  Cancels AckTracker and
+// (for RELIABLE_RETRY) RetryManager slots so no spurious timeout or retry
+// fires for a message never put on wire.
+//
+// Must NOT be called when res == ERR_IO_PARTIAL: at least one fragment is
+// already on the wire and the bookkeeping must remain active for timeout/retry.
 //
 // Power of 10 Rule 7 / HAZ-001: both cancel() return values are checked and
 // logged at WARNING_HI on failure so stale slots can be detected and swept.
@@ -507,6 +511,42 @@ static void rollback_on_transport_failure(AckTracker&            ack_tracker,
                         static_cast<uint8_t>(retry_cancel_res));
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// handle_send_fragments_failure() — file-static CC-reduction helper for send().
+//
+// Processes the failure result from send_fragments():
+//   - If res == ERR_IO_PARTIAL: at least one fragment is already on the wire;
+//     rollback MUST NOT happen (bookkeeping stays active for ACK timeout/retry).
+//     Returns ERR_IO so callers see a uniform transport-failure code.
+//   - Otherwise (ERR_IO, ERR_INVALID): nothing on wire; rollback is safe for
+//     reliable classes.  Returns res unchanged.
+//
+// Precondition: res != OK (caller checked).
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+static Result handle_send_fragments_failure(AckTracker&            ack_tracker,
+                                            RetryManager&          retry_manager,
+                                            const MessageEnvelope& env,
+                                            Result                 res)
+{
+    NEVER_COMPILED_OUT_ASSERT(res != Result::OK);          // Assert: only called on failure
+    NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));        // Assert: envelope fields set
+
+    if (res == Result::ERR_IO_PARTIAL) {
+        // Fragment 0..i-1 already transmitted; cannot undo.  Keep bookkeeping
+        // active.  Normalise to ERR_IO for the public API.
+        return Result::ERR_IO;
+    }
+
+    // No fragment reached the wire: safe to cancel bookkeeping entries.
+    if (env.reliability_class == ReliabilityClass::RELIABLE_ACK ||
+        env.reliability_class == ReliabilityClass::RELIABLE_RETRY) {
+        rollback_on_transport_failure(ack_tracker, retry_manager, env);
+    }
+
+    return res;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -561,16 +601,16 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
     // multi-fragment sends transparently.
     Result res = send_fragments(env, now_us);
     if (res != Result::OK) {
-        // Roll back bookkeeping reserved in Step 2 so no spurious timeout or
-        // retry fires for a message that was never put on the wire.
+        // CC-reduction: rollback decision delegated to handle_send_fragments_failure().
+        // That helper rolls back bookkeeping only when nothing reached the wire
+        // (ERR_IO / ERR_INVALID); it preserves bookkeeping on ERR_IO_PARTIAL
+        // (≥1 fragment already sent) and normalises the result to ERR_IO.
         // Power of 10 Rule 7 / HAZ-001: cancel() return values are checked
         // and logged inside rollback_on_transport_failure() (CC-reduction helper).
-        if (env.reliability_class == ReliabilityClass::RELIABLE_ACK ||
-            env.reliability_class == ReliabilityClass::RELIABLE_RETRY) {
-            rollback_on_transport_failure(m_ack_tracker, m_retry_manager, env);
-        }
-        record_send_failure(env, res);  // REQ-7.2.3: stats + log (CC-reduction helper)
-        return res;
+        Result reported = handle_send_fragments_failure(
+            m_ack_tracker, m_retry_manager, env, res);
+        record_send_failure(env, reported);  // REQ-7.2.3: stats + log
+        return reported;
     }
 
     // REQ-7.2.3: count successful sends -- only after all bookkeeping AND transport succeed
@@ -1069,6 +1109,16 @@ Result DeliveryEngine::send_fragments(const MessageEnvelope& env, uint64_t now_u
 
     NEVER_COMPILED_OUT_ASSERT(frag_count <= FRAG_MAX_COUNT);  // Assert: bounded
 
+    // Bug fix: track whether any fragment was successfully transmitted to the
+    // wire.  The caller (send()) calls rollback_on_transport_failure() on any
+    // non-OK result from this function, but rollback is only safe when zero
+    // fragments reached the wire — once a fragment is sent it cannot be recalled.
+    // We signal this via a distinct error code so send() can skip the rollback.
+    // ERR_IO_PARTIAL is returned when at least one fragment was sent before
+    // the failure; ERR_IO is returned when the very first fragment failed
+    // (nothing on wire → rollback is valid).
+    bool any_sent = false;
+
     // Power of 10 Rule 2: bounded loop — frag_count <= FRAG_MAX_COUNT
     for (uint32_t i = 0U; i < frag_count; ++i) {
         Result res = send_via_transport(m_frag_buf[i], now_us);
@@ -1078,10 +1128,15 @@ Result DeliveryEngine::send_fragments(const MessageEnvelope& env, uint64_t now_u
                         i + 1U, frag_count,
                         (unsigned long long)env.message_id,
                         static_cast<uint8_t>(res));
-            return Result::ERR_IO;
+            // Return ERR_IO_PARTIAL when prior fragments were already sent so
+            // the caller knows rollback would be incorrect.  Return plain ERR_IO
+            // when nothing reached the wire (rollback is safe).
+            return any_sent ? Result::ERR_IO_PARTIAL : Result::ERR_IO;
         }
+        any_sent = true;
     }
 
+    NEVER_COMPILED_OUT_ASSERT(any_sent || frag_count == 0U);  // Assert: all frags sent
     return Result::OK;
 }
 

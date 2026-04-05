@@ -2717,6 +2717,77 @@ static void test_de_held_pending_expiry_event()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// M5 Test 59: Partial fragmented send (fragment 0 succeeds, fragment 1 fails)
+// must NOT rollback AckTracker/RetryManager bookkeeping.
+//
+// Verifies the Bug 2 fix: when at least one fragment has been transmitted to
+// the wire, the bookkeeping entries must remain active so normal ACK timeout
+// and retry machinery can detect the stall.  Rolling them back incorrectly
+// removes the timeout guard, causing a silent delivery failure.
+//
+// Verification: M1 + M2 + M5 (fault injection via MockTransportInterface with
+//   fail_send_after_n=1: first call succeeds, second returns ERR_IO).
+//
+// Verifies: REQ-3.2.3, REQ-3.2.4, REQ-3.2.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mock_fragmented_partial_send_keeps_bookkeeping()
+{
+    // Verifies: REQ-3.2.3, REQ-3.2.4, REQ-3.2.5
+    MockTransportInterface mock;
+    ChannelConfig cfg;
+    make_mock_channel_config(cfg);
+
+    DeliveryEngine engine;
+    engine.init(&mock, cfg, 1U);
+
+    // Arm partial-send failure: succeed on call 1, fail on call 2.
+    // A 2048-byte RELIABLE_RETRY message fragments into exactly 2 wire frames
+    // (each FRAG_MAX_PAYLOAD_BYTES = 1024 bytes).  Fragment 0 is sent on
+    // send_message() call 1; fragment 1 fails on send_message() call 2.
+    mock.fail_send_after_n = 1;  // succeed for first 1 call, fail from call 2 onward
+
+    static const uint32_t PAYLOAD_LEN = 2U * FRAG_MAX_PAYLOAD_BYTES;  // = 2048 bytes
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.source_id         = 1U;
+    env.destination_id    = 2U;
+    env.message_id        = 0ULL;
+    env.timestamp_us      = NOW_US;
+    env.expiry_time_us    = NOW_US + 5000000ULL;
+    env.priority          = 0U;
+    env.reliability_class = ReliabilityClass::RELIABLE_RETRY;
+    env.payload_length    = PAYLOAD_LEN;
+    env.sequence_num      = 0U;  // UNORDERED
+    // Power of 10 Rule 2: bounded loop
+    for (uint32_t i = 0U; i < PAYLOAD_LEN; ++i) {
+        env.payload[i] = static_cast<uint8_t>(i & 0xFFU);
+    }
+
+    Result res = engine.send(env, NOW_US);
+
+    // send() must report ERR_IO (normalised from ERR_IO_PARTIAL) because the
+    // second fragment failed.
+    assert(res == Result::ERR_IO);             // Assert: caller sees ERR_IO
+    assert(mock.n_send_message == 2);          // Assert: both fragments attempted
+
+    // CRITICAL: bookkeeping must NOT have been rolled back.
+    // Without the fix, sweep_ack_timeouts far in the future returns 0 because
+    // the slot was cancelled; with the fix it must return >= 1 (slot is still
+    // pending, will time out).
+    uint32_t expired = engine.sweep_ack_timeouts(NOW_US + 2000000ULL);
+    assert(expired >= 1U);  // Assert: AckTracker slot survived (not rolled back)
+
+    // RetryManager slot must also be alive: pump_retries far in the future
+    // must fire at least one retry attempt (n_send_message increases).
+    uint32_t retried = engine.pump_retries(NOW_US + 2000000ULL);
+    assert(retried >= 1U);                     // Assert: RetryManager slot not cancelled
+    assert(mock.n_send_message >= 3);          // Assert: retry send attempted
+
+    printf("PASS: test_mock_fragmented_partial_send_keeps_bookkeeping\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -2778,6 +2849,7 @@ int main()
     test_de_idle_ordered_gap_expiry_sweep();
     test_de_ordering_full_stat();
     test_de_held_pending_expiry_event();
+    test_mock_fragmented_partial_send_keeps_bookkeeping();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;

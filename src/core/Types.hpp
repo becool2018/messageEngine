@@ -141,7 +141,10 @@ enum class Result : uint8_t {
     ERR_DUPLICATE  = 6U,
     ERR_EXPIRED    = 7U,
     ERR_OVERRUN    = 8U,
-    ERR_AGAIN      = 9U   ///< More data needed (reassembly or ordering) — not an error
+    ERR_AGAIN      = 9U,  ///< More data needed (reassembly or ordering) — not an error
+    ERR_IO_PARTIAL = 10U  ///< Partial fragmented send: ≥1 fragment already on wire;
+                          ///< rollback of bookkeeping is UNSAFE — caller must not
+                          ///< cancel AckTracker/RetryManager slots.
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
