@@ -1570,11 +1570,10 @@ static void test_stats_latency()
     Result recv_r = engine.receive(recv_out, 100U, NOW_US + 2000ULL);
     assert(recv_r == Result::OK);
 
-    // latency_sample_count must be 1; latency_sum_us >= 0
+    // latency_sample_count must be 1
     DeliveryStats s1;
     engine.get_stats(s1);
     assert(s1.latency_sample_count == 1U);
-    assert(s1.latency_sum_us >= 0ULL);
 
     harness_a.close();
     harness_b.close();
