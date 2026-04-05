@@ -1018,7 +1018,7 @@ static void test_reassembly_slot_recycling()
             envelope_init(out);
             stress_make_frag(frag, msg_id, FRAG_SRC_A, 0U, 2U, TOTAL_LEN,
                              FAR_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
-            Result r = buf.ingest(frag, out);
+            Result r = buf.ingest(frag, out, 1000000ULL);
             assert(r == Result::ERR_AGAIN);  // frag 0: session opens, not yet complete
         }
 
@@ -1031,7 +1031,7 @@ static void test_reassembly_slot_recycling()
             envelope_init(out);
             stress_make_frag(frag, overflow_id, FRAG_SRC_A, 0U, 2U, TOTAL_LEN,
                              FAR_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
-            Result r = buf.ingest(frag, out);
+            Result r = buf.ingest(frag, out, 1000000ULL);
             assert(r == Result::ERR_FULL);  // no slot overrun permitted
         }
 
@@ -1046,7 +1046,7 @@ static void test_reassembly_slot_recycling()
             envelope_init(out);
             stress_make_frag(frag, msg_id, FRAG_SRC_A, 1U, 2U, TOTAL_LEN,
                              FAR_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
-            Result r = buf.ingest(frag, out);
+            Result r = buf.ingest(frag, out, 1000000ULL);
             assert(r == Result::OK);           // frag 1: message complete
             assert(out.message_id == msg_id);  // assembled envelope has correct key
         }
@@ -1060,13 +1060,13 @@ static void test_reassembly_slot_recycling()
             envelope_init(out);
             stress_make_frag(frag, recycle_id, FRAG_SRC_A, 0U, 2U, TOTAL_LEN,
                              FAR_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
-            Result r = buf.ingest(frag, out);
+            Result r = buf.ingest(frag, out, 1000000ULL);
             assert(r == Result::ERR_AGAIN);  // slot freed; new session must open
 
             // Complete the recycle session so buf is fully clean before next cycle
             stress_make_frag(frag, recycle_id, FRAG_SRC_A, 1U, 2U, TOTAL_LEN,
                              FAR_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
-            r = buf.ingest(frag, out);
+            r = buf.ingest(frag, out, 1000000ULL);
             assert(r == Result::OK);
         }
     }
@@ -1086,7 +1086,7 @@ static void test_reassembly_slot_recycling()
             envelope_init(out);
             stress_make_frag(frag, msg_id, FRAG_SRC_B, 0U, 2U, TOTAL_LEN,
                              PAST_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
-            Result r = buf.ingest(frag, out);
+            Result r = buf.ingest(frag, out, 1000000ULL);
             assert(r == Result::ERR_AGAIN);  // frag 0 accepted; session COLLECTING
         }
 
@@ -1102,7 +1102,7 @@ static void test_reassembly_slot_recycling()
             envelope_init(out);
             stress_make_frag(frag, verify_id, FRAG_SRC_B, 0U, 2U, TOTAL_LEN,
                              PAST_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
-            Result r = buf.ingest(frag, out);
+            Result r = buf.ingest(frag, out, 1000000ULL);
             assert(r == Result::ERR_AGAIN);  // sweep freed at least one slot
 
             // Clean up verify session so buf is empty before next cycle

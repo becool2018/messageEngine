@@ -307,7 +307,8 @@ private:
     // Returns ERR_INVALID/ERR_FULL on error (caller should return the error).
     // REQ-3.2.3.
     Result handle_fragment_ingest(const MessageEnvelope& wire_env,
-                                   MessageEnvelope&       logical_out);
+                                   MessageEnvelope&       logical_out,
+                                   uint64_t               now_us);
 
     // Private helper: run a logical DATA message through the ordering gate.
     // Returns OK when the message is ready in out.

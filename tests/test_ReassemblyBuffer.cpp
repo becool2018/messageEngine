@@ -31,7 +31,7 @@
  *   - F-Prime style: assert() for test verification.
  */
 
-// Verifies: REQ-3.2.3, REQ-3.3.3
+// Verifies: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9
 // Verification: M1 + M2 + M4
 
 #include <cstdio>
@@ -89,7 +89,7 @@ static bool test_reassembly_single_fragment()
 
     MessageEnvelope out;
     envelope_init(out);
-    Result r = buf.ingest(frag, out);
+    Result r = buf.ingest(frag, out, 1000000ULL);
 
     assert(r == Result::OK);
     assert(out.message_id == 1ULL);
@@ -132,13 +132,13 @@ static bool test_reassembly_in_order()
     MessageEnvelope out;
     envelope_init(out);
 
-    Result r0 = buf.ingest(f0, out);
+    Result r0 = buf.ingest(f0, out, 1000000ULL);
     assert(r0 == Result::ERR_AGAIN);
 
-    Result r1 = buf.ingest(f1, out);
+    Result r1 = buf.ingest(f1, out, 1000000ULL);
     assert(r1 == Result::ERR_AGAIN);
 
-    Result r2 = buf.ingest(f2, out);
+    Result r2 = buf.ingest(f2, out, 1000000ULL);
     assert(r2 == Result::OK);
 
     assert(out.payload_length == 2500U);
@@ -179,13 +179,13 @@ static bool test_reassembly_out_of_order()
     envelope_init(out);
 
     // Arrive out of order: 2, 0, 1
-    Result r2 = buf.ingest(f2, out);
+    Result r2 = buf.ingest(f2, out, 1000000ULL);
     assert(r2 == Result::ERR_AGAIN);
 
-    Result r0 = buf.ingest(f0, out);
+    Result r0 = buf.ingest(f0, out, 1000000ULL);
     assert(r0 == Result::ERR_AGAIN);
 
-    Result r1 = buf.ingest(f1, out);
+    Result r1 = buf.ingest(f1, out, 1000000ULL);
     assert(r1 == Result::OK);
 
     assert(out.payload_length == 2500U);
@@ -231,15 +231,15 @@ static bool test_reassembly_duplicate_fragment()
     envelope_init(out);
 
     // First ingestion of fragment 0
-    Result r0 = buf.ingest(f0, out);
+    Result r0 = buf.ingest(f0, out, 1000000ULL);
     assert(r0 == Result::ERR_AGAIN);
 
     // Duplicate fragment 0: should be ignored, not an error
-    Result dup = buf.ingest(f0, out);
+    Result dup = buf.ingest(f0, out, 1000000ULL);
     assert(dup == Result::ERR_AGAIN);  // silently discarded, still waiting
 
     // Now ingest fragment 1: should complete
-    Result r1 = buf.ingest(f1, out);
+    Result r1 = buf.ingest(f1, out, 1000000ULL);
     assert(r1 == Result::OK);
 
     assert(out.payload_length == TOTAL);
@@ -273,11 +273,11 @@ static bool test_reassembly_inconsistent_count_rejected()
     MessageEnvelope out;
     envelope_init(out);
 
-    Result r0 = buf.ingest(f0, out);
+    Result r0 = buf.ingest(f0, out, 1000000ULL);
     assert(r0 == Result::ERR_AGAIN);
 
     // Inconsistent count should be rejected
-    Result r1 = buf.ingest(f1_bad, out);
+    Result r1 = buf.ingest(f1_bad, out, 1000000ULL);
     assert(r1 == Result::ERR_INVALID);
 
     return true;
@@ -304,7 +304,7 @@ static bool test_reassembly_slot_exhaustion()
                       static_cast<NodeId>(i + 1U),
                       0U, 2U, 8U, p, 4U);
         envelope_init(out);
-        Result r = buf.ingest(f, out);
+        Result r = buf.ingest(f, out, 1000000ULL);
         assert(r == Result::ERR_AGAIN);
     }
 
@@ -314,7 +314,7 @@ static bool test_reassembly_slot_exhaustion()
                   static_cast<NodeId>(REASSEMBLY_SLOT_COUNT + 1U),
                   0U, 2U, 8U, p, 4U);
     envelope_init(out);
-    Result r_full = buf.ingest(f_extra, out);
+    Result r_full = buf.ingest(f_extra, out, 1000000ULL);
     assert(r_full == Result::ERR_FULL);
 
     return true;
@@ -338,7 +338,7 @@ static bool test_reassembly_payload_too_large_rejected()
 
     MessageEnvelope out;
     envelope_init(out);
-    Result r = buf.ingest(f, out);
+    Result r = buf.ingest(f, out, 1000000ULL);
     assert(r == Result::ERR_INVALID);
 
     return true;
@@ -386,9 +386,9 @@ static bool test_reassembly_short_last_frag_no_stale_bytes()
     MessageEnvelope out;
     envelope_init(out);
 
-    Result ra0 = buf.ingest(fa0, out);
+    Result ra0 = buf.ingest(fa0, out, 1000000ULL);
     assert(ra0 == Result::ERR_AGAIN);  // Assert: first fragment held
-    Result ra1 = buf.ingest(fa1, out);
+    Result ra1 = buf.ingest(fa1, out, 1000000ULL);
     assert(ra1 == Result::OK);         // Assert: message A assembled
     assert(out.payload_length == TOTAL_A);
     assert(out.payload[0] == 0xFFU);
@@ -412,10 +412,10 @@ static bool test_reassembly_short_last_frag_no_stale_bytes()
                   fb1_payload, SHORT_LEN);
 
     envelope_init(out);
-    Result rb0 = buf.ingest(fb0, out);
+    Result rb0 = buf.ingest(fb0, out, 1000000ULL);
     assert(rb0 == Result::ERR_AGAIN);  // Assert: fragment 0 held
 
-    Result rb1 = buf.ingest(fb1, out);
+    Result rb1 = buf.ingest(fb1, out, 1000000ULL);
     assert(rb1 == Result::OK);         // Assert: message B assembled
 
     assert(out.payload_length == TOTAL_B);  // Assert: correct total length
@@ -429,6 +429,171 @@ static bool test_reassembly_short_last_frag_no_stale_bytes()
     assert(out.payload[FRAG_MAX_PAYLOAD_BYTES + 1U] == 0xBBU);
     assert(out.payload[FRAG_MAX_PAYLOAD_BYTES + 2U] == 0xBBU);
     assert(out.payload[FRAG_MAX_PAYLOAD_BYTES + 3U] == 0xBBU);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 9: record_fragment offset boundary (F4 assertion must not fire)
+// Verifies: REQ-3.2.3
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_record_fragment_offset_boundary()
+{
+    ReassemblyBuffer buf;
+    buf.init();
+
+    // Build a 4-fragment message with fragment_index = FRAG_MAX_COUNT-1 (maximum)
+    // total_payload_length = FRAG_MAX_COUNT * FRAG_MAX_PAYLOAD_BYTES (maximum valid)
+    static const uint32_t TOTAL = FRAG_MAX_COUNT * FRAG_MAX_PAYLOAD_BYTES;
+    static const uint8_t p[4U] = { 0x01U, 0x02U, 0x03U, 0x04U };
+
+    // Send all four fragments, ending with the max-index one
+    MessageEnvelope f0;
+    make_fragment(f0, 9000ULL, 20U, 0U, static_cast<uint8_t>(FRAG_MAX_COUNT),
+                  static_cast<uint16_t>(TOTAL), p, 4U);
+    MessageEnvelope f1;
+    make_fragment(f1, 9000ULL, 20U, 1U, static_cast<uint8_t>(FRAG_MAX_COUNT),
+                  static_cast<uint16_t>(TOTAL), p, 4U);
+    MessageEnvelope f2;
+    make_fragment(f2, 9000ULL, 20U, 2U, static_cast<uint8_t>(FRAG_MAX_COUNT),
+                  static_cast<uint16_t>(TOTAL), p, 4U);
+    // Last fragment: fragment_index = FRAG_MAX_COUNT - 1
+    MessageEnvelope f3;
+    make_fragment(f3, 9000ULL, 20U, static_cast<uint8_t>(FRAG_MAX_COUNT - 1U),
+                  static_cast<uint8_t>(FRAG_MAX_COUNT),
+                  static_cast<uint16_t>(TOTAL), p, 4U);
+
+    MessageEnvelope out;
+    envelope_init(out);
+
+    // Ingest first three fragments
+    Result r0 = buf.ingest(f0, out, 1000000ULL);
+    assert(r0 == Result::ERR_AGAIN);  // Assert: slot opened, not complete
+    Result r1 = buf.ingest(f1, out, 1000000ULL);
+    assert(r1 == Result::ERR_AGAIN);
+    Result r2 = buf.ingest(f2, out, 1000000ULL);
+    assert(r2 == Result::ERR_AGAIN);
+
+    // Ingest the maximum-index fragment: assertion in record_fragment must not fire
+    Result r3 = buf.ingest(f3, out, 1000000ULL);
+    assert(r3 == Result::OK);         // Assert: no crash, reassembly complete
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 10: sweep_stale returns 0 when threshold is zero (no-op)
+// Verifies: REQ-3.2.9
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.9
+static bool test_sweep_stale_no_op_when_threshold_zero()
+{
+    ReassemblyBuffer buf;
+    buf.init();
+
+    static const uint8_t p[4U] = { 0x01U, 0x02U, 0x03U, 0x04U };
+    MessageEnvelope f0;
+    make_fragment(f0, 10000ULL, 30U, 0U, 2U, 8U, p, 4U);
+
+    MessageEnvelope out;
+    envelope_init(out);
+
+    // Inject first fragment of a 2-fragment message — slot opens
+    Result r = buf.ingest(f0, out, 1000000ULL);
+    assert(r == Result::ERR_AGAIN);  // Assert: slot opened, waiting for fragment 1
+
+    // Threshold == 0 must be a no-op regardless of elapsed time
+    uint32_t freed = buf.sweep_stale(1000000ULL + 1000000ULL, 0U);
+    assert(freed == 0U);  // Assert: no slots freed when threshold is zero
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 11: sweep_stale frees an open slot and it becomes reusable
+// Verifies: REQ-3.2.9
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.9
+static bool test_sweep_stale_frees_open_slot()
+{
+    ReassemblyBuffer buf;
+    buf.init();
+
+    static const uint8_t p[4U] = { 0xAAU, 0xBBU, 0xCCU, 0xDDU };
+    // Two fragments; send only the first to leave the slot open
+    MessageEnvelope f0;
+    make_fragment(f0, 11000ULL, 31U, 0U, 2U, 8U, p, 4U);
+    MessageEnvelope f1;
+    make_fragment(f1, 11000ULL, 31U, 1U, 2U, 8U, p, 4U);
+
+    MessageEnvelope out;
+    envelope_init(out);
+
+    // Open the slot at T = 1000000 us
+    static const uint64_t T = 1000000ULL;
+    Result r0 = buf.ingest(f0, out, T);
+    assert(r0 == Result::ERR_AGAIN);  // Assert: slot opened
+
+    // Sweep at T + 5000000 with threshold 4000000 — slot is stale
+    uint32_t freed = buf.sweep_stale(T + 5000000ULL, 4000000ULL);
+    assert(freed == 1U);  // Assert: one stale slot freed
+
+    // Inject both fragments fresh — slot must be reusable
+    Result ra = buf.ingest(f0, out, T + 5000001ULL);
+    assert(ra == Result::ERR_AGAIN);  // Assert: new slot opened
+
+    Result rb = buf.ingest(f1, out, T + 5000001ULL);
+    assert(rb == Result::OK);         // Assert: reassembly completes (slot was reused)
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 12: sweep_stale prevents slot exhaustion (all slots freed, 9th fits)
+// Verifies: REQ-3.2.9, REQ-3.2.3
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.9, REQ-3.2.3
+static bool test_sweep_stale_prevents_slot_exhaustion()
+{
+    ReassemblyBuffer buf;
+    buf.init();
+
+    static const uint8_t p[4U] = { 0x11U, 0x22U, 0x33U, 0x44U };
+    static const uint64_t OPEN_TIME = 1000000ULL;
+    static const uint64_t THRESHOLD = 4000000ULL;
+
+    MessageEnvelope out;
+
+    // Fill all REASSEMBLY_SLOT_COUNT slots with distinct in-progress messages
+    // Power of 10 Rule 2: bounded loop
+    for (uint32_t i = 0U; i < REASSEMBLY_SLOT_COUNT; ++i) {
+        MessageEnvelope f;
+        make_fragment(f, static_cast<uint64_t>(12000U) + static_cast<uint64_t>(i),
+                      static_cast<NodeId>(40U + i),
+                      0U, 2U, 8U, p, 4U);
+        envelope_init(out);
+        Result r = buf.ingest(f, out, OPEN_TIME);
+        assert(r == Result::ERR_AGAIN);  // Assert: slot opened
+    }
+
+    // Confirm all slots are taken — 9th distinct message must fail
+    MessageEnvelope f_extra;
+    make_fragment(f_extra, 99999ULL,
+                  static_cast<NodeId>(40U + REASSEMBLY_SLOT_COUNT),
+                  0U, 2U, 8U, p, 4U);
+    envelope_init(out);
+    Result r_full = buf.ingest(f_extra, out, OPEN_TIME);
+    assert(r_full == Result::ERR_FULL);  // Assert: all slots occupied
+
+    // Sweep stale — all slots are beyond threshold
+    uint32_t freed = buf.sweep_stale(OPEN_TIME + THRESHOLD + 1ULL, THRESHOLD);
+    assert(freed == REASSEMBLY_SLOT_COUNT);  // Assert: all stale slots freed
+
+    // Inject the previously-rejected fragment — must now succeed
+    envelope_init(out);
+    Result r_retry = buf.ingest(f_extra, out, OPEN_TIME + THRESHOLD + 2ULL);
+    assert(r_retry == Result::ERR_AGAIN);  // Assert: slot now available (waiting for frag 1)
 
     return true;
 }
@@ -471,6 +636,22 @@ int main()
     if (!test_reassembly_short_last_frag_no_stale_bytes()) {
         printf("FAIL: test_reassembly_short_last_frag_no_stale_bytes\n"); ++failed;
     } else { printf("PASS: test_reassembly_short_last_frag_no_stale_bytes\n"); }
+
+    if (!test_record_fragment_offset_boundary()) {
+        printf("FAIL: test_record_fragment_offset_boundary\n"); ++failed;
+    } else { printf("PASS: test_record_fragment_offset_boundary\n"); }
+
+    if (!test_sweep_stale_no_op_when_threshold_zero()) {
+        printf("FAIL: test_sweep_stale_no_op_when_threshold_zero\n"); ++failed;
+    } else { printf("PASS: test_sweep_stale_no_op_when_threshold_zero\n"); }
+
+    if (!test_sweep_stale_frees_open_slot()) {
+        printf("FAIL: test_sweep_stale_frees_open_slot\n"); ++failed;
+    } else { printf("PASS: test_sweep_stale_frees_open_slot\n"); }
+
+    if (!test_sweep_stale_prevents_slot_exhaustion()) {
+        printf("FAIL: test_sweep_stale_prevents_slot_exhaustion\n"); ++failed;
+    } else { printf("PASS: test_sweep_stale_prevents_slot_exhaustion\n"); }
 
     return (failed > 0) ? 1 : 0;
 }

@@ -32,9 +32,9 @@
  *   COLLECTING → COMPLETE (all fragments received)
  *   COLLECTING → INACTIVE (sweep_expired when slot.expiry_us < now_us)
  *
- * Implements: REQ-3.2.3, REQ-3.3.3
+ * Implements: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9
  */
-// Implements: REQ-3.2.3, REQ-3.3.3
+// Implements: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9
 
 #ifndef CORE_REASSEMBLY_BUFFER_HPP
 #define CORE_REASSEMBLY_BUFFER_HPP
@@ -67,12 +67,20 @@ public:
     ///         ERR_INVALID    if fragment metadata is inconsistent (different
     ///                        fragment_count or total_payload_length from a prior
     ///                        fragment of the same message, or out-of-range values).
-    Result ingest(const MessageEnvelope& frag, MessageEnvelope& logical_out);
+    Result ingest(const MessageEnvelope& frag, MessageEnvelope& logical_out, uint64_t now_us);
 
     /// Expire and free slots whose expiry_us <= now_us.
     /// Should be called periodically to reclaim slots from stalled senders.
     /// NSC: housekeeping only; no effect on delivery semantics.
     void sweep_expired(uint64_t now_us);
+
+    /// Sweep and free reassembly slots that have been open longer than stale_threshold_us.
+    /// Protects against slot exhaustion from peers that send only the first fragment.
+    /// stale_threshold_us == 0 disables the sweep (returns 0 immediately).
+    /// Returns the number of slots freed.
+    /// Power of 10 Rule 2: bounded loop (REASSEMBLY_SLOT_COUNT iterations).
+    // NSC: housekeeping only.
+    uint32_t sweep_stale(uint64_t now_us, uint64_t stale_threshold_us);
 
 private:
     // ─────────────────────────────────────────────────────────────────────────
@@ -86,6 +94,7 @@ private:
         uint8_t         expected_count;                ///< fragment_count from first fragment
         uint16_t        total_length;                  ///< total_payload_length from first fragment
         uint64_t        expiry_us;                     ///< expiry_time_us from first fragment
+        uint64_t        open_time_us;                  ///< Timestamp when this slot was opened (for stale-sweep).
         MessageEnvelope header;                        ///< copy of first fragment (for metadata)
         bool            active;                        ///< slot in use
     };
@@ -102,7 +111,7 @@ private:
     uint32_t find_free_slot() const;
 
     // Initialize a new slot from the first fragment received for a message.
-    void open_slot(uint32_t idx, const MessageEnvelope& frag);
+    void open_slot(uint32_t idx, const MessageEnvelope& frag, uint64_t now_us);
 
     // Validate that subsequent fragment metadata is consistent with the open slot.
     // Returns ERR_INVALID on mismatch, OK otherwise.
@@ -127,14 +136,15 @@ private:
     // Returns ERR_INVALID if the existing slot has inconsistent metadata.
     // Returns OK and sets idx_out on success.
     // Extracted from ingest() to reduce its cognitive complexity to ≤ 10.
-    Result find_or_open_slot(const MessageEnvelope& frag, uint32_t& idx_out);
+    Result find_or_open_slot(const MessageEnvelope& frag, uint32_t& idx_out, uint64_t now_us);
 
     // Handle the multi-fragment path of ingest(): find/open slot, bitmask
     // dedup, record, and assemble when complete.
     // Precondition: frag.fragment_count > 1 and metadata already validated.
     // Returns OK (logical_out filled), ERR_AGAIN, ERR_FULL, or ERR_INVALID.
     // Extracted from ingest() to reduce its cognitive complexity to ≤ 10.
-    Result ingest_multifrag(const MessageEnvelope& frag, MessageEnvelope& logical_out);
+    Result ingest_multifrag(const MessageEnvelope& frag, MessageEnvelope& logical_out,
+                             uint64_t now_us);
 };
 
 #endif // CORE_REASSEMBLY_BUFFER_HPP

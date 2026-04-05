@@ -162,6 +162,10 @@ The message layer must provide helpers for:
   - Deserializer must reject frames whose version byte does not equal PROTO_VERSION.
   - Deserializer must reject frames whose magic word does not equal PROTO_MAGIC.
   - Bump PROTO_VERSION on any change to the wire field layout; PROTO_MAGIC is fixed.
+- [REQ-3.2.9] Stale reassembly slot reclamation:
+  - The reassembly buffer must not hold slots indefinitely. Slots open longer
+    than `recv_timeout_ms` without completing must be reclaimed by a periodic
+    sweep to prevent resource exhaustion from peers that send partial fragment sets.
 
 3.3 Delivery semantics
 The system must support multiple delivery semantics, including:

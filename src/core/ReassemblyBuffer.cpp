@@ -22,12 +22,13 @@
  *   - MISRA C++:2023: checked casts, no UB.
  *   - F-Prime style: explicit error codes.
  *
- * Implements: REQ-3.2.3, REQ-3.3.3
+ * Implements: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9
  */
-// Implements: REQ-3.2.3, REQ-3.3.3
+// Implements: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9
 
 #include "ReassemblyBuffer.hpp"
 #include "Assert.hpp"
+#include "Logger.hpp"
 #include <cstring>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -47,6 +48,7 @@ void ReassemblyBuffer::init()
         m_slots[i].expected_count = 0U;
         m_slots[i].total_length  = 0U;
         m_slots[i].expiry_us     = 0U;
+        m_slots[i].open_time_us  = 0U;
         envelope_init(m_slots[i].header);
     }
 
@@ -96,7 +98,7 @@ uint32_t ReassemblyBuffer::find_free_slot() const
 // ─────────────────────────────────────────────────────────────────────────────
 // ReassemblyBuffer::open_slot (private)
 // ─────────────────────────────────────────────────────────────────────────────
-void ReassemblyBuffer::open_slot(uint32_t idx, const MessageEnvelope& frag)
+void ReassemblyBuffer::open_slot(uint32_t idx, const MessageEnvelope& frag, uint64_t now_us)
 {
     NEVER_COMPILED_OUT_ASSERT(idx < REASSEMBLY_SLOT_COUNT);   // Assert: valid index
     NEVER_COMPILED_OUT_ASSERT(!m_slots[idx].active);           // Assert: slot is free
@@ -108,6 +110,7 @@ void ReassemblyBuffer::open_slot(uint32_t idx, const MessageEnvelope& frag)
     m_slots[idx].expected_count = frag.fragment_count;
     m_slots[idx].total_length   = frag.total_payload_length;
     m_slots[idx].expiry_us      = frag.expiry_time_us;
+    m_slots[idx].open_time_us   = now_us;
     envelope_copy(m_slots[idx].header, frag);
 
     // Bug fix: zero the accumulation buffer so that any fragment slice shorter
@@ -151,6 +154,7 @@ void ReassemblyBuffer::record_fragment(uint32_t idx, const MessageEnvelope& frag
     // Compute byte offset for this fragment's slice
     // Power of 10 Rule 2: constant; FRAG_MAX_PAYLOAD_BYTES is compile-time constant
     uint32_t byte_offset = static_cast<uint32_t>(frag.fragment_index) * FRAG_MAX_PAYLOAD_BYTES;
+    NEVER_COMPILED_OUT_ASSERT(byte_offset <= MSG_MAX_PAYLOAD_BYTES);  // Assert: fragment offset in range
 
     // Place payload into the accumulation buffer
     if (frag.payload_length > 0U) {
@@ -242,7 +246,8 @@ Result ReassemblyBuffer::validate_metadata(const MessageEnvelope& frag) const
 // Finds an existing reassembly slot or opens a new one for frag.
 // Extracted from ingest() to reduce its cognitive complexity to ≤ 10.
 // ─────────────────────────────────────────────────────────────────────────────
-Result ReassemblyBuffer::find_or_open_slot(const MessageEnvelope& frag, uint32_t& idx_out)
+Result ReassemblyBuffer::find_or_open_slot(const MessageEnvelope& frag, uint32_t& idx_out,
+                                            uint64_t now_us)
 {
     NEVER_COMPILED_OUT_ASSERT(m_initialized);          // Assert: initialized
     NEVER_COMPILED_OUT_ASSERT(frag.source_id != 0U);   // Assert: valid source
@@ -255,7 +260,7 @@ Result ReassemblyBuffer::find_or_open_slot(const MessageEnvelope& frag, uint32_t
         if (idx == REASSEMBLY_SLOT_COUNT) {
             return Result::ERR_FULL;
         }
-        open_slot(idx, frag);
+        open_slot(idx, frag, now_us);
     } else {
         // Existing slot: validate consistency
         Result vr = validate_fragment(idx, frag);
@@ -271,7 +276,8 @@ Result ReassemblyBuffer::find_or_open_slot(const MessageEnvelope& frag, uint32_t
 // ─────────────────────────────────────────────────────────────────────────────
 // ReassemblyBuffer::ingest
 // ─────────────────────────────────────────────────────────────────────────────
-Result ReassemblyBuffer::ingest(const MessageEnvelope& frag, MessageEnvelope& logical_out)
+Result ReassemblyBuffer::ingest(const MessageEnvelope& frag, MessageEnvelope& logical_out,
+                                 uint64_t now_us)
 {
     NEVER_COMPILED_OUT_ASSERT(m_initialized);          // Assert: initialized
     NEVER_COMPILED_OUT_ASSERT(frag.source_id != 0U);   // Assert: valid source
@@ -290,7 +296,7 @@ Result ReassemblyBuffer::ingest(const MessageEnvelope& frag, MessageEnvelope& lo
     }
 
     // Multi-fragment path — CC-reduction: delegated to ingest_multifrag().
-    return ingest_multifrag(frag, logical_out);
+    return ingest_multifrag(frag, logical_out, now_us);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -301,14 +307,15 @@ Result ReassemblyBuffer::ingest(const MessageEnvelope& frag, MessageEnvelope& lo
 // Extracted from ingest() to reduce its cognitive complexity to ≤ 10.
 // ─────────────────────────────────────────────────────────────────────────────
 Result ReassemblyBuffer::ingest_multifrag(const MessageEnvelope& frag,
-                                           MessageEnvelope&       logical_out)
+                                           MessageEnvelope&       logical_out,
+                                           uint64_t               now_us)
 {
     NEVER_COMPILED_OUT_ASSERT(m_initialized);            // Assert: initialized
     NEVER_COMPILED_OUT_ASSERT(frag.fragment_count > 1U); // Assert: caller guarantees multi-frag
 
     // Find or open a reassembly slot (CC-reduction: delegated to helper).
     uint32_t idx = 0U;
-    Result slot_res = find_or_open_slot(frag, idx);
+    Result slot_res = find_or_open_slot(frag, idx, now_us);
     if (slot_res != Result::OK) {
         return slot_res;
     }
@@ -333,6 +340,50 @@ Result ReassemblyBuffer::ingest_multifrag(const MessageEnvelope& frag,
 
     NEVER_COMPILED_OUT_ASSERT(logical_out.payload_length <= MSG_MAX_PAYLOAD_BYTES);  // Assert: valid output
     return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ReassemblyBuffer::sweep_stale
+// Frees slots that have been open longer than stale_threshold_us.
+// Prevents slot exhaustion from peers that send only the first fragment.
+// stale_threshold_us == 0 disables the sweep (returns 0 immediately).
+// REQ-3.2.9: stale reassembly slot reclamation.
+// NSC: housekeeping only.
+// ─────────────────────────────────────────────────────────────────────────────
+uint32_t ReassemblyBuffer::sweep_stale(uint64_t now_us, uint64_t stale_threshold_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);                          // Assert: buffer ready
+    NEVER_COMPILED_OUT_ASSERT(REASSEMBLY_SLOT_COUNT > 0U);             // Assert: capacity valid
+
+    if (stale_threshold_us == 0U) {
+        return 0U;
+    }
+
+    uint32_t freed = 0U;
+    // Power of 10 Rule 2: bounded by REASSEMBLY_SLOT_COUNT.
+    for (uint32_t i = 0U; i < REASSEMBLY_SLOT_COUNT; ++i) {
+        if (!m_slots[i].active) {
+            continue;
+        }
+        if (now_us >= m_slots[i].open_time_us &&
+            (now_us - m_slots[i].open_time_us) >= stale_threshold_us) {
+            // Log stale slot expiry.
+            Logger::log(Severity::WARNING_LO, "ReassemblyBuffer",
+                        "stale slot freed: src=%u msg_id=%llu age_ms=%llu",
+                        static_cast<unsigned>(m_slots[i].source_id),
+                        static_cast<unsigned long long>(m_slots[i].message_id),
+                        static_cast<unsigned long long>(
+                            (now_us - m_slots[i].open_time_us) / 1000ULL));
+            m_slots[i].active         = false;
+            m_slots[i].received_mask  = 0U;
+            m_slots[i].expected_count = 0U;
+            m_slots[i].open_time_us   = 0U;
+            ++freed;
+        }
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(freed <= REASSEMBLY_SLOT_COUNT);  // Assert: cannot free more than capacity
+    return freed;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

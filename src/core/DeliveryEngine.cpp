@@ -738,7 +738,7 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
     // For multi-frame messages, ERR_AGAIN is returned until all fragments arrive.
     MessageEnvelope logical_env;
     envelope_init(logical_env);
-    Result frag_res = handle_fragment_ingest(wire_env, logical_env);
+    Result frag_res = handle_fragment_ingest(wire_env, logical_env, now_us);
     if (frag_res != Result::OK) {
         // ERR_AGAIN: still collecting; not an error for the caller.
         // ERR_FULL/ERR_INVALID: fragment-level error; drop frame.
@@ -900,6 +900,16 @@ uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
     // m_reassembly.sweep_expired() was never called, causing fragment slots for stalled
     // senders to be held indefinitely. Housekeeping here keeps the buffer live.
     m_reassembly.sweep_expired(now_us);
+
+    // REQ-3.2.9: sweep stale reassembly slots — prevents slot exhaustion from partial sends.
+    {
+        const uint64_t stale_us = static_cast<uint64_t>(m_cfg.recv_timeout_ms) * 1000ULL;
+        const uint32_t stale_freed = m_reassembly.sweep_stale(now_us, stale_us);
+        if (stale_freed > 0U) {
+            Logger::log(Severity::WARNING_LO, "DeliveryEngine",
+                        "sweep_stale freed %u stale reassembly slot(s)", stale_freed);
+        }
+    }
 
     // REQ-3.3.5 / Issue 3 fix: advance the ordering gate past permanently lost gaps.
     // Without this, a single lost ordered message blocks all later messages from
@@ -1148,12 +1158,13 @@ Result DeliveryEngine::send_fragments(const MessageEnvelope& env, uint64_t now_u
 // Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
 // ─────────────────────────────────────────────────────────────────────────────
 Result DeliveryEngine::handle_fragment_ingest(const MessageEnvelope& wire_env,
-                                               MessageEnvelope&       logical_out)
+                                               MessageEnvelope&       logical_out,
+                                               uint64_t               now_us)
 {
     NEVER_COMPILED_OUT_ASSERT(m_initialized);           // Assert: engine initialized
     NEVER_COMPILED_OUT_ASSERT(envelope_valid(wire_env)); // Assert: valid envelope
 
-    Result res = m_reassembly.ingest(wire_env, logical_out);
+    Result res = m_reassembly.ingest(wire_env, logical_out, now_us);
 
     if (res == Result::ERR_AGAIN) {
         // Normal: still collecting fragments for this message
