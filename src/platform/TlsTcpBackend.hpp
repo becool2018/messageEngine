@@ -159,11 +159,13 @@ private:
     /// tls_enabled is true. Extracted to reduce connect_to_server() CC.
     Result tls_connect_handshake();
 
+#if defined(MBEDTLS_SSL_SESSION_TICKETS)
     /// Save the TLS session from slot 0 into m_saved_session after a successful
     /// client handshake.  Called only when session_resumption_enabled is true.
     /// Failure is non-fatal: logs WARNING_LO and leaves m_session_saved false.
     /// Extracted from tls_connect_handshake() to keep its CC ≤ 10 (REQ-6.3.4).
     void try_save_client_session();
+#endif /* MBEDTLS_SSL_SESSION_TICKETS */
 
     /// Attempt to load m_saved_session into m_ssl[0] before the TLS handshake
     /// to enable abbreviated session resumption (RFC 5077, REQ-6.3.4).
