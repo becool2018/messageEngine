@@ -295,12 +295,13 @@ public:
      * RRHeader, it saves the full envelope here rather than dropping it.
      * The application calls receive_non_rr() to retrieve those frames.
      *
-     * @param[out] env Filled with the oldest non-RR envelope on OK.
+     * @param[out] env     Filled with the oldest non-RR envelope on OK.
+     * @param[in]  now_us  Current time in microseconds (passed to pump_inbound()).
      * @return OK if a frame was available; ERR_EMPTY otherwise;
      *         ERR_INVALID if not initialized.
      * NSC: passthrough bookkeeping only.
      */
-    Result receive_non_rr(MessageEnvelope& env);
+    Result receive_non_rr(MessageEnvelope& env, uint64_t now_us);
 };
 
 #endif // CORE_REQUEST_REPLY_ENGINE_HPP

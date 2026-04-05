@@ -29,6 +29,7 @@
 #include "OrderingBuffer.hpp"
 #include "Assert.hpp"
 #include "Logger.hpp"
+#include "Timestamp.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OrderingBuffer::init
@@ -251,4 +252,38 @@ void OrderingBuffer::advance_sequence(NodeId src, uint32_t up_to_seq)
     }
 
     NEVER_COMPILED_OUT_ASSERT(m_peers[peer_idx].next_expected_seq >= up_to_seq);  // Assert: advanced
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OrderingBuffer::sweep_expired_holds — SC: HAZ-001 (Issue 3 fix)
+// Walks held slots; for any whose expiry_time_us has passed, calls
+// advance_sequence() past that sequence so the ordering gate unblocks.
+// Power of 10 Rule 2: bounded loop (≤ ORDERING_HOLD_COUNT iterations).
+// ─────────────────────────────────────────────────────────────────────────────
+uint32_t OrderingBuffer::sweep_expired_holds(uint64_t now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);   // Assert: initialized
+    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);   // Assert: valid timestamp
+
+    uint32_t freed = 0U;
+
+    // Power of 10 Rule 2: fixed upper bound = ORDERING_HOLD_COUNT.
+    for (uint32_t i = 0U; i < ORDERING_HOLD_COUNT; ++i) {
+        if (!m_hold[i].active) {
+            continue;
+        }
+        if (timestamp_expired(m_hold[i].env.expiry_time_us, now_us)) {
+            Logger::log(Severity::WARNING_LO, "OrderingBuffer",
+                        "Held seq=%u from src=%u expired; advancing ordering gate",
+                        m_hold[i].env.sequence_num, m_hold[i].env.source_id);
+            // Advance past this sequence so later frames can be delivered.
+            advance_sequence(m_hold[i].env.source_id,
+                             m_hold[i].env.sequence_num + 1U);
+            m_hold[i].active = false;
+            ++freed;
+        }
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(freed <= ORDERING_HOLD_COUNT);  // Assert: bounded result
+    return freed;
 }
