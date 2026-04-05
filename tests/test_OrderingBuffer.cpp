@@ -388,6 +388,92 @@ static bool test_ordering_ooo_duplicate_does_not_exhaust_hold()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 9: Sequence number wraparound at u32 max is handled safely.
+// Verifies: REQ-3.3.5
+// Steps:
+//   1. Init and register a peer by delivering seq=1 in-order.
+//   2. Advance next_expected to 0xFFFFFFFEU using advance_sequence().
+//   3. Deliver seq=0xFFFFFFFEU -> OK (in-order, next_expected becomes 0xFFFFFFFFU).
+//   4. Deliver seq=0xFFFFFFFFU -> OK (in-order, advance_next_expected fires wraparound,
+//      next_expected resets to 1U).
+//   5. Deliver seq=1U -> OK (matches new next_expected=1 after wraparound reset).
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.3.5
+static bool test_sequence_wraparound_at_max()
+{
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    const NodeId SRC = 80U;
+
+    // Step 1: Register the peer by delivering seq=1 in-order.
+    MessageEnvelope m1;
+    make_ordered(m1, SRC, 1U, 0x01U);
+    MessageEnvelope out;
+    envelope_init(out);
+    Result r1 = buf.ingest(m1, out, 1000000ULL);
+    assert(r1 == Result::OK);        // Assert: seq=1 delivered in order
+    assert(out.sequence_num == 1U);  // Assert: correct sequence number delivered
+
+    // Step 2: Advance next_expected to 0xFFFFFFFEU so the next in-order
+    //         delivery is at the penultimate u32 value.
+    buf.advance_sequence(SRC, 0xFFFFFFFEU);
+
+    // Step 3: Deliver seq=0xFFFFFFFEU -> must be in-order (OK).
+    MessageEnvelope mfe;
+    make_ordered(mfe, SRC, 0xFFFFFFFEU, 0xFEU);
+    Result rfe = buf.ingest(mfe, out, 1000001ULL);
+    assert(rfe == Result::OK);              // Assert: seq=0xFFFFFFFE delivered
+    assert(out.sequence_num == 0xFFFFFFFEU); // Assert: correct sequence returned
+
+    // Step 4: Deliver seq=0xFFFFFFFFU -> must be in-order (OK).
+    // advance_next_expected() detects next would be 0 and resets to 1.
+    MessageEnvelope mff;
+    make_ordered(mff, SRC, 0xFFFFFFFFU, 0xFFU);
+    Result rff = buf.ingest(mff, out, 1000002ULL);
+    assert(rff == Result::OK);               // Assert: seq=0xFFFFFFFF delivered
+    assert(out.sequence_num == 0xFFFFFFFFU); // Assert: correct sequence returned
+
+    // Step 5: next_expected is now 1 (after wraparound reset).
+    // Deliver seq=1U -> must be in-order (OK).
+    MessageEnvelope mwrap;
+    make_ordered(mwrap, SRC, 1U, 0xA0U);
+    Result rwrap = buf.ingest(mwrap, out, 1000003ULL);
+    assert(rwrap == Result::OK);       // Assert: seq=1 accepted after wraparound
+    assert(out.sequence_num == 1U);    // Assert: correct sequence returned
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 10: Normal sequence advancement across 100 messages does not crash.
+// Verifies: REQ-3.3.5
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.3.5
+static bool test_advance_sequence_no_wraparound_normal()
+{
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    const NodeId SRC = 90U;
+
+    MessageEnvelope out;
+    envelope_init(out);
+
+    // Power of 10 Rule 2: bounded loop (100 iterations, static upper bound)
+    static const uint32_t NUM_MSGS = 100U;
+    for (uint32_t seq = 1U; seq <= NUM_MSGS; ++seq) {
+        MessageEnvelope m;
+        make_ordered(m, SRC, seq, static_cast<uint8_t>(seq & 0xFFU));
+        Result r = buf.ingest(m, out, 1000000ULL + static_cast<uint64_t>(seq));
+        assert(r == Result::OK);              // Assert: each in-order message delivered
+        assert(out.sequence_num == seq);      // Assert: returned sequence matches sent
+    }
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -425,6 +511,14 @@ int main()
     if (!test_ordering_ooo_duplicate_does_not_exhaust_hold()) {
         printf("FAIL: test_ordering_ooo_duplicate_does_not_exhaust_hold\n"); ++failed;
     } else { printf("PASS: test_ordering_ooo_duplicate_does_not_exhaust_hold\n"); }
+
+    if (!test_sequence_wraparound_at_max()) {
+        printf("FAIL: test_sequence_wraparound_at_max\n"); ++failed;
+    } else { printf("PASS: test_sequence_wraparound_at_max\n"); }
+
+    if (!test_advance_sequence_no_wraparound_normal()) {
+        printf("FAIL: test_advance_sequence_no_wraparound_normal\n"); ++failed;
+    } else { printf("PASS: test_advance_sequence_no_wraparound_normal\n"); }
 
     return (failed > 0) ? 1 : 0;
 }

@@ -125,6 +125,7 @@ private:
     uint32_t        m_count = 0U;                        ///< number of non-FREE slots currently in use
     AckTrackerStats m_stats = {};                        ///< REQ-7.2.3 observability counters
     bool            m_initialized = false;               ///< false until init() is called; guards against use before init
+    uint64_t        m_last_sweep_us = 0U;                ///< Monotonic-time enforcement: timestamp of last sweep_expired call.
 };
 
 #endif // CORE_ACK_TRACKER_HPP

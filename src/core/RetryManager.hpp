@@ -135,9 +135,10 @@ private:
 
     // Power of 10 rule 3: fixed-capacity storage, no dynamic allocation
     RetryEntry  m_slots[ACK_TRACKER_CAPACITY] = {};
-    uint32_t    m_count       = 0U;    ///< Number of active entries
-    bool        m_initialized = false; ///< True after init() has been called
-    RetryStats  m_stats = {};          ///< REQ-7.2.3 observability counters
+    uint32_t    m_count         = 0U;    ///< Number of active entries
+    bool        m_initialized   = false; ///< True after init() has been called
+    RetryStats  m_stats         = {};    ///< REQ-7.2.3 observability counters
+    uint64_t    m_last_collect_us = 0U;  ///< Monotonic-time enforcement: timestamp of last collect_due call.
 };
 
 #endif // CORE_RETRY_MANAGER_HPP

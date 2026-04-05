@@ -41,6 +41,7 @@ void AckTracker::init()
 
     m_count = 0U;
     m_initialized = true;
+    m_last_sweep_us = 0U;
     ack_tracker_stats_init(m_stats);  // REQ-7.2.3: zero all observability counters
 
     // Power of 10 rule 5: post-condition assertions
@@ -207,6 +208,11 @@ uint32_t AckTracker::sweep_expired(uint64_t         now_us,
     // Power of 10 rule 5: pre-condition assertions
     NEVER_COMPILED_OUT_ASSERT(expired_buf != nullptr);               // Assert: output buffer is valid
     NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);      // Assert: count is consistent
+
+    // Monotonic-time contract: callers must supply non-decreasing now_us (CLOCK_MONOTONIC).
+    // Backward timestamps prevent entries from expiring, permanently leaking slots.
+    NEVER_COMPILED_OUT_ASSERT(now_us >= m_last_sweep_us);  // Assert: monotonic time contract
+    m_last_sweep_us = now_us;
 
     uint32_t expired_count = 0U;
 

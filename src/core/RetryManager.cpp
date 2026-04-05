@@ -73,6 +73,7 @@ void RetryManager::init()
 
     m_count = 0U;
     m_initialized = true;
+    m_last_collect_us = 0U;
     retry_stats_init(m_stats);  // REQ-7.2.3: zero all observability counters
 
     // Power of 10 rule 2: bounded loop (compile-time constant)
@@ -271,6 +272,10 @@ uint32_t RetryManager::collect_due(uint64_t         now_us,
     NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: manager was initialized
     NEVER_COMPILED_OUT_ASSERT(out_buf != nullptr);  // Assert: output buffer provided
     NEVER_COMPILED_OUT_ASSERT(buf_cap <= MSG_RING_CAPACITY);  // Assert: reasonable capacity
+
+    // Monotonic-time contract: callers must supply non-decreasing now_us (CLOCK_MONOTONIC).
+    NEVER_COMPILED_OUT_ASSERT(now_us >= m_last_collect_us);  // Assert: monotonic time contract
+    m_last_collect_us = now_us;
 
     uint32_t collected = 0U;
 

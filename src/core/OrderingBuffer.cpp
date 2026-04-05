@@ -141,6 +141,35 @@ uint32_t OrderingBuffer::find_held(NodeId src, uint32_t seq) const
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// OrderingBuffer::advance_next_expected (private)
+// Guards u32 wraparound when incrementing next_expected_seq for a peer slot.
+// On wraparound (0xFFFFFFFF -> 0), logs WARNING_HI and resets to 1 so the
+// ordering gate does not stall permanently on the next expected value of 0.
+// Power of 10 Rule 5: 2 assertions. CC <= 10.
+// ─────────────────────────────────────────────────────────────────────────────
+void OrderingBuffer::advance_next_expected(uint32_t peer_idx)
+{
+    NEVER_COMPILED_OUT_ASSERT(peer_idx < ORDERING_PEER_COUNT);  // Assert: valid peer index
+    NEVER_COMPILED_OUT_ASSERT(m_peers[peer_idx].active);         // Assert: peer slot is active
+
+    uint32_t next = m_peers[peer_idx].next_expected_seq + 1U;
+
+    if (next == 0U) {
+        // Wraparound from 0xFFFFFFFF -> 0; reset to 1 to avoid ordering stall.
+        Logger::log(Severity::WARNING_HI, "OrderingBuffer",
+                    "sequence number wraparound for peer slot %u; resetting to 1",
+                    static_cast<unsigned>(peer_idx));
+        next = 1U;
+    }
+
+    // Assert: next must never be 0 after the wraparound guard above.
+    // Sequence 0 is reserved for UNORDERED bypass (sequence_num == 0 bypasses gate).
+    NEVER_COMPILED_OUT_ASSERT(next != 0U);  // Assert: sequence zero is reserved and never expected
+
+    m_peers[peer_idx].next_expected_seq = next;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // OrderingBuffer::ingest
 // ─────────────────────────────────────────────────────────────────────────────
 Result OrderingBuffer::ingest(const MessageEnvelope& msg,
@@ -183,7 +212,7 @@ Result OrderingBuffer::ingest(const MessageEnvelope& msg,
     if (msg.sequence_num == expected) {
         // In order: deliver
         envelope_copy(out, msg);
-        m_peers[peer_idx].next_expected_seq = expected + 1U;
+        advance_next_expected(peer_idx);
         return Result::OK;
     }
 
@@ -238,7 +267,7 @@ Result OrderingBuffer::try_release_next(NodeId src, MessageEnvelope& out)
     // Found the next in-sequence held message: deliver and free hold slot
     envelope_copy(out, m_hold[hold_idx].env);
     m_hold[hold_idx].active = false;
-    m_peers[peer_idx].next_expected_seq = expected + 1U;
+    advance_next_expected(peer_idx);
 
     NEVER_COMPILED_OUT_ASSERT(!m_hold[hold_idx].active);  // Assert: hold slot freed
     return Result::OK;

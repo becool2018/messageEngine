@@ -677,6 +677,77 @@ static void test_retry_manager_cancel()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 21: collect_due accepts equal now_us (monotonic: >= not only >)
+// Verifies: REQ-3.2.5
+// Equal timestamps must be accepted (not trigger assertion failure).
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_collect_due_accepts_equal_now_us()
+{
+    // Verifies: REQ-3.2.5
+    RetryManager mgr;
+    mgr.init();
+
+    const uint64_t T = 1000000ULL;
+
+    // Schedule one message; next_retry_us == T (fires at or after T)
+    MessageEnvelope env;
+    make_test_envelope(env, 901ULL, T + 60000000ULL);
+    Result sched_r = mgr.schedule(env, 5U, 100U, T);
+    assert(sched_r == Result::OK);
+
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+
+    // First collect at T: entry is due (next_retry_us == T), fires and advances backoff
+    uint32_t count1 = mgr.collect_due(T, buf, ACK_TRACKER_CAPACITY);
+    assert(count1 == 1U);  // Assert: entry fired
+
+    // Second collect at same T: monotonic equality is accepted (>= passes)
+    // Entry is no longer due (backoff applied after first fire), so count is 0
+    uint32_t count2 = mgr.collect_due(T, buf, ACK_TRACKER_CAPACITY);
+    assert(count2 == 0U);  // Assert: no second fire; no assertion failure on equal timestamp
+
+    printf("PASS: test_collect_due_accepts_equal_now_us\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 22: collect_due monotonic sequence — correct fire at backoff boundary
+// Verifies: REQ-3.2.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_collect_due_monotonic_sequence()
+{
+    // Verifies: REQ-3.2.5
+    RetryManager mgr;
+    mgr.init();
+
+    const uint64_t T          = 1000000ULL;
+    const uint32_t BACKOFF_MS = 100U;
+    const uint64_t BACKOFF_US = static_cast<uint64_t>(BACKOFF_MS) * 1000ULL; // 100000 us
+
+    // Schedule message with backoff_ms=100; first retry fires at T (immediate)
+    MessageEnvelope env;
+    make_test_envelope(env, 902ULL, T + 60000000ULL);
+    Result sched_r = mgr.schedule(env, 5U, BACKOFF_MS, T);
+    assert(sched_r == Result::OK);
+
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+
+    // Collect at T: first retry fires immediately (next_retry_us == T)
+    // After firing, backoff doubles to 200ms; next_retry_us = T + 200000us
+    uint32_t count1 = mgr.collect_due(T, buf, ACK_TRACKER_CAPACITY);
+    assert(count1 == 1U);  // Assert: first retry fired at T
+
+    // Collect at T + BACKOFF_US (T + 100000us): too early (next_retry_us = T + 200000us)
+    uint32_t count2 = mgr.collect_due(T + BACKOFF_US, buf, ACK_TRACKER_CAPACITY);
+    assert(count2 == 0U);  // Assert: not due yet at T+100ms
+
+    // Collect at T + 2*BACKOFF_US (T + 200000us): exactly at next retry time
+    uint32_t count3 = mgr.collect_due(T + 2U * BACKOFF_US, buf, ACK_TRACKER_CAPACITY);
+    assert(count3 == 1U);  // Assert: second retry fired at T+200ms
+
+    printf("PASS: test_collect_due_monotonic_sequence\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -702,6 +773,8 @@ int main()
     test_stats_expired();
     test_stats_ack_received();
     test_retry_manager_cancel();
+    test_collect_due_accepts_equal_now_us();
+    test_collect_due_monotonic_sequence();
 
     printf("ALL RetryManager tests passed.\n");
     return 0;

@@ -141,6 +141,11 @@ private:
 
     // Find a held message for (src, seq). Returns ORDERING_HOLD_COUNT if not found.
     uint32_t find_held(NodeId src, uint32_t seq) const;
+
+    /// Advance next_expected_seq for peer at peer_idx by one, guarding against u32 wraparound.
+    /// On wraparound (0xFFFFFFFF -> 0), logs WARNING_HI and resets to 1U.
+    /// Power of 10 Rule 5: 2 assertions. CC <= 10.
+    void advance_next_expected(uint32_t peer_idx);
 };
 
 #endif // CORE_ORDERING_BUFFER_HPP

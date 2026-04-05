@@ -193,3 +193,13 @@ unusedFunction:src/core/DeliveryEngine.cpp
 # analysed src/ tree. Deviation: false positive -- cppcheck does not see test callers.
 # Logged: DEFECT_LOG.md INSP-008.
 unusedFunction:src/core/RequestReplyEngine.cpp
+
+# Justification: knownConditionTrueFalse in OrderingBuffer::advance_next_expected() --
+# cppcheck deduces that (next_expected_seq + 1U) > 0 from its value-range analysis and
+# flags the wraparound guard `if (next == 0U)` as always-false. This is a false positive:
+# when next_expected_seq == 0xFFFFFFFF, the uint32_t addition wraps to 0, making the
+# condition true. Cppcheck's static range analysis does not model u32 wraparound for
+# this pattern. The guard is the deliberate fix for security finding F2.
+# Deviation: cppcheck false positive on u32 arithmetic wraparound detection.
+# Logged: DEFECT_LOG.md (pending INSP-009).
+knownConditionTrueFalse:src/core/OrderingBuffer.cpp

@@ -458,6 +458,71 @@ static void test_ack_tracker_cancel()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 15: sweep_expired accepts equal now_us (monotonic: >= not only >)
+// Verifies: REQ-3.2.4
+// Equal timestamps must be accepted (not trigger assertion failure).
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_sweep_expired_accepts_equal_now_us()
+{
+    // Verifies: REQ-3.2.4
+    AckTracker tracker;
+    tracker.init();
+
+    const uint64_t T = 1000000ULL;
+
+    // Track one RELIABLE_ACK message with far-future deadline
+    MessageEnvelope env;
+    make_test_envelope(env, 901ULL);
+    Result track_r = tracker.track(env, T + 500000ULL);
+    assert(track_r == Result::OK);
+
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+
+    // First sweep at T: message not yet expired (deadline > T)
+    uint32_t count1 = tracker.sweep_expired(T, buf, ACK_TRACKER_CAPACITY);
+    assert(count1 == 0U);  // Assert: not expired yet
+
+    // Second sweep at same T: equal timestamp must be accepted (>= passes)
+    uint32_t count2 = tracker.sweep_expired(T, buf, ACK_TRACKER_CAPACITY);
+    assert(count2 == 0U);  // Assert: still not expired; no assertion failure
+
+    printf("PASS: test_sweep_expired_accepts_equal_now_us\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 16: sweep_expired monotonic sequence — correct expiry at the right time
+// Verifies: REQ-3.2.4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_sweep_expired_monotonic_sequence()
+{
+    // Verifies: REQ-3.2.4
+    AckTracker tracker;
+    tracker.init();
+
+    // Track a message with deadline = 200000 us
+    MessageEnvelope env;
+    make_test_envelope(env, 902ULL);
+    Result track_r = tracker.track(env, 200000ULL);
+    assert(track_r == Result::OK);
+
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+
+    // Call at 100000: not expired (deadline=200000 > 100000)
+    uint32_t count1 = tracker.sweep_expired(100000ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(count1 == 0U);  // Assert: not expired before deadline
+
+    // Call at 200000: exactly at deadline; sweep_one_slot uses >= so this expires
+    uint32_t count2 = tracker.sweep_expired(200000ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(count2 == 1U);  // Assert: expired exactly at deadline
+
+    // Call at 300000: slot already freed; no more entries
+    uint32_t count3 = tracker.sweep_expired(300000ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(count3 == 0U);  // Assert: slot freed after expiry; no second expiry
+
+    printf("PASS: test_sweep_expired_monotonic_sequence\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -476,6 +541,8 @@ int main()
     test_stats_ack_received();
     test_stats_timeout_multiround();
     test_ack_tracker_cancel();
+    test_sweep_expired_accepts_equal_now_us();
+    test_sweep_expired_monotonic_sequence();
 
     printf("ALL AckTracker tests passed.\n");
     return 0;
