@@ -583,6 +583,50 @@ static void test_reorder_window_trailing_garbage()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 25: parse_uint rejects UINT32_MAX+1 (2^32) — overflow protection (F4)
+//   On 64-bit platforms strtoul("4294967296") returns 4294967296UL.
+//   Without the UINT32_MAX guard, static_cast<uint32_t>(4294967296UL) == 0,
+//   silently producing an incorrect-but-valid-looking result.
+//   The fix must reject the value and leave the field at its default.
+// Verifies: REQ-5.2.1
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_parse_uint_rejects_overflow()
+{
+    // Verifies: REQ-5.2.1
+    // 4294967296 == UINT32_MAX + 1 == 2^32; must be rejected, not truncated.
+    write_test_file("fixed_latency_ms=4294967296\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    // Field must remain at the default (0), not silently wrap to 0 via truncation.
+    assert(cfg.fixed_latency_ms == 0U);
+    assert(cfg.enabled == false);
+
+    printf("PASS: test_parse_uint_rejects_overflow\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 26: parse_uint accepts UINT32_MAX (4294967295) — boundary acceptance
+//   Verifies the fix does not over-reject: exactly UINT32_MAX must be accepted.
+// Verifies: REQ-5.2.1
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_parse_uint_accepts_max_valid()
+{
+    // Verifies: REQ-5.2.1
+    // 4294967295 == UINT32_MAX; must be accepted and stored verbatim.
+    write_test_file("fixed_latency_ms=4294967295\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.fixed_latency_ms == 4294967295U);
+    assert(cfg.enabled == false);
+
+    printf("PASS: test_parse_uint_accepts_max_valid\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -611,6 +655,8 @@ int main()
     test_parse_prob_trailing_garbage();
     test_parse_u64_trailing_garbage();
     test_reorder_window_trailing_garbage();
+    test_parse_uint_rejects_overflow();
+    test_parse_uint_accepts_max_valid();
 
     // Cleanup temp file
     (void)remove(TEST_FILE);

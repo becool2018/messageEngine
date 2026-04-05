@@ -31,6 +31,7 @@
 #include "ImpairmentConfigLoader.hpp"
 #include "core/Assert.hpp"
 #include "core/Logger.hpp"
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -50,13 +51,19 @@ static const uint32_t MAX_CONFIG_LINE_LEN = 128U;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Parse a uint32 from @p val into @p out. Returns true on success.
+/// Security: sets errno=0 before strtoul and checks ERANGE and UINT32_MAX
+/// to prevent silent truncation on 64-bit platforms where unsigned long > 32 bits.
 static bool parse_uint(const char* val, uint32_t* out)
 {
     NEVER_COMPILED_OUT_ASSERT(val != nullptr);
     NEVER_COMPILED_OUT_ASSERT(out != nullptr);
     char* end = nullptr;
+    errno = 0;
     unsigned long v = strtoul(val, &end, 10);
     if (end == val || *end != '\0') { return false; }
+    if (errno == ERANGE) { return false; }
+    // Guard against 64-bit unsigned long holding a value > UINT32_MAX
+    if (v > static_cast<unsigned long>(0xFFFFFFFFUL)) { return false; }
     *out = static_cast<uint32_t>(v);
     return true;
 }
@@ -91,25 +98,31 @@ static bool parse_prob(const char* val, double* out)
 }
 
 /// Parse a uint64 from @p val into @p out. Returns true on success.
+/// Security: sets errno=0 before strtoull and checks ERANGE after the call.
 static bool parse_u64(const char* val, uint64_t* out)
 {
     NEVER_COMPILED_OUT_ASSERT(val != nullptr);
     NEVER_COMPILED_OUT_ASSERT(out != nullptr);
     char* end = nullptr;
+    errno = 0;
     // strtoull returns unsigned long long; safe cast to uint64_t (both ≥ 64 bits).
     unsigned long long v = strtoull(val, &end, 10);  // NOLINT(google-runtime-int)
     if (end == val || *end != '\0') { return false; }
+    if (errno == ERANGE) { return false; }
     *out = static_cast<uint64_t>(v);
     return true;
 }
 
 /// Parse and apply reorder_window_size: parse uint32, clamp to IMPAIR_DELAY_BUF_SIZE.
+/// Security: sets errno=0 before strtoul and checks ERANGE and UINT32_MAX before cast.
 static void apply_reorder_window(const char* val, ImpairmentConfig& cfg)
 {
     NEVER_COMPILED_OUT_ASSERT(val != nullptr);
     char* end = nullptr;
+    errno = 0;
     unsigned long v = strtoul(val, &end, 10);
     if (end == val || *end != '\0') { return; }
+    if (errno == ERANGE || v > static_cast<unsigned long>(0xFFFFFFFFUL)) { return; }
     uint32_t w = static_cast<uint32_t>(v);
     // Clamp to IMPAIR_DELAY_BUF_SIZE (Power of 10: bounded buffer)
     if (w > IMPAIR_DELAY_BUF_SIZE) {
