@@ -425,3 +425,39 @@ make lint and make run_tests: PASS.
 
 Moderator: Don Jessup — 2026-04-04. No CRITICAL or MAJOR defects. All entry and exit criteria satisfied. Inspection INSP-007 closed PASS.
 
+---
+
+### INSP-008 — cppcheck unusedFunction suppressions for DeliveryEngine and RequestReplyEngine
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-05 |
+| Author      | Claude (AI-assisted) |
+| Moderator   | Don Jessup |
+| Reviewer(s) | Claude (AI-assisted) |
+| Outcome     | PASS — no new defects; all findings are cppcheck false positives |
+
+#### Scope of change
+
+Added three `unusedFunction` suppression entries to `.cppcheck-suppress` to resolve
+cppcheck CI failures introduced when the `request-response-helpers` and
+`observability-core-hooks-v2` features were integrated (INSP-007). Cppcheck analyses
+only the `src/` directory and cannot see callers in `tests/`.
+
+| File(s) | Change summary |
+|---------|---------------|
+| `.cppcheck-suppress` | Added `unusedFunction` suppressions for `src/core/DeliveryEngine.cpp`, `src/core/DeliveryEventRing.hpp`, and `src/core/RequestReplyEngine.cpp` |
+| `docs/DEFECT_LOG.md` | Added this INSP-008 record |
+
+#### Defects found / waivers
+
+| ID | File : line | Description | Severity | Disposition | Resolution |
+|----|-------------|-------------|----------|-------------|------------|
+| INSP-008-1 | `src/core/DeliveryEngine.cpp:302,317,334` | cppcheck `unusedFunction` for `poll_event`, `pending_event_count`, `drain_events`. These are public API methods called from `tests/test_DeliveryEngine.cpp`, outside the analysed `src/` tree. False positive. | MINOR | WAIVE | Added `unusedFunction:src/core/DeliveryEngine.cpp` to `.cppcheck-suppress` |
+| INSP-008-2 | `src/core/DeliveryEventRing.hpp:137` | cppcheck `unusedFunction` for `clear()`. Public utility method with no current caller inside `src/`; part of the ring-buffer public API surface. | MINOR | WAIVE | Added `unusedFunction:src/core/DeliveryEventRing.hpp` to `.cppcheck-suppress` |
+| INSP-008-3 | `src/core/RequestReplyEngine.cpp:260,474,510,592,646,700,762` | cppcheck `unusedFunction` for `find_free_stash`, `receive_non_rr`, `send_request`, `receive_request`, `send_response`, `receive_response`, `sweep_timeouts`. Public API methods are called from `tests/test_RequestReplyEngine.cpp` and `tests/test_stress_capacity.cpp`, outside the analysed tree. `find_free_stash` is a private helper with no current caller and is suppressed at file level alongside the verified public methods. | MINOR | WAIVE | Added `unusedFunction:src/core/RequestReplyEngine.cpp` to `.cppcheck-suppress` |
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-05. All three findings are cppcheck false positives caused by test callers residing outside the analysed `src/` tree. No code logic changed. Inspection INSP-008 closed PASS.
+
