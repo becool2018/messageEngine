@@ -87,7 +87,7 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
 |-----------|-------------|--------------|
 | `reliability_class == RELIABLE_ACK` | Enter `reserve_bookkeeping()` path | Not this UC |
 | AckTracker slot available (inside `reserve_bookkeeping`) | `track()` OK; proceed | `track()` returns `ERR_FULL`; `send()` returns `ERR_FULL` |
-| `book_res != OK` | Return `ERR_FULL` without I/O | Proceed to `send_via_transport()` |
+| `book_res != OK` | Return `ERR_FULL` without I/O | Proceed to `send_fragments()` |
 | `send_fragments()` returns `ERR_IO` (nothing sent) | `rollback_on_transport_failure()` via `handle_send_fragments_failure()`; return `ERR_IO` | Proceed; `msgs_sent++` |
 | `send_fragments()` returns `ERR_IO_PARTIAL` (≥1 frame sent) | Preserve AckTracker slot; return `ERR_IO` | — |
 
