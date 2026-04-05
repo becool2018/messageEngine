@@ -509,6 +509,8 @@ Reclassifying a function from NSC to SC, or adding a new SC function, requires:
 </software_safety_requirements>
 ```
 
+Security assumptions and invariants: docs/SECURITY_ASSUMPTIONS.md
+
 ---
 
 14. Coverage Requirements (NASA-STD-8739.8A / NPR 7150.2D)
