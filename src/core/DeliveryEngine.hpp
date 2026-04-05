@@ -323,10 +323,12 @@ private:
 
     // Private helper: deliver the staged m_held_pending envelope (REQ-3.3.5 Issue 1 fix).
     // Called at the top of receive() when m_held_pending_valid is true.
-    // Copies the held message to env, attempts to stage the next held message
-    // via try_release_next(), sends ACK if required, and increments stats.
-    // NSC: ordering bookkeeping on the non-reliable housekeeping path.
-    void deliver_held_pending(MessageEnvelope& env, uint64_t now_us);
+    // Copies the held message to env, checks expiry, attempts to stage the next held
+    // message via try_release_next(), sends ACK if required, and increments stats.
+    // Returns OK on successful delivery; ERR_EXPIRED if the held message has expired
+    // (receive() must loop so the caller gets a live message or ERR_TIMEOUT).
+    // SC: HAZ-001, HAZ-004 — expiry gate on the ordering backlog drain path.
+    Result deliver_held_pending(MessageEnvelope& env, uint64_t now_us);
 
     // Private helper: process an inbound control message (ACK/NAK/HEARTBEAT).
     // Always returns OK (control messages are never an error condition).

@@ -633,10 +633,15 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
     // REQ-3.3.5: drain any previously-held ordering message before blocking on the
     // transport. If a prior in-order delivery left a contiguous message staged in
     // m_held_pending, return it immediately so the backlog drains without waiting
-    // for the next wire frame (Issue 1 fix).
+    // for the next wire frame (Issue 1 fix). If the held message has since expired,
+    // deliver_held_pending() returns ERR_EXPIRED and clears the slot; fall through
+    // to the transport poll so the caller gets a live message or ERR_TIMEOUT.
     if (m_held_pending_valid) {
-        deliver_held_pending(env, now_us);
-        return Result::OK;
+        Result held_res = deliver_held_pending(env, now_us);
+        if (held_res == Result::OK) {
+            return Result::OK;
+        }
+        // ERR_EXPIRED: held message dropped; fall through to transport receive.
     }
 
     // Power of 10 rule 7: check return value from transport
@@ -708,9 +713,14 @@ Result DeliveryEngine::handle_data_path(MessageEnvelope& env, uint64_t now_us)
     MessageEnvelope ordered_env;
     envelope_init(ordered_env);
     Result ord_res = handle_ordering_gate(env, ordered_env, now_us);
+    if (ord_res == Result::ERR_FULL) {
+        // Issue 5 fix: hard drop due to exhausted ordering resources — propagate
+        // ERR_FULL so callers can distinguish a real capacity drop from a benign hold.
+        ++m_stats.msgs_dropped_misrouted;  // REQ-7.2.3: count capacity drop
+        return Result::ERR_FULL;
+    }
     if (ord_res != Result::OK) {
-        // ERR_AGAIN: held (out-of-order) or discarded (duplicate seq).
-        // ERR_FULL: hold buffer exhausted — log but do not crash.
+        // ERR_AGAIN: held (out-of-order) or discarded (duplicate seq) — benign.
         return Result::ERR_AGAIN;
     }
     envelope_copy(env, ordered_env);
@@ -814,6 +824,19 @@ uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
     // m_reassembly.sweep_expired() was never called, causing fragment slots for stalled
     // senders to be held indefinitely. Housekeeping here keeps the buffer live.
     m_reassembly.sweep_expired(now_us);
+
+    // REQ-3.3.5 / Issue 3 fix: advance the ordering gate past permanently lost gaps.
+    // Without this, a single lost ordered message blocks all later messages from
+    // that source indefinitely. sweep_expired_holds() frees any held slots whose
+    // message has expired and calls advance_sequence() so the gate unblocks.
+    // Power of 10 Rule 7: return value checked (count of freed slots; informational).
+    {
+        uint32_t freed_holds = m_ordering.sweep_expired_holds(now_us);
+        if (freed_holds > 0U) {
+            Logger::log(Severity::WARNING_LO, "DeliveryEngine",
+                        "Ordering gate: advanced past %u expired gap(s)", freed_holds);
+        }
+    }
 
     // Sweep expired ACK entries
     // Power of 10 rule 7: check return value (it's count)
@@ -1096,13 +1119,34 @@ Result DeliveryEngine::handle_ordering_gate(const MessageEnvelope& logical,
 // NSC: ordering bookkeeping on the non-reliability housekeeping path.
 // Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
 // ─────────────────────────────────────────────────────────────────────────────
-void DeliveryEngine::deliver_held_pending(MessageEnvelope& env, uint64_t now_us)
+Result DeliveryEngine::deliver_held_pending(MessageEnvelope& env, uint64_t now_us)
 {
     NEVER_COMPILED_OUT_ASSERT(m_held_pending_valid);  // Assert: called only when valid
     NEVER_COMPILED_OUT_ASSERT(m_initialized);          // Assert: engine initialized
 
     m_held_pending_valid = false;
     envelope_copy(env, m_held_pending);
+
+    // REQ-3.2.7 / Issue 2 fix: re-check expiry on the held message.
+    // A message can be valid when first held but expire during a sequence gap.
+    if (timestamp_expired(env.expiry_time_us, now_us)) {
+        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
+                    "Held ordered message_id=%llu from src=%u expired; dropping",
+                    (unsigned long long)env.message_id, env.source_id);
+        ++m_stats.msgs_dropped_expired;  // REQ-7.2.3
+        // Still attempt to drain the next held frame so the backlog advances.
+        {
+            MessageEnvelope next_held;
+            envelope_init(next_held);
+            Result rel_res = m_ordering.try_release_next(env.source_id, next_held);
+            if (rel_res == Result::OK) {
+                envelope_copy(m_held_pending, next_held);
+                m_held_pending_valid = true;
+            }
+        }
+        NEVER_COMPILED_OUT_ASSERT(m_stats.msgs_dropped_expired > 0U);  // Assert: counted
+        return Result::ERR_EXPIRED;
+    }
 
     // Try to stage the next contiguous held message for this source.
     // Power of 10 Rule 7: return value of try_release_next checked.
@@ -1129,6 +1173,7 @@ void DeliveryEngine::deliver_held_pending(MessageEnvelope& env, uint64_t now_us)
 
     // Power of 10 rule 5: post-condition assertion
     NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));  // Assert: envelope valid on exit
+    return Result::OK;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

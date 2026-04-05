@@ -419,7 +419,7 @@ void RequestReplyEngine::stash_non_rr_data(const MessageEnvelope& env)
 // Pops the oldest non-RR DATA envelope from m_non_rr_stash.
 // Power of 10: ≥2 assertions, CC ≤ 10.
 // ─────────────────────────────────────────────────────────────────────────────
-Result RequestReplyEngine::receive_non_rr(MessageEnvelope& env)
+Result RequestReplyEngine::receive_non_rr(MessageEnvelope& env, uint64_t now_us)
 {
     NEVER_COMPILED_OUT_ASSERT(m_initialized);                       // Assert: engine ready
     NEVER_COMPILED_OUT_ASSERT(m_non_rr_count <= MAX_STASH_SIZE);    // Assert: valid count
@@ -427,6 +427,12 @@ Result RequestReplyEngine::receive_non_rr(MessageEnvelope& env)
     if (!m_initialized) {
         return Result::ERR_INVALID;
     }
+
+    // Issue 4 fix: drain the underlying engine so fresh non-RR frames are
+    // captured even when the application calls only receive_non_rr() and never
+    // calls receive_request() or receive_response().
+    pump_inbound(now_us);
+
     if (m_non_rr_count == 0U) {
         return Result::ERR_EMPTY;
     }
@@ -435,6 +441,7 @@ Result RequestReplyEngine::receive_non_rr(MessageEnvelope& env)
     m_non_rr_head = (m_non_rr_head + 1U) % MAX_STASH_SIZE;
     --m_non_rr_count;
 
+    NEVER_COMPILED_OUT_ASSERT(m_non_rr_count < MAX_STASH_SIZE);    // Assert: decremented
     return Result::OK;
 }
 

@@ -488,6 +488,194 @@ static void test_rre_request_stash_full()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 8: non_rr_passthrough
+// Verifies: REQ-3.2.4
+//
+// Send a plain DATA envelope (no RRHeader) from B to A's underlying engine.
+// Verify that receive_non_rr() on A returns the frame (FIFO, correct payload).
+// Confirms Issue 4 fix: receive_non_rr() calls pump_inbound() internally.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_non_rr_passthrough()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    // Build a plain DATA envelope (no RR header — raw application payload).
+    MessageEnvelope raw_env;
+    envelope_init(raw_env);
+    raw_env.message_type     = MessageType::DATA;
+    raw_env.source_id        = NODE_B;
+    raw_env.destination_id   = NODE_A;
+    raw_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    raw_env.payload_length      = 4U;
+    raw_env.payload[0]       = 0xCAU;
+    raw_env.payload[1]       = 0xFEU;
+    raw_env.payload[2]       = 0xBAU;
+    raw_env.payload[3]       = 0xBEU;
+
+    // Send via engine_b (bypasses RRE — raw DATA, no correlation header).
+    Result s = eb.send(raw_env, NOW_US);
+    assert(s == Result::OK);
+
+    // receive_non_rr() on A must find it (Issue 4 fix: it calls pump_inbound).
+    MessageEnvelope out;
+    envelope_init(out);
+    Result r = rrea.receive_non_rr(out, NOW_US);
+    assert(r == Result::OK);
+    assert(out.payload_length == 4U);
+    assert(out.payload[0] == 0xCAU);
+    assert(out.payload[1] == 0xFEU);
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_non_rr_passthrough\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 9: non_rr_fifo_order
+// Verifies: REQ-3.2.4
+//
+// Send three plain DATA frames from B to A. Verify receive_non_rr() returns
+// them in FIFO order (first in, first out).
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_non_rr_fifo_order()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    static const uint32_t FRAME_COUNT = 3U;
+    static const uint8_t  MARKERS[FRAME_COUNT] = { 0x11U, 0x22U, 0x33U };
+
+    // Send three raw DATA frames in order.
+    for (uint32_t i = 0U; i < FRAME_COUNT; ++i) {
+        MessageEnvelope raw_env;
+        envelope_init(raw_env);
+        raw_env.message_type      = MessageType::DATA;
+        raw_env.source_id         = NODE_B;
+        raw_env.destination_id    = NODE_A;
+        raw_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+        raw_env.payload_length       = 1U;
+        raw_env.payload[0]        = MARKERS[i];
+        Result s = eb.send(raw_env, NOW_US + static_cast<uint64_t>(i));
+        assert(s == Result::OK);
+    }
+
+    // Receive and verify FIFO order.
+    for (uint32_t i = 0U; i < FRAME_COUNT; ++i) {
+        MessageEnvelope out;
+        envelope_init(out);
+        Result r = rrea.receive_non_rr(out, NOW_US);
+        assert(r == Result::OK);
+        assert(out.payload[0] == MARKERS[i]);
+    }
+
+    // Stash must be empty after draining all three.
+    MessageEnvelope empty_out;
+    envelope_init(empty_out);
+    Result rem = rrea.receive_non_rr(empty_out, NOW_US);
+    assert(rem == Result::ERR_EMPTY);
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_non_rr_fifo_order\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 10: non_rr_stash_overflow
+// Verifies: REQ-3.2.4
+//
+// Fill the non-RR stash to MAX_STASH_SIZE then send one more. Verify that
+// overflow is dropped gracefully and the original MAX_STASH_SIZE frames survive.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_non_rr_stash_overflow()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    // Send MAX_STASH_SIZE + 1 raw DATA frames from B to A.
+    // Strategy: trigger pump_inbound() while the stash is already at capacity
+    // so the (MAX_STASH_SIZE + 1)th frame is dropped.
+    //
+    // Step 1: send MAX_STASH_SIZE frames and saturate the stash by calling
+    // receive_request() (which calls pump_inbound()) without consuming from
+    // the non-RR stash. This fills m_non_rr_stash to MAX_STASH_SIZE.
+    static const uint32_t CAP = RequestReplyEngine::MAX_STASH_SIZE;
+    for (uint32_t i = 0U; i < CAP; ++i) {
+        MessageEnvelope raw_env;
+        envelope_init(raw_env);
+        raw_env.message_type      = MessageType::DATA;
+        raw_env.source_id         = NODE_B;
+        raw_env.destination_id    = NODE_A;
+        raw_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+        raw_env.payload_length    = 1U;
+        raw_env.payload[0]        = static_cast<uint8_t>(i & 0xFFU);
+        Result s = eb.send(raw_env, NOW_US + static_cast<uint64_t>(i));
+        assert(s == Result::OK);
+    }
+    // receive_request() triggers pump_inbound(), filling non-RR stash to CAP.
+    uint8_t  req_buf[64];
+    uint32_t req_len  = 0U;
+    NodeId   req_src  = 0U;
+    uint64_t req_cid  = 0U;
+    // Returns ERR_EMPTY because the frames have no RR header — but the pump runs.
+    (void)rrea.receive_request(req_buf, 64U, req_len, req_src, req_cid, NOW_US);
+
+    // Step 2: send one more non-RR frame and trigger pump again.
+    // The stash is now full so this frame must be dropped (WARNING_LO).
+    {
+        MessageEnvelope extra_env;
+        envelope_init(extra_env);
+        extra_env.message_type      = MessageType::DATA;
+        extra_env.source_id         = NODE_B;
+        extra_env.destination_id    = NODE_A;
+        extra_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+        extra_env.payload_length    = 1U;
+        extra_env.payload[0]        = 0xFFU;
+        Result s = eb.send(extra_env, NOW_US + static_cast<uint64_t>(CAP));
+        assert(s == Result::OK);
+    }
+    // Another receive_request() pump — extra frame dropped, stash still at CAP.
+    (void)rrea.receive_request(req_buf, 64U, req_len, req_src, req_cid, NOW_US);
+
+    // Step 3: drain the non-RR stash; must return exactly CAP frames.
+    uint32_t received = 0U;
+    for (uint32_t i = 0U; i <= CAP; ++i) {
+        MessageEnvelope out;
+        envelope_init(out);
+        Result r = rrea.receive_non_rr(out, NOW_US);
+        if (r == Result::OK) {
+            ++received;
+        } else {
+            assert(r == Result::ERR_EMPTY);
+            break;
+        }
+    }
+    assert(received == CAP);   // exactly CAP; the extra frame was dropped
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_non_rr_stash_overflow\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main()
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -501,6 +689,9 @@ int main()
     test_rre_unmatched_response_stash();
     test_rre_receive_request_then_reply();
     test_rre_request_stash_full();
+    test_rre_non_rr_passthrough();
+    test_rre_non_rr_fifo_order();
+    test_rre_non_rr_stash_overflow();
 
     printf("=== ALL TESTS PASSED ===\n");
     return 0;

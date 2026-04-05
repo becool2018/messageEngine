@@ -85,6 +85,15 @@ public:
     /// Used to skip a gap after a timeout so ordering does not stall indefinitely.
     void advance_sequence(NodeId src, uint32_t up_to_seq);
 
+    /// Sweep all held slots: for any held message whose expiry_time_us has passed,
+    /// call advance_sequence() past that slot's sequence number so the ordering
+    /// gate does not stall forever on a permanently lost gap.
+    /// Call periodically (e.g., from DeliveryEngine::sweep_ack_timeouts()).
+    /// Returns the number of expired hold slots released.
+    /// Power of 10 Rule 2: bounded loop (≤ ORDERING_HOLD_COUNT iterations).
+    // Safety-critical (SC): HAZ-001 — prevents permanent ordering stall on gap loss.
+    uint32_t sweep_expired_holds(uint64_t now_us);
+
 private:
     // ─────────────────────────────────────────────────────────────────────────
     // HoldSlot: one queued out-of-order message
