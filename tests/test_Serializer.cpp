@@ -611,6 +611,107 @@ static bool test_serialize_min_output_length()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 19: Deserialize rejects out-of-range message_type (Security finding F1)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_deserialize_rejects_invalid_message_type()
+{
+    // Serialize a valid envelope to obtain a well-formed wire frame
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type   = MessageType::DATA;
+    original.source_id      = 50U;
+    original.payload_length = 0U;
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+    assert(out_len >= Serializer::WIRE_HEADER_SIZE);
+
+    // Overwrite message_type byte (offset 0) with an undefined value (4)
+    wire_buf[0U] = 4U;
+
+    MessageEnvelope env;
+    envelope_init(env);
+    Result r = Serializer::deserialize(wire_buf, out_len, env);
+    assert(r == Result::ERR_INVALID);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 20: Deserialize rejects out-of-range reliability_class (Security finding F1)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_deserialize_rejects_invalid_reliability_class()
+{
+    // Serialize a valid envelope to obtain a well-formed wire frame
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type      = MessageType::DATA;
+    original.reliability_class = ReliabilityClass::BEST_EFFORT;
+    original.source_id         = 51U;
+    original.payload_length    = 0U;
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+    assert(out_len >= Serializer::WIRE_HEADER_SIZE);
+
+    // Overwrite reliability_class byte (offset 1) with an undefined value (3)
+    wire_buf[1U] = 3U;
+
+    MessageEnvelope env;
+    envelope_init(env);
+    Result r = Serializer::deserialize(wire_buf, out_len, env);
+    assert(r == Result::ERR_INVALID);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 21: Deserialize accepts in-range message_type boundary values
+//          (0=DATA, 1=ACK, 2=NAK, 3=HEARTBEAT)
+//
+// Note: value 255 (INVALID) is a defined enum value that passes the range check
+// but is caught by the post-condition NEVER_COMPILED_OUT_ASSERT(envelope_valid(env))
+// inside deserialize() — it cannot be tested via a return-value check.  Values
+// 0–3 are the exercisable accepted boundary values.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_deserialize_accepts_boundary_message_types()
+{
+    // Test that message_type values 0, 1, 2, 3 are accepted (pass the range guard)
+    // and that deserialize() returns OK for each.
+    static const uint8_t valid_types[4U] = { 0U, 1U, 2U, 3U };
+
+    for (uint32_t i = 0U; i < 4U; ++i) {
+        MessageEnvelope original;
+        envelope_init(original);
+        original.message_type   = MessageType::ACK;   // any defined non-INVALID type for serialize
+        original.source_id      = 52U;
+        original.payload_length = 0U;
+
+        uint32_t out_len = 0U;
+        Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+        assert(sr == Result::OK);
+        assert(out_len >= Serializer::WIRE_HEADER_SIZE);
+
+        // Overwrite message_type byte with the boundary value under test
+        wire_buf[0U] = valid_types[i];
+
+        MessageEnvelope env;
+        envelope_init(env);
+        Result r = Serializer::deserialize(wire_buf, out_len, env);
+        // All four values are within the defined enum set and must be accepted
+        assert(r == Result::OK);
+        assert(static_cast<uint8_t>(env.message_type) == valid_types[i]);
+    }
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -741,6 +842,27 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_serialize_min_output_length\n");
+    }
+
+    if (!test_deserialize_rejects_invalid_message_type()) {
+        printf("FAIL: test_deserialize_rejects_invalid_message_type\n");
+        ++failed;
+    } else {
+        printf("PASS: test_deserialize_rejects_invalid_message_type\n");
+    }
+
+    if (!test_deserialize_rejects_invalid_reliability_class()) {
+        printf("FAIL: test_deserialize_rejects_invalid_reliability_class\n");
+        ++failed;
+    } else {
+        printf("PASS: test_deserialize_rejects_invalid_reliability_class\n");
+    }
+
+    if (!test_deserialize_accepts_boundary_message_types()) {
+        printf("FAIL: test_deserialize_accepts_boundary_message_types\n");
+        ++failed;
+    } else {
+        printf("PASS: test_deserialize_accepts_boundary_message_types\n");
     }
 
     return (failed > 0) ? 1 : 0;

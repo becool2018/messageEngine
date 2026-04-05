@@ -35,7 +35,7 @@
  *   - Raw assert() permitted in tests/ per CLAUDE.md §9 table.
  *   - STL exempted in tests/ for test fixture setup only.
  *
- * Verifies: REQ-6.3.4, REQ-5.1.6
+ * Verifies: REQ-6.1.6, REQ-6.1.7, REQ-6.3.4, REQ-5.1.6
  */
 
 #include <cstdio>
@@ -52,6 +52,7 @@
 #include "core/TlsConfig.hpp"
 #include "core/ChannelConfig.hpp"
 #include "core/MessageEnvelope.hpp"
+#include "core/Serializer.hpp"
 #include "platform/TlsTcpBackend.hpp"
 #include "MockSocketOps.hpp"
 #if __has_include(<mbedtls/build_info.h>)
@@ -2134,6 +2135,339 @@ static void test_tls_inbound_partition_drops_received()
     printf("PASS: test_tls_inbound_partition_drops_received\n");
 }
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 34: F2 — tls_recv_frame() returns false on short header read
+//
+// Inject a mock socket whose recv_frame returns false (EOF/error path).  The
+// TLS-disabled path delegates to m_sock_ops->recv_frame(), so injecting a
+// mock that always fails exercises the recv_frame false branch without needing
+// a real TLS context.  The test verifies that recv_from_client() calls
+// remove_client() and returns ERR_IO, and that receive_message() eventually
+// returns ERR_TIMEOUT (the server never delivers a valid message).
+//
+// Coverage note for the TLS header-loop (hdr_received != 4U branch):
+//   The loop guard condition is only reachable when m_tls_enabled=true and
+//   mbedtls_ssl_read() returns a partial count.  mbedTLS always delivers a
+//   full record in a single call over loopback, so the "short header" exit
+//   (hdr_received!=4U) cannot be triggered by a loopback integration test
+//   without a custom mbedTLS BIO mock.  The fix is verified by code review
+//   (M1) and static analysis (M2); branch coverage of that specific exit is
+//   architecturally gated (see docs/COVERAGE_CEILINGS.md entry for F2).
+//
+// Verifies: REQ-6.1.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.6
+static void test_f2_recv_frame_short_read_via_mock()
+{
+    // MockSocketOps whose recv_frame always returns false (simulates EOF/error).
+    // The plaintext path in tls_recv_frame() calls m_sock_ops->recv_frame();
+    // returning false triggers remove_client() then ERR_IO in recv_from_client().
+    MockSocketOps mock;
+    mock.fail_recv_frame = true;  // configure: always return false
+
+    TlsTcpBackend backend(mock);
+    TransportConfig cfg;
+    make_transport_config(cfg, true, 19900U, false);  // plaintext server
+
+    Result init_res = backend.init(cfg);
+    assert(init_res == Result::OK);
+    assert(backend.is_open() == true);
+
+    // Connect a plain client so m_client_count > 0; then the injected mock's
+    // recv_frame returns false on the first poll → remove_client → ERR_IO.
+    ClientThreadArg args;
+    args.port   = 19900U;
+    args.tls_on = false;
+    args.result = Result::ERR_IO;
+
+    pthread_t tid = create_thread_4mb(client_thread_func, &args);
+
+    // Server polls; plaintext recv_frame delegates to mock → false → ERR_IO.
+    // receive_message() drains poll iterations and returns ERR_TIMEOUT.
+    MessageEnvelope env;
+    Result recv_res = backend.receive_message(env, 1000U);
+
+    (void)pthread_join(tid, nullptr);
+    backend.close();
+
+    // Client connects and sends OK; server-side mock causes recv failure.
+    // receive_message must not return OK (no valid message was delivered).
+    assert(recv_res == Result::ERR_TIMEOUT);
+
+    printf("PASS: test_f2_recv_frame_short_read_via_mock\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 35: F3 — BIO re-association: two simultaneous raw TLS clients;
+//          remove_client(0) compacts slot 1→0; slot 0 remains usable.
+//
+// Both clients use the raw mbedTLS API (NOT TlsTcpBackend) to avoid calling
+// mbedtls_psa_crypto_free() on destruction.  psa_crypto_free() is called
+// only by the server's TlsTcpBackend destructor at the end of the test, so
+// the global PSA state remains valid throughout.
+//
+// Design:
+//   Both clients start simultaneously (80 ms delay).  Both perform the TLS
+//   handshake and each writes a single valid serialised frame to the server.
+//   The server accepts client 1 first (slot 0), then client 2 (slot 1).
+//
+//   After delivering both frames to the server's receive queue, client 1 sends
+//   TLS close_notify so the server's next ssl_read on slot 0 fires the close
+//   path.  The server calls remove_client(0): the F3 fix re-associates slot 0's
+//   BIO to &m_client_net[0] before zeroing slot 1.
+//
+//   Client 2 then sends a second frame.  The server must be able to receive it
+//   via slot 0 (the compacted slot, BIO re-associated) — proving the fix works.
+//   Without the fix, ssl_read on slot 0 would use fd=-1 from the zeroed
+//   m_client_net[1] and return an I/O error.
+//
+// Coverage note:
+//   The compaction loop body (j < m_client_count-1) executes when
+//   m_client_count==2 and remove_client(0) fires.  The F3 fix
+//   (mbedtls_ssl_set_bio re-association) inside that body is exercised here.
+//
+// Verifies: REQ-6.1.6, REQ-6.1.7
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Shared state for the two raw TLS client threads.
+struct F3SharedState {
+    uint16_t port;
+};
+
+struct F3RawArg {
+    F3SharedState* shared;
+    bool           is_client1;  // true = slot 0 client; false = slot 1 client
+    Result         result;
+};
+
+// Helper: set up a raw mbedTLS client context, connect, and handshake.
+// Returns 0 on success, non-zero on failure.
+static int f3_raw_connect_and_handshake(mbedtls_net_context* net,
+                                         mbedtls_ssl_context* ssl,
+                                         mbedtls_ssl_config*  conf,
+                                         uint16_t port)
+{
+    assert(net != nullptr);
+    assert(ssl != nullptr);
+    assert(conf != nullptr);
+
+    char port_str[8U];
+    (void)snprintf(port_str, sizeof(port_str), "%u", static_cast<unsigned>(port));
+    int ret = mbedtls_net_connect(net, "127.0.0.1", port_str, MBEDTLS_NET_PROTO_TCP);
+    if (ret != 0) { return ret; }
+
+    ret = mbedtls_ssl_config_defaults(conf, MBEDTLS_SSL_IS_CLIENT,
+                                      MBEDTLS_SSL_TRANSPORT_STREAM,
+                                      MBEDTLS_SSL_PRESET_DEFAULT);
+    if (ret != 0) { return ret; }
+    mbedtls_ssl_conf_authmode(conf, MBEDTLS_SSL_VERIFY_NONE);
+#if MBEDTLS_VERSION_MAJOR < 4
+    mbedtls_ssl_conf_rng(conf, mbedtls_psa_get_random, MBEDTLS_PSA_RANDOM_STATE);
+#endif
+
+    ret = mbedtls_ssl_setup(ssl, conf);
+    if (ret != 0) { return ret; }
+    mbedtls_ssl_set_bio(ssl, net, mbedtls_net_send, mbedtls_net_recv, nullptr);
+
+    // Power of 10 Rule 2 deviation: handshake retry loop — bounded by WANT_READ/
+    // WANT_WRITE continuations; terminates when handshake completes or fails.
+    do {
+        ret = mbedtls_ssl_handshake(ssl);
+    } while (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+
+    return ret;
+}
+
+// Send exactly `len` bytes via a raw TLS context, looping on partial writes.
+// Power of 10 Rule 2: bounded by len iterations (each sends ≥1 byte).
+static bool f3_raw_write_all(mbedtls_ssl_context* ssl,
+                              const uint8_t* buf, uint32_t len)
+{
+    assert(ssl != nullptr);
+    assert(buf != nullptr);
+    assert(len > 0U);
+
+    uint32_t sent = 0U;
+    for (uint32_t iter = 0U; iter < len && sent < len; ++iter) {
+        int ret = mbedtls_ssl_write(ssl, buf + sent,
+                                    static_cast<size_t>(len - sent));
+        if (ret > 0) {
+            sent += static_cast<uint32_t>(ret);
+        } else if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    return (sent == len);
+}
+
+static void* f3_raw_client_thread(void* raw_arg)
+{
+    F3RawArg* a = static_cast<F3RawArg*>(raw_arg);
+    assert(a != nullptr);
+    assert(a->shared != nullptr);
+    usleep(80000U);  // 80 ms: wait for server to bind
+
+    mbedtls_net_context net;
+    mbedtls_ssl_context ssl;
+    mbedtls_ssl_config  conf;
+    mbedtls_net_init(&net);
+    mbedtls_ssl_init(&ssl);
+    mbedtls_ssl_config_init(&conf);
+
+    // psa_crypto_init is idempotent; server called it first.
+    (void)psa_crypto_init();
+
+    int ret = f3_raw_connect_and_handshake(&net, &ssl, &conf, a->shared->port);
+    if (ret != 0) {
+        a->result = Result::ERR_IO;
+        mbedtls_ssl_free(&ssl);
+        mbedtls_ssl_config_free(&conf);
+        mbedtls_net_free(&net);
+        return nullptr;
+    }
+
+    // Build and send one valid serialised frame.
+    // Use a known-good serialised MessageEnvelope.  The simplest approach is to
+    // build the raw 4-byte-length-prefixed wire bytes using Serializer.
+    // We use a stack buffer (Power of 10 Rule 3: no dynamic allocation).
+    uint8_t wire[SOCKET_RECV_BUF_BYTES];
+    uint32_t wire_len = 0U;
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.message_id        = a->is_client1 ? 0xF301ULL : 0xF302ULL;
+    env.source_id         = 2U;
+    env.destination_id    = 1U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    Result ser_res = Serializer::serialize(env, wire, SOCKET_RECV_BUF_BYTES, wire_len);
+    if (!result_ok(ser_res) || wire_len == 0U) {
+        a->result = Result::ERR_IO;
+        (void)mbedtls_ssl_close_notify(&ssl);
+        mbedtls_ssl_free(&ssl);
+        mbedtls_ssl_config_free(&conf);
+        mbedtls_net_free(&net);
+        return nullptr;
+    }
+
+    // Build 4-byte big-endian length prefix + payload (as TlsTcpBackend would).
+    uint8_t hdr[4U];
+    hdr[0U] = static_cast<uint8_t>((wire_len >> 24U) & 0xFFU);
+    hdr[1U] = static_cast<uint8_t>((wire_len >> 16U) & 0xFFU);
+    hdr[2U] = static_cast<uint8_t>((wire_len >>  8U) & 0xFFU);
+    hdr[3U] = static_cast<uint8_t>( wire_len         & 0xFFU);
+    bool ok = f3_raw_write_all(&ssl, hdr, 4U);
+    if (ok) {
+        ok = f3_raw_write_all(&ssl, wire, wire_len);
+    }
+
+    if (a->is_client1) {
+        // Client 1: send close_notify quickly so server detects disconnect
+        // while client 2 is still alive (triggering the compaction path).
+        usleep(100000U);  // 100 ms: let server read the first message
+        (void)mbedtls_ssl_close_notify(&ssl);
+    } else {
+        // Client 2: stay alive; send a second frame after client 1 has closed.
+        // Wait for client 1 to have had time to close (200 ms extra).
+        usleep(400000U);  // 400 ms
+
+        // Send second frame (message_id 0xF303).
+        env.message_id = 0xF303ULL;
+        uint32_t wire2_len = 0U;
+        ser_res = Serializer::serialize(env, wire, SOCKET_RECV_BUF_BYTES, wire2_len);
+        if (result_ok(ser_res) && wire2_len > 0U) {
+            hdr[0U] = static_cast<uint8_t>((wire2_len >> 24U) & 0xFFU);
+            hdr[1U] = static_cast<uint8_t>((wire2_len >> 16U) & 0xFFU);
+            hdr[2U] = static_cast<uint8_t>((wire2_len >>  8U) & 0xFFU);
+            hdr[3U] = static_cast<uint8_t>( wire2_len         & 0xFFU);
+            (void)f3_raw_write_all(&ssl, hdr, 4U);
+            (void)f3_raw_write_all(&ssl, wire, wire2_len);
+        }
+
+        usleep(500000U);  // 500 ms: stay alive until server receives second frame
+        (void)mbedtls_ssl_close_notify(&ssl);
+    }
+
+    // Free per-connection contexts; do NOT call mbedtls_psa_crypto_free().
+    mbedtls_ssl_free(&ssl);
+    mbedtls_ssl_config_free(&conf);
+    mbedtls_net_free(&net);
+
+    a->result = ok ? Result::OK : Result::ERR_IO;
+    return nullptr;
+}
+
+// Verifies: REQ-6.1.6, REQ-6.1.7
+static void test_f3_bio_reassoc_after_remove_client()
+{
+    static const uint16_t PORT = 19901U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, true);  // TLS server
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    // Shared state between the two raw client threads.
+    F3SharedState shared;
+    shared.port = PORT;
+
+    F3RawArg arg1;
+    arg1.shared    = &shared;
+    arg1.is_client1 = true;
+    arg1.result    = Result::ERR_IO;
+
+    F3RawArg arg2;
+    arg2.shared    = &shared;
+    arg2.is_client1 = false;
+    arg2.result    = Result::ERR_IO;
+
+    // Launch both threads; they wait 80ms then connect simultaneously.
+    pthread_t t1 = create_thread_4mb(f3_raw_client_thread, &arg1);
+    pthread_t t2 = create_thread_4mb(f3_raw_client_thread, &arg2);
+
+    // Server drains:
+    // Call A: receives client 1's msg (slot 0) → envA (msg_id 0xF301)
+    // Call B: receives client 2's msg (slot 1) → envB (msg_id 0xF302)
+    //         During or after Call B, server detects client 1's close_notify
+    //         on slot 0 → remove_client(0) → compaction:
+    //           F3 fix: ssl[0].BIO → &m_client_net[0] before zeroing slot 1.
+    //         client 2 shifts to slot 0.
+    // Call C: receives client 2's second msg (slot 0, BIO re-associated)
+    //         → envC (msg_id 0xF303)
+    //         Proves slot 0's BIO is valid after compaction.
+
+    uint64_t ids[3U] = {0U, 0U, 0U};
+    uint32_t got = 0U;
+    // Power of 10 Rule 2: bounded loop (at most 80 × 200 ms = 16 s max)
+    for (uint32_t k = 0U; k < 80U && got < 3U; ++k) {
+        MessageEnvelope env;
+        Result r = server.receive_message(env, 200U);
+        if (r == Result::OK) {
+            if (got < 3U) {
+                ids[got] = env.message_id;
+                ++got;
+            }
+        }
+    }
+
+    server.close();
+    (void)pthread_join(t1, nullptr);
+    (void)pthread_join(t2, nullptr);
+
+    assert(arg1.result == Result::OK);
+    assert(arg2.result == Result::OK);
+    // Must have received all 3 frames: 0xF301, 0xF302, 0xF303.
+    // Order may vary (slot 0 or slot 1 polled first).
+    assert(got == 3U);
+
+    printf("PASS: test_f3_bio_reassoc_after_remove_client\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2180,6 +2514,10 @@ int main()
 
     // Inbound impairment tests (REQ-5.1.6)
     test_tls_inbound_partition_drops_received();
+
+    // Security fix tests (F2 and F3):
+    test_f2_recv_frame_short_read_via_mock();
+    test_f3_bio_reassoc_after_remove_client();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);

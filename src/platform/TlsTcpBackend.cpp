@@ -558,6 +558,15 @@ void TlsTcpBackend::remove_client(uint32_t idx)
     for (uint32_t j = idx; j < m_client_count - 1U; ++j) {
         m_client_net[j] = m_client_net[j + 1U];
         m_ssl[j]        = m_ssl[j + 1U];
+        // Security fix F3: after struct-copying ssl[j+1] into ssl[j], the SSL
+        // context in slot j has an internal BIO pointer that still refers to
+        // &m_client_net[j+1].  Re-associate the BIO to &m_client_net[j] before
+        // zeroing slot j+1; otherwise all TLS reads/writes on slot j would use
+        // fd=-1 (the zeroed context at j+1) after mbedtls_net_init clears it.
+        if (m_tls_enabled) {
+            mbedtls_ssl_set_bio(&m_ssl[j], &m_client_net[j],
+                                mbedtls_net_send, mbedtls_net_recv, nullptr);
+        }
         // Re-initialise the slot we just moved away from
         mbedtls_net_init(&m_client_net[j + 1U]);
         mbedtls_ssl_init(&m_ssl[j + 1U]);
@@ -565,6 +574,43 @@ void TlsTcpBackend::remove_client(uint32_t idx)
     --m_client_count;
     ++m_connections_closed;  // REQ-7.2.4: client connection removed
     NEVER_COMPILED_OUT_ASSERT(m_client_count < MAX_TCP_CONNECTIONS);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// tls_write_all() — write exactly len bytes via TLS, looping on partial writes
+// Security fix F2: mbedtls_ssl_write() CAN return a positive value smaller
+// than requested; this helper loops until all bytes are sent or an error occurs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool TlsTcpBackend::tls_write_all(uint32_t idx, const uint8_t* buf, uint32_t len)
+{
+    NEVER_COMPILED_OUT_ASSERT(buf != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(len > 0U);
+
+    uint32_t sent = 0U;
+    // Power of 10 Rule 2: bounded loop — at most len iterations total
+    // (each successful iteration sends at least 1 byte, so sent advances).
+    for (uint32_t iter = 0U; iter < len && sent < len; ++iter) {
+        int ret = mbedtls_ssl_write(&m_ssl[idx], buf + sent,
+                                    static_cast<size_t>(len - sent));
+        if (ret > 0) {
+            sent += static_cast<uint32_t>(ret);
+        } else if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            continue;
+        } else {
+            log_mbedtls_err("TlsTcpBackend", "ssl_write", ret);
+            return false;
+        }
+    }
+
+    if (sent != len) {
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "tls_write_all: short write %u/%u", sent, len);
+        return false;
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(sent == len);
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -586,19 +632,12 @@ bool TlsTcpBackend::tls_send_frame(uint32_t idx,
     hdr[3U] = static_cast<uint8_t>( len         & 0xFFU);
 
     if (m_tls_enabled) {
-        // TLS path: write header then payload
-        int ret = mbedtls_ssl_write(&m_ssl[idx], hdr, 4U);
-        if (ret < 0) {
-            log_mbedtls_err("TlsTcpBackend", "ssl_write (header)", ret);
+        // Security fix F2: use tls_write_all() for both header and payload to
+        // handle partial-write return values from mbedtls_ssl_write() correctly.
+        if (!tls_write_all(idx, hdr, 4U)) {
             return false;
         }
-        ret = mbedtls_ssl_write(&m_ssl[idx], buf,
-                                static_cast<size_t>(len));
-        if (ret < 0) {
-            log_mbedtls_err("TlsTcpBackend", "ssl_write (payload)", ret);
-            return false;
-        }
-        return true;
+        return tls_write_all(idx, buf, len);
     }
 
     // Plaintext path: reuse existing SocketUtils framing via injected ISocketOps
@@ -660,13 +699,26 @@ bool TlsTcpBackend::tls_recv_frame(uint32_t idx,
                                       timeout_ms, out_len);
     }
 
-    // TLS path: read 4-byte header first
+    // TLS path: read 4-byte header first.
+    // Security fix F2: loop to handle partial header reads from mbedtls_ssl_read().
     uint8_t hdr[4U];
-    int ret = mbedtls_ssl_read(&m_ssl[idx], hdr, 4U);
-    if (ret <= 0) {
-        if (ret != MBEDTLS_ERR_SSL_WANT_READ) {
+    uint32_t hdr_received = 0U;
+    // Power of 10 Rule 2: bounded loop — at most 4 iterations for 4-byte header
+    for (uint32_t iter = 0U; iter < 4U && hdr_received < 4U; ++iter) {
+        int ret = mbedtls_ssl_read(&m_ssl[idx], hdr + hdr_received,
+                                   static_cast<size_t>(4U - hdr_received));
+        if (ret > 0) {
+            hdr_received += static_cast<uint32_t>(ret);
+        } else if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
+            continue;
+        } else {
             log_mbedtls_err("TlsTcpBackend", "ssl_read (header)", ret);
+            return false;
         }
+    }
+    if (hdr_received != 4U) {
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "tls_recv_frame: short header read %u/4", hdr_received);
         return false;
     }
 

@@ -211,7 +211,15 @@ private:
     bool tls_recv_frame(uint32_t idx, uint8_t* buf, uint32_t buf_cap,
                         uint32_t timeout_ms, uint32_t* out_len);
 
-    // ── CC-reduction helper ───────────────────────────────────────────────────
+    // ── CC-reduction helpers ──────────────────────────────────────────────────
+
+    /// Write exactly @p len bytes from @p buf via m_ssl[idx], looping on
+    /// partial writes and MBEDTLS_ERR_SSL_WANT_WRITE continuations.
+    /// Returns false (and logs WARNING_HI) if the full write cannot be completed.
+    /// Loop bound: at most len iterations (each iteration sends ≥1 byte).
+    /// Security fix F2: replaces single mbedtls_ssl_write() calls in
+    /// tls_send_frame() to handle partial-write return values correctly.
+    bool tls_write_all(uint32_t idx, const uint8_t* buf, uint32_t len);
 
     /// Read exactly @p payload_len bytes from m_ssl[idx] into @p buf, handling
     /// MBEDTLS_ERR_SSL_WANT_READ continuations. Sets *out_len on success.

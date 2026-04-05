@@ -223,6 +223,48 @@ Result Serializer::serialize(const MessageEnvelope& env,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Enum range-validation helpers (Security finding F1)
+// Kept as separate static functions to hold CC of deserialize() within Rule 4
+// ceiling of 10.  Each function has a single decision point.
+// REQ-3.2.3
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Return true when the raw byte is a defined MessageType value.
+/// Valid: 0 (DATA), 1 (ACK), 2 (NAK), 3 (HEARTBEAT), 255 (INVALID).
+static bool message_type_in_range(uint8_t raw)
+{
+    NEVER_COMPILED_OUT_ASSERT(raw <= 255U);  // Assert: uint8_t invariant always holds
+    return (raw <= 3U) || (raw == 255U);
+}
+
+/// Return true when the raw byte is a defined ReliabilityClass value.
+/// Valid: 0 (BEST_EFFORT), 1 (RELIABLE_ACK), 2 (RELIABLE_RETRY).
+static bool reliability_class_in_range(uint8_t raw)
+{
+    NEVER_COMPILED_OUT_ASSERT(raw <= 255U);  // Assert: uint8_t invariant always holds
+    return (raw <= 2U);
+}
+
+/// Validate v2 fragment header fields already read into env.
+/// Returns false if any constraint is violated.
+/// REQ-3.2.3
+static bool fragment_header_valid(const MessageEnvelope& env)
+{
+    NEVER_COMPILED_OUT_ASSERT(env.fragment_count <= 255U);  // Assert: uint8_t field invariant
+    NEVER_COMPILED_OUT_ASSERT(env.fragment_index <= 255U);  // Assert: uint8_t field invariant
+    if (env.fragment_count == 0U) {
+        return false;
+    }
+    if (env.fragment_index >= env.fragment_count) {
+        return false;
+    }
+    if (static_cast<uint32_t>(env.fragment_count) > FRAG_MAX_COUNT) {
+        return false;
+    }
+    return (static_cast<uint32_t>(env.total_payload_length) <= MSG_MAX_PAYLOAD_BYTES);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Deserialization
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -246,11 +288,24 @@ Result Serializer::deserialize(const uint8_t*  buf,
     uint32_t offset = 0U;
 
     // Read header fields in big-endian order
-    env.message_type = static_cast<MessageType>(read_u8(buf, offset));
-    offset += 1U;
 
-    env.reliability_class = static_cast<ReliabilityClass>(read_u8(buf, offset));
+    // REQ-3.2.3: validate message_type before casting — values 4–254 are undefined.
+    // (Security finding F1: out-of-range cast bypasses envelope_valid() and hits SC assert)
+    uint8_t mt_raw = read_u8(buf, offset);
     offset += 1U;
+    if (!message_type_in_range(mt_raw)) {
+        return Result::ERR_INVALID;
+    }
+    env.message_type = static_cast<MessageType>(mt_raw);
+
+    // REQ-3.2.3: validate reliability_class before casting — values 3–255 are undefined.
+    // (Security finding F1: out-of-range cast bypasses envelope_valid() and hits SC assert)
+    uint8_t rc_raw = read_u8(buf, offset);
+    offset += 1U;
+    if (!reliability_class_in_range(rc_raw)) {
+        return Result::ERR_INVALID;
+    }
+    env.reliability_class = static_cast<ReliabilityClass>(rc_raw);
 
     env.priority = read_u8(buf, offset);
     offset += 1U;
@@ -300,21 +355,8 @@ Result Serializer::deserialize(const uint8_t*  buf,
     env.total_payload_length = read_u16(buf, offset);
     offset += 2U;
 
-    // REQ-3.2.3: validate fragment metadata
-    // fragment_count == 0 is invalid (must be at least 1)
-    if (env.fragment_count == 0U) {
-        return Result::ERR_INVALID;
-    }
-    // fragment_index must be < fragment_count
-    if (env.fragment_index >= env.fragment_count) {
-        return Result::ERR_INVALID;
-    }
-    // fragment_count must not exceed FRAG_MAX_COUNT
-    if (static_cast<uint32_t>(env.fragment_count) > FRAG_MAX_COUNT) {
-        return Result::ERR_INVALID;
-    }
-    // total_payload_length must not exceed MSG_MAX_PAYLOAD_BYTES
-    if (static_cast<uint32_t>(env.total_payload_length) > MSG_MAX_PAYLOAD_BYTES) {
+    // REQ-3.2.3: validate fragment metadata — delegate to helper to hold CC within Rule 4
+    if (!fragment_header_valid(env)) {
         return Result::ERR_INVALID;
     }
 
