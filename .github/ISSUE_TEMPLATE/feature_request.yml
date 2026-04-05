@@ -1,0 +1,49 @@
+name: Feature request
+description: Propose a new capability or enhancement
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or motivation
+      description: What limitation or gap does this address?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: >
+        Describe the change you have in mind. Include any API or interface
+        changes, and note which layer (core / platform / app) it belongs to.
+    validations:
+      required: true
+
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requirements impact
+      description: >
+        Does this require a new REQ ID in CLAUDE.md? Which existing requirements
+        (REQ-x.x) does it relate to or extend?
+    validations:
+      required: false
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety considerations
+      description: >
+        Does this touch any SC function listed in docs/HAZARD_ANALYSIS.md §3?
+        Could it introduce a new hazard? If unsure, leave blank.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you considered and why you ruled them out.
+    validations:
+      required: false

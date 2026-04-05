@@ -1,0 +1,63 @@
+name: Bug report
+description: Report incorrect behaviour in messageEngine
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security vulnerability?** Do not use this form.
+        Use [GitHub Private Security Advisories](../../security/advisories/new) instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: >
+        The value of `ME_VERSION_STRING` in `src/core/Version.hpp`, or the git tag
+        (e.g. `v2.0.0`).
+      placeholder: v2.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS, compiler, and compiler version.
+      placeholder: "Ubuntu 24.04, clang 18"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What did you observe? What did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Minimal code or command sequence that reproduces the issue.
+      render: cpp
+    validations:
+      required: true
+
+  - type: textarea
+    id: component
+    attributes:
+      label: Affected component (if known)
+      description: >
+        E.g. DeliveryEngine, Serializer, AckTracker, TcpBackend, ImpairmentEngine.
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Logs, stack traces, test output, or anything else relevant.
+    validations:
+      required: false
