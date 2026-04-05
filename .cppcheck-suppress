@@ -100,6 +100,8 @@ compareValueOutOfTypeRangeError:src/core/Serializer.cpp
 # as always-true/false. This is intentional. Pre-existing.
 knownConditionTrueFalse:src/app/Client.cpp
 knownConditionTrueFalse:src/core/DeliveryEngine.cpp
+knownConditionTrueFalse:src/core/Fragmentation.cpp
+knownConditionTrueFalse:src/core/RequestReplyEngine.cpp
 knownConditionTrueFalse:src/platform/LocalSimHarness.cpp
 
 # Justification: constParameter for argv in static arg-parsing helpers --
