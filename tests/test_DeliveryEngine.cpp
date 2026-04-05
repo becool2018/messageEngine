@@ -2083,6 +2083,39 @@ static void setup_two_engines(LocalSimHarness& ha,
     engine_b.init(&hb, cfg_b.channels[0], 2U);
 }
 
+// Variant of setup_two_engines() with ORDERED channel mode (Issue 2 fix test helper).
+// Use this for tests that verify per-destination sequence number assignment.
+// Verifies: REQ-3.3.5
+static void setup_two_ordered_engines(LocalSimHarness& ha,
+                                       LocalSimHarness& hb,
+                                       DeliveryEngine&  engine_a,
+                                       DeliveryEngine&  engine_b)
+{
+    TransportConfig cfg_a;
+    create_local_sim_config(cfg_a, 1U);
+    cfg_a.channels[0].max_retries      = 5U;
+    cfg_a.channels[0].retry_backoff_ms = 100U;
+    cfg_a.channels[0].recv_timeout_ms  = 1000U;
+    cfg_a.channels[0].ordering         = OrderingMode::ORDERED;
+    Result ra = ha.init(cfg_a);
+    assert(ra == Result::OK);
+
+    TransportConfig cfg_b;
+    create_local_sim_config(cfg_b, 2U);
+    cfg_b.channels[0].max_retries      = 5U;
+    cfg_b.channels[0].retry_backoff_ms = 100U;
+    cfg_b.channels[0].recv_timeout_ms  = 1000U;
+    cfg_b.channels[0].ordering         = OrderingMode::ORDERED;
+    Result rb = hb.init(cfg_b);
+    assert(rb == Result::OK);
+
+    ha.link(&hb);
+    hb.link(&ha);
+
+    engine_a.init(&ha, cfg_a.channels[0], 1U);
+    engine_b.init(&hb, cfg_b.channels[0], 2U);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Integration Test 51: Fragmented send and receive through two engines
 // Engine A sends a 2500-byte payload; Engine B's receive() reassembles 3 frags.
@@ -2147,7 +2180,7 @@ static void test_de_ordered_delivery()
 {
     LocalSimHarness ha, hb;
     DeliveryEngine  engine_a, engine_b;
-    setup_two_engines(ha, hb, engine_a, engine_b);
+    setup_two_ordered_engines(ha, hb, engine_a, engine_b);
 
     // Engine A sends two DATA messages; the engine assigns sequence_num 1 and 2
     MessageEnvelope env1, env2;

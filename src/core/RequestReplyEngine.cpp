@@ -78,6 +78,14 @@ void RequestReplyEngine::init(DeliveryEngine& engine, NodeId local_node)
                      static_cast<size_t>(APP_PAYLOAD_CAP));
     }
 
+    // REQ-3.2.4: zero the non-RR passthrough stash (Issue 4 fix)
+    // Power of 10 Rule 2: bounded loop — compile-time constant MAX_STASH_SIZE
+    m_non_rr_head  = 0U;
+    m_non_rr_count = 0U;
+    for (uint32_t k = 0U; k < MAX_STASH_SIZE; ++k) {
+        envelope_init(m_non_rr_stash[k]);
+    }
+
     m_initialized = true;
 
     NEVER_COMPILED_OUT_ASSERT(m_initialized);       // post: engine marked ready
@@ -371,9 +379,63 @@ void RequestReplyEngine::pump_inbound(uint64_t now_us)
 
         // Dispatch: parse RRHeader and route to response or request handler.
         // Extracted to dispatch_inbound_envelope() to keep CC ≤ 10.
-        // Power of 10 Rule 7: return value checked (result ignored on malformed).
-        (void)dispatch_inbound_envelope(env);
+        // Power of 10 Rule 7: return value checked; non-RR frames are stashed.
+        bool dispatched = dispatch_inbound_envelope(env);
+        if (!dispatched) {
+            // Issue 4 fix: preserve non-RR DATA frames so the application can
+            // retrieve them via receive_non_rr(). Prior behaviour silently dropped them.
+            stash_non_rr_data(env);
+        }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RequestReplyEngine::stash_non_rr_data() — NSC private helper (Issue 4 fix)
+// Saves a non-RR DATA envelope to the m_non_rr_stash FIFO for later retrieval
+// via receive_non_rr(). Drops with WARNING_LO when the stash is full.
+// Power of 10: ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+void RequestReplyEngine::stash_non_rr_data(const MessageEnvelope& env)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);            // Assert: engine ready
+    NEVER_COMPILED_OUT_ASSERT(envelope_is_data(env));    // Assert: DATA frames only
+
+    if (m_non_rr_count >= MAX_STASH_SIZE) {
+        Logger::log(Severity::WARNING_LO, "RequestReplyEngine",
+                    "Non-RR stash full; dropping message_id=%llu from src=%u",
+                    (unsigned long long)env.message_id, env.source_id);
+        return;
+    }
+
+    uint32_t idx = (m_non_rr_head + m_non_rr_count) % MAX_STASH_SIZE;
+    envelope_copy(m_non_rr_stash[idx], env);
+    ++m_non_rr_count;
+
+    NEVER_COMPILED_OUT_ASSERT(m_non_rr_count <= MAX_STASH_SIZE);  // Assert: bounded
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RequestReplyEngine::receive_non_rr() — NSC public (Issue 4 fix)
+// Pops the oldest non-RR DATA envelope from m_non_rr_stash.
+// Power of 10: ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+Result RequestReplyEngine::receive_non_rr(MessageEnvelope& env)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);                       // Assert: engine ready
+    NEVER_COMPILED_OUT_ASSERT(m_non_rr_count <= MAX_STASH_SIZE);    // Assert: valid count
+
+    if (!m_initialized) {
+        return Result::ERR_INVALID;
+    }
+    if (m_non_rr_count == 0U) {
+        return Result::ERR_EMPTY;
+    }
+
+    envelope_copy(env, m_non_rr_stash[m_non_rr_head]);
+    m_non_rr_head = (m_non_rr_head + 1U) % MAX_STASH_SIZE;
+    --m_non_rr_count;
+
+    return Result::OK;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

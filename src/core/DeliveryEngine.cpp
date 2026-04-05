@@ -191,6 +191,10 @@ void DeliveryEngine::init(TransportInterface* transport,
         envelope_init(m_frag_buf[i]);
     }
 
+    // REQ-3.3.5: zero the held-pending ordering slot (Issue 1 fix)
+    envelope_init(m_held_pending);
+    m_held_pending_valid = false;
+
     m_initialized = true;
 
     // Power of 10 rule 5: post-condition assertion
@@ -489,9 +493,13 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
     env.message_id   = m_id_gen.next();
     env.timestamp_us = now_us;
 
-    // REQ-3.3.5: assign per-destination sequence number for ORDERED DATA messages.
-    // sequence_num == 0 is reserved for UNORDERED; next_seq_for() returns >= 1.
-    if (envelope_is_data(env) && env.sequence_num == 0U) {
+    // REQ-3.3.5: assign per-destination sequence number only for ORDERED DATA messages.
+    // Unordered channels must leave sequence_num == 0 so the receiver bypasses the
+    // ordering gate. Assigning a sequence on an UNORDERED channel would cause the
+    // receiver to hold every message in the ordering buffer indefinitely (Issue 2 fix).
+    if (envelope_is_data(env) &&
+        env.sequence_num == 0U &&
+        m_cfg.ordering == OrderingMode::ORDERED) {
         env.sequence_num = next_seq_for(env.destination_id);
     }
 
@@ -622,6 +630,15 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
         return Result::ERR_INVALID;
     }
 
+    // REQ-3.3.5: drain any previously-held ordering message before blocking on the
+    // transport. If a prior in-order delivery left a contiguous message staged in
+    // m_held_pending, return it immediately so the backlog drains without waiting
+    // for the next wire frame (Issue 1 fix).
+    if (m_held_pending_valid) {
+        deliver_held_pending(env, now_us);
+        return Result::OK;
+    }
+
     // Power of 10 rule 7: check return value from transport
     // wire_env holds the raw wire frame; logical_env will hold the assembled message.
     MessageEnvelope wire_env;
@@ -697,6 +714,20 @@ Result DeliveryEngine::handle_data_path(MessageEnvelope& env, uint64_t now_us)
         return Result::ERR_AGAIN;
     }
     envelope_copy(env, ordered_env);
+
+    // REQ-3.3.5: attempt to drain the next contiguous held message for this source
+    // (Issue 1 fix). If a previously held message is now the next in sequence, stage
+    // it in m_held_pending so the subsequent receive() call delivers it without waiting
+    // for the transport. Power of 10 Rule 7: return value of try_release_next checked.
+    {
+        MessageEnvelope next_held;
+        envelope_init(next_held);
+        Result rel_res = m_ordering.try_release_next(env.source_id, next_held);
+        if (rel_res == Result::OK) {
+            envelope_copy(m_held_pending, next_held);
+            m_held_pending_valid = true;
+        }
+    }
 
     Logger::log(Severity::INFO, "DeliveryEngine",
                 "Received data message_id=%llu from src=%u, length=%u",
@@ -778,6 +809,11 @@ uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
     // in init()). sweep_expired() overwrites only the first 'collected' slots;
     // stale data beyond that index is never read.
     uint32_t collected = 0U;
+
+    // REQ-3.2.3: sweep stale reassembly slots (Issue 3 fix).
+    // m_reassembly.sweep_expired() was never called, causing fragment slots for stalled
+    // senders to be held indefinitely. Housekeeping here keeps the buffer live.
+    m_reassembly.sweep_expired(now_us);
 
     // Sweep expired ACK entries
     // Power of 10 rule 7: check return value (it's count)
@@ -1048,6 +1084,51 @@ Result DeliveryEngine::handle_ordering_gate(const MessageEnvelope& logical,
                                res == Result::ERR_AGAIN ||
                                res == Result::ERR_FULL);  // Assert: known result code
     return res;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::deliver_held_pending() — REQ-3.3.5 private helper (Issue 1 fix)
+// Delivers the message staged in m_held_pending, attempts to stage the next
+// contiguous held message via try_release_next(), sends ACK if required, and
+// increments the received-message counter.  Called from receive() when
+// m_held_pending_valid is true so that ordering backlogs drain across consecutive
+// receive() calls without waiting for additional wire frames.
+// NSC: ordering bookkeeping on the non-reliability housekeeping path.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+void DeliveryEngine::deliver_held_pending(MessageEnvelope& env, uint64_t now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_held_pending_valid);  // Assert: called only when valid
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);          // Assert: engine initialized
+
+    m_held_pending_valid = false;
+    envelope_copy(env, m_held_pending);
+
+    // Try to stage the next contiguous held message for this source.
+    // Power of 10 Rule 7: return value of try_release_next checked.
+    {
+        MessageEnvelope next_held;
+        envelope_init(next_held);
+        Result rel_res = m_ordering.try_release_next(env.source_id, next_held);
+        if (rel_res == Result::OK) {
+            envelope_copy(m_held_pending, next_held);
+            m_held_pending_valid = true;
+        }
+    }
+
+    Logger::log(Severity::INFO, "DeliveryEngine",
+                "Delivered held message_id=%llu from src=%u (ordering backlog drain)",
+                (unsigned long long)env.message_id, env.source_id);
+
+    // Generate and send ACK (held messages were not ACK'd when originally held).
+    if (envelope_needs_ack_response(env)) {
+        send_data_ack(*m_transport, env, m_local_id, now_us);
+    }
+
+    ++m_stats.msgs_received;  // REQ-7.2.3: count successful data message delivery
+
+    // Power of 10 rule 5: post-condition assertion
+    NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));  // Assert: envelope valid on exit
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
