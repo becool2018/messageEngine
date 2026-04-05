@@ -317,6 +317,7 @@ Result TlsTcpBackend::bind_and_listen(const char* ip, uint16_t port)
 /// Called after a successful client handshake when session_resumption_enabled.
 /// Non-fatal on failure: logs WARNING_LO; m_session_saved remains false.
 /// Extracted from tls_connect_handshake() to keep its CC ≤ 10 (REQ-6.3.4).
+#if defined(MBEDTLS_SSL_SESSION_TICKETS)
 void TlsTcpBackend::try_save_client_session()
 {
     NEVER_COMPILED_OUT_ASSERT(m_tls_enabled);
@@ -338,6 +339,7 @@ void TlsTcpBackend::try_save_client_session()
                     "TLS session saved for resumption on next connect");
     }
 }
+#endif /* MBEDTLS_SSL_SESSION_TICKETS */
 
 /// Attempt to load m_saved_session into m_ssl[0] before the TLS handshake
 /// to enable abbreviated session resumption (RFC 5077, REQ-6.3.4).
