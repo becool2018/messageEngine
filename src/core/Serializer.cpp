@@ -215,8 +215,9 @@ Result Serializer::serialize(const MessageEnvelope& env,
 
     out_len = required_len;
 
-    // Power of 10 rule 5: post-condition assertion
+    // Power of 10 rule 5: post-condition assertions
     NEVER_COMPILED_OUT_ASSERT(out_len == WIRE_HEADER_SIZE + env.payload_length);  // Assert: output size correct
+    NEVER_COMPILED_OUT_ASSERT(out_len >= WIRE_HEADER_SIZE);  // Assert: minimum header always serialized
 
     return Result::OK;
 }

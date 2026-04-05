@@ -590,6 +590,27 @@ static bool test_v2_fragment_count_too_large_rejected()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 18: Serialize zero-payload envelope and assert out_len == WIRE_HEADER_SIZE
+//          (exercises the post-condition assertion on the minimum-payload path, F5)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_serialize_min_output_length()
+{
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type   = MessageType::DATA;
+    env.source_id      = 30U;
+    env.payload_length = 0U;  // zero payload: out_len must equal WIRE_HEADER_SIZE exactly
+
+    uint32_t out_len = 0U;
+    Result r = Serializer::serialize(env, wire_buf, sizeof(wire_buf), out_len);
+    assert(r == Result::OK);
+    assert(out_len == Serializer::WIRE_HEADER_SIZE);  // post-condition: minimum header always present
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -713,6 +734,13 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_v2_fragment_count_too_large_rejected\n");
+    }
+
+    if (!test_serialize_min_output_length()) {
+        printf("FAIL: test_serialize_min_output_length\n");
+        ++failed;
+    } else {
+        printf("PASS: test_serialize_min_output_length\n");
     }
 
     return (failed > 0) ? 1 : 0;

@@ -176,6 +176,12 @@ private:
     /// REQ-5.1.2: bidirectional jitter; lower bound clamped to 0 when variance > mean.
     /// @return Jitter offset in microseconds in [lo_ms, hi_ms]*1000.
     uint64_t compute_jitter_us();
+
+    /// Log a WARNING_LO if the delay buffer exceeds the 80% high-watermark threshold.
+    /// Extracted to keep process_outbound() CC ≤ 10 (Power of 10 rule 4).
+    /// Threshold: (IMPAIR_DELAY_BUF_SIZE * 80U) / 100U slots.
+    /// REQ-7.2.2: early-warning observability for delay buffer approaching capacity.
+    void check_delay_buf_watermark() const;
     // ───────────────────────────────────────────────────────────────────────
     // Delay buffer entry (messages waiting for release due to latency/jitter)
     // ───────────────────────────────────────────────────────────────────────

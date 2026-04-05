@@ -198,6 +198,29 @@ uint64_t ImpairmentEngine::compute_jitter_us()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// check_delay_buf_watermark() — private helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+void ImpairmentEngine::check_delay_buf_watermark() const
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);                              // Power of 10: initialized
+    NEVER_COMPILED_OUT_ASSERT(m_delay_count <= IMPAIR_DELAY_BUF_SIZE);    // Power of 10: valid count
+
+    // Early-warning: log when delay buffer approaches capacity (>80%).
+    // Prevents silent ERR_FULL surprise under sustained high-latency impairment.
+    // Threshold: (IMPAIR_DELAY_BUF_SIZE * 80U) / 100U = 25 slots for size=32.
+    static const uint32_t k_delay_warn_threshold =
+        (IMPAIR_DELAY_BUF_SIZE * 80U) / 100U;
+
+    if (m_delay_count > k_delay_warn_threshold) {
+        Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
+                    "delay buffer approaching capacity: %u/%u slots used",
+                    static_cast<unsigned>(m_delay_count),
+                    static_cast<unsigned>(IMPAIR_DELAY_BUF_SIZE));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // process_outbound()
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -215,7 +238,11 @@ Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env,
                        "delay buffer full (disabled impairments)");
             return Result::ERR_FULL;
         }
-        return queue_to_delay_buf(in_env, now_us);
+        Result r_passthrough = queue_to_delay_buf(in_env, now_us);
+        if (result_ok(r_passthrough)) {
+            check_delay_buf_watermark();  // REQ-7.2.2: early-warning on 80% capacity
+        }
+        return r_passthrough;
     }
 
     // Drop if partition is active
@@ -250,6 +277,7 @@ Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env,
     if (!result_ok(res)) {
         return res;
     }
+    check_delay_buf_watermark();  // REQ-7.2.2: early-warning on 80% capacity
 
     // Probabilistically queue a duplicate copy
     if (m_cfg.duplication_probability > 0.0) {

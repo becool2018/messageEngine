@@ -991,6 +991,80 @@ static bool test_process_inbound_partition_drop()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: process_outbound_high_watermark_no_err_full
+// Verifies: REQ-7.2.2
+// Verifies that (IMPAIR_DELAY_BUF_SIZE * 80 / 100) + 1 = 26 messages enter the
+// delay buffer without ERR_FULL, i.e., the warning fires before the buffer is full.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-7.2.2
+static bool test_process_outbound_high_watermark_no_err_full()
+{
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled          = true;
+    cfg.fixed_latency_ms = 1000000U;  // 1000 s: messages won't be collected during test
+    cfg.loss_probability = 0.0;
+
+    engine.init(cfg);
+
+    uint64_t now_us = 1000000ULL;
+
+    // k_delay_warn_threshold = (32 * 80) / 100 = 25; send threshold+1 = 26 msgs
+    static const uint32_t k_watermark_plus_one = (IMPAIR_DELAY_BUF_SIZE * 80U) / 100U + 1U;
+
+    // Power of 10 rule 2: fixed loop bound
+    for (uint32_t i = 0U; i < k_watermark_plus_one; ++i) {
+        MessageEnvelope env;
+        create_test_envelope(env, 1U, 2U, static_cast<uint64_t>(i) + 10000U);
+        Result r = engine.process_outbound(env, now_us);
+        assert(r == Result::OK);  // none of the first 26 should return ERR_FULL
+    }
+
+    // Verify all 26 fit without error (watermark warning logged but buffer not full)
+    assert(k_watermark_plus_one <= IMPAIR_DELAY_BUF_SIZE);  // sanity: 26 <= 32
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: process_outbound_full_returns_err_full
+// Verifies: REQ-7.2.2
+// Verifies that after IMPAIR_DELAY_BUF_SIZE messages are in the buffer,
+// the next process_outbound returns ERR_FULL.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-7.2.2
+static bool test_process_outbound_full_returns_err_full()
+{
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled          = true;
+    cfg.fixed_latency_ms = 1000000U;  // 1000 s: messages won't be collected during test
+    cfg.loss_probability = 0.0;
+
+    engine.init(cfg);
+
+    uint64_t now_us = 2000000ULL;
+
+    // Fill all IMPAIR_DELAY_BUF_SIZE slots (Power of 10: bounded loop)
+    for (uint32_t i = 0U; i < IMPAIR_DELAY_BUF_SIZE; ++i) {
+        MessageEnvelope env;
+        create_test_envelope(env, 1U, 2U, static_cast<uint64_t>(i) + 20000U);
+        Result r = engine.process_outbound(env, now_us);
+        assert(r == Result::OK);
+    }
+
+    // The 33rd message must be rejected with ERR_FULL
+    MessageEnvelope env_overflow;
+    create_test_envelope(env_overflow, 1U, 2U, 99998ULL);
+    Result r_full = engine.process_outbound(env_overflow, now_us);
+    assert(r_full == Result::ERR_FULL);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -1163,6 +1237,20 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_process_inbound_partition_drop\n");
+    }
+
+    if (!test_process_outbound_high_watermark_no_err_full()) {
+        printf("FAIL: test_process_outbound_high_watermark_no_err_full\n");
+        ++failed;
+    } else {
+        printf("PASS: test_process_outbound_high_watermark_no_err_full\n");
+    }
+
+    if (!test_process_outbound_full_returns_err_full()) {
+        printf("FAIL: test_process_outbound_full_returns_err_full\n");
+        ++failed;
+    } else {
+        printf("PASS: test_process_outbound_full_returns_err_full\n");
     }
 
     return (failed > 0) ? 1 : 0;
