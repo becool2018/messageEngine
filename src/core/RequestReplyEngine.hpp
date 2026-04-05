@@ -217,6 +217,14 @@ private:
     StashedRequest  m_request_stash[MAX_STASH_SIZE];
     uint32_t        m_stash_count   = 0U;
 
+    // REQ-3.2.4 (Issue 4 fix): stash for DATA envelopes that do not carry an RRHeader.
+    // pump_inbound() consumes all frames from the shared DeliveryEngine; non-RR DATA
+    // messages were silently dropped. They are now preserved here and returned via
+    // receive_non_rr(). Power of 10 Rule 3: bounded FIFO; no dynamic allocation.
+    MessageEnvelope m_non_rr_stash[MAX_STASH_SIZE];
+    uint32_t        m_non_rr_head  = 0U;
+    uint32_t        m_non_rr_count = 0U;
+
     // ─────────────────────────────────────────────────────────────────────────
     // Private helpers
     // ─────────────────────────────────────────────────────────────────────────
@@ -270,6 +278,29 @@ private:
     /// Extracted from pump_inbound() to keep pump_inbound() CC <= 10.
     /// Returns false if the envelope is not an RR message (caller may skip).
     bool dispatch_inbound_envelope(const MessageEnvelope& env);
+
+    /// Save a non-RR DATA envelope to m_non_rr_stash for later retrieval via
+    /// receive_non_rr(). Drops with WARNING_LO when the stash is full.
+    /// NSC: bookkeeping only; no reliability or delivery impact.
+    void stash_non_rr_data(const MessageEnvelope& env);
+
+public:
+    // ─────────────────────────────────────────────────────────────────────────
+    // Non-RR DATA passthrough (Issue 4 fix)
+    // ─────────────────────────────────────────────────────────────────────────
+    /**
+     * @brief Pop the oldest non-RR DATA message from the passthrough stash.
+     *
+     * When pump_inbound() consumes a DATA frame that does not carry a valid
+     * RRHeader, it saves the full envelope here rather than dropping it.
+     * The application calls receive_non_rr() to retrieve those frames.
+     *
+     * @param[out] env Filled with the oldest non-RR envelope on OK.
+     * @return OK if a frame was available; ERR_EMPTY otherwise;
+     *         ERR_INVALID if not initialized.
+     * NSC: passthrough bookkeeping only.
+     */
+    Result receive_non_rr(MessageEnvelope& env);
 };
 
 #endif // CORE_REQUEST_REPLY_ENGINE_HPP

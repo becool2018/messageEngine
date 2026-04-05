@@ -164,11 +164,12 @@ Result OrderingBuffer::ingest(const MessageEnvelope& msg,
     // Ordered DATA message: apply ordering gate
     uint32_t peer_idx = get_or_create_peer(msg.source_id);
     if (peer_idx == REASSEMBLY_SLOT_COUNT) {
-        // No peer slot available; bypass ordering to avoid stall
+        // No peer slot available: ordering guarantee cannot be maintained.
+        // Return ERR_FULL so the caller can log and drop the frame rather than
+        // silently delivering it out of order (Issue 5 fix: honour ordering contract).
         Logger::log(Severity::WARNING_HI, "OrderingBuffer",
-                    "No peer slot for src=%u; bypassing ordering gate", msg.source_id);
-        envelope_copy(out, msg);
-        return Result::OK;
+                    "Peer table full; cannot enforce ordering for src=%u", msg.source_id);
+        return Result::ERR_FULL;
     }
 
     uint32_t expected = m_peers[peer_idx].next_expected_seq;

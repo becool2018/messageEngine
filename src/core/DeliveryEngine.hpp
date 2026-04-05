@@ -232,6 +232,14 @@ private:
     // Holds up to FRAG_MAX_COUNT wire fragments for one logical message at a time.
     MessageEnvelope m_frag_buf[FRAG_MAX_COUNT];
 
+    // REQ-3.3.5: single-slot staging area for held ordering messages (Issue 1 fix).
+    // When handle_data_path() delivers an in-order message, try_release_next() checks
+    // whether the next sequential message is already held; if so it is staged here and
+    // returned on the subsequent receive() call rather than being stuck forever.
+    // Power of 10 Rule 3: single pre-allocated envelope; no heap after init.
+    MessageEnvelope m_held_pending;
+    bool            m_held_pending_valid;
+
     // Private helper: push one DeliveryEvent into m_events (REQ-7.2.5).
     // Bounded overwrite-on-full ring push; never blocks, never fails.
     // NSC: observability bookkeeping only.
@@ -312,6 +320,13 @@ private:
     // Extracted from receive() to reduce its cognitive complexity to ≤ 10.
     // Safety-critical (SC): HAZ-001, HAZ-003 — on the reliable delivery path.
     Result handle_data_path(MessageEnvelope& env, uint64_t now_us);
+
+    // Private helper: deliver the staged m_held_pending envelope (REQ-3.3.5 Issue 1 fix).
+    // Called at the top of receive() when m_held_pending_valid is true.
+    // Copies the held message to env, attempts to stage the next held message
+    // via try_release_next(), sends ACK if required, and increments stats.
+    // NSC: ordering bookkeeping on the non-reliable housekeeping path.
+    void deliver_held_pending(MessageEnvelope& env, uint64_t now_us);
 
     // Private helper: process an inbound control message (ACK/NAK/HEARTBEAT).
     // Always returns OK (control messages are never an error condition).
