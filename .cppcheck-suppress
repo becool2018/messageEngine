@@ -141,6 +141,42 @@ oppositeInnerCondition:src/platform/SocketUtils.cpp
 arrayIndexOutOfBoundsCond:src/platform/TcpBackend.cpp
 arrayIndexOutOfBoundsCond:src/platform/UdpBackend.cpp
 arrayIndexOutOfBoundsCond:src/platform/LocalSimHarness.cpp
+arrayIndexOutOfBoundsCond:src/core/ReassemblyBuffer.cpp
+arrayIndexOutOfBoundsCond:src/platform/TlsTcpBackend.cpp
+arrayIndexOutOfBoundsCond:src/platform/DtlsUdpBackend.cpp
+arrayIndexOutOfBoundsCond:src/core/RequestReplyEngine.cpp
+
+# Justification: nullPointerRedundantCheck -- NEVER_COMPILED_OUT_ASSERT(ptr != nullptr)
+# expands to if (!(ptr != nullptr)) { abort/log }, causing cppcheck to hypothesize the
+# path where ptr == nullptr, then flag the subsequent dereference as a null pointer
+# dereference. In reality, the macro aborts (debug) or resets (production) before the
+# dereference. The assertion is a mandatory precondition guard per Power of 10 Rule 5.
+# Raw assert() suppressed this internally. Deviation: false positive from macro expansion
+# making the abort-path visible to cppcheck's flow analysis.
+nullPointerRedundantCheck:src/core/DeliveryEngine.cpp
+nullPointerRedundantCheck:src/core/RequestReplyEngine.cpp
+nullPointerRedundantCheck:src/platform/ImpairmentConfigLoader.cpp
+nullPointerRedundantCheck:src/platform/TlsTcpBackend.cpp
+nullPointerRedundantCheck:src/platform/DtlsUdpBackend.cpp
+nullPointerRedundantCheck:src/platform/SocketUtils.hpp
+
+# Justification: uninitMemberVar / uninitMemberVarPrivate -- these classes use an
+# explicit init() pattern (F-Prime / MISRA C++:2023 style) instead of constructor
+# initialization. Members are fully initialized by init() before any other method
+# is called; m_initialized guards all runtime methods via NEVER_COMPILED_OUT_ASSERT.
+# noConstructor suppresses the missing-constructor warning; these suppress the
+# complementary uninitialized-member warnings for the same design pattern.
+# Deviation: F-Prime init() idiom; logged with noConstructor deviation above.
+uninitMemberVar:src/core/DeliveryEngine.hpp
+uninitMemberVarPrivate:src/core/AckTracker.hpp
+uninitMemberVarPrivate:src/core/RetryManager.hpp
+uninitMemberVarPrivate:src/core/RequestReplyEngine.hpp
+
+# Justification: unusedPrivateFunction -- try_save_client_session() IS called from
+# TlsTcpBackend.cpp:428 inside connect_as_client(). Cppcheck fails to trace through
+# the mbedTLS-conditional code path and incorrectly classifies it as unused.
+# Deviation: false positive; verified by grep.
+unusedPrivateFunction:src/platform/TlsTcpBackend.cpp
 
 # Justification: poll_event(), pending_event_count(), and drain_events() are public API
 # methods called from tests/test_DeliveryEngine.cpp, which is outside the src/ directory
@@ -149,19 +185,9 @@ arrayIndexOutOfBoundsCond:src/platform/LocalSimHarness.cpp
 # Logged: DEFECT_LOG.md INSP-008.
 unusedFunction:src/core/DeliveryEngine.cpp
 
-# Justification: DeliveryEventRing::clear() is a public utility method on the ring-buffer
-# class, part of the observable API surface. No current caller exists inside src/, but
-# it is part of the intended interface and may be called via DeliveryEngine wrappers or
-# future callers outside the analysed tree.
-# Deviation: false positive on public API surface; not dead code.
-# Logged: DEFECT_LOG.md INSP-008.
-unusedFunction:src/core/DeliveryEventRing.hpp
-
 # Justification: send_request(), receive_request(), send_response(), receive_response(),
 # sweep_timeouts(), and receive_non_rr() are public API methods called from
 # tests/test_RequestReplyEngine.cpp and tests/test_stress_capacity.cpp, outside the
-# analysed src/ tree. find_free_stash() is a private helper declared alongside these
-# methods; it is suppressed at file level together with the verified public callers.
-# Deviation: false positive -- cppcheck does not see test callers.
+# analysed src/ tree. Deviation: false positive -- cppcheck does not see test callers.
 # Logged: DEFECT_LOG.md INSP-008.
 unusedFunction:src/core/RequestReplyEngine.cpp

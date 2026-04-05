@@ -46,6 +46,10 @@ jobs:
         run: |
           make run_tests
 
+      - name: Build + run sanitizer tests (ASan + UBSan)
+        run: |
+          make run_sanitize
+
       - name: Static analysis (clang-tidy + cppcheck + scan-build)
         run: |
           make static_analysis

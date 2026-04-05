@@ -133,21 +133,6 @@ public:
         return m_count;
     }
 
-    /// Discard all events; reset to empty state.
-    void clear()
-    {
-        // Power of 10 Rule 5: ≥2 assertions
-        NEVER_COMPILED_OUT_ASSERT(m_count <= DELIVERY_EVENT_RING_CAPACITY);   // count bounded before clear
-        NEVER_COMPILED_OUT_ASSERT(DELIVERY_EVENT_RING_CAPACITY > 0U);          // capacity invariant
-
-        m_head  = 0U;
-        m_tail  = 0U;
-        m_count = 0U;
-
-        // Power of 10 Rule 5: post-condition
-        NEVER_COMPILED_OUT_ASSERT(m_count == 0U);   // ring is empty after clear
-    }
-
 private:
     // Power of 10 Rule 3: fixed-size array; no dynamic allocation after init.
     DeliveryEvent m_buf[DELIVERY_EVENT_RING_CAPACITY] = {};

@@ -243,10 +243,6 @@ private:
     /// Returns index [0, MAX_PENDING_REQUESTS) or MAX_PENDING_REQUESTS if full.
     uint32_t find_free_pending() const;
 
-    /// Find a free stash slot.
-    /// Returns index [0, MAX_STASH_SIZE) or MAX_STASH_SIZE if full.
-    uint32_t find_free_stash() const;
-
     /// Store an inbound RESPONSE envelope into the matching pending slot or drop
     /// it if the correlation_id is unknown.
     void handle_inbound_response(uint64_t       correlation_id,

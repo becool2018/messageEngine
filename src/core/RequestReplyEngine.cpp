@@ -254,24 +254,6 @@ uint32_t RequestReplyEngine::find_free_pending() const
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RequestReplyEngine::find_free_stash() — private helper
-// Power of 10: ≥2 assertions, CC ≤ 10, bounded loop.
-// ─────────────────────────────────────────────────────────────────────────────
-uint32_t RequestReplyEngine::find_free_stash() const
-{
-    NEVER_COMPILED_OUT_ASSERT(m_initialized);        // pre: engine ready
-    NEVER_COMPILED_OUT_ASSERT(MAX_STASH_SIZE > 0U);  // pre: capacity valid
-
-    // Power of 10 Rule 2: bounded by MAX_STASH_SIZE.
-    for (uint32_t i = 0U; i < MAX_STASH_SIZE; ++i) {
-        if (!m_request_stash[i].active) {
-            return i;
-        }
-    }
-    return MAX_STASH_SIZE; // sentinel: full
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // RequestReplyEngine::handle_inbound_response() — private helper
 // Matches correlation_id to pending table; stashes payload if found.
 // Silently drops if unknown (may be an unmatched or duplicate response).
