@@ -693,18 +693,22 @@ Every impairment decision is driven by `PrngEngine`. Tests pass a known seed at 
 
 ### 13.4 Test Suite
 
-The project has 18 test binaries. The stress test (`test_stress_capacity`) is run separately from the main suite (`make run_stress_tests`); all others run under `make run_tests`.
+The project has 22 test binaries. The stress test (`test_stress_capacity`) is run separately from the main suite (`make run_stress_tests`); all others run under `make run_tests`.
 
 | Test Binary | Module Under Test | Tests |
 |---|---|---|
 | `test_MessageEnvelope` | `MessageEnvelope` helpers | 5 |
 | `test_MessageId` | `MessageId` / `MessageIdGen` | 4 |
 | `test_Timestamp` | `Timestamp` / expiry logic | 6 |
-| `test_Serializer` | `Serializer` | 14 |
+| `test_Serializer` | `Serializer` | 17 |
 | `test_DuplicateFilter` | `DuplicateFilter` | 5 |
 | `test_AckTracker` | `AckTracker` | 14 |
-| `test_RetryManager` | `RetryManager` | 20 |
-| `test_DeliveryEngine` | `DeliveryEngine` | 39 |
+| `test_RetryManager` | `RetryManager` | 21 |
+| `test_DeliveryEngine` | `DeliveryEngine` | 57 |
+| `test_Fragmentation` | `Fragmentation` helpers | 6 |
+| `test_ReassemblyBuffer` | `ReassemblyBuffer` | 7 |
+| `test_OrderingBuffer` | `OrderingBuffer` | 7 |
+| `test_RequestReplyEngine` | `RequestReplyEngine` | 14 |
 | `test_AssertState` | `AssertState` / `NEVER_COMPILED_OUT_ASSERT` | 8 |
 | `test_ImpairmentEngine` | `ImpairmentEngine` | 24 |
 | `test_ImpairmentConfigLoader` | `ImpairmentConfigLoader` | 24 |
@@ -714,7 +718,7 @@ The project has 18 test binaries. The stress test (`test_stress_capacity`) is ru
 | `test_TlsTcpBackend` | `TlsTcpBackend` | 30 |
 | `test_DtlsUdpBackend` | `DtlsUdpBackend` | 38 |
 | `test_LocalSim` | `LocalSimHarness` | 10 |
-| `test_stress_capacity` | Stress: capacity limits under load | 6 |
+| `test_stress_capacity` | Stress: capacity limits under load | 8 |
 
 ### 13.5 Coverage Policy
 

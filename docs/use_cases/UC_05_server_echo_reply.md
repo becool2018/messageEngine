@@ -60,9 +60,10 @@ Server main loop                               [Server.cpp]
  └── DeliveryEngine::send(reply, now_us)       [DeliveryEngine.cpp]
       ├── MessageIdGen::next()
       ├── reserve_bookkeeping()                [DeliveryEngine.cpp] (no-op for BEST_EFFORT)
-      └── send_via_transport()
-           └── TcpBackend::send_message()
-                └── Serializer::serialize() -> ::send()
+      └── send_fragments()                     [DeliveryEngine.cpp]
+           └── send_via_transport()
+                └── TcpBackend::send_message()
+                     └── Serializer::serialize() -> ::send()
 ```
 
 ---
@@ -146,7 +147,7 @@ Server (main loop)
   -> DeliveryEngine::send(reply, now_us)
        -> MessageIdGen::next()
        -> reserve_bookkeeping()    [no-op for BEST_EFFORT; allocates slot for RELIABLE_ACK/RETRY]
-       -> send_via_transport() -> TcpBackend::send_message() -> ::send()
+       -> send_fragments() -> send_via_transport() -> TcpBackend::send_message() -> ::send()
        <- Result::OK
   [Server loops back to receive()]
 ```

@@ -336,7 +336,7 @@ test_AckTracker.cpp
   acks_received bump).
 
 test_RetryManager.cpp
-  20 tests: init, schedule_ok, schedule_full (ERR_FULL), on_ack_ok,
+  21 tests: init, reinit, schedule_ok, schedule_full (ERR_FULL), on_ack_ok,
   on_ack_not_found, collect_due_immediate, collect_not_due, collect_expired,
   collect_exhausted (max retries reached), backoff_doubles (interval doubles
   each attempt), backoff_cap (interval capped at MAX_BACKOFF_MS),
@@ -347,7 +347,7 @@ test_RetryManager.cpp
   with no acks_received bump).
 
 test_DeliveryEngine.cpp
-  39 tests: send_best_effort, send_reliable_ack, send_reliable_retry,
+  57 tests: send_best_effort, send_reliable_ack, send_reliable_retry,
   receive_data_best_effort, receive_expired, send_expired_returns_err,
   receive_expired_at_boundary, receive_zero_expiry_never_drops,
   receive_ack_cancels_retry, receive_duplicate, receive_timeout,
@@ -364,7 +364,39 @@ test_DeliveryEngine.cpp
   mock_reliable_retry_send_err_rolls_back_both_slots (M5: ERR rollback),
   receive_reliable_ack_data_emits_ack, receive_reliable_retry_data_emits_ack,
   receive_duplicate_resends_ack, stats_msgs_sent, stats_msgs_received,
-  stats_dropped_expired, stats_dropped_duplicate, and stats_latency.
+  stats_dropped_expired, stats_dropped_duplicate, stats_latency,
+  event_ring_send_ok_emits_event, event_ring_send_fail_emits_event,
+  event_ring_ack_timeout_emits_event, event_ring_duplicate_drop_emits_event,
+  event_ring_expiry_drop_emits_event, event_ring_overflow_wraps,
+  event_ring_retry_fired_emits_event, event_ring_ack_received_emits_event,
+  event_ring_misroute_drop_emits_event, event_ring_drain_events,
+  de_fragmented_send_receive, de_ordered_delivery, de_fragmented_retry,
+  de_dedup_after_reassembly, de_ack_per_logical_message,
+  de_idle_ordered_gap_expiry_sweep, de_ordering_full_stat, and
+  de_held_pending_expiry_event.
+
+test_Fragmentation.cpp
+  6 tests: frag_single_fragment, frag_multi_fragment, frag_exact_boundary,
+  frag_max_payload, frag_oversized_rejected, and frag_last_shorter.
+
+test_ReassemblyBuffer.cpp
+  7 tests: reassembly_single_fragment, reassembly_in_order,
+  reassembly_out_of_order, reassembly_duplicate_fragment,
+  reassembly_inconsistent_count_rejected, reassembly_slot_exhaustion, and
+  reassembly_payload_too_large_rejected.
+
+test_OrderingBuffer.cpp
+  7 tests: ordering_in_sequence, ordering_out_of_sequence,
+  ordering_unordered_passthrough, ordering_control_bypass, ordering_hold_full,
+  ordering_duplicate_seq_discarded, and ordering_sixteen_peers.
+
+test_RequestReplyEngine.cpp
+  14 tests: rre_basic_request_response, rre_response_correlation,
+  rre_response_timeout, rre_pending_table_full, rre_unmatched_response_stash,
+  rre_receive_request_then_reply, rre_request_stash_full,
+  rre_non_rr_passthrough, rre_non_rr_fifo_order, rre_non_rr_stash_overflow,
+  rre_zero_cid_rejected, rre_nonzero_pad_rejected, rre_big_endian_cid_encoding,
+  and rre_request_stash_fifo_reuse.
 
 test_ImpairmentEngine.cpp
   24 tests: disabled pass-through, deterministic 100% loss, zero loss,

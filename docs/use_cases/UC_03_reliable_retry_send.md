@@ -58,13 +58,14 @@ DeliveryEngine::send()                          [DeliveryEngine.cpp]
  │    │    └── [linear scan for FREE slot; set PENDING]
  │    └── RetryManager::schedule()              [RetryManager.cpp]
  │         └── [linear scan for inactive slot; copy envelope; set active]
- ├── DeliveryEngine::send_via_transport()       [DeliveryEngine.cpp]
- │    ├── timestamp_expired()
- │    └── TcpBackend::send_message()
- │         ├── ImpairmentEngine::process_outbound()
- │         ├── ImpairmentEngine::collect_deliverable()
- │         ├── Serializer::serialize()
- │         └── send_to_all_clients() -> ::send()
+ ├── send_fragments()                           [DeliveryEngine.cpp]
+ │    └── DeliveryEngine::send_via_transport()  [DeliveryEngine.cpp]  (×frames)
+ │         ├── timestamp_expired()
+ │         └── TcpBackend::send_message()
+ │              ├── ImpairmentEngine::process_outbound()
+ │              ├── ImpairmentEngine::collect_deliverable()
+ │              ├── Serializer::serialize()
+ │              └── send_to_all_clients() -> ::send()
  └── [on transport failure] rollback_on_transport_failure()
       ├── AckTracker::cancel()                  [AckTracker.cpp]
       └── RetryManager::cancel()                [RetryManager.cpp]
@@ -152,9 +153,11 @@ User
                  [scan inactive slot; copy envelope; set active=true]
                  <- Result::OK
             <- Result::OK
-       -> DeliveryEngine::send_via_transport()
-            -> TcpBackend::send_message()
-                 -> Serializer::serialize() -> ::send()
+       -> send_fragments()
+            -> DeliveryEngine::send_via_transport()
+                 -> TcpBackend::send_message()
+                      -> Serializer::serialize() -> ::send()
+                 <- Result::OK
             <- Result::OK
   <- Result::OK
 ```

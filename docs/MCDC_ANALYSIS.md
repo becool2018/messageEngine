@@ -33,9 +33,9 @@ outcomes are exercised.
 ## Architectural Ceiling Note
 
 Both `DeliveryEngine::send()` and `DeliveryEngine::receive()` contain a defensive
-`if (!m_initialized) { return ERR_INVALID; }` guard (L82 and L156 respectively).
+`if (!m_initialized) { return ERR_INVALID; }` guard (L520 and L665 respectively).
 In both cases, a `NEVER_COMPILED_OUT_ASSERT(m_initialized)` immediately precedes
-the guard (L79 / L153). In any build where assertions are active (all builds per
+the guard (L517 / L662). In any build where assertions are active (all builds per
 CLAUDE.md §10), the assert fires and aborts before the False-outcome path of the
 guard can be reached. The True-outcome branch (`!m_initialized == true`) is
 therefore architecturally unreachable and is excluded from MC/DC demonstration,
@@ -46,8 +46,8 @@ consistent with the ceiling policy established in CLAUDE.md §14.
 ## 1. `DeliveryEngine::send()` — HAZ-001, HAZ-002, HAZ-006
 
 **Files:** `src/core/DeliveryEngine.cpp`
-- `reserve_bookkeeping()` (static helper): lines 225–285
-- `DeliveryEngine::send()`: lines 337–393
+- `reserve_bookkeeping()` (static helper): lines 403–463
+- `DeliveryEngine::send()`: lines 515–593
 
 The logical send path spans both functions. `reserve_bookkeeping()` is a CC-reduction helper called exclusively from `send()` before any I/O; its decisions are analysed here as part of `send()`'s MC/DC argument.
 
@@ -55,14 +55,14 @@ The logical send path spans both functions. `reserve_bookkeeping()` is a CC-redu
 
 | ID | Function | Source line | Decision expression | Conditions | MC/DC pair — True outcome | MC/DC pair — False outcome | Test(s) |
 |----|----------|-------------|--------------------|-----------|--------------------------|-----------------------------|---------|
-| S-D1 | `send()` | L342 | `!m_initialized` | A = `m_initialized` | *Architecturally unreachable* — `NEVER_COMPILED_OUT_ASSERT` fires first | `test_send_best_effort` (A=T → branch skipped) | See ceiling note |
-| S-D2 | `reserve_bookkeeping()` | L235–236 | `rel != RELIABLE_ACK && rel != RELIABLE_RETRY` | A = `rel != RELIABLE_ACK`; B = `rel != RELIABLE_RETRY` | A=T, B=T (BEST_EFFORT) → skip bookkeeping; return OK | A=F (RELIABLE_ACK) or B=F (RELIABLE_RETRY) → proceed to track() | T: `test_send_best_effort`; F(A): `test_send_reliable_ack`; F(B): `test_send_reliable_retry` |
-| S-D3 | `reserve_bookkeeping()` | L245 | `track_res != Result::OK` | A = `track_res != OK` | A=T: AckTracker full → log WARNING_HI; return ERR_FULL | A=F: tracked OK → continue | T: `test_send_ack_tracker_full`; F: `test_send_reliable_ack` |
-| S-D4 | `reserve_bookkeeping()` | L254 | `rel != RELIABLE_RETRY` | A = `rel != RELIABLE_RETRY` | A=T (RELIABLE_ACK) → skip schedule; return OK | A=F (RELIABLE_RETRY) → proceed to schedule() | T: `test_send_reliable_ack`; F: `test_send_reliable_retry` |
-| S-D5 | `reserve_bookkeeping()` | L264 | `sched_res != Result::OK` | A = `sched_res != OK` | A=T: RetryManager full → log WARNING_HI; cancel AckTracker slot; return ERR_FULL | A=F: scheduled OK → return OK | T: `test_send_retry_manager_full`; F: `test_send_reliable_retry` |
-| S-D6 | `send()` | L360 | `book_res != Result::OK` | A = `book_res != OK` | A=T: return error without any wire I/O | A=F: proceed to send_via_transport() | T: `test_send_ack_tracker_full`; F: `test_send_best_effort` |
-| S-D7 | `send()` | L367 | `res != Result::OK` | A = `res != OK` | A=T: rollback bookkeeping; return transport error | A=F: increment msgs_sent; return OK | T: `test_mock_send_transport_err_io`; F: `test_send_best_effort` |
-| S-D8 | `send()` | L372 | `rel == RELIABLE_ACK \|\| rel == RELIABLE_RETRY` | A = `rel == RELIABLE_ACK`; B = `rel == RELIABLE_RETRY` | A=T or B=T → call rollback_on_transport_failure() | A=F, B=F (BEST_EFFORT) → skip rollback | T(A): `test_mock_reliable_ack_send_err_rolls_back_ack_tracker`; T(B): `test_mock_reliable_retry_send_err_rolls_back_both_slots`; F: `test_mock_send_transport_err_io` |
+| S-D1 | `send()` | L520 | `!m_initialized` | A = `m_initialized` | *Architecturally unreachable* — `NEVER_COMPILED_OUT_ASSERT` fires first | `test_send_best_effort` (A=T → branch skipped) | See ceiling note |
+| S-D2 | `reserve_bookkeeping()` | L413–414 | `rel != RELIABLE_ACK && rel != RELIABLE_RETRY` | A = `rel != RELIABLE_ACK`; B = `rel != RELIABLE_RETRY` | A=T, B=T (BEST_EFFORT) → skip bookkeeping; return OK | A=F (RELIABLE_ACK) or B=F (RELIABLE_RETRY) → proceed to track() | T: `test_send_best_effort`; F(A): `test_send_reliable_ack`; F(B): `test_send_reliable_retry` |
+| S-D3 | `reserve_bookkeeping()` | L423 | `track_res != Result::OK` | A = `track_res != OK` | A=T: AckTracker full → log WARNING_HI; return ERR_FULL | A=F: tracked OK → continue | T: `test_send_ack_tracker_full`; F: `test_send_reliable_ack` |
+| S-D4 | `reserve_bookkeeping()` | L432 | `rel != RELIABLE_RETRY` | A = `rel != RELIABLE_RETRY` | A=T (RELIABLE_ACK) → skip schedule; return OK | A=F (RELIABLE_RETRY) → proceed to schedule() | T: `test_send_reliable_ack`; F: `test_send_reliable_retry` |
+| S-D5 | `reserve_bookkeeping()` | L442 | `sched_res != Result::OK` | A = `sched_res != OK` | A=T: RetryManager full → log WARNING_HI; cancel AckTracker slot; return ERR_FULL | A=F: scheduled OK → return OK | T: `test_send_retry_manager_full`; F: `test_send_reliable_retry` |
+| S-D6 | `send()` | L554 | `book_res != Result::OK` | A = `book_res != OK` | A=T: return error without any wire I/O | A=F: proceed to send_fragments() | T: `test_send_ack_tracker_full`; F: `test_send_best_effort` |
+| S-D7 | `send()` | L563 | `res != Result::OK` | A = `res != OK` | A=T: rollback bookkeeping; return transport error | A=F: increment msgs_sent; return OK | T: `test_mock_send_transport_err_io`; F: `test_send_best_effort` |
+| S-D8 | `send()` | L568 | `rel == RELIABLE_ACK \|\| rel == RELIABLE_RETRY` | A = `rel == RELIABLE_ACK`; B = `rel == RELIABLE_RETRY` | A=T or B=T → call rollback_on_transport_failure() | A=F, B=F (BEST_EFFORT) → skip rollback | T(A): `test_mock_reliable_ack_send_err_rolls_back_ack_tracker`; T(B): `test_mock_reliable_retry_send_err_rolls_back_both_slots`; F: `test_mock_send_transport_err_io` |
 
 ### MC/DC independence demonstration — S-D2 (compound `&&`)
 
@@ -95,19 +95,19 @@ Note: S-D8 is only reached when S-D7 is True (transport failed).
 
 ## 2. `DeliveryEngine::receive()` — HAZ-001, HAZ-003, HAZ-004, HAZ-005
 
-**File:** `src/core/DeliveryEngine.cpp` lines 149–222
+**File:** `src/core/DeliveryEngine.cpp` lines 658–729
 
 ### Decision table
 
 | ID | Source line | Decision expression | Conditions | MC/DC pair — True outcome | MC/DC pair — False outcome | Test(s) |
 |----|-------------|--------------------|-----------|--------------------------|-----------------------------|---------|
-| R-D1 | L156 | `!m_initialized` | A = `m_initialized` | *Architecturally unreachable* — `NEVER_COMPILED_OUT_ASSERT` fires first | `test_receive_data_best_effort` (A=T) | See ceiling note |
-| R-D2 | L162 | `res != Result::OK` | A = `res != OK` | A=T: receive timeout → return | A=F: message received → continue | T: `test_receive_timeout`; F: `test_receive_data_best_effort` |
-| R-D3 | L171 | `timestamp_expired(env.expiry_time_us, now_us)` | A = message expired | A=T → return ERR_EXPIRED | A=F → continue | T: `test_receive_expired`; F: `test_receive_data_best_effort` |
-| R-D4 | L179 | `envelope_is_control(env)` | A = is control type | A=T → handle control | A=F → handle data | T: `test_receive_ack_cancels_retry`; F: `test_receive_data_best_effort` |
-| R-D5 | L180 | `env.message_type == ACK` | A = `type == ACK` | A=T → process ACK (on_ack, retry cancel) | A=F → pass through (NAK/HEARTBEAT) | T: `test_receive_ack_cancels_retry`; F: `test_receive_nak_control`, `test_receive_heartbeat_control` |
-| R-D6 | L201 | `rel == RELIABLE_RETRY` | A = `rel == RELIABLE_RETRY` | A=T → apply dedup | A=F → skip dedup | T: `test_receive_duplicate`; F: `test_receive_data_best_effort` |
-| R-D7 | L204 | `dedup_res == ERR_DUPLICATE` | A = is duplicate | A=T → return ERR_DUPLICATE | A=F → deliver | T: `test_receive_duplicate` (second receive of same id); F: `test_receive_duplicate` (first receive of that id) |
+| R-D1 | L665 | `!m_initialized` | A = `m_initialized` | *Architecturally unreachable* — `NEVER_COMPILED_OUT_ASSERT` fires first | `test_receive_data_best_effort` (A=T) | See ceiling note |
+| R-D2 | L688 | `res != Result::OK` | A = `res != OK` | A=T: receive timeout → return | A=F: message received → continue | T: `test_receive_timeout`; F: `test_receive_data_best_effort` |
+| R-D3 | L714 | `routing_res != Result::OK` | A = routing/expiry check failed | A=T → return routing error (expiry or misroute) | A=F → continue | T: `test_receive_expired`; F: `test_receive_data_best_effort` |
+| R-D4 | L721 | `envelope_is_control(env)` | A = is control type | A=T → handle control | A=F → handle data | T: `test_receive_ack_cancels_retry`; F: `test_receive_data_best_effort` |
+| R-D5 | L605 | `env.message_type == ACK` | A = `type == ACK` | A=T → process ACK (on_ack, retry cancel) | A=F → pass through (NAK/HEARTBEAT) | T: `test_receive_ack_cancels_retry`; F: `test_receive_nak_control`, `test_receive_heartbeat_control` |
+| R-D6 | L628 | `rel != RELIABLE_RETRY` | A = `rel != RELIABLE_RETRY` | A=T → skip dedup; return OK | A=F → apply dedup | T: `test_receive_data_best_effort`; F: `test_receive_duplicate` |
+| R-D7 | L634 | `dedup_res != ERR_DUPLICATE` | A = not duplicate | A=T → deliver | A=F → return ERR_DUPLICATE | T: `test_receive_duplicate` (first receive of that id); F: `test_receive_duplicate` (second receive of same id) |
 
 **MC/DC status: DEMONSTRATED** — all single-condition decisions covered T and F; no compound decisions.
 

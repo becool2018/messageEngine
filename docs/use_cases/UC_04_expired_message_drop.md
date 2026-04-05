@@ -32,13 +32,13 @@ Synchronous in the caller's thread.
 2. `NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr)` and `NEVER_COMPILED_OUT_ASSERT(envelope_valid(envelope))`.
 3. `m_id_gen.next()` is called; `message_id` assigned to `work` (stack copy). The ID is consumed even for an expired message (counter advances).
 4. **`reserve_bookkeeping(m_ack_tracker, m_retry_manager, work, m_cfg, now_us)`** is called. For BEST_EFFORT: immediate `return OK` with no tracker interaction. For RELIABLE_ACK/RETRY: allocates a slot in the AckTracker and/or RetryManager.
-5. **`send_via_transport(work, now_us)`** is called.
+5. **`send_fragments(work, now_us)`** is called, which iterates over frames and calls **`send_via_transport()`** for each.
 6. Inside `send_via_transport()`:
    a. `NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr)`.
    b. **`timestamp_expired(work.expiry_time_us, now_us)`** is evaluated (`Timestamp.hpp`). Implementation: `return (expiry_time_us != 0U) && (now_us >= expiry_time_us)`.
    c. **Branch: condition true** — `Logger::log(WARNING_LO, "DeliveryEngine", "Message expired before send; dropping. id=%llu", ...)` is called.
    d. Returns `Result::ERR_EXPIRED` immediately.
-7. `send_via_transport()` returns `ERR_EXPIRED` to `send()`.
+7. `send_via_transport()` returns `ERR_EXPIRED` to `send_fragments()`, which propagates it to `send()`.
 8. `res != OK` — for RELIABLE_ACK/RETRY: **`rollback_on_transport_failure()`** is called to cancel any reserved bookkeeping slots. For BEST_EFFORT: no slots were allocated; rollback is a no-op. Returns `ERR_EXPIRED`.
 9. Returns `Result::ERR_EXPIRED` to the User.
 
@@ -51,10 +51,11 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
  ├── MessageIdGen::next()                      [MessageId.cpp]
  ├── reserve_bookkeeping()                     [DeliveryEngine.cpp]
  │    (no-op for BEST_EFFORT; allocates slot for RELIABLE_ACK/RETRY)
- └── DeliveryEngine::send_via_transport()      [DeliveryEngine.cpp]
-      ├── timestamp_expired()                  [Timestamp.hpp]  <- returns true; expiry detected
-      └── Logger::log(WARNING_LO, ...)         [Logger.hpp]
-          [returns ERR_EXPIRED immediately; TcpBackend::send_message() NOT called]
+ └── send_fragments()                          [DeliveryEngine.cpp]
+      └── DeliveryEngine::send_via_transport() [DeliveryEngine.cpp]
+           ├── timestamp_expired()             [Timestamp.hpp]  <- returns true; expiry detected
+           └── Logger::log(WARNING_LO, ...)    [Logger.hpp]
+               [returns ERR_EXPIRED immediately; TcpBackend::send_message() NOT called]
  [on ERR_EXPIRED return: rollback_on_transport_failure() cancels any reserved slots]
  [RELIABLE_ACK/RETRY: slot freed; BEST_EFFORT: no-op]
 ```
@@ -126,9 +127,11 @@ User
   -> DeliveryEngine::send(envelope, now_us)  [expiry_time_us <= now_us]
        -> MessageIdGen::next()               [counter consumed]
        -> reserve_bookkeeping()              [no-op for BEST_EFFORT; allocates slot for RELIABLE_ACK/RETRY]
-       -> DeliveryEngine::send_via_transport()
-            -> timestamp_expired()           [returns true]
-            -> Logger::log(WARNING_LO, ...)  [logs drop]
+       -> send_fragments()
+            -> DeliveryEngine::send_via_transport()
+                 -> timestamp_expired()           [returns true]
+                 -> Logger::log(WARNING_LO, ...)  [logs drop]
+                 <- ERR_EXPIRED
             <- ERR_EXPIRED
        -> rollback_on_transport_failure()    [cancels bookkeeping slot; no-op for BEST_EFFORT]
   <- ERR_EXPIRED

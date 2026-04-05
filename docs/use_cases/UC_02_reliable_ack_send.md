@@ -57,13 +57,14 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
  ├── reserve_bookkeeping()                     [DeliveryEngine.cpp]
  │    └── AckTracker::track()                  [AckTracker.cpp]
  │         └── [linear scan for FREE slot; set PENDING]
- ├── DeliveryEngine::send_via_transport()      [DeliveryEngine.cpp]
- │    ├── timestamp_expired()                  [Timestamp.hpp]
- │    └── TcpBackend::send_message()           [TcpBackend.cpp]
- │         ├── ImpairmentEngine::process_outbound()
- │         ├── ImpairmentEngine::collect_deliverable()
- │         ├── Serializer::serialize()
- │         └── send_to_all_clients() -> ::send()
+ ├── send_fragments()                          [DeliveryEngine.cpp]
+ │    └── DeliveryEngine::send_via_transport() [DeliveryEngine.cpp]  (×frames)
+ │         ├── timestamp_expired()             [Timestamp.hpp]
+ │         └── TcpBackend::send_message()      [TcpBackend.cpp]
+ │              ├── ImpairmentEngine::process_outbound()
+ │              ├── ImpairmentEngine::collect_deliverable()
+ │              ├── Serializer::serialize()
+ │              └── send_to_all_clients() -> ::send()
  └── [on transport failure] rollback_on_transport_failure()
       └── AckTracker::cancel()                 [AckTracker.cpp]
 ```
@@ -145,10 +146,12 @@ User
                  [scan FREE slot; set PENDING]
                  <- Result::OK
             <- Result::OK
-       -> DeliveryEngine::send_via_transport()
-            -> TcpBackend::send_message()
-                 -> Serializer::serialize()
-                 -> send_to_all_clients() -> ::send()
+       -> send_fragments()
+            -> DeliveryEngine::send_via_transport()
+                 -> TcpBackend::send_message()
+                      -> Serializer::serialize()
+                      -> send_to_all_clients() -> ::send()
+                 <- Result::OK
             <- Result::OK
   <- Result::OK
 ```
