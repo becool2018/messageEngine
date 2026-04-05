@@ -64,6 +64,30 @@ MBEDTLS_LIBS ?= $(if $(strip $(MBEDTLS_PKG_LIBS)),$(MBEDTLS_PKG_LIBS),$(if $(str
 LDFLAGS      := -lpthread $(MBEDTLS_LIBS)
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Sanitizer flags (ASan + UBSan)
+# -fno-sanitize-recover=all: any UB terminates the process immediately
+#   (mirrors ASan default; ensures sanitized tests fail rather than warn-and-pass).
+# On Linux, ASan enables LeakSanitizer by default.  mbedTLS allocates heap
+#   internally and does not always free it before exit, producing false positives.
+#   ASAN_OPTIONS=detect_leaks=0 suppresses LSan on Linux without disabling ASan or
+#   UBSan.  Power of 10 Rule 3 prohibits heap allocation on critical paths, so
+#   real leak bugs in our code are structurally impossible.
+# On macOS, LSan is not shipped with Apple clang; no suppression needed.
+# ─────────────────────────────────────────────────────────────────────────────
+SAN_OBJ_DIR  := build/san-objs
+SAN_CXXFLAGS := $(filter-out -Werror,$(CXXFLAGS)) \
+                -fsanitize=address,undefined \
+                -fno-sanitize-recover=all
+SAN_LDFLAGS  := -fsanitize=address,undefined $(LDFLAGS)
+SAN_LIB_OBJS  = $(patsubst src/%.cpp,$(SAN_OBJ_DIR)/%.o,$(ALL_LIB_SRC))
+# Suppress mbedTLS LSan false positives on Linux; no-op on macOS (LSan absent).
+ifeq ($(UNAME_S),Linux)
+SAN_RUN_ENV  := ASAN_OPTIONS=detect_leaks=0
+else
+SAN_RUN_ENV  :=
+endif
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Source groups
 # ─────────────────────────────────────────────────────────────────────────────
 CORE_SRC := \
@@ -109,6 +133,7 @@ ALL_LIB_OBJS := $(CORE_OBJS) $(PLATFORM_OBJS)
 .PHONY: all clean tests stress_tests run_stress_tests server client check_traceability \
         lint cppcheck pclint scan_build static_analysis \
         coverage coverage_show coverage_report \
+        sanitize_tests run_sanitize \
         check_version
 
 all: server client tests
@@ -166,6 +191,91 @@ run_stress_tests: stress_tests
 	@echo "    (may take several seconds on slow hardware)"
 	@build/test_stress_capacity
 	@echo "=== STRESS TESTS PASSED ==="
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sanitizer tests (ASan + UBSan) — separate target, same test suite as run_tests
+#
+# Runs the complete unit-test suite compiled with AddressSanitizer and
+# UndefinedBehaviorSanitizer.  Catches buffer overflows, use-after-free,
+# signed integer overflow, misaligned access, invalid enum values, and other
+# MISRA C++:2023 / Power of 10 UB classes that the compiler and static
+# analysis tools do not always flag.
+#
+# Binaries land in build/san/ (separate from build/test_* to allow both to
+# coexist without a clean).  Object files land in build/san-objs/.
+#
+# Usage:
+#   make sanitize_tests   — build only
+#   make run_sanitize     — build and run (recommended)
+#
+# Portability:
+#   macOS  — Apple clang 17; LSan absent; no ASAN_OPTIONS override needed.
+#   Linux  — GCC or clang; LSan active by default; ASAN_OPTIONS=detect_leaks=0
+#             suppresses mbedTLS false positives (see variable definition above).
+# ─────────────────────────────────────────────────────────────────────────────
+sanitize_tests: \
+    build/san/test_MessageEnvelope \
+    build/san/test_Serializer \
+    build/san/test_DuplicateFilter \
+    build/san/test_ImpairmentEngine \
+    build/san/test_LocalSim \
+    build/san/test_AckTracker \
+    build/san/test_RetryManager \
+    build/san/test_DeliveryEngine \
+    build/san/test_ImpairmentConfigLoader \
+    build/san/test_TlsTcpBackend \
+    build/san/test_DtlsUdpBackend \
+    build/san/test_TcpBackend \
+    build/san/test_UdpBackend \
+    build/san/test_SocketUtils \
+    build/san/test_AssertState \
+    build/san/test_MessageId \
+    build/san/test_Timestamp \
+    build/san/test_RequestReplyEngine \
+    build/san/test_Fragmentation \
+    build/san/test_ReassemblyBuffer \
+    build/san/test_OrderingBuffer
+
+run_sanitize: sanitize_tests
+	@echo "=== Sanitizer tests: ASan + UBSan ($(if $(SAN_RUN_ENV),$(SAN_RUN_ENV),no LSan suppression needed)) ==="
+	@$(SAN_RUN_ENV) build/san/test_MessageEnvelope
+	@$(SAN_RUN_ENV) build/san/test_Serializer
+	@$(SAN_RUN_ENV) build/san/test_DuplicateFilter
+	@$(SAN_RUN_ENV) build/san/test_ImpairmentEngine
+	@$(SAN_RUN_ENV) build/san/test_LocalSim
+	@$(SAN_RUN_ENV) build/san/test_AckTracker
+	@$(SAN_RUN_ENV) build/san/test_RetryManager
+	@$(SAN_RUN_ENV) build/san/test_DeliveryEngine
+	@$(SAN_RUN_ENV) build/san/test_ImpairmentConfigLoader
+	@$(SAN_RUN_ENV) build/san/test_TlsTcpBackend
+	@$(SAN_RUN_ENV) build/san/test_DtlsUdpBackend
+	@$(SAN_RUN_ENV) build/san/test_TcpBackend
+	@$(SAN_RUN_ENV) build/san/test_UdpBackend
+	@$(SAN_RUN_ENV) build/san/test_SocketUtils
+	@$(SAN_RUN_ENV) build/san/test_AssertState
+	@$(SAN_RUN_ENV) build/san/test_MessageId
+	@$(SAN_RUN_ENV) build/san/test_Timestamp
+	@$(SAN_RUN_ENV) build/san/test_RequestReplyEngine
+	@$(SAN_RUN_ENV) build/san/test_Fragmentation
+	@$(SAN_RUN_ENV) build/san/test_ReassemblyBuffer
+	@$(SAN_RUN_ENV) build/san/test_OrderingBuffer
+	@echo "=== SANITIZER TESTS PASSED ==="
+
+build/san/test_%: $(SAN_LIB_OBJS) $(SAN_OBJ_DIR)/tests/test_%.o
+	@mkdir -p build/san
+	$(CXX) $(SAN_CXXFLAGS) -o $@ $^ $(SAN_LDFLAGS)
+
+$(SAN_OBJ_DIR)/core/%.o: src/core/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(SAN_CXXFLAGS) -c -o $@ $<
+
+$(SAN_OBJ_DIR)/platform/%.o: src/platform/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(SAN_CXXFLAGS) -c -o $@ $<
+
+$(SAN_OBJ_DIR)/tests/%.o: tests/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(SAN_CXXFLAGS) -c -o $@ $<
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Compile rules
