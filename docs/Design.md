@@ -713,11 +713,11 @@ The project has 22 test binaries. The stress test (`test_stress_capacity`) is ru
 | `test_ImpairmentEngine` | `ImpairmentEngine` | 24 |
 | `test_ImpairmentConfigLoader` | `ImpairmentConfigLoader` | 24 |
 | `test_SocketUtils` | `SocketUtils` (POSIX helpers) | 22 |
-| `test_TcpBackend` | `TcpBackend` | 26 |
-| `test_UdpBackend` | `UdpBackend` | 19 |
-| `test_TlsTcpBackend` | `TlsTcpBackend` | 30 |
-| `test_DtlsUdpBackend` | `DtlsUdpBackend` | 38 |
-| `test_LocalSim` | `LocalSimHarness` | 10 |
+| `test_TcpBackend` | `TcpBackend` | 28 |
+| `test_UdpBackend` | `UdpBackend` | 20 |
+| `test_TlsTcpBackend` | `TlsTcpBackend` | 34 |
+| `test_DtlsUdpBackend` | `DtlsUdpBackend` | 39 |
+| `test_LocalSim` | `LocalSimHarness` | 11 |
 | `test_stress_capacity` | Stress: capacity limits under load | 8 |
 
 ### 13.5 Coverage Policy

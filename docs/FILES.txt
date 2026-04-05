@@ -113,11 +113,11 @@ docs/use_cases/use_case_format.txt
   UC_*.md documents; defines the quality bar and output format requirements.
 
 docs/use_cases/HIGH_LEVEL_USE_CASES.md
-  Index of 20 high-level use cases (HL-1 through HL-20) with links to the 58
+  Index of 29 high-level use cases (HL-1 through HL-29) with links to the 61
   detailed Flow-of-Control documents.
 
-docs/use_cases/UC_01 … UC_58
-  58 Flow-of-Control documents, one per use case. Each document has 15
+docs/use_cases/UC_01 … UC_61
+  61 Flow-of-Control documents, one per use case. Each document has 15
   sections: overview, entry points, step-by-step control flow, call tree, key
   components, branching logic, concurrency, memory/ownership, error handling,
   external interactions, state changes, sequence diagram (ASCII), init vs
@@ -413,13 +413,14 @@ test_ImpairmentEngine.cpp
   and other edge-case impairment paths.
 
 test_LocalSim.cpp
-  10 tests: basic send/receive round-trip, bidirectional messaging (both
+  11 tests: basic send/receive round-trip, bidirectional messaging (both
   directions simultaneously), queue-full overflow (ERR_FULL when ring buffer
   capacity is exceeded), and receive timeout on empty queue (ERR_TIMEOUT),
-  plus 6 additional tests covering multi-message throughput, close/reopen
+  plus 7 additional tests covering multi-message throughput, close/reopen
   lifecycle, connections_opened/connections_closed stats, ERR_FULL on
   flush_outbound_batch for the current envelope, impairment-engine integration
-  paths, and stats counters.
+  paths (test_localsim_inbound_partition_drops_linked_delivery), and
+  test_localsim_inject_bypasses_impairment.
 
 test_AssertState.cpp
   8 tests: get_handler_initially_null, set_and_get_handler,
@@ -428,23 +429,26 @@ test_AssertState.cpp
   check_and_clear_true, and check_and_clear_idempotent.
 
 test_TcpBackend.cpp
-  26 tests covering the TcpBackend via MockSocketOps injection: config
+  28 tests covering the TcpBackend via MockSocketOps injection: config
   defaults, server bind/close, client connect failure, receive timeout, send
   with no clients, close-before-init, is_open lifecycle, loopback roundtrip,
   large-timeout cap, bad bind IP, num_channels_zero, garbage-frame
   deserialize failure, two-client compaction, client detects server close,
-  and 7 mock-injection fault tests (socket create, reuseaddr, listen,
-  nonblocking, impairment delay paths, recv queue overflow, send_frame fail,
-  loss impairment drop).
+  7 mock-injection fault tests (socket create, reuseaddr, listen, nonblocking,
+  impairment delay paths, recv queue overflow, send_frame fail, loss impairment
+  drop), and 3 integration tests (test_connection_limit_reached,
+  test_tcp_inbound_partition_drops_received,
+  test_tcp_inbound_reorder_buffers_message).
 
 test_UdpBackend.cpp
-  19 tests covering the UdpBackend via MockSocketOps injection: config
+  20 tests covering the UdpBackend via MockSocketOps injection: config
   defaults, bind/close, receive timeout, loopback send/receive, multiple
   messages, close-before-init, is_open lifecycle, unreachable peer, bad
   bind IP, num_channels_zero, garbage datagram, recv_wrong_source_dropped
-  (REQ-6.2.4 source validation), and 5 mock-injection fault tests (create
+  (REQ-6.2.4 source validation), 5 mock-injection fault tests (create
   fail, reuseaddr fail, impairment delay paths, send loss impairment,
-  send_to fail, recv_from fail, recv queue initial pop).
+  send_to fail, recv_from fail, recv queue initial pop), and
+  test_udp_inbound_partition_drops_received.
 
 test_SocketUtils.cpp
   22 tests covering raw POSIX helpers in SocketUtils: create_tcp,
@@ -460,7 +464,7 @@ MockSocketOps.hpp
   (socket create, bind, listen, accept, send, recv) without real network I/O.
 
 test_TlsTcpBackend.cpp
-  30 tests covering TlsTcpBackend via ISocketOps injection: TlsConfig
+  34 tests covering TlsTcpBackend via ISocketOps injection: TlsConfig
   defaults, transport_config includes TLS fields, server bind plaintext,
   bad cert/key path, server bind TLS, plaintext loopback, TLS loopback,
   connect bad host, receive timeout, send no clients, echo loopback
@@ -469,21 +473,26 @@ test_TlsTcpBackend.cpp
   raw socket no TLS handshake, garbage frame deserialize fail, two-client
   queue prefill, two-client compact loop, bad CA file, bind port in use,
   server send before client connects, max_connections_exceeded,
-  TLS zero-length frame, DI constructor, and recv queue overflow.
+  TLS zero-length frame, DI constructor, recv queue overflow,
+  test_send_impairment_loss_drop, test_session_resumption_disabled_by_default,
+  test_tls_session_saved_after_handshake,
+  test_tls_session_resumption_reconnect_cycle, and
+  test_tls_inbound_partition_drops_received.
 
 test_DtlsUdpBackend.cpp
-  38 tests covering DtlsUdpBackend via IMbedtlsOps/ISocketOps injection:
+  39 tests covering DtlsUdpBackend via IMbedtlsOps/ISocketOps injection:
   plaintext server bind, DTLS bad cert, plaintext loopback, DTLS loopback,
   oversized payload rejected (ERR_INVALID), receive timeout, bad key path,
   bad CA cert file, server init timeout (ERR_TIMEOUT), client bad peer IP,
   bad bind IP, server recv after client close, plaintext recv garbage
   datagram, DTLS server handshake garbage, plaintext send bad peer IP,
   receive long timeout clamp, DTLS server verify-peer without CA, valid CA
-  cert load, server zero connect timeout, and 18 IMbedtlsOps mock-injection
+  cert load, server zero connect timeout, 18 IMbedtlsOps mock-injection
   fault tests (crypto_init fail, ssl_config_defaults fail, ssl_conf_own_cert
   fail, ssl_cookie_setup fail, server recvfrom_peek fail, server net_connect
   fail, server ssl_setup fail, server ssl_set_transport_id fail, client
-  net_connect fail, client ssl_setup fail, and more).
+  net_connect fail, client ssl_setup fail, and more), and
+  test_dtls_inbound_partition_drops_received.
 
 test_ImpairmentConfigLoader.cpp
   24 tests: file not found (ERR_IO), empty file, all fields parsed, partial

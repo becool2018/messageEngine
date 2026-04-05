@@ -22,7 +22,7 @@
 
 ```cpp
 // src/core/DeliveryEngine.cpp
-Result DeliveryEngine::send(const MessageEnvelope& envelope, uint64_t now_us);
+Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us);
 ```
 
 Called directly by application code. No thread is created; the call is synchronous in the caller's thread.
