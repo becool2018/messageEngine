@@ -531,6 +531,13 @@ static void test_retry_manager_max_retry_exhaustion()
     static const uint64_t ADVANCE_US    = 1000000ULL;  // 1 second per step
     static const uint64_t INITIAL_NOW   = 1000000ULL;
 
+    // now_us is declared outside the cycle loop so it advances monotonically
+    // across all cycles.  RetryManager::collect_due() asserts
+    // now_us >= m_last_collect_us (monotonic-time enforcement added with
+    // security fix F3); resetting to INITIAL_NOW each cycle would violate
+    // that invariant on cycle 1 and later.
+    uint64_t now_us = INITIAL_NOW;
+
     // Power of 10 Rule 2: bounded outer loop
     for (uint32_t cycle = 0U; cycle < RETRY_EXHAUST_CYCLES; ++cycle) {
 
@@ -541,7 +548,7 @@ static void test_retry_manager_max_retry_exhaustion()
                 (static_cast<uint64_t>(cycle) * 100ULL) +
                 static_cast<uint64_t>(slot) + 1ULL;
             make_stress_envelope(env, msg_id);
-            Result r = rm.schedule(env, MAX_RETRY_COUNT, 1U, INITIAL_NOW);
+            Result r = rm.schedule(env, MAX_RETRY_COUNT, 1U, now_us);
             assert(r == Result::OK);
         }
 
@@ -550,7 +557,6 @@ static void test_retry_manager_max_retry_exhaustion()
         // guarantees every remaining entry is always due.
         // After MAX_RETRY_COUNT calls, all entries must be gone.
         // The (MAX_RETRY_COUNT + 1)th call must return 0.
-        uint64_t now_us = INITIAL_NOW;
         uint32_t total_collected = 0U;
 
         // Power of 10 Rule 2: inner loop bounded by MAX_RETRY_COUNT + 1
