@@ -1,6 +1,6 @@
 # UC_59 — Request/reply: send a request and receive the matching response
 
-**HL Group:** HL-3 — Reliable Request/Response Exchange
+**HL Group:** HL-28 — Bounded Request/Response via RequestReplyEngine
 **Actor:** Application (requester side)
 **Requirement traceability:** REQ-3.2.4, REQ-3.3.2, REQ-3.3.3
 

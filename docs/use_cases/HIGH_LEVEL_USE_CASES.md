@@ -186,8 +186,7 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 ## HL-23: Poll DeliveryEngine Observability Events
 > User calls DeliveryEngine::poll_event() in the application event loop; System returns the next unread delivery event from the bounded DeliveryEventRing (send success/failure, ACK received, retry fired, ACK timeout, duplicate drop, expiry drop, misroute drop).
 
-- UC_59 — poll_event(): dequeue one DeliveryEvent from the bounded ring; returns ERR_EMPTY when no events are pending
-- UC_60 — pending_event_count(): return the number of unread events currently held in the DeliveryEventRing
+- UC_61 — poll_event() / pending_event_count(): dequeue one DeliveryEvent or query the count of unread events in the bounded ring; see HL-29 for bulk drain_events()
 
 ---
 
