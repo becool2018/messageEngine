@@ -42,8 +42,9 @@ Result DeliveryEngine::send(MessageEnvelope& envelope, uint64_t now_us);
       - If found: `entry.env = work` (full `MessageEnvelope` copy), `entry.next_retry_us = now_us`, `entry.expiry_us = env.expiry_time_us`, `entry.retry_count = 0`, `entry.max_retries = max_retries`, `entry.backoff_ms = backoff_ms`, `entry.active = true`. Returns `Result::OK`.
       - If not found: logs `WARNING_HI`; calls `m_ack_tracker.cancel(work.source_id, work.message_id)` to free the already-reserved AckTracker slot; returns `ERR_FULL`.
 6. If `book_res != OK`: `record_send_failure()` called; `send()` returns `ERR_FULL` immediately. No wire I/O occurs.
-7. On `book_res == OK` (both slots reserved): **`send_via_transport(work, now_us)`** is called. Expiry check, then `m_transport->send_message(work)` (same TCP path as UC_01).
-   - If `send_res != OK`: **`rollback_on_transport_failure()`** cancels both the `AckTracker` slot and the `RetryManager` slot (freeing both, no stat bump). `send()` returns the transport error.
+7. On `book_res == OK` (both slots reserved): **`send_fragments(work, now_us)`** is called, which calls `send_via_transport()` per frame. Expiry check, then `m_transport->send_message(work)` (same TCP path as UC_01).
+   - If `send_fragments()` returns `ERR_IO` (first frame failed — nothing on wire): **`rollback_on_transport_failure()`** via `handle_send_fragments_failure()` cancels both the `AckTracker` and `RetryManager` slots (no stat bump). `send()` returns `ERR_IO`.
+   - If `send_fragments()` returns `ERR_IO_PARTIAL` (≥1 frame already transmitted): both bookkeeping slots are **preserved**. Retry will fire when the backoff timer expires. `send()` returns `ERR_IO` (normalised).
 8. On `send_res == OK`: `++m_stats.msgs_sent`.
 9. Returns `Result::OK` to the User.
 
@@ -76,7 +77,7 @@ DeliveryEngine::send()                          [DeliveryEngine.cpp]
 
 ## 5. Key Components Involved
 
-- **`DeliveryEngine`** — Sequences bookkeeping then wire send. Both `AckTracker` and `RetryManager` slots are reserved before any I/O so `ERR_FULL` is returned before the peer sees the message. If `send_via_transport()` fails after bookkeeping, `rollback_on_transport_failure()` cancels both slots so no spurious timeout or retry fires.
+- **`DeliveryEngine`** — Sequences bookkeeping then wire send. Both `AckTracker` and `RetryManager` slots are reserved before any I/O so `ERR_FULL` is returned before the peer sees the message. If `send_fragments()` fails with `ERR_IO` (nothing reached the wire), `rollback_on_transport_failure()` via `handle_send_fragments_failure()` cancels both slots so no spurious timeout or retry fires. If `send_fragments()` returns `ERR_IO_PARTIAL` (≥1 frame transmitted), both slots are preserved so the retry mechanism can recover the logical message.
 - **`RetryManager`** — Fixed-capacity table (32 slots). Stores the full `MessageEnvelope` copy plus retry metadata. `next_retry_us = now_us` means the first retry is due immediately on the next `pump_retries()` call.
 - **`MessageIdGen`** — ID assigned here is the same ID stored in `RetryEntry.env.message_id` and used to cancel the entry when an ACK for that ID arrives.
 
@@ -89,8 +90,9 @@ DeliveryEngine::send()                          [DeliveryEngine.cpp]
 | `reliability_class == RELIABLE_RETRY` | Enter `reserve_bookkeeping()` path | Not this UC |
 | AckTracker slot available (inside `reserve_bookkeeping`) | `track()` OK; proceed to `schedule()` | `track()` returns `ERR_FULL`; `send()` returns `ERR_FULL` |
 | RetryManager slot available (inside `reserve_bookkeeping`) | `schedule()` OK; proceed | `schedule()` fails; `cancel()` AckTracker slot; `send()` returns `ERR_FULL` |
-| `book_res != OK` | Return `ERR_FULL` without I/O | Proceed to `send_via_transport()` |
-| `send_res != OK` | `rollback_on_transport_failure()` (cancel both slots); return error | Proceed; `msgs_sent++` |
+| `book_res != OK` | Return `ERR_FULL` without I/O | Proceed to `send_fragments()` |
+| `send_fragments()` returns `ERR_IO` (nothing sent) | `rollback_on_transport_failure()` (cancel both slots); return `ERR_IO` | Proceed; `msgs_sent++` |
+| `send_fragments()` returns `ERR_IO_PARTIAL` (≥1 frame sent) | Preserve both slots; return `ERR_IO` | — |
 | `env.expiry_time_us == 0` | Entry never expires (expiry_us=0 treated as no-expiry in collect_due) | Entry expires at expiry_us |
 
 ---

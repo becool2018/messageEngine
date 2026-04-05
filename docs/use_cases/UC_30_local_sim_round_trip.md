@@ -28,7 +28,7 @@ engine_b.receive(out, timeout_ms, now_us); // backed by harness_b
 ## 3. End-to-End Control Flow
 
 1. User sets up: `harness_a.init(cfg_a)`, `harness_b.init(cfg_b)`, `harness_a.link(&harness_b)`, `harness_b.link(&harness_a)`, `engine_a.init(&harness_a, ...)`, `engine_b.init(&harness_b, ...)`.
-2. **`engine_a.send(envelope, now_us)`** — assigns message_id, calls `send_via_transport(work, now_us)` → `harness_a.send_message(work)`.
+2. **`engine_a.send(envelope, now_us)`** — assigns message_id, calls `send_fragments(work, now_us)` → `send_via_transport()` → `harness_a.send_message(work)`.
 3. `harness_a.send_message(work)`:
    a. `m_impairment.process_outbound(work, now_us)` — applies loss/dup/latency. ERR_IO = silent drop; OK = queued.
    b. `collect_deliverable(now_us, ...)` — retrieves due entries.

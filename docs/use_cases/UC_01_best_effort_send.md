@@ -36,7 +36,7 @@ Called directly by application code. No thread is created; the call is synchrono
 3. `NEVER_COMPILED_OUT_ASSERT(envelope_valid(envelope))` — verifies envelope is not INVALID type.
 4. `m_id_gen.next()` is called (`MessageId.cpp`) to assign a unique monotonic `message_id`; the result is written into a local copy of the envelope (stack-allocated `MessageEnvelope work`).
 5. **Branch:** `envelope.reliability_class == BEST_EFFORT` — true, so neither `m_ack_tracker.track()` nor `m_retry_mgr.schedule()` is called. Both ACK and retry branches are entirely skipped.
-6. **`send_via_transport(work, now_us)`** is called (`DeliveryEngine.cpp`).
+6. **`send_fragments(work, now_us)`** is called (`DeliveryEngine.cpp`), which calls `send_via_transport()` per frame. For BEST_EFFORT with a payload ≤ `FRAG_MAX_PAYLOAD_BYTES`, this is always a single frame.
 7. Inside `send_via_transport`: `NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr)`.
 8. **Branch:** `work.expiry_time_us != 0 && timestamp_expired(work.expiry_time_us, now_us)` — if true, log `WARNING_LO` and return `Result::ERR_EXPIRED`. For a freshly built envelope this is false; continue.
 9. **`m_transport->send_message(work)`** is called — virtual dispatch to `TcpBackend::send_message()` (`TcpBackend.cpp`).

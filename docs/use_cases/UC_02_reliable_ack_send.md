@@ -114,7 +114,8 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
 
 - **`ERR_EXPIRED`:** Expiry check in `send_via_transport()` fires before any socket interaction. No slot consumed. Caller should discard.
 - **`AckTracker` full:** `reserve_bookkeeping()` returns `ERR_FULL`; `send()` returns `ERR_FULL` immediately. No bytes are sent to the wire. Caller must handle the `ERR_FULL`.
-- **Transport failure after bookkeeping:** `rollback_on_transport_failure()` calls `cancel()` to free the `AckTracker` slot (PENDING→FREE), preventing a spurious timeout sweep. The transport error is returned.
+- **Transport failure after bookkeeping — nothing sent:** `rollback_on_transport_failure()` via `handle_send_fragments_failure()` calls `cancel()` to free the `AckTracker` slot (PENDING→FREE), preventing a spurious timeout sweep. `send()` returns `ERR_IO`.
+- **Transport failure after bookkeeping — partial send:** If ≥1 fragment was already transmitted (`ERR_IO_PARTIAL`), the `AckTracker` slot is **preserved**. The ACK timeout sweep will fire if no ACK arrives, allowing the application to detect the failure. `send()` returns `ERR_IO` (normalised).
 
 ---
 
