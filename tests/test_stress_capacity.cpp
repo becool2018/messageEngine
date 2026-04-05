@@ -66,7 +66,7 @@
  *  CC ≤ 15 for test functions (raised ceiling per §1b; all functions ≤ 8).
  *  assert() is used (not NEVER_COMPILED_OUT_ASSERT) — tests/ exemption per §9.
  *
- * Verifies: REQ-3.2.4, REQ-3.2.5, REQ-3.2.6, REQ-3.3.2, REQ-3.3.3, REQ-4.1.2
+ * Verifies: REQ-3.2.3, REQ-3.2.4, REQ-3.2.5, REQ-3.2.6, REQ-3.3.2, REQ-3.3.3, REQ-4.1.2
  */
 // Verification: M1 + M2 + M4 (stress path; no injectable dependency required)
 
@@ -81,6 +81,9 @@
 #include "core/RetryManager.hpp"
 #include "core/RingBuffer.hpp"
 #include "core/DuplicateFilter.hpp"
+#include "core/DeliveryEngine.hpp"        // brings in ChannelConfig, ReassemblyBuffer
+#include "core/RequestReplyEngine.hpp"
+#include "platform/LocalSimHarness.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Stress iteration counts (compile-time constants — Power of 10 Rule 2).
@@ -108,6 +111,103 @@ static const uint32_t RING_FILL_CYCLES        =  1000U;
 
 /// Window lengths to cycle through for DuplicateFilter wraparound test.
 static const uint32_t DEDUP_WRAP_CYCLES       =   100U;
+
+/// Single-step request/response cycles — walks m_stash_head through all 16
+/// positions (1000 / 16 = 62 full wraps + 8 extra positions exercised).
+static const uint32_t RRE_SINGLE_CYCLES       =  1000U;
+
+/// Batch fill/drain cycles — fills RRE_BATCH_SIZE slots then drains;
+/// exercises (head + count) % MAX_STASH_SIZE arithmetic on every write.
+static const uint32_t RRE_BATCH_CYCLES        =   100U;
+
+/// Requests per batch cycle.  Must satisfy: 2 × RRE_BATCH_SIZE ≤ MAX_STASH_SIZE (16)
+/// so that (ACKs + responses) fit in a single pump_inbound drain call.
+/// Using 8: 8 ACKs + 8 responses = 16 = MAX_STASH_SIZE exactly.
+static const uint32_t RRE_BATCH_SIZE          =     8U;
+
+/// Cycles of open-all-8-sessions → complete-all-8 for ReassemblyBuffer.
+static const uint32_t REASSEMBLY_COMPLETE_CYCLES = 1000U;
+
+/// Cycles of open-all-8-sessions → sweep_expired-all-8 for ReassemblyBuffer.
+static const uint32_t REASSEMBLY_EXPIRY_CYCLES   = 1000U;
+
+/// Node IDs used in the RRE stress tests (distinct from production node IDs).
+static const NodeId RRE_STRESS_NODE_A = 10U;
+static const NodeId RRE_STRESS_NODE_B = 11U;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers: RRE stress test setup
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void stress_make_sim_config(TransportConfig& cfg, NodeId node_id)
+{
+    transport_config_default(cfg);
+    cfg.kind                         = TransportKind::LOCAL_SIM;
+    cfg.local_node_id                = node_id;
+    cfg.is_server                    = false;
+    cfg.channels[0].max_retries      = 3U;
+    cfg.channels[0].retry_backoff_ms = 50U;
+    cfg.channels[0].recv_timeout_ms  = 0U;  // non-blocking polls
+}
+
+static void stress_setup_rre_nodes(LocalSimHarness&    ha,
+                                    DeliveryEngine&     ea,
+                                    RequestReplyEngine& rrea,
+                                    LocalSimHarness&    hb,
+                                    DeliveryEngine&     eb,
+                                    RequestReplyEngine& rreb)
+{
+    TransportConfig cfg_a;
+    stress_make_sim_config(cfg_a, RRE_STRESS_NODE_A);
+    Result ra = ha.init(cfg_a);
+    assert(ra == Result::OK);
+
+    TransportConfig cfg_b;
+    stress_make_sim_config(cfg_b, RRE_STRESS_NODE_B);
+    Result rb = hb.init(cfg_b);
+    assert(rb == Result::OK);
+
+    ha.link(&hb);
+    hb.link(&ha);
+
+    ea.init(&ha, cfg_a.channels[0], RRE_STRESS_NODE_A);
+    eb.init(&hb, cfg_b.channels[0], RRE_STRESS_NODE_B);
+
+    rrea.init(ea, RRE_STRESS_NODE_A);
+    rreb.init(eb, RRE_STRESS_NODE_B);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: build a fragment envelope for ReassemblyBuffer stress tests.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void stress_make_frag(MessageEnvelope& frag,
+                              uint64_t         message_id,
+                              NodeId           src,
+                              uint8_t          frag_index,
+                              uint8_t          frag_count,
+                              uint16_t         total_payload_length,
+                              uint64_t         expiry_us,
+                              const uint8_t*   payload,
+                              uint32_t         payload_len)
+{
+    envelope_init(frag);
+    frag.message_type         = MessageType::DATA;
+    frag.source_id            = src;
+    frag.destination_id       = 1U;
+    frag.message_id           = message_id;
+    frag.timestamp_us         = 1000000ULL;
+    frag.expiry_time_us       = expiry_us;
+    frag.priority             = 0U;
+    frag.reliability_class    = ReliabilityClass::BEST_EFFORT;
+    frag.fragment_index       = frag_index;
+    frag.fragment_count       = frag_count;
+    frag.total_payload_length = total_payload_length;
+    frag.payload_length       = payload_len;
+    if (payload != nullptr && payload_len > 0U) {
+        (void)memcpy(frag.payload, payload, static_cast<size_t>(payload_len));
+    }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: build a minimal valid test envelope.
@@ -696,6 +796,328 @@ static void test_dedup_filter_window_wraparound()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// TEST 7 — RequestReplyEngine: stash FIFO circular-buffer wraparound
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * What is being tested
+ * --------------------
+ * The request stash inside RequestReplyEngine uses a circular FIFO:
+ *   slot = (m_stash_head + m_stash_count) % MAX_STASH_SIZE   on write
+ *   m_stash_head = (m_stash_head + 1) % MAX_STASH_SIZE       on read
+ *
+ * Phase A — single-step cycles (RRE_SINGLE_CYCLES = 1000):
+ *   One request/response per cycle.  m_stash_head advances by 1 each cycle;
+ *   after 16 cycles it wraps to 0.  1000 cycles = 62 full wraps + 8
+ *   extra positions — every slot acts as head many times.
+ *
+ * Phase B — batch fill/drain cycles (RRE_BATCH_CYCLES = 100):
+ *   All MAX_PENDING_REQUESTS (16) slots filled then drained per cycle.
+ *   Verifies FIFO order (payload byte == slot index) and that the boundary
+ *   overflow (17th send) and the post-drain empty (first extra receive) are
+ *   correctly reported.
+ *
+ * Failure modes caught
+ * --------------------
+ *  • Off-by-one in (head + count) % MAX_STASH_SIZE: slot aliasing causes the
+ *    wrong entry to be returned, failing the payload assertion.
+ *  • Slot not freed on dequeue: m_stash_count stays elevated; the stash
+ *    appears full one entry early on the next batch cycle.
+ *  • Overflow not caught: the 17th send succeeds and corrupts a stash slot.
+ *  • Empty not reported: a dequeue after full drain returns stale data.
+ *
+ * Verifies: REQ-3.2.4, REQ-3.3.2, REQ-3.3.3
+ */
+static void test_rre_stash_fifo_wraparound()
+{
+    // Large objects in BSS to avoid stack overflow (Power of 10 Rule 3 note:
+    // static local → BSS; init() fully re-initialises all state).
+    static LocalSimHarness    ha;
+    static DeliveryEngine     ea;
+    static RequestReplyEngine rrea;
+    static LocalSimHarness    hb;
+    static DeliveryEngine     eb;
+    static RequestReplyEngine rreb;
+
+    stress_setup_rre_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    static const uint64_t RRE_NOW_US     = 1000000ULL;  // fixed test clock
+    static const uint64_t RRE_TIMEOUT_US = 5000000ULL;  // 5 s — far future
+    static const uint8_t  REQ_BYTE       = 0xA1U;
+    static const uint8_t  RSP_BYTE       = 0xB2U;
+
+    // ── Phase A: RRE_SINGLE_CYCLES single-step request/response cycles ──────
+    // Power of 10 Rule 2: bounded loop — RRE_SINGLE_CYCLES is a compile-time constant
+    for (uint32_t cycle = 0U; cycle < RRE_SINGLE_CYCLES; ++cycle) {
+
+        // A sends one request
+        uint64_t cid = 0U;
+        Result r = rrea.send_request(RRE_STRESS_NODE_B, &REQ_BYTE, 1U,
+                                     RRE_TIMEOUT_US, RRE_NOW_US, cid);
+        assert(r == Result::OK);  // pending table must have a free slot
+
+        // B receives the request
+        uint8_t  rx_buf[1U]  = { 0U };
+        uint32_t rx_len      = 0U;
+        NodeId   rx_src      = 0U;
+        uint64_t rx_cid      = 0U;
+        r = rreb.receive_request(rx_buf, 1U, rx_len, rx_src, rx_cid, RRE_NOW_US);
+        assert(r == Result::OK);  // request must arrive at B
+
+        // B sends response
+        r = rreb.send_response(rx_src, rx_cid, &RSP_BYTE, 1U, RRE_NOW_US);
+        assert(r == Result::OK);
+
+        // A collects the response
+        uint8_t  rsp_buf[1U] = { 0U };
+        uint32_t rsp_len     = 0U;
+        r = rrea.receive_response(cid, rsp_buf, 1U, rsp_len, RRE_NOW_US);
+        assert(r == Result::OK);  // pending slot must be recycled correctly
+
+        // Sweep ACKED → FREE in AckTracker so the slot is available next cycle.
+        // AckTracker::on_ack() transitions PENDING→ACKED; only sweep_ack_timeouts()
+        // completes the ACKED→FREE transition.  Without this call the tracker fills
+        // up after ACK_TRACKER_CAPACITY (32) cycles and the next send_request fails.
+        // Power of 10 Rule 7: return value is a count; cast to void (no action needed).
+        (void)ea.sweep_ack_timeouts(RRE_NOW_US);
+    }
+
+    // ── Phase B: RRE_BATCH_CYCLES full stash fill/drain cycles ──────────────
+    // Batch size = RRE_BATCH_SIZE (8): 8 RELIABLE_RETRY requests produce 8 ACKs
+    // in A's inbound queue; 8 responses add 8 more.  8 + 8 = 16 = MAX_STASH_SIZE,
+    // so a single pump_inbound call (≤ MAX_STASH_SIZE iterations) drains all of
+    // them and sets stash_ready on every pending slot before the collect loop runs.
+    // Power of 10 Rule 2: bounded outer loop
+    for (uint32_t cycle = 0U; cycle < RRE_BATCH_CYCLES; ++cycle) {
+
+        uint64_t cids[RRE_BATCH_SIZE];
+        (void)memset(cids, 0, sizeof(cids));
+
+        // A sends RRE_BATCH_SIZE requests; payload byte = slot index (for FIFO check)
+        // Power of 10 Rule 2: bounded inner loop
+        for (uint32_t slot = 0U; slot < RRE_BATCH_SIZE; ++slot) {
+            const uint8_t pay = static_cast<uint8_t>(slot);
+            Result r = rrea.send_request(RRE_STRESS_NODE_B, &pay, 1U,
+                                         RRE_TIMEOUT_US, RRE_NOW_US, cids[slot]);
+            assert(r == Result::OK);  // each slot must be accepted
+        }
+
+        // B reads all RRE_BATCH_SIZE requests; verify FIFO order, then responds
+        // Power of 10 Rule 2: bounded inner loop
+        for (uint32_t slot = 0U; slot < RRE_BATCH_SIZE; ++slot) {
+            uint8_t  rx_buf[1U] = { 0U };
+            uint32_t rx_len     = 0U;
+            NodeId   rx_src     = 0U;
+            uint64_t rx_cid     = 0U;
+            Result r = rreb.receive_request(rx_buf, 1U, rx_len, rx_src, rx_cid, RRE_NOW_US);
+            assert(r == Result::OK);
+            // FIFO: payload must equal slot index; any mismatch = head/tail wrap bug
+            assert(rx_buf[0] == static_cast<uint8_t>(slot));
+
+            Result send_r = rreb.send_response(rx_src, rx_cid, rx_buf, rx_len, RRE_NOW_US);
+            assert(send_r == Result::OK);
+        }
+
+        // Stash now empty: next receive_request must report no entry
+        {
+            uint8_t  empty_buf[1U] = { 0U };
+            uint32_t empty_len     = 0U;
+            NodeId   empty_src     = 0U;
+            uint64_t empty_cid     = 0U;
+            Result empty_r = rreb.receive_request(empty_buf, 1U, empty_len,
+                                                   empty_src, empty_cid, RRE_NOW_US);
+            assert(empty_r == Result::ERR_EMPTY);  // no spurious stash entry
+        }
+
+        // A collects all RRE_BATCH_SIZE responses; pending table fully recycled
+        // Power of 10 Rule 2: bounded inner loop
+        for (uint32_t slot = 0U; slot < RRE_BATCH_SIZE; ++slot) {
+            uint8_t  rsp_buf[1U] = { 0U };
+            uint32_t rsp_len     = 0U;
+            Result r = rrea.receive_response(cids[slot], rsp_buf, 1U, rsp_len, RRE_NOW_US);
+            assert(r == Result::OK);  // every pending slot must be recoverable
+        }
+
+        // Free ACKED AckTracker slots so the next batch cycle can track new sends.
+        // Power of 10 Rule 7: return value is a count; cast to void.
+        (void)ea.sweep_ack_timeouts(RRE_NOW_US);
+    }
+
+    printf("PASS: test_rre_stash_fifo_wraparound"
+           " (Phase A: %u single cycles, Phase B: %u batch cycles x %u slots)\n",
+           RRE_SINGLE_CYCLES, RRE_BATCH_CYCLES, RRE_BATCH_SIZE);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TEST 8 — ReassemblyBuffer: session slot recycling (completion + expiry paths)
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * What is being tested
+ * --------------------
+ * ReassemblyBuffer has REASSEMBLY_SLOT_COUNT (8) session slots.  Slots are
+ * freed by two independent code paths:
+ *   A) assemble_and_free()  — called when all fragments arrive (Result::OK).
+ *   B) sweep_expired()      — called periodically; frees slots past deadline.
+ *
+ * Phase A — completion cycles (REASSEMBLY_COMPLETE_CYCLES = 1000):
+ *   1. Open all 8 sessions (frag 0 only) — each returns ERR_AGAIN.
+ *   2. Verify 9th session is rejected (ERR_FULL — table full).
+ *   3. Complete all 8 sessions (frag 1) — each returns OK via assemble_and_free().
+ *   4. Verify recycle: open a new session immediately — must succeed (ERR_AGAIN).
+ *
+ * Phase B — expiry cycles (REASSEMBLY_EXPIRY_CYCLES = 1000):
+ *   1. Open all 8 sessions with an already-expired expiry_us.
+ *   2. Call sweep_expired() — must free all 8 slots.
+ *   3. Verify recycle: open a new session immediately — must succeed (ERR_AGAIN).
+ *
+ * Failure modes caught
+ * --------------------
+ *  • Phase A: assemble_and_free() fails to clear active flag → ERR_FULL on
+ *    the next cycle's first open attempt, failing the assertion.
+ *  • Phase A boundary: off-by-one in find_free_slot() admits a 9th slot that
+ *    corrupts an adjacent struct.
+ *  • Phase B: sweep_expired() fails to clear active flag → same ERR_FULL
+ *    failure on next cycle.
+ *  • Phase B: sweep uses a wrong comparison (< instead of <=) and misses the
+ *    boundary expiry value → no slot freed → ERR_FULL on recycle.
+ *
+ * Verifies: REQ-3.2.3, REQ-3.3.3
+ */
+static void test_reassembly_slot_recycling()
+{
+    static ReassemblyBuffer buf;
+    buf.init();
+
+    // Single payload byte per fragment — enough to open a session.
+    // total_payload_length = 2 × 1 byte (2 fragments × 1 byte each).
+    static const uint8_t  FRAG_BYTE  = 0xBBU;
+    static const uint32_t FRAG_BYTES = 1U;
+    static const uint16_t TOTAL_LEN  = 2U;
+
+    static const uint64_t FAR_EXPIRY  = 0xFFFFFFFFFFFFFF00ULL; // won't expire
+    static const uint64_t PAST_EXPIRY = 1ULL;                  // already expired
+    static const uint64_t SWEEP_NOW   = 1000000ULL;            // t = 1 s
+
+    static const NodeId FRAG_SRC_A = 20U;  // source for Phase A (completion)
+    static const NodeId FRAG_SRC_B = 21U;  // source for Phase B (expiry)
+
+    // Phase B IDs start far above Phase A to avoid any (src, msg_id) collision.
+    static const uint64_t PHASE_B_BASE = 1000000ULL;
+
+    // ── Phase A: REASSEMBLY_COMPLETE_CYCLES open-all → complete-all cycles ──
+    // Power of 10 Rule 2: bounded outer loop
+    for (uint32_t cycle = 0U; cycle < REASSEMBLY_COMPLETE_CYCLES; ++cycle) {
+
+        // Open all 8 sessions (frag 0 only — session COLLECTING, not complete)
+        // Power of 10 Rule 2: bounded inner loop
+        for (uint32_t s = 0U; s < REASSEMBLY_SLOT_COUNT; ++s) {
+            const uint64_t msg_id =
+                static_cast<uint64_t>(cycle) * static_cast<uint64_t>(REASSEMBLY_SLOT_COUNT)
+                + static_cast<uint64_t>(s) + 1ULL;
+            MessageEnvelope frag;
+            MessageEnvelope out;
+            envelope_init(out);
+            stress_make_frag(frag, msg_id, FRAG_SRC_A, 0U, 2U, TOTAL_LEN,
+                             FAR_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
+            Result r = buf.ingest(frag, out);
+            assert(r == Result::ERR_AGAIN);  // frag 0: session opens, not yet complete
+        }
+
+        // All 8 slots in use — the 9th open attempt must be rejected
+        {
+            const uint64_t overflow_id = 0xDEAD000000000000ULL
+                                         + static_cast<uint64_t>(cycle);
+            MessageEnvelope frag;
+            MessageEnvelope out;
+            envelope_init(out);
+            stress_make_frag(frag, overflow_id, FRAG_SRC_A, 0U, 2U, TOTAL_LEN,
+                             FAR_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
+            Result r = buf.ingest(frag, out);
+            assert(r == Result::ERR_FULL);  // no slot overrun permitted
+        }
+
+        // Complete all 8 sessions (frag 1 → assemble_and_free() frees the slot)
+        // Power of 10 Rule 2: bounded inner loop
+        for (uint32_t s = 0U; s < REASSEMBLY_SLOT_COUNT; ++s) {
+            const uint64_t msg_id =
+                static_cast<uint64_t>(cycle) * static_cast<uint64_t>(REASSEMBLY_SLOT_COUNT)
+                + static_cast<uint64_t>(s) + 1ULL;
+            MessageEnvelope frag;
+            MessageEnvelope out;
+            envelope_init(out);
+            stress_make_frag(frag, msg_id, FRAG_SRC_A, 1U, 2U, TOTAL_LEN,
+                             FAR_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
+            Result r = buf.ingest(frag, out);
+            assert(r == Result::OK);           // frag 1: message complete
+            assert(out.message_id == msg_id);  // assembled envelope has correct key
+        }
+
+        // All 8 slots freed — verify recycle: open one fresh session
+        {
+            const uint64_t recycle_id = 0xCAFE000000000000ULL
+                                        + static_cast<uint64_t>(cycle);
+            MessageEnvelope frag;
+            MessageEnvelope out;
+            envelope_init(out);
+            stress_make_frag(frag, recycle_id, FRAG_SRC_A, 0U, 2U, TOTAL_LEN,
+                             FAR_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
+            Result r = buf.ingest(frag, out);
+            assert(r == Result::ERR_AGAIN);  // slot freed; new session must open
+
+            // Complete the recycle session so buf is fully clean before next cycle
+            stress_make_frag(frag, recycle_id, FRAG_SRC_A, 1U, 2U, TOTAL_LEN,
+                             FAR_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
+            r = buf.ingest(frag, out);
+            assert(r == Result::OK);
+        }
+    }
+
+    // ── Phase B: REASSEMBLY_EXPIRY_CYCLES open-all → sweep cycles ───────────
+    // Power of 10 Rule 2: bounded outer loop
+    for (uint32_t cycle = 0U; cycle < REASSEMBLY_EXPIRY_CYCLES; ++cycle) {
+
+        // Open all 8 sessions with an already-expired expiry_us
+        // Power of 10 Rule 2: bounded inner loop
+        for (uint32_t s = 0U; s < REASSEMBLY_SLOT_COUNT; ++s) {
+            const uint64_t msg_id = PHASE_B_BASE
+                + static_cast<uint64_t>(cycle) * static_cast<uint64_t>(REASSEMBLY_SLOT_COUNT)
+                + static_cast<uint64_t>(s) + 1ULL;
+            MessageEnvelope frag;
+            MessageEnvelope out;
+            envelope_init(out);
+            stress_make_frag(frag, msg_id, FRAG_SRC_B, 0U, 2U, TOTAL_LEN,
+                             PAST_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
+            Result r = buf.ingest(frag, out);
+            assert(r == Result::ERR_AGAIN);  // frag 0 accepted; session COLLECTING
+        }
+
+        // Sweep at SWEEP_NOW (1 s) > PAST_EXPIRY (1 µs) — all 8 must be freed
+        buf.sweep_expired(SWEEP_NOW);
+
+        // Verify recycle: open one fresh session — must succeed
+        {
+            const uint64_t verify_id = 0xBEEF000000000000ULL
+                                       + static_cast<uint64_t>(cycle);
+            MessageEnvelope frag;
+            MessageEnvelope out;
+            envelope_init(out);
+            stress_make_frag(frag, verify_id, FRAG_SRC_B, 0U, 2U, TOTAL_LEN,
+                             PAST_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
+            Result r = buf.ingest(frag, out);
+            assert(r == Result::ERR_AGAIN);  // sweep freed at least one slot
+
+            // Clean up verify session so buf is empty before next cycle
+            buf.sweep_expired(SWEEP_NOW);
+        }
+    }
+
+    printf("PASS: test_reassembly_slot_recycling"
+           " (Phase A: %u completion cycles x %u slots,"
+           " Phase B: %u expiry cycles x %u slots)\n",
+           REASSEMBLY_COMPLETE_CYCLES, REASSEMBLY_SLOT_COUNT,
+           REASSEMBLY_EXPIRY_CYCLES, REASSEMBLY_SLOT_COUNT);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -709,6 +1131,8 @@ int main()
     test_retry_manager_max_retry_exhaustion();
     test_ring_buffer_sustained_push_pop();
     test_dedup_filter_window_wraparound();
+    test_rre_stash_fifo_wraparound();
+    test_reassembly_slot_recycling();
 
     printf("\nALL stress capacity tests passed.\n");
     return 0;
