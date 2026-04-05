@@ -120,12 +120,12 @@ private:
         bool     active;
     };
 
-    HoldSlot  m_hold[ORDERING_HOLD_COUNT];
+    HoldSlot  m_hold[ORDERING_HOLD_COUNT] = {};
     // Peer table sized to ORDERING_PEER_COUNT (= MAX_PEER_NODES = 16) so all
     // concurrent ordered-channel peers can be tracked without hitting ERR_FULL.
-    PeerState m_peers[ORDERING_PEER_COUNT];
-    bool      m_initialized;
-    NodeId    m_local_node;
+    PeerState m_peers[ORDERING_PEER_COUNT] = {};
+    bool      m_initialized = false;
+    NodeId    m_local_node  = 0U;
 
     // Private helpers — extracted to keep ingest() CC ≤ 10
 

@@ -90,8 +90,8 @@ private:
         bool            active;                        ///< slot in use
     };
 
-    ReassemblySlot m_slots[REASSEMBLY_SLOT_COUNT];
-    bool           m_initialized;
+    ReassemblySlot m_slots[REASSEMBLY_SLOT_COUNT] = {};
+    bool           m_initialized = false;
 
     // Private helpers — extracted to keep ingest() CC ≤ 10
     // Find existing active slot for (source_id, message_id); returns REASSEMBLY_SLOT_COUNT
