@@ -71,7 +71,7 @@ No branching logic. The function performs a fixed sequence of operations on any 
 
 ## 8. Memory & Ownership Semantics
 
-- `*env` — `MessageEnvelope` struct; `sizeof(MessageEnvelope) = sizeof header fields + MSG_MAX_PAYLOAD_BYTES (4096) ≈ 4140 bytes`.
+- `*env` — `MessageEnvelope` struct; `sizeof(MessageEnvelope) = sizeof header fields + MSG_MAX_PAYLOAD_BYTES (4096) 4144 bytes`.
 - `memset` touches the entire struct including the 4096-byte payload array.
 - No heap allocation. Power of 10 Rule 3 compliant.
 
@@ -125,7 +125,7 @@ User -> envelope_init(&env)
 
 ## 14. Known Risks / Observations
 
-- **memset of large struct:** `sizeof(MessageEnvelope) ≈ 4140 bytes` makes `memset` the dominant cost of this function. For high-frequency senders this may be a minor but measurable overhead; callers that reuse the same envelope for multiple sends can skip `envelope_init()` after the first call if they overwrite all relevant fields.
+- **memset of large struct:** `sizeof(MessageEnvelope) 4144 bytes` makes `memset` the dominant cost of this function. For high-frequency senders this may be a minor but measurable overhead; callers that reuse the same envelope for multiple sends can skip `envelope_init()` after the first call if they overwrite all relevant fields.
 - **INVALID sentinel:** `MessageType::INVALID = 255` (0xFF) is the zero-initialized value's complement; `memset(0)` sets it to 0 (DATA), not INVALID. The explicit `env->message_type = MessageType::INVALID` step after `memset` is required.
 
 ---

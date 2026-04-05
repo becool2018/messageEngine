@@ -97,7 +97,7 @@ DeliveryEngine::pump_retries(now_us)                          [DeliveryEngine.cp
 
 ## 8. Memory & Ownership Semantics
 
-- `due_buf[ACK_TRACKER_CAPACITY]` — 32 × ~4152-byte `MessageEnvelope` array on the stack: approximately 132 KB. This is the largest stack frame in the codebase.
+- `due_buf[ACK_TRACKER_CAPACITY]` — 32 × 4144-byte `MessageEnvelope` array on the stack: approximately 130 KB. This is the largest stack frame in the codebase.
 - `RetryEntry::env` is read during `collect_due()` (copied to `due_buf`); not modified.
 - No heap allocation. Power of 10 Rule 3 satisfied.
 

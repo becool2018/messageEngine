@@ -56,7 +56,7 @@ envelope_copy(dst, src)                            [Envelope.hpp/cpp]
 
 ## 5. Key Components Involved
 
-- **`memcpy()`** — copies the full `sizeof(MessageEnvelope) ≈ 4140 bytes` including the 4096-byte payload. Using `memcpy` instead of struct assignment avoids any potential compiler-generated overhead for large structs.
+- **`memcpy()`** — copies the full `sizeof(MessageEnvelope) 4144 bytes` including the 4096-byte payload. Using `memcpy` instead of struct assignment avoids any potential compiler-generated overhead for large structs.
 - **Non-aliasing assertion** — `dst != src` prevents an undefined-behavior self-copy through `memcpy`.
 
 ---
@@ -78,7 +78,7 @@ No branching beyond the assertion checks.
 ## 8. Memory & Ownership Semantics
 
 - `dst` and `src` are pointers to `MessageEnvelope` objects owned by their respective callers.
-- `sizeof(MessageEnvelope) ≈ 4140 bytes` — copying this on every push/pop is the dominant memory operation in the receive path; documented in WCET analysis.
+- `sizeof(MessageEnvelope) 4144 bytes` — copying this on every push/pop is the dominant memory operation in the receive path; documented in WCET analysis.
 - No heap allocation. Power of 10 Rule 3 compliant.
 
 ---
@@ -131,7 +131,7 @@ No branching beyond the assertion checks.
 
 ## 14. Known Risks / Observations
 
-- **Copy cost:** `memcpy` of ~4140 bytes per message is the largest per-message memory operation. For very high message rates this can be a throughput bottleneck. The fixed-size struct design makes this cost constant and predictable.
+- **Copy cost:** `memcpy` of 4144 bytes per message is the largest per-message memory operation. For very high message rates this can be a throughput bottleneck. The fixed-size struct design makes this cost constant and predictable.
 - **No partial copy protection:** If the call is interrupted (signal) during `memcpy`, the destination may be partially written. In single-threaded or SPSC contexts this is not a concern since the slot is not visible to the consumer until after the full copy completes (guaranteed by the release store on `m_head`).
 
 ---

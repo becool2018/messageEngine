@@ -80,7 +80,7 @@ DeliveryEngine::receive(out, timeout_ms, now_us)   [DeliveryEngine.cpp]
 
 ## 8. Memory & Ownership Semantics
 
-- `raw` — stack-allocated `MessageEnvelope` (~4152 bytes) inside `receive()`. Discarded (not copied to `out`) when expired.
+- `raw` — stack-allocated `MessageEnvelope` (4144 bytes) inside `receive()`. Discarded (not copied to `out`) when expired.
 - `out` — caller-provided; untouched on `ERR_EXPIRED`.
 - No heap allocation.
 

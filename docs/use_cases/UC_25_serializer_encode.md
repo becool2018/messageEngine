@@ -10,7 +10,7 @@
 
 - **Trigger:** Any backend calls `Serializer::serialize(envelope, buf, buf_cap, &wire_len)` on the send path. File: `src/core/Serializer.cpp`.
 - **Goal:** Convert a `MessageEnvelope` struct into a deterministic big-endian wire byte sequence.
-- **Success outcome:** `Result::OK` returned; `buf[0..wire_len-1]` contains the 44-byte header + payload bytes. `*wire_len = WIRE_HEADER_SIZE + envelope.payload_length`.
+- **Success outcome:** `Result::OK` returned; `buf[0..wire_len-1]` contains the 52-byte header + payload bytes. `*wire_len = WIRE_HEADER_SIZE + envelope.payload_length`.
 - **Error outcomes:**
   - `Result::ERR_INVALID` — `envelope.payload_length > MSG_MAX_PAYLOAD_BYTES`.
   - `Result::ERR_INVALID` — `WIRE_HEADER_SIZE + payload_length > buf_cap`.

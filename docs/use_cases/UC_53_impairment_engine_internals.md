@@ -112,7 +112,7 @@ ImpairmentEngine::process_inbound(env)            [ImpairmentEngine.cpp]
 
 ## 8. Memory & Ownership Semantics
 
-- `m_delay_buf[IMPAIR_DELAY_BUF_SIZE=32]` — fixed array; each slot holds one `MessageEnvelope` (~4140 bytes) plus a `deliver_time_us` field; total ≈ 32 × 4148 bytes ≈ 133 KB static.
+- `m_delay_buf[IMPAIR_DELAY_BUF_SIZE=32]` — fixed array; each slot holds one `MessageEnvelope` (4144 bytes) plus a `deliver_time_us` field; total ≈ 32 × 4148 bytes ≈ 133 KB static.
 - No heap allocation. Power of 10 Rule 3 compliant.
 - `m_prng` — `PrngEngine` member; no dynamic state.
 

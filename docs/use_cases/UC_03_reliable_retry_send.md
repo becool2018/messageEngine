@@ -104,7 +104,7 @@ DeliveryEngine::send()                          [DeliveryEngine.cpp]
 
 ## 8. Memory & Ownership Semantics
 
-- `MessageEnvelope work` — ~4152 bytes on stack in `DeliveryEngine::send()`.
+- `MessageEnvelope work` — 4144 bytes on stack in `DeliveryEngine::send()`.
 - `RetryEntry::env` — full `MessageEnvelope` copy stored inside `RetryManager::m_entries[slot]`; this is the copy that will be retransmitted by `pump_retries()`. No heap allocation.
 - `RetryManager::m_entries[ACK_TRACKER_CAPACITY]` — 32 `RetryEntry` structs, owned by `RetryManager` value member inside `DeliveryEngine`.
 - Power of 10 Rule 3: no heap allocation.
@@ -180,7 +180,7 @@ User
 
 - **`next_retry_us = now_us`:** The first retry is due immediately. If `pump_retries()` is called before the peer has a chance to ACK, the message may be resent before the original copy is even delivered. Receiver-side deduplication (DuplicateFilter) is required to suppress redundant copies.
 - **RetryManager full returns `ERR_FULL`:** When the `RetryManager` is full, `reserve_bookkeeping()` cancels the already-reserved `AckTracker` slot and returns `ERR_FULL`. `send()` returns `ERR_FULL` before any wire I/O — no longer a silent failure. Caller must handle `ERR_FULL`.
-- **Full envelope copy cost:** `RetryEntry::env` is a copy of the full `MessageEnvelope` (~4152 bytes). With 32 slots, `RetryManager` holds up to ~132 KB of envelope data as fixed members.
+- **Full envelope copy cost:** `RetryEntry::env` is a copy of the full `MessageEnvelope` (4144 bytes). With 32 slots, `RetryManager` holds up to ~132 KB of envelope data as fixed members.
 
 ---
 

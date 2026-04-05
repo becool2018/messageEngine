@@ -175,11 +175,11 @@ Header-only, statically allocated, power-of-two SPSC (single-producer, single-co
 ### `Serializer`
 **Files:** `Serializer.hpp`, `Serializer.cpp`
 
-Static-only class providing deterministic big-endian (network byte order) serialization and deserialization of `MessageEnvelope`. Uses manual bit-shift I/O — no `htons`/`ntohl` — for explicit endian control. Wire header is always 44 bytes.
+Static-only class providing deterministic big-endian (network byte order) serialization and deserialization of `MessageEnvelope`. Uses manual bit-shift I/O — no `htons`/`ntohl` — for explicit endian control. Wire header is always 52 bytes.
 
 | | |
 |---|---|
-| **Key API** | `static const uint32_t WIRE_HEADER_SIZE = 44` |
+| **Key API** | `static const uint32_t WIRE_HEADER_SIZE = 52` |
 | | `static Result serialize(env, buf, buf_len, out_len)` |
 | | `static Result deserialize(buf, buf_len, env)` |
 | **Depends on** | `Types.hpp`, `MessageEnvelope.hpp` |

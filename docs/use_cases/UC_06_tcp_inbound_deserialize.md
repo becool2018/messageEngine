@@ -45,7 +45,7 @@ Called internally by the system; never called directly by User code.
 5. If `recv_frame` returns false: `Logger::log(WARNING_LO, ...)`, `remove_client(idx)`, return `Result::ERR_IO`.
 6. `NEVER_COMPILED_OUT_ASSERT(wire_len >= WIRE_HEADER_SIZE)`.
 7. **`Serializer::deserialize(m_wire_buf, wire_len, env)`** (`Serializer.cpp`):
-   a. Reads all 44-byte header fields with big-endian `read_u8/u32/u64` helpers.
+   a. Reads all 52-byte header fields with big-endian `read_u8/u32/u64` helpers.
    b. Validates `env.payload_length <= MSG_MAX_PAYLOAD_BYTES`.
    c. Validates `wire_len == WIRE_HEADER_SIZE + env.payload_length`.
    d. `memcpy(env.payload, buf + WIRE_HEADER_SIZE, payload_length)`.
@@ -108,7 +108,7 @@ TcpBackend::recv_from_client(idx, timeout_ms)   [TcpBackend.cpp]
 ## 8. Memory & Ownership Semantics
 
 - `m_wire_buf[SOCKET_RECV_BUF_BYTES]` (8192 bytes) — `TcpBackend` member; reused on every call.
-- `RingBuffer::m_buf[MSG_RING_CAPACITY]` — 64 × ~4152-byte `MessageEnvelope` array; owned by `TcpBackend::m_recv_queue`. No heap allocation.
+- `RingBuffer::m_buf[MSG_RING_CAPACITY]` — 64 × 4144-byte `MessageEnvelope` array; owned by `TcpBackend::m_recv_queue`. No heap allocation.
 - `env` — stack-allocated `MessageEnvelope` inside `recv_from_client()` for intermediate use.
 - Power of 10 Rule 3: no heap allocation on this path.
 

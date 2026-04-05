@@ -109,7 +109,7 @@ DeliveryEngine::send()                       [DeliveryEngine.cpp]
 ## 8. Memory & Ownership Semantics
 
 - **Stack buffers used:**
-  - `MessageEnvelope work` — copy of the input envelope with updated `message_id`; approximately 4152 bytes on the stack in `DeliveryEngine::send()`.
+  - `MessageEnvelope work` — copy of the input envelope with updated `message_id`; 4144 bytes on the stack in `DeliveryEngine::send()`.
   - `m_wire_buf[SOCKET_RECV_BUF_BYTES]` — 8192-byte member of `TcpBackend`; used to hold the serialized frame.
   - `delay_buf[IMPAIR_DELAY_BUF_SIZE]` — 32-slot array of `MessageEnvelope` inside `ImpairmentEngine::process_outbound()`.
 - **No heap allocation** on this path (Power of 10 Rule 3 satisfied).
@@ -183,7 +183,7 @@ User
 - **No delivery confirmation:** BEST_EFFORT provides no guarantee. If the TCP socket buffers are full or the connection drops after `::send()` returns, the message is silently lost.
 - **Silent success with zero clients:** If no clients are connected, `send_to_all_clients()` does nothing but `Result::OK` is still returned. The caller cannot distinguish "sent to zero clients" from "sent successfully."
 - **`MessageIdGen` not thread-safe:** Calling `send()` from multiple threads concurrently creates a data race on `m_counter`.
-- **Stack depth:** Each `send()` allocates approximately 4152 bytes (`MessageEnvelope work`) on the stack; callers on constrained stacks should be aware of this.
+- **Stack depth:** Each `send()` allocates 4144 bytes (`MessageEnvelope work`) on the stack; callers on constrained stacks should be aware of this.
 
 ---
 

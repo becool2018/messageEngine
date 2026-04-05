@@ -101,7 +101,7 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
 
 ## 8. Memory & Ownership Semantics
 
-- `MessageEnvelope work` — stack copy (~4152 bytes) in `DeliveryEngine::send()`.
+- `MessageEnvelope work` — stack copy (4144 bytes) in `DeliveryEngine::send()`.
 - `AckTracker::m_entries[ACK_TRACKER_CAPACITY]` — fixed array of 32 `AckEntry` structs; owned by `AckTracker` value member inside `DeliveryEngine`. No heap allocation.
 - `m_wire_buf[8192]` in `TcpBackend` — as in UC_01.
 - Power of 10 Rule 3: no heap allocation on this path.

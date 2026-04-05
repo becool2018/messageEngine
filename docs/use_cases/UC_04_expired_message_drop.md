@@ -89,7 +89,7 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
 
 ## 8. Memory & Ownership Semantics
 
-- `MessageEnvelope work` — ~4152 bytes on stack; created but immediately discarded when `ERR_EXPIRED` is returned.
+- `MessageEnvelope work` — 4144 bytes on stack; created but immediately discarded when `ERR_EXPIRED` is returned.
 - Logger uses a 512-byte stack buffer in `Logger::log()` for `snprintf`.
 - No heap allocation. Power of 10 Rule 3 satisfied.
 

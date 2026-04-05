@@ -67,7 +67,7 @@ These are **application-layer** semantics implemented entirely in `DeliveryEngin
 
 ### 3. Serialization
 - Deterministic big-endian (network byte order) wire format
-- Fixed 44-byte header; payload follows immediately
+- Fixed 52-byte header; payload follows immediately
 - Protocol version byte (byte 3) and 2-byte frame magic `0x4D45` ('ME') embedded in every frame — mismatched version or magic rejected before any field is read (`src/core/ProtocolVersion.hpp`)
 - Validated on deserialization: protocol version, frame magic, payload length bounds
 
@@ -208,7 +208,7 @@ DeliveryEngine::send()
 TransportInterface::send_message()  [virtual dispatch to concrete backend]
  ▼
 TcpBackend / UdpBackend / TlsTcpBackend / DtlsUdpBackend
- │  Serializer::serialize() → wire bytes (44-byte header + payload)
+ │  Serializer::serialize() → wire bytes (52-byte header + payload)
  ▼
 ImpairmentEngine::process_outbound()
  │  partition active?  → drop, return ERR_IO
@@ -752,7 +752,7 @@ All functions return a `Result` enum. Never ignore a return value.
 
 The [`docs/use_cases/`](docs/use_cases/) directory contains detailed use case documents that trace every user-facing capability and system-internal sub-function through the live source code.
 
-- **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 61 use cases, grouped by high-level capability (HL-1 through HL-22), Application Workflow patterns, and System Internal sub-functions. (v2: UC-62 ordered delivery, UC-63 fragment send, UC-64 fragment reassembly added.)
+- **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 61 use cases, grouped by high-level capability (HL-1 through HL-29), Application Workflow patterns, and System Internal sub-functions.
 - **[USE_CASE_FREQUENCY.md](docs/use_cases/USE_CASE_FREQUENCY.md)** — frequency classification of all 61 use cases (hottest path → high → medium → low → system internals); use this to guide performance analysis, profiling focus, and code review prioritisation.
 
 Each individual `UC_*.md` document follows a 15-section flow-of-control format covering: entry points, end-to-end control flow, call tree, branching logic, concurrency behavior, memory ownership, error handling, external interactions, state changes, and known risks.

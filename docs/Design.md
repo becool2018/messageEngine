@@ -125,7 +125,7 @@ The central data structure. Every message — DATA, ACK, NAK, or HEARTBEAT — i
 | *(padding)* | `uint32_t` | 4 bytes | Reserved; must be 0 on wire |
 | `payload` | `uint8_t[4096]` | 0–4096 bytes | Application data; opaque to all layers below App |
 
-**Wire header total: 44 bytes.** Payload follows immediately. Maximum wire frame: 44 + 4096 = 4,140 bytes.
+**Wire header total: 52 bytes.** Payload follows immediately. Maximum wire frame: 52 + 4096 = 4,148 bytes.
 
 ### 4.2 Key Enumerations
 

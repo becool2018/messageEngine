@@ -78,7 +78,7 @@ LocalSimHarness::inject(envelope)                  [LocalSimHarness.cpp]
 
 ## 8. Memory & Ownership Semantics
 
-- `m_recv_queue` — `RingBuffer` with `MSG_RING_CAPACITY = 64` slots; each slot holds one `MessageEnvelope` (fixed-size struct, ~4140 bytes each).
+- `m_recv_queue` — `RingBuffer` with `MSG_RING_CAPACITY = 64` slots; each slot holds one `MessageEnvelope` (fixed-size struct, 4144 bytes each).
 - `m_recv_queue.m_buf[MSG_RING_CAPACITY]` — fixed array; no heap allocation. Power of 10 Rule 3 compliant.
 - The envelope is copied by value into the ring buffer slot; no pointer aliasing.
 

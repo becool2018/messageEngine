@@ -80,7 +80,7 @@ RingBuffer::pop(out_env)                           [RingBuffer.hpp]
 - **`m_head` (std::atomic<uint32_t>)** — producer index; written only by the producer thread; read by both.
 - **`m_tail` (std::atomic<uint32_t>)** — consumer index; written only by the consumer thread; read by both.
 - **Acquire/release ordering** — the release store on `m_head` (push) synchronizes with the acquire load on `m_head` (pop), ensuring the consumer sees the complete `memcpy` before advancing `m_tail`. Symmetric for pop→push.
-- **`m_buf[MSG_RING_CAPACITY]`** — fixed array of 64 `MessageEnvelope` slots; ~64 × 4140 bytes ≈ 265 KB static allocation.
+- **`m_buf[MSG_RING_CAPACITY]`** — fixed array of 64 `MessageEnvelope` slots; 64 × 4144 bytes ≈ 259 KB static allocation.
 
 ---
 
@@ -105,7 +105,7 @@ RingBuffer::pop(out_env)                           [RingBuffer.hpp]
 
 ## 8. Memory & Ownership Semantics
 
-- `m_buf[MSG_RING_CAPACITY]` — static array member of `RingBuffer`; `MSG_RING_CAPACITY = 64`; each slot `sizeof(MessageEnvelope) ≈ 4140 bytes`; total ≈ 265 KB.
+- `m_buf[MSG_RING_CAPACITY]` — static array member of `RingBuffer`; `MSG_RING_CAPACITY = 64`; each slot `sizeof(MessageEnvelope) = 4144 bytes`; total ≈ 265 KB.
 - No heap allocation. Power of 10 Rule 3 compliant.
 - `m_head`, `m_tail` — `std::atomic<uint32_t>` members; permitted carve-out from no-STL rule.
 
@@ -175,7 +175,7 @@ RingBuffer::pop(out_env)                           [RingBuffer.hpp]
 
 - **SPSC violation:** If two threads simultaneously call `push()`, the relaxed load of `m_head` in both threads may read the same head value; both would write to the same slot and the second write would corrupt the first. The SPSC invariant must be maintained by callers.
 - **Capacity saturation:** At `MSG_RING_CAPACITY = 64`, a slow consumer will cause the producer to start dropping envelopes silently (push returns false, WARNING_LO logged). This is the documented behavior.
-- **Large slot size:** Each slot is ~4140 bytes. The full ring buffer occupies ~265 KB. For embedded targets with tight SRAM this is the dominant static allocation.
+- **Large slot size:** Each slot is 4144 bytes. The full ring buffer occupies ~259 KB. For embedded targets with tight SRAM this is the dominant static allocation.
 
 ---
 

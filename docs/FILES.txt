@@ -165,7 +165,7 @@ RingBuffer.hpp
 
 Serializer.hpp / Serializer.cpp
   Deterministic, big-endian (network byte order) wire serialization of
-  MessageEnvelope into a fixed 44-byte header + variable payload; uses manual
+  MessageEnvelope into a fixed 52-byte header + variable payload; uses manual
   bit-shift I/O (no htons/ntohl). Validates padding fields and payload bounds
   on deserialization.
 
@@ -315,6 +315,15 @@ test_MessageEnvelope.cpp
   5 tests: envelope_init, envelope_valid, envelope_copy, envelope_make_ack,
   and envelope_is_data / envelope_is_control.
 
+test_MessageId.cpp
+  4 tests: test_init_seed, test_monotonic_increment, test_wraparound_recovery,
+  and test_min_valid_seed.
+
+test_Timestamp.cpp
+  6 tests: test_expired_false_before_deadline, test_expired_true_at_deadline,
+  test_expired_true_past_deadline, test_expiry_zero_never_expires,
+  test_deadline_arithmetic, and test_deadline_zero_duration.
+
 test_Serializer.cpp
   14 tests: basic round-trip, undersized buffer, invalid envelope, truncated
   input, maximum-payload pattern fill, wire-header-size constant, zero-payload
@@ -463,6 +472,11 @@ MockSocketOps.hpp
   UdpBackend, and TlsTcpBackend tests to inject POSIX socket failures
   (socket create, bind, listen, accept, send, recv) without real network I/O.
 
+MockTransportInterface.hpp
+  Test-only mock implementation of TransportInterface used by DeliveryEngine
+  tests; configurable to return arbitrary Results from send_message() and
+  receive_message(), enabling M5 fault injection of transport-layer errors.
+
 test_TlsTcpBackend.cpp
   34 tests covering TlsTcpBackend via ISocketOps injection: TlsConfig
   defaults, transport_config includes TLS fields, server bind plaintext,
@@ -503,3 +517,14 @@ test_ImpairmentConfigLoader.cpp
   clamp (<0.0 → 0.0), leading space, leading tab, carriage return in line,
   truly malformed line, over-64-lines truncation, malformed values, plus 5
   additional loader tests.
+
+test_stress_capacity.cpp
+  8 tests (stress suite, not run on every commit — triggered by capacity or
+  slot-management changes): test_ack_tracker_fill_drain_cycles,
+  test_ack_tracker_partial_ack_then_sweep,
+  test_retry_manager_fill_ack_drain_cycles,
+  test_retry_manager_max_retry_exhaustion,
+  test_ring_buffer_sustained_push_pop,
+  test_dedup_filter_window_wraparound,
+  test_rre_stash_fifo_wraparound, and
+  test_reassembly_slot_recycling.

@@ -98,7 +98,7 @@ Server main loop                               [Server.cpp]
 
 ## 8. Memory & Ownership Semantics
 
-- `recv_env` and `reply` are stack-allocated `MessageEnvelope` structs (~4152 bytes each) in `Server.cpp`'s event loop stack frame.
+- `recv_env` and `reply` are stack-allocated `MessageEnvelope` structs (4144 bytes each) in `Server.cpp`'s event loop stack frame.
 - No heap allocation in this flow.
 - Ownership: all envelopes are stack-local; no transfer of ownership.
 

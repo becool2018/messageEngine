@@ -3,7 +3,7 @@ messageEngine/
 ├── src/
 │   ├── core/          ← message layer (transport-agnostic)
 │   │   ├── Types, Logger, MessageEnvelope, TransportInterface, ChannelConfig
-│   │   ├── Serializer (44-byte big-endian wire format)
+│   │   ├── Serializer (52-byte big-endian wire format)
 │   │   ├── MessageId, Timestamp, RingBuffer (fixed-cap, power-of-two)
 │   │   ├── DuplicateFilter (128-entry sliding window)
 │   │   ├── AckTracker (32-slot outstanding-ACK table)
@@ -15,11 +15,18 @@ messageEngine/
 │   │   ├── SocketUtils (TCP framing, UDP recvfrom, poll-based timeouts)
 │   │   ├── TcpBackend (server+client, multi-connection)
 │   │   ├── UdpBackend (datagram send/recv)
+│   │   ├── TlsTcpBackend (TLS-encrypted TCP via mbedTLS 4.0)
+│   │   ├── DtlsUdpBackend (DTLS-encrypted UDP; cookie anti-replay; MTU enforcement)
 │   │   └── LocalSimHarness (in-process, linkable, no sockets)
+│   ├── core/ (continued)
+│   │   ├── Fragmentation (split large messages into frames)
+│   │   ├── ReassemblyBuffer (reassemble fragment streams)
+│   │   ├── OrderingBuffer (sequence-number-based in-order delivery)
+│   │   └── RequestReplyEngine (correlated request/reply over DeliveryEngine)
 │   └── app/
 │       ├── Server.cpp (echo server, SIGINT-graceful, bounded loop)
 │       └── Client.cpp (sends 5 messages, waits for echo replies)
-├── tests/  (22 test suites + 1 stress suite — all green)
+├── tests/  (22 test binaries — all green)
 ├── build/  (compiled objects and binaries — not checked in)
 └── docs/
     ├── CMakeLists.txt          (CMake build equivalent of Makefile)

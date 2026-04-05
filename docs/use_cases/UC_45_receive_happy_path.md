@@ -106,7 +106,7 @@ DeliveryEngine::receive(env, timeout_ms, now_us)   [DeliveryEngine.cpp]
 
 ## 8. Memory & Ownership Semantics
 
-- `raw_env` — stack-allocated `MessageEnvelope` (~4140 bytes) in `receive()` stack frame.
+- `raw_env` — stack-allocated `MessageEnvelope` (4144 bytes) in `receive()` stack frame.
 - `ack_env` — stack-allocated `MessageEnvelope` for the ACK response.
 - `env` — caller-provided reference; written in place by `m_transport->receive_message()` and the routing/dedup checks operate on the same object.
 - No heap allocation. Power of 10 Rule 3 compliant.
