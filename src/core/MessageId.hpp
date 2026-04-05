@@ -85,7 +85,7 @@ public:
 
 private:
     // Power of 10 rule 6: minimal scope, private member
-    uint64_t m_next;
+    uint64_t m_next = 0ULL;
 };
 
 #endif // CORE_MESSAGE_ID_HPP

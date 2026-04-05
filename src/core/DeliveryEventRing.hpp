@@ -150,11 +150,11 @@ public:
 
 private:
     // Power of 10 Rule 3: fixed-size array; no dynamic allocation after init.
-    DeliveryEvent m_buf[DELIVERY_EVENT_RING_CAPACITY];
+    DeliveryEvent m_buf[DELIVERY_EVENT_RING_CAPACITY] = {};
 
-    uint32_t m_head;   ///< Next write index (0 … DELIVERY_EVENT_RING_CAPACITY-1)
-    uint32_t m_tail;   ///< Next read index  (0 … DELIVERY_EVENT_RING_CAPACITY-1)
-    uint32_t m_count;  ///< Current number of valid events (0 … DELIVERY_EVENT_RING_CAPACITY)
+    uint32_t m_head  = 0U;  ///< Next write index (0 … DELIVERY_EVENT_RING_CAPACITY-1)
+    uint32_t m_tail  = 0U;  ///< Next read index  (0 … DELIVERY_EVENT_RING_CAPACITY-1)
+    uint32_t m_count = 0U;  ///< Current number of valid events (0 … DELIVERY_EVENT_RING_CAPACITY)
 };
 
 #endif // CORE_DELIVERY_EVENT_RING_HPP

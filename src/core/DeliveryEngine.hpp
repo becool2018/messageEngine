@@ -190,7 +190,7 @@ public:
 
 private:
     TransportInterface* m_transport;
-    ChannelConfig       m_cfg;
+    ChannelConfig       m_cfg = {};
     NodeId              m_local_id;
     AckTracker          m_ack_tracker;
     RetryManager        m_retry_manager;
@@ -201,11 +201,11 @@ private:
     // Power of 10 Rule 3: pre-allocated output buffers for pump_retries() and
     // sweep_ack_timeouts(). Zero-initialized in init(). Single-threaded access
     // only; each buffer is owned exclusively by its corresponding function.
-    MessageEnvelope m_retry_buf[MSG_RING_CAPACITY];
-    MessageEnvelope m_timeout_buf[ACK_TRACKER_CAPACITY];
+    MessageEnvelope m_retry_buf[MSG_RING_CAPACITY] = {};
+    MessageEnvelope m_timeout_buf[ACK_TRACKER_CAPACITY] = {};
 
     // REQ-7.2.1–7.2.4: aggregated delivery statistics (zero-init in init())
-    DeliveryStats   m_stats;
+    DeliveryStats   m_stats = {};
 
     // REQ-7.2.5: bounded pull-style observability event ring (init'd in init())
     // Power of 10 Rule 3: fixed-capacity ring; no dynamic allocation.
@@ -226,24 +226,24 @@ private:
         uint32_t next_seq;
         bool     active;
     };
-    SeqState m_seq_state[ACK_TRACKER_CAPACITY];
+    SeqState m_seq_state[ACK_TRACKER_CAPACITY] = {};
 
     // Power of 10 Rule 3: fragment staging buffer for send/retry paths.
     // Holds up to FRAG_MAX_COUNT wire fragments for one logical message at a time.
-    MessageEnvelope m_frag_buf[FRAG_MAX_COUNT];
+    MessageEnvelope m_frag_buf[FRAG_MAX_COUNT] = {};
 
     // Issue 3 fix: pre-allocated output buffer for sweep_expired_holds() calls.
     // Sized to ORDERING_HOLD_COUNT (max holds that can expire in one sweep).
     // Power of 10 Rule 3: fixed-capacity; no heap after init.
-    MessageEnvelope m_ordering_freed_buf[ORDERING_HOLD_COUNT];
+    MessageEnvelope m_ordering_freed_buf[ORDERING_HOLD_COUNT] = {};
 
     // REQ-3.3.5: single-slot staging area for held ordering messages (Issue 1 fix).
     // When handle_data_path() delivers an in-order message, try_release_next() checks
     // whether the next sequential message is already held; if so it is staged here and
     // returned on the subsequent receive() call rather than being stuck forever.
     // Power of 10 Rule 3: single pre-allocated envelope; no heap after init.
-    MessageEnvelope m_held_pending;
-    bool            m_held_pending_valid;
+    MessageEnvelope m_held_pending = {};
+    bool            m_held_pending_valid = false;
 
     // Issue 3 fix: update msgs_dropped_expired stats and emit EXPIRY_DROP events
     // for holds freed by sweep_expired_holds().  Extracted to keep callers CC ≤ 10.

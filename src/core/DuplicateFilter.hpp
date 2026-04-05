@@ -72,9 +72,9 @@ private:
     };
 
     // Power of 10 rule 3: fixed-size allocation at static scope
-    Entry    m_window[DEDUP_WINDOW_SIZE];  ///< circular buffer of entries
-    uint32_t m_next;                       ///< next write position (round-robin)
-    uint32_t m_count;                      ///< number of valid entries in window
+    Entry    m_window[DEDUP_WINDOW_SIZE] = {};  ///< circular buffer of entries
+    uint32_t m_next  = 0U;                      ///< next write position (round-robin)
+    uint32_t m_count = 0U;                      ///< number of valid entries in window
 };
 
 #endif // CORE_DUPLICATE_FILTER_HPP
