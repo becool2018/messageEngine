@@ -676,6 +676,200 @@ static void test_rre_non_rr_stash_overflow()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 11: zero_cid_rejected
+// Verifies: REQ-3.2.4
+//
+// A DATA frame whose RRHeader has correlation_id == 0 must be rejected by
+// parse_rr_header() and routed to the non-RR stash rather than crashing the
+// always-on assertion inside handle_inbound_request / handle_inbound_response.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_zero_cid_rejected()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    // Build a DATA envelope whose payload starts with a malformed RRHeader:
+    // kind=REQUEST(0), cid=0 (all zero bytes 1-8), pad=0.
+    // Any correlation_id of 0 must be rejected per the zero-cid fix.
+    MessageEnvelope raw_env;
+    envelope_init(raw_env);
+    raw_env.message_type      = MessageType::DATA;
+    raw_env.source_id         = NODE_B;
+    raw_env.destination_id    = NODE_A;
+    raw_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    raw_env.expiry_time_us    = NOW_US + 5000000ULL;
+    // RRHeader bytes (12 bytes): kind=0, cid=0x0000000000000000, pad=0
+    raw_env.payload[0]  = 0x00U;   // kind = REQUEST
+    raw_env.payload[1]  = 0x00U;   // cid byte 0 (MSB)
+    raw_env.payload[2]  = 0x00U;
+    raw_env.payload[3]  = 0x00U;
+    raw_env.payload[4]  = 0x00U;
+    raw_env.payload[5]  = 0x00U;
+    raw_env.payload[6]  = 0x00U;
+    raw_env.payload[7]  = 0x00U;
+    raw_env.payload[8]  = 0x00U;   // cid byte 7 (LSB) → cid = 0
+    raw_env.payload[9]  = 0x00U;   // pad[0]
+    raw_env.payload[10] = 0x00U;   // pad[1]
+    raw_env.payload[11] = 0x00U;   // pad[2]
+    raw_env.payload_length = 12U;
+    Result s = eb.send(raw_env, NOW_US);
+    assert(s == Result::OK);
+
+    // pump_inbound() should reject the frame (cid==0) and stash it as non-RR.
+    uint8_t  req_buf[64];
+    uint32_t req_len = 0U;
+    NodeId   req_src = 0U;
+    uint64_t req_cid = 0U;
+    Result rr = rrea.receive_request(req_buf, 64U, req_len, req_src, req_cid, NOW_US);
+    assert(rr == Result::ERR_EMPTY);  // not a valid RR request
+
+    // Frame must appear in the non-RR stash (not silently dropped).
+    MessageEnvelope stashed;
+    envelope_init(stashed);
+    Result nr = rrea.receive_non_rr(stashed, NOW_US);
+    assert(nr == Result::OK);
+    assert(stashed.payload_length == 12U);
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_zero_cid_rejected\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 12: nonzero_pad_rejected
+// Verifies: REQ-3.2.4
+//
+// A DATA frame whose RRHeader has a non-zero reserved padding byte must be
+// rejected by parse_rr_header() and routed to the non-RR stash.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_nonzero_pad_rejected()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    // Build a DATA envelope with a valid kind and non-zero cid, but pad[0] = 0xAA.
+    MessageEnvelope raw_env;
+    envelope_init(raw_env);
+    raw_env.message_type      = MessageType::DATA;
+    raw_env.source_id         = NODE_B;
+    raw_env.destination_id    = NODE_A;
+    raw_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    raw_env.expiry_time_us    = NOW_US + 5000000ULL;
+    // RRHeader: kind=REQUEST(0), cid=0x0000000000000001 (valid non-zero), pad[0]=0xAA
+    raw_env.payload[0]  = 0x00U;   // kind = REQUEST
+    raw_env.payload[1]  = 0x00U;   // cid MSB
+    raw_env.payload[2]  = 0x00U;
+    raw_env.payload[3]  = 0x00U;
+    raw_env.payload[4]  = 0x00U;
+    raw_env.payload[5]  = 0x00U;
+    raw_env.payload[6]  = 0x00U;
+    raw_env.payload[7]  = 0x00U;
+    raw_env.payload[8]  = 0x01U;   // cid LSB → cid = 1 (valid)
+    raw_env.payload[9]  = 0xAAU;   // pad[0] — non-zero; must be rejected
+    raw_env.payload[10] = 0x00U;
+    raw_env.payload[11] = 0x00U;
+    raw_env.payload_length = 12U;
+    Result s = eb.send(raw_env, NOW_US);
+    assert(s == Result::OK);
+
+    // pump_inbound() must reject the frame (non-zero pad) and stash it as non-RR.
+    uint8_t  req_buf[64];
+    uint32_t req_len = 0U;
+    NodeId   req_src = 0U;
+    uint64_t req_cid = 0U;
+    Result rr = rrea.receive_request(req_buf, 64U, req_len, req_src, req_cid, NOW_US);
+    assert(rr == Result::ERR_EMPTY);  // not a valid RR request
+
+    // Frame must appear in the non-RR stash.
+    MessageEnvelope stashed;
+    envelope_init(stashed);
+    Result nr = rrea.receive_non_rr(stashed, NOW_US);
+    assert(nr == Result::OK);
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_nonzero_pad_rejected\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 13: big_endian_cid_encoding
+// Verifies: REQ-3.2.4
+//
+// Verify that the big-endian correlation_id encoding is correctly decoded
+// by injecting a DATA frame whose RRHeader carries a known big-endian cid
+// value with significant bits in the high bytes (0x0102030405060708).
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_big_endian_cid_encoding()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    // Craft a DATA frame whose RRHeader has a known non-trivial big-endian cid.
+    // The high bytes (0x01 through 0x04) exercise the MSB-first shift decoding.
+    // Expected decoded cid: 0x0102030405060708ULL
+    static const uint64_t EXPECTED_CID = 0x0102030405060708ULL;
+
+    MessageEnvelope raw_env;
+    envelope_init(raw_env);
+    raw_env.message_type      = MessageType::DATA;
+    raw_env.source_id         = NODE_B;
+    raw_env.destination_id    = NODE_A;
+    raw_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    raw_env.expiry_time_us    = NOW_US + 5000000ULL;
+    // RRHeader bytes: kind=REQUEST(0), cid big-endian, pad=0
+    raw_env.payload[0]  = 0x00U;   // kind = REQUEST
+    raw_env.payload[1]  = 0x01U;   // cid byte 0 (MSB)
+    raw_env.payload[2]  = 0x02U;
+    raw_env.payload[3]  = 0x03U;
+    raw_env.payload[4]  = 0x04U;
+    raw_env.payload[5]  = 0x05U;
+    raw_env.payload[6]  = 0x06U;
+    raw_env.payload[7]  = 0x07U;
+    raw_env.payload[8]  = 0x08U;   // cid byte 7 (LSB)
+    raw_env.payload[9]  = 0x00U;   // pad[0]
+    raw_env.payload[10] = 0x00U;   // pad[1]
+    raw_env.payload[11] = 0x00U;   // pad[2]
+    // Append one byte of app payload after the header
+    raw_env.payload[12]    = 0x42U;
+    raw_env.payload_length = 13U;
+    Result s = eb.send(raw_env, NOW_US);
+    assert(s == Result::OK);
+
+    // receive_request() on A's RRE must decode the cid as EXPECTED_CID.
+    uint8_t  req_buf[64];
+    uint32_t req_len = 0U;
+    NodeId   req_src = 0U;
+    uint64_t rx_cid  = 0U;
+    Result rr = rrea.receive_request(req_buf, 64U, req_len, req_src, rx_cid, NOW_US);
+    assert(rr == Result::OK);
+    assert(rx_cid == EXPECTED_CID);
+    assert(req_len == 1U);
+    assert(req_buf[0] == 0x42U);
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_big_endian_cid_encoding\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main()
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -692,6 +886,9 @@ int main()
     test_rre_non_rr_passthrough();
     test_rre_non_rr_fifo_order();
     test_rre_non_rr_stash_overflow();
+    test_rre_zero_cid_rejected();
+    test_rre_nonzero_pad_rejected();
+    test_rre_big_endian_cid_encoding();
 
     printf("=== ALL TESTS PASSED ===\n");
     return 0;

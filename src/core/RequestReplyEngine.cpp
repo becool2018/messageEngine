@@ -198,6 +198,17 @@ bool RequestReplyEngine::parse_rr_header(const uint8_t* raw_payload,
         return false;
     }
 
+    // Issue 4 fix: reject frames with non-zero reserved padding bytes.
+    // The header contract (RequestReplyHeader.hpp layout comment) specifies bytes 9-11
+    // as zero. Under the project's input-validation rules, malformed RR frames must be
+    // rejected rather than silently accepted. A non-zero pad byte indicates a framing
+    // error or a different header version that this implementation does not support.
+    if ((hdr_out._pad[0] != 0U) || (hdr_out._pad[1] != 0U) || (hdr_out._pad[2] != 0U)) {
+        Logger::log(Severity::WARNING_LO, "RequestReplyEngine",
+                    "Rejected RR frame: non-zero reserved padding bytes");
+        return false;
+    }
+
     NEVER_COMPILED_OUT_ASSERT(hdr_out.correlation_id != 0U);  // post: safe to pass on
     return true;
 }

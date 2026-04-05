@@ -2386,6 +2386,124 @@ static void test_de_ack_per_logical_message()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Integration Test 56: Idle ordered-gap expiry release via sweep_ack_timeouts().
+// Verifies REQ-3.3.5: when an ordered channel goes idle after a gap (seq=2 lost,
+// seq=3 held), sweep_ack_timeouts() must call sweep_expired_holds(), advance
+// the ordering cursor past the expired hold, and allow seq=4 to be delivered.
+// Also verifies that msgs_dropped_expired is incremented and EXPIRY_DROP is emitted.
+// Verifies: REQ-3.3.5, REQ-7.2.3, REQ-7.2.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_idle_ordered_gap_expiry_sweep()
+{
+    // Verifies: REQ-3.3.5, REQ-7.2.3, REQ-7.2.5
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_ordered_engines(ha, hb, engine_a, engine_b);
+
+    // All injected frames share the same source node (NODE_A = 1U).
+    static const NodeId  SRC = 1U;
+    static const NodeId  DST = 2U;
+    static const uint64_t SHORT_EXPIRY_US = NOW_US + 10ULL;  // expires quickly
+    static const uint64_t FAR_EXPIRY_US   = NOW_US + 5000000ULL;
+    static const uint64_t AFTER_EXPIRY_US = NOW_US + 100ULL; // > SHORT_EXPIRY_US
+
+    // Step 1: inject seq=1 → engine_b receives it; next_expected_seq becomes 2.
+    {
+        MessageEnvelope e1;
+        envelope_init(e1);
+        e1.message_type      = MessageType::DATA;
+        e1.message_id        = 1001ULL;
+        e1.source_id         = SRC;
+        e1.destination_id    = DST;
+        e1.timestamp_us      = NOW_US;
+        e1.expiry_time_us    = FAR_EXPIRY_US;
+        e1.priority          = 0U;
+        e1.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e1.sequence_num      = 1U;
+        e1.payload_length    = 1U;
+        e1.payload[0]        = 0x01U;
+        Result inj = hb.inject(e1);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out1;
+    Result r1 = engine_b.receive(out1, 100U, NOW_US + 1ULL);
+    assert(r1 == Result::OK);
+    assert(out1.sequence_num == 1U);
+
+    // Step 2: inject seq=3 with a SHORT expiry (gap: seq=2 never arrives).
+    // Ordering buffer holds seq=3, waiting for seq=2.
+    {
+        MessageEnvelope e3;
+        envelope_init(e3);
+        e3.message_type      = MessageType::DATA;
+        e3.message_id        = 1003ULL;
+        e3.source_id         = SRC;
+        e3.destination_id    = DST;
+        e3.timestamp_us      = NOW_US;
+        e3.expiry_time_us    = SHORT_EXPIRY_US;
+        e3.priority          = 0U;
+        e3.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e3.sequence_num      = 3U;
+        e3.payload_length    = 1U;
+        e3.payload[0]        = 0x03U;
+        Result inj = hb.inject(e3);
+        assert(inj == Result::OK);
+    }
+    // receive() returns ERR_AGAIN: seq=3 is out of order (expecting seq=2).
+    MessageEnvelope out3;
+    Result r3 = engine_b.receive(out3, 0U, NOW_US + 2ULL);
+    assert(r3 == Result::ERR_AGAIN);
+
+    // Channel goes idle; no new frames arrive.
+    // Step 3: sweep_ack_timeouts() at AFTER_EXPIRY_US — past seq=3's expiry.
+    // This calls sweep_expired_holds(), which frees seq=3 and advances
+    // next_expected_seq to 4. msgs_dropped_expired must increase by 1.
+    DeliveryStats stats_before;
+    engine_b.get_stats(stats_before);
+    uint32_t swept = engine_b.sweep_ack_timeouts(AFTER_EXPIRY_US);
+    (void)swept;
+    DeliveryStats stats_after;
+    engine_b.get_stats(stats_after);
+    assert(stats_after.msgs_dropped_expired == stats_before.msgs_dropped_expired + 1U);
+
+    // Step 4: an EXPIRY_DROP event must have been emitted for the freed hold.
+    {
+        DeliveryEvent ev;
+        Result pe = engine_b.poll_event(ev);
+        assert(pe == Result::OK);
+        assert(ev.kind == DeliveryEventKind::EXPIRY_DROP);
+    }
+
+    // Step 5: inject seq=4 — ordering cursor is now at 4, so it delivers immediately.
+    {
+        MessageEnvelope e4;
+        envelope_init(e4);
+        e4.message_type      = MessageType::DATA;
+        e4.message_id        = 1004ULL;
+        e4.source_id         = SRC;
+        e4.destination_id    = DST;
+        e4.timestamp_us      = AFTER_EXPIRY_US;
+        e4.expiry_time_us    = FAR_EXPIRY_US;
+        e4.priority          = 0U;
+        e4.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e4.sequence_num      = 4U;
+        e4.payload_length    = 1U;
+        e4.payload[0]        = 0x04U;
+        Result inj = hb.inject(e4);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out4;
+    Result r4 = engine_b.receive(out4, 100U, AFTER_EXPIRY_US + 1ULL);
+    assert(r4 == Result::OK);
+    assert(out4.sequence_num == 4U);
+    assert(out4.payload[0] == 0x04U);
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_de_idle_ordered_gap_expiry_sweep\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -2444,6 +2562,7 @@ int main()
     test_de_fragmented_retry();
     test_de_dedup_after_reassembly();
     test_de_ack_per_logical_message();
+    test_de_idle_ordered_gap_expiry_sweep();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;

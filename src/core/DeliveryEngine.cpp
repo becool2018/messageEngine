@@ -258,6 +258,42 @@ void DeliveryEngine::emit_routing_drop_event(const MessageEnvelope& env,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::account_ordering_expiry_drops() — Issue 3 (Round 4) fix
+// Increments msgs_dropped_expired and emits one EXPIRY_DROP event per freed
+// ordering-hold envelope.  Called after sweep_expired_holds() in both
+// sweep_ack_timeouts() and handle_ordering_gate().
+// NSC: observability bookkeeping only; no effect on delivery state.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 10.
+// ─────────────────────────────────────────────────────────────────────────────
+void DeliveryEngine::account_ordering_expiry_drops(const MessageEnvelope* freed,
+                                                    uint32_t               count,
+                                                    uint64_t               now_us)
+{
+    NEVER_COMPILED_OUT_ASSERT(count <= ORDERING_HOLD_COUNT);  // Assert: bounded count
+    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);                 // Assert: valid timestamp
+
+    if (count == 0U) {
+        return;  // nothing to account
+    }
+
+    // Power of 10 Rule 5: pointer is non-null whenever count > 0
+    NEVER_COMPILED_OUT_ASSERT(freed != nullptr);  // Assert: caller supplied buffer
+
+    m_stats.msgs_dropped_expired += count;  // REQ-7.2.3: count ordering expiry drops
+
+    // Power of 10 Rule 2: bounded loop (count <= ORDERING_HOLD_COUNT).
+    for (uint32_t i = 0U; i < count; ++i) {
+        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
+                    "Ordering hold expired: message_id=%llu from src=%u dropped",
+                    (unsigned long long)freed[i].message_id, freed[i].source_id);
+        // REQ-7.2.5: emit EXPIRY_DROP event for each freed ordering hold.
+        emit_event(DeliveryEventKind::EXPIRY_DROP,
+                   freed[i].message_id, freed[i].source_id, now_us,
+                   Result::ERR_EXPIRED);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DeliveryEngine::poll_event() — REQ-7.2.5 public observability API
 // Pops one event from the ring. Returns ERR_EMPTY when no events are pending.
 // NSC: observability only; no effect on delivery state.
@@ -829,13 +865,12 @@ uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
     // Without this, a single lost ordered message blocks all later messages from
     // that source indefinitely. sweep_expired_holds() frees any held slots whose
     // message has expired and calls advance_sequence() so the gate unblocks.
-    // Power of 10 Rule 7: return value checked (count of freed slots; informational).
+    // Issue 3 (Round 4) fix: also update stats and emit EXPIRY_DROP events.
+    // Power of 10 Rule 7: return value checked (count of freed slots).
     {
-        uint32_t freed_holds = m_ordering.sweep_expired_holds(now_us);
-        if (freed_holds > 0U) {
-            Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                        "Ordering gate: advanced past %u expired gap(s)", freed_holds);
-        }
+        uint32_t freed_holds = m_ordering.sweep_expired_holds(
+                                   now_us, m_ordering_freed_buf, ORDERING_HOLD_COUNT);
+        account_ordering_expiry_drops(m_ordering_freed_buf, freed_holds, now_us);
     }
 
     // Sweep expired ACK entries
@@ -1101,8 +1136,13 @@ Result DeliveryEngine::handle_ordering_gate(const MessageEnvelope& logical,
     // ordered BEST_EFFORT channels recover from lost gaps without requiring the caller
     // to invoke sweep_ack_timeouts() (which has ACK-specific naming and may be skipped
     // for BEST_EFFORT flows). ORDERING_HOLD_COUNT = 8 — bounded overhead per receive.
-    // Power of 10 Rule 7: return value checked (informational count; discard OK).
-    (void)m_ordering.sweep_expired_holds(now_us);
+    // Issue 3 (Round 4) fix: collect freed envelopes and account for expiry drops.
+    // Power of 10 Rule 7: return value checked (count of freed slots).
+    {
+        uint32_t gate_freed = m_ordering.sweep_expired_holds(
+                                  now_us, m_ordering_freed_buf, ORDERING_HOLD_COUNT);
+        account_ordering_expiry_drops(m_ordering_freed_buf, gate_freed, now_us);
+    }
 
     Result res = m_ordering.ingest(logical, out, now_us);
     if (res == Result::ERR_FULL) {
