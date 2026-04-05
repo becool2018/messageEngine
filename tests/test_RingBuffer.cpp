@@ -37,7 +37,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: simple test framework using assert() and printf().
  *
- * Implements: REQ-4.1.2
+ * Verifies: REQ-4.1.2
  */
 // Verification: M1 + M2 + M4
 
@@ -65,7 +65,7 @@ static void make_env(MessageEnvelope& env, uint64_t msg_id, NodeId src)
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1: pop() on a freshly initialised buffer returns ERR_EMPTY
 // ─────────────────────────────────────────────────────────────────────────────
-// Implements: REQ-4.1.2
+// Verifies: REQ-4.1.2
 static bool test_pop_empty()
 {
     RingBuffer rb;
@@ -85,7 +85,7 @@ static bool test_pop_empty()
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 2: push() then pop() round-trip — single item
 // ─────────────────────────────────────────────────────────────────────────────
-// Implements: REQ-4.1.2
+// Verifies: REQ-4.1.2
 static bool test_push_pop_single()
 {
     RingBuffer rb;
@@ -114,7 +114,7 @@ static bool test_push_pop_single()
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 3: FIFO ordering — N pushes followed by N pops preserve insertion order
 // ─────────────────────────────────────────────────────────────────────────────
-// Implements: REQ-4.1.2
+// Verifies: REQ-4.1.2
 static bool test_fifo_order()
 {
     RingBuffer rb;
@@ -152,7 +152,7 @@ static bool test_fifo_order()
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 4: push() returns ERR_FULL after MSG_RING_CAPACITY items are queued
 // ─────────────────────────────────────────────────────────────────────────────
-// Implements: REQ-4.1.2
+// Verifies: REQ-4.1.2
 static bool test_push_full()
 {
     RingBuffer rb;
@@ -180,7 +180,7 @@ static bool test_push_full()
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 5: full-cycle — fill to capacity, drain all, confirm empty
 // ─────────────────────────────────────────────────────────────────────────────
-// Implements: REQ-4.1.2
+// Verifies: REQ-4.1.2
 static bool test_full_cycle()
 {
     RingBuffer rb;
@@ -216,7 +216,7 @@ static bool test_full_cycle()
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 6: wraparound — fill, partial drain, fill again (exercises index wrap)
 // ─────────────────────────────────────────────────────────────────────────────
-// Implements: REQ-4.1.2
+// Verifies: REQ-4.1.2
 static bool test_wraparound()
 {
     RingBuffer rb;
@@ -271,7 +271,7 @@ static bool test_wraparound()
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 7: consecutive full-cycles — fill, drain, fill, drain (2 complete cycles)
 // ─────────────────────────────────────────────────────────────────────────────
-// Implements: REQ-4.1.2
+// Verifies: REQ-4.1.2
 static bool test_consecutive_full_cycles()
 {
     RingBuffer rb;
@@ -321,7 +321,7 @@ static bool test_consecutive_full_cycles()
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 8: pop() does not modify the output envelope on ERR_EMPTY
 // ─────────────────────────────────────────────────────────────────────────────
-// Implements: REQ-4.1.2
+// Verifies: REQ-4.1.2
 static bool test_pop_empty_no_clobber()
 {
     RingBuffer rb;
@@ -358,7 +358,7 @@ static bool test_pop_empty_no_clobber()
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 9: init() after partial use resets the buffer
 // ─────────────────────────────────────────────────────────────────────────────
-// Implements: REQ-4.1.2
+// Verifies: REQ-4.1.2
 static bool test_init_resets()
 {
     RingBuffer rb;
