@@ -312,6 +312,11 @@ The impairment engine must be able to apply, per channel or globally:
   - [REQ-7.2.2] Packet/message loss, duplication, reordering rates.
   - [REQ-7.2.3] Retry counts, timeouts, and failures.
   - [REQ-7.2.4] Connection counts and restart/fatal event counts.
+  - [REQ-7.2.5] Bounded observability event ring: a fixed-capacity, non-blocking
+    ring buffer (poll_event / drain_events / pending_event_count) that records
+    per-message delivery events (SEND_OK, SEND_FAIL, ACK_RECEIVED, ACK_TIMEOUT,
+    DUPLICATE_DROP, EXPIRY_DROP, RETRY_FIRED, MISROUTE_DROP) without dynamic
+    allocation, enabling post-hoc observability and test verification.
 
 8. Interaction with global standards
 
