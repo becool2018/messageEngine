@@ -273,11 +273,14 @@ void OrderingBuffer::advance_sequence(NodeId src, uint32_t up_to_seq)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OrderingBuffer::sweep_expired_holds — SC: HAZ-001 (Issue 3 fix)
-// Walks held slots; for any whose expiry_time_us has passed, calls
-// advance_sequence() past that sequence so the ordering gate unblocks.
+// Walks held slots; for any whose expiry_time_us has passed, copies the freed
+// envelope into out_freed[] (if capacity allows), calls advance_sequence()
+// past that sequence so the ordering gate unblocks, and frees the slot.
 // Power of 10 Rule 2: bounded loop (≤ ORDERING_HOLD_COUNT iterations).
 // ─────────────────────────────────────────────────────────────────────────────
-uint32_t OrderingBuffer::sweep_expired_holds(uint64_t now_us)
+uint32_t OrderingBuffer::sweep_expired_holds(uint64_t         now_us,
+                                              MessageEnvelope* out_freed,
+                                              uint32_t         out_cap)
 {
     NEVER_COMPILED_OUT_ASSERT(m_initialized);   // Assert: initialized
     NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);   // Assert: valid timestamp
@@ -293,6 +296,11 @@ uint32_t OrderingBuffer::sweep_expired_holds(uint64_t now_us)
             Logger::log(Severity::WARNING_LO, "OrderingBuffer",
                         "Held seq=%u from src=%u expired; advancing ordering gate",
                         m_hold[i].env.sequence_num, m_hold[i].env.source_id);
+            // Copy freed envelope to caller's buffer before freeing the slot.
+            // Power of 10 Rule 7: out_cap check before write (no overflow).
+            if ((out_freed != nullptr) && (freed < out_cap)) {
+                envelope_copy(out_freed[freed], m_hold[i].env);
+            }
             // Advance past this sequence so later frames can be delivered.
             advance_sequence(m_hold[i].env.source_id,
                              m_hold[i].env.sequence_num + 1U);

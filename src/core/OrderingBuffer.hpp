@@ -89,10 +89,18 @@ public:
     /// call advance_sequence() past that slot's sequence number so the ordering
     /// gate does not stall forever on a permanently lost gap.
     /// Call periodically (e.g., from DeliveryEngine::sweep_ack_timeouts()).
-    /// Returns the number of expired hold slots released.
+    ///
+    /// @param now_us   Current time in microseconds (used to check expiry).
+    /// @param out_freed Caller-supplied buffer to receive freed envelopes
+    ///                  (for stats and event emission by the caller).
+    ///                  Must point to an array of at least out_cap elements.
+    /// @param out_cap  Capacity of out_freed (use ORDERING_HOLD_COUNT or larger).
+    /// @return Number of expired hold slots released (written to out_freed[0..n-1]).
     /// Power of 10 Rule 2: bounded loop (≤ ORDERING_HOLD_COUNT iterations).
     // Safety-critical (SC): HAZ-001 — prevents permanent ordering stall on gap loss.
-    uint32_t sweep_expired_holds(uint64_t now_us);
+    uint32_t sweep_expired_holds(uint64_t         now_us,
+                                  MessageEnvelope* out_freed,
+                                  uint32_t         out_cap);
 
 private:
     // ─────────────────────────────────────────────────────────────────────────

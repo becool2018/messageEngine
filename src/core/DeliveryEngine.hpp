@@ -232,6 +232,11 @@ private:
     // Holds up to FRAG_MAX_COUNT wire fragments for one logical message at a time.
     MessageEnvelope m_frag_buf[FRAG_MAX_COUNT];
 
+    // Issue 3 fix: pre-allocated output buffer for sweep_expired_holds() calls.
+    // Sized to ORDERING_HOLD_COUNT (max holds that can expire in one sweep).
+    // Power of 10 Rule 3: fixed-capacity; no heap after init.
+    MessageEnvelope m_ordering_freed_buf[ORDERING_HOLD_COUNT];
+
     // REQ-3.3.5: single-slot staging area for held ordering messages (Issue 1 fix).
     // When handle_data_path() delivers an in-order message, try_release_next() checks
     // whether the next sequential message is already held; if so it is staged here and
@@ -239,6 +244,13 @@ private:
     // Power of 10 Rule 3: single pre-allocated envelope; no heap after init.
     MessageEnvelope m_held_pending;
     bool            m_held_pending_valid;
+
+    // Issue 3 fix: update msgs_dropped_expired stats and emit EXPIRY_DROP events
+    // for holds freed by sweep_expired_holds().  Extracted to keep callers CC ≤ 10.
+    // NSC: observability bookkeeping only.
+    void account_ordering_expiry_drops(const MessageEnvelope* freed,
+                                        uint32_t               count,
+                                        uint64_t               now_us);
 
     // Private helper: push one DeliveryEvent into m_events (REQ-7.2.5).
     // Bounded overwrite-on-full ring push; never blocks, never fails.
