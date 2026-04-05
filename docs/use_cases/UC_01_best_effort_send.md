@@ -44,7 +44,7 @@ Called directly by application code. No thread is created; the call is synchrono
     a. `NEVER_COMPILED_OUT_ASSERT(m_open)`.
     b. `m_impairment.process_outbound(env, now_us, delay_buf, &delay_count)` is called (`ImpairmentEngine.cpp`). With all impairments disabled (default config), no loss/delay/duplication is applied; the envelope is passed through immediately.
     c. `m_impairment.collect_deliverable(delay_buf, delay_count, now_us, out_buf, &out_count)` retrieves any immediately-due messages (the one just queued).
-    d. For each deliverable envelope (the one envelope): `Serializer::serialize(env, m_wire_buf, SOCKET_RECV_BUF_BYTES, &wire_len)` serializes it to a 44-byte header + payload wire frame in `m_wire_buf`.
+    d. For each deliverable envelope (the one envelope): `Serializer::serialize(env, m_wire_buf, SOCKET_RECV_BUF_BYTES, &wire_len)` serializes it to a 52-byte header + payload wire frame in `m_wire_buf`.
     e. `send_to_all_clients(m_wire_buf, wire_len)` iterates over `m_client_fds[0..m_client_count-1]` and calls `m_sock_ops->send_frame(fd, buf, len, timeout_ms)` for each, which calls `tcp_send_frame()` → `socket_send_all()` → `::send()`.
 11. `TcpBackend::send_message()` returns `Result::OK`.
 12. `send_via_transport()` checks `send_res != Result::OK` — false; returns `Result::OK`.

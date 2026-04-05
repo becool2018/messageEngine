@@ -35,7 +35,7 @@ Called via virtual dispatch from `DeliveryEngine::send_via_transport()`.
 2. `NEVER_COMPILED_OUT_ASSERT(m_open)`.
 3. `uint64_t now_us = timestamp_now_us()` — current monotonic time.
 4. **`flush_delayed_messages(now_us)`** — drain any previously-delayed envelopes from the delay buffer: for each due entry, `Serializer::serialize(env, m_wire_buf, sizeof(m_wire_buf), &wire_len)`, then `m_sock_ops->send_to(m_fd, m_wire_buf, wire_len, peer_ip, peer_port)`.
-5. `Serializer::serialize(envelope, m_wire_buf, SOCKET_RECV_BUF_BYTES, &wire_len)` — converts `envelope` to big-endian wire bytes in `m_wire_buf`. Wire frame: 44-byte header + payload.
+5. `Serializer::serialize(envelope, m_wire_buf, SOCKET_RECV_BUF_BYTES, &wire_len)` — converts `envelope` to big-endian wire bytes in `m_wire_buf`. Wire frame: 52-byte header + payload.
 6. **`m_impairment.process_outbound(envelope, now_us, delay_buf, &delay_count)`** — applies impairments. With no impairments: `delay_buf[0] = envelope`, `delay_count = 1`.
 7. **`m_impairment.collect_deliverable(delay_buf, delay_count, now_us, out_buf, &out_count)`** — returns due entries (immediately if no latency).
 8. For each `out_buf[i]`: serialize again → `m_sock_ops->send_to(m_fd, wire, wire_len, peer_ip, peer_port)` → `::sendto()`.
