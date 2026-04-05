@@ -75,6 +75,39 @@ static void test_init()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 1b: reinit — calling init() a second time on the same manager object
+// resets all state cleanly.  Regression test for the release-blocking abort
+// where NEVER_COMPILED_OUT_ASSERT(!m_initialized) fired on the second call.
+// Verifies: REQ-3.2.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_reinit()
+{
+    // Verifies: REQ-3.2.5
+    RetryManager mgr;
+    mgr.init();
+
+    // Schedule a message so the manager has active state.
+    MessageEnvelope env;
+    make_test_envelope(env, 77ULL);
+    Result sr = mgr.schedule(env, 3U, 100U, 1000000ULL);
+    assert(sr == Result::OK);
+
+    // Second init() must not abort; it should silently reset all state.
+    mgr.init();  // was crashing with NEVER_COMPILED_OUT_ASSERT(!m_initialized)
+
+    // After reinit the manager must behave as if freshly constructed.
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+    uint32_t count = mgr.collect_due(1000000ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(count == 0U);
+
+    // Stats must be zeroed.
+    const RetryStats& s = mgr.get_stats();
+    assert(s.retries_sent == 0U);
+
+    printf("PASS: test_reinit\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test 2: schedule one message; returns OK
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_schedule_ok()
@@ -649,6 +682,7 @@ static void test_retry_manager_cancel()
 int main()
 {
     test_init();
+    test_reinit();
     test_schedule_ok();
     test_schedule_full();
     test_on_ack_ok();

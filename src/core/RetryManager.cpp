@@ -58,10 +58,18 @@ static uint32_t advance_backoff(uint32_t current_ms)
 // ─────────────────────────────────────────────────────────────────────────────
 void RetryManager::init()
 {
-    // Power of 10 rule 5: precondition — manager must not already be initialized.
-    // Re-calling init() on an active manager is a contract violation; slots would be
-    // silently zeroed while callers believe entries are still valid.
-    NEVER_COMPILED_OUT_ASSERT(!m_initialized);  // Assert: first-time initialization only
+    // If called on an already-initialized manager (e.g. engine restart or test re-use),
+    // emit a warning if active slots exist — those entries will be discarded — then
+    // fall through and reset all state to a clean baseline.  Aborting here is too
+    // strict: a re-initializing caller is not misusing the API; it explicitly wants a
+    // fresh manager, which is the correct contract for engine restart paths.
+    // Power of 10 Rule 7: m_count access is safe because m_initialized only becomes
+    // true inside this function, so the value is always valid here.
+    if (m_initialized && (m_count > 0U)) {
+        Logger::log(Severity::WARNING_HI, "RetryManager",
+                    "re-init with %u active retry slot(s); entries discarded", m_count);
+    }
+    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count bounded
 
     m_count = 0U;
     m_initialized = true;
