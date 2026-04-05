@@ -20,9 +20,11 @@ name: Release
 #   b. Verifies the tag exists on origin.
 #   c. Builds the full project (make all).
 #   d. Runs make lint (zero clang-tidy violations required).
-#   e. Runs make run_tests (all tests must pass).
-#   f. Runs make check_version (git tag must match Version.hpp exactly).
-#   g. Creates the GitHub Release with auto-generated notes.
+#   e. Runs make cppcheck (zero cppcheck violations required).
+#   f. Runs make run_tests (all tests must pass).
+#   g. Runs make run_sanitize (ASan + UBSan clean).
+#   h. Runs make check_version (git tag must match Version.hpp exactly).
+#   i. Creates the GitHub Release with auto-generated notes.
 #
 # If any step fails the workflow aborts and no Release is created.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -71,7 +73,8 @@ jobs:
             pkg-config \
             libmbedtls-dev \
             clang \
-            clang-tidy
+            clang-tidy \
+            cppcheck
 
       - name: Build (make all)
         run: make all
@@ -79,8 +82,14 @@ jobs:
       - name: Lint (make lint)
         run: make lint
 
+      - name: Static analysis (make cppcheck)
+        run: make cppcheck
+
       - name: Unit tests (make run_tests)
-        run: make run_tests 2>/dev/null
+        run: make run_tests
+
+      - name: Sanitizer tests (make run_sanitize)
+        run: make run_sanitize
 
       - name: Version consistency check (make check_version)
         # Ensures ME_VERSION_STRING in Version.hpp matches the release tag.
