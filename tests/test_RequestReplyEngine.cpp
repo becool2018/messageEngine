@@ -872,6 +872,88 @@ static void test_rre_big_endian_cid_encoding()
 // ─────────────────────────────────────────────────────────────────────────────
 // main()
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 14: request stash FIFO reuse
+// Verifies: REQ-3.2.4
+//
+// After dequeuing the oldest request (slot freed), a subsequent send must not
+// overtake requests already buffered in the stash. Demonstrates that the FIFO
+// read/write cursors (m_stash_head, m_stash_count) correctly wrap across slot
+// reuse: dequeue A; send D; verify dequeue order is B, C, D — not D, B, C.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_request_stash_fifo_reuse()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    // Payload bytes used as unique identifiers for each request
+    static const uint8_t PAY_A = 0x0AU;
+    static const uint8_t PAY_B = 0x0BU;
+    static const uint8_t PAY_C = 0x0CU;
+    static const uint8_t PAY_D = 0x0DU;
+
+    // Send requests A, B, C from A to B before B ever polls.
+    // All three land in harness_b's receive queue in FIFO wire order.
+    uint64_t cid_a = 0U;
+    uint64_t cid_b = 0U;
+    uint64_t cid_c = 0U;
+    Result ra = rrea.send_request(NODE_B, &PAY_A, 1U, TIMEOUT_5S, NOW_US, cid_a);
+    assert(ra == Result::OK);
+    Result rb = rrea.send_request(NODE_B, &PAY_B, 1U, TIMEOUT_5S, NOW_US, cid_b);
+    assert(rb == Result::OK);
+    Result rc = rrea.send_request(NODE_B, &PAY_C, 1U, TIMEOUT_5S, NOW_US, cid_c);
+    assert(rc == Result::OK);
+
+    // B's first receive_request: pump_inbound drains A, B, C; stash = [A, B, C].
+    // Must return A (oldest).
+    uint8_t  buf[64U];
+    uint32_t blen = 0U;
+    NodeId   bsrc = 0U;
+    uint64_t bcid = 0U;
+    Result r1 = rreb.receive_request(buf, 64U, blen, bsrc, bcid, NOW_US);
+    assert(r1 == Result::OK);
+    assert(blen == 1U);
+    assert(buf[0] == PAY_A);  // Assert: oldest request (A) returned first
+
+    // Now send D after A was dequeued.
+    // D must not overtake B or C, which are still in the stash.
+    uint64_t cid_d = 0U;
+    Result rd = rrea.send_request(NODE_B, &PAY_D, 1U, TIMEOUT_5S, NOW_US, cid_d);
+    assert(rd == Result::OK);
+
+    // Dequeue remaining: FIFO order must be B, C, D.
+    blen = 0U; bsrc = 0U; bcid = 0U;
+    Result r2 = rreb.receive_request(buf, 64U, blen, bsrc, bcid, NOW_US);
+    assert(r2 == Result::OK);
+    assert(buf[0] == PAY_B);  // Assert: B precedes D (FIFO preserved across slot reuse)
+
+    blen = 0U; bsrc = 0U; bcid = 0U;
+    Result r3 = rreb.receive_request(buf, 64U, blen, bsrc, bcid, NOW_US);
+    assert(r3 == Result::OK);
+    assert(buf[0] == PAY_C);  // Assert: C precedes D
+
+    blen = 0U; bsrc = 0U; bcid = 0U;
+    Result r4 = rreb.receive_request(buf, 64U, blen, bsrc, bcid, NOW_US);
+    assert(r4 == Result::OK);
+    assert(buf[0] == PAY_D);  // Assert: D last
+
+    // Stash must be empty after all four are consumed.
+    blen = 0U; bsrc = 0U; bcid = 0U;
+    Result r5 = rreb.receive_request(buf, 64U, blen, bsrc, bcid, NOW_US);
+    assert(r5 == Result::ERR_EMPTY);
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_request_stash_fifo_reuse\n");
+}
+
 int main()
 {
     printf("=== test_RequestReplyEngine ===\n");
@@ -889,6 +971,7 @@ int main()
     test_rre_zero_cid_rejected();
     test_rre_nonzero_pad_rejected();
     test_rre_big_endian_cid_encoding();
+    test_rre_request_stash_fifo_reuse();
 
     printf("=== ALL TESTS PASSED ===\n");
     return 0;

@@ -2504,6 +2504,219 @@ static void test_de_idle_ordered_gap_expiry_sweep()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Integration Test 57: Ordering hold buffer full → msgs_dropped_ordering_full
+// Verifies: REQ-3.3.5, REQ-7.2.3
+//
+// Fills all ORDERING_HOLD_COUNT (8) hold slots with out-of-order frames
+// (seq=2..9, gap at seq=1). A ninth out-of-order frame (seq=10) must be
+// rejected with ERR_FULL and msgs_dropped_ordering_full must increment by 1.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_ordering_full_stat()
+{
+    // Verifies: REQ-3.3.5, REQ-7.2.3
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_ordered_engines(ha, hb, engine_a, engine_b);
+
+    static const NodeId   SRC          = 1U;
+    static const NodeId   DST          = 2U;
+    static const uint64_t FAR_EXPIRY   = NOW_US + 5000000ULL;
+
+    // Inject ORDERING_HOLD_COUNT out-of-order frames (seq=2..9).
+    // seq=1 is never sent; all are held by the ordering gate.
+    // Power of 10 Rule 2: bounded loop (ORDERING_HOLD_COUNT iterations).
+    for (uint32_t i = 0U; i < ORDERING_HOLD_COUNT; ++i) {
+        MessageEnvelope e;
+        envelope_init(e);
+        e.message_type      = MessageType::DATA;
+        e.message_id        = 2000ULL + static_cast<uint64_t>(i) + 2ULL;
+        e.source_id         = SRC;
+        e.destination_id    = DST;
+        e.timestamp_us      = NOW_US;
+        e.expiry_time_us    = FAR_EXPIRY;
+        e.priority          = 0U;
+        e.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e.sequence_num      = static_cast<uint32_t>(i + 2U);  // seq=2,3,...,9
+        e.payload_length    = 1U;
+        e.payload[0]        = static_cast<uint8_t>(i & 0xFFU);
+        Result inj = hb.inject(e);
+        assert(inj == Result::OK);
+
+        MessageEnvelope out;
+        Result r = engine_b.receive(out, 0U, NOW_US + static_cast<uint64_t>(i) + 1ULL);
+        assert(r == Result::ERR_AGAIN);  // Assert: out-of-order frame held
+    }
+
+    // Capture stats before triggering the full condition.
+    DeliveryStats stats_before;
+    engine_b.get_stats(stats_before);
+
+    // Inject the (ORDERING_HOLD_COUNT + 1)th out-of-order frame (seq=10).
+    // All 8 hold slots are occupied; ingest must return ERR_FULL.
+    {
+        MessageEnvelope e;
+        envelope_init(e);
+        e.message_type      = MessageType::DATA;
+        e.message_id        = 2010ULL;
+        e.source_id         = SRC;
+        e.destination_id    = DST;
+        e.timestamp_us      = NOW_US;
+        e.expiry_time_us    = FAR_EXPIRY;
+        e.priority          = 0U;
+        e.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e.sequence_num      = ORDERING_HOLD_COUNT + 2U;  // = 10U
+        e.payload_length    = 1U;
+        e.payload[0]        = 0xFFU;
+        Result inj = hb.inject(e);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out10;
+    Result r10 = engine_b.receive(out10, 0U, NOW_US + static_cast<uint64_t>(ORDERING_HOLD_COUNT) + 1ULL);
+    assert(r10 == Result::ERR_FULL);  // Assert: hold buffer exhausted
+
+    DeliveryStats stats_after;
+    engine_b.get_stats(stats_after);
+    assert(stats_after.msgs_dropped_ordering_full ==
+           stats_before.msgs_dropped_ordering_full + 1U);  // Assert: counter incremented
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_de_ordering_full_stat\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integration Test 58: Held-pending expiry emits EXPIRY_DROP event
+// Verifies: REQ-3.3.5, REQ-7.2.3, REQ-7.2.5
+//
+// When an ordered message is staged in m_held_pending (via try_release_next)
+// and expires before the next receive() call, deliver_held_pending() must:
+//   - increment msgs_dropped_expired
+//   - emit DeliveryEventKind::EXPIRY_DROP with the correct message_id
+// This exercises the expiry path inside deliver_held_pending(), which is
+// distinct from the sweep_expired_holds() path tested by Test 56.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_held_pending_expiry_event()
+{
+    // Verifies: REQ-3.3.5, REQ-7.2.3, REQ-7.2.5
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_ordered_engines(ha, hb, engine_a, engine_b);
+
+    static const NodeId   SRC           = 1U;
+    static const NodeId   DST           = 2U;
+    static const uint64_t FAR_EXPIRY    = NOW_US + 5000000ULL;
+    static const uint64_t SHORT_EXPIRY  = NOW_US + 10ULL;
+    static const uint64_t AFTER_EXPIRY  = NOW_US + 100ULL;  // > SHORT_EXPIRY
+
+    // Step 1: inject seq=1 (far expiry) — delivers immediately, next_expected → 2.
+    {
+        MessageEnvelope e1;
+        envelope_init(e1);
+        e1.message_type      = MessageType::DATA;
+        e1.message_id        = 5001ULL;
+        e1.source_id         = SRC;
+        e1.destination_id    = DST;
+        e1.timestamp_us      = NOW_US;
+        e1.expiry_time_us    = FAR_EXPIRY;
+        e1.priority          = 0U;
+        e1.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e1.sequence_num      = 1U;
+        e1.payload_length    = 1U;
+        e1.payload[0]        = 0x01U;
+        Result inj = hb.inject(e1);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out1;
+    Result r1 = engine_b.receive(out1, 100U, NOW_US + 1ULL);
+    assert(r1 == Result::OK);
+    assert(out1.sequence_num == 1U);  // Assert: seq=1 delivered
+
+    // Step 2: inject seq=3 with SHORT_EXPIRY — held (gap: seq=2 missing).
+    {
+        MessageEnvelope e3;
+        envelope_init(e3);
+        e3.message_type      = MessageType::DATA;
+        e3.message_id        = 5003ULL;
+        e3.source_id         = SRC;
+        e3.destination_id    = DST;
+        e3.timestamp_us      = NOW_US;
+        e3.expiry_time_us    = SHORT_EXPIRY;
+        e3.priority          = 0U;
+        e3.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e3.sequence_num      = 3U;
+        e3.payload_length    = 1U;
+        e3.payload[0]        = 0x03U;
+        Result inj = hb.inject(e3);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out3;
+    Result r3 = engine_b.receive(out3, 0U, NOW_US + 2ULL);
+    assert(r3 == Result::ERR_AGAIN);  // Assert: seq=3 held (out of order)
+
+    // Step 3: inject seq=2 (far expiry) — in-order delivery.
+    // After delivering seq=2, try_release_next finds seq=3 and stages it
+    // in m_held_pending (m_held_pending_valid = true).
+    {
+        MessageEnvelope e2;
+        envelope_init(e2);
+        e2.message_type      = MessageType::DATA;
+        e2.message_id        = 5002ULL;
+        e2.source_id         = SRC;
+        e2.destination_id    = DST;
+        e2.timestamp_us      = NOW_US;
+        e2.expiry_time_us    = FAR_EXPIRY;
+        e2.priority          = 0U;
+        e2.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e2.sequence_num      = 2U;
+        e2.payload_length    = 1U;
+        e2.payload[0]        = 0x02U;
+        Result inj = hb.inject(e2);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out2;
+    Result r2 = engine_b.receive(out2, 0U, NOW_US + 3ULL);
+    assert(r2 == Result::OK);
+    assert(out2.sequence_num == 2U);  // Assert: seq=2 delivered; seq=3 now staged
+
+    // Drain any events accumulated during steps 1–3 to isolate the expiry event.
+    // Power of 10 Rule 2: bounded drain (EVENT_RING_CAPACITY is the upper bound).
+    {
+        DeliveryEvent ev;
+        while (engine_b.poll_event(ev) == Result::OK) {
+            // discard pre-existing events
+        }
+    }
+
+    // Capture baseline stats before the expiry receive.
+    DeliveryStats stats_before;
+    engine_b.get_stats(stats_before);
+
+    // Step 4: receive() at AFTER_EXPIRY — deliver_held_pending detects that
+    // seq=3 (SHORT_EXPIRY = NOW_US+10) has expired (AFTER_EXPIRY = NOW_US+100).
+    // Expected: msgs_dropped_expired increments, EXPIRY_DROP event emitted,
+    // and receive() falls through to transport (empty → ERR_TIMEOUT).
+    MessageEnvelope out_exp;
+    Result r_exp = engine_b.receive(out_exp, 0U, AFTER_EXPIRY);
+    assert(r_exp == Result::ERR_TIMEOUT);  // Assert: no live frame; held frame expired
+
+    DeliveryStats stats_after;
+    engine_b.get_stats(stats_after);
+    assert(stats_after.msgs_dropped_expired ==
+           stats_before.msgs_dropped_expired + 1U);  // Assert: expiry counted
+
+    // Step 5: EXPIRY_DROP event must be in the ring with message_id == 5003.
+    DeliveryEvent ev;
+    Result pe = engine_b.poll_event(ev);
+    assert(pe == Result::OK);
+    assert(ev.kind == DeliveryEventKind::EXPIRY_DROP);
+    assert(ev.message_id == 5003ULL);  // Assert: event identifies the expired message
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_de_held_pending_expiry_event\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -2563,6 +2776,8 @@ int main()
     test_de_dedup_after_reassembly();
     test_de_ack_per_logical_message();
     test_de_idle_ordered_gap_expiry_sweep();
+    test_de_ordering_full_stat();
+    test_de_held_pending_expiry_event();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;

@@ -282,6 +282,44 @@ static bool test_ordering_duplicate_seq_discarded()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 7: Sixteen distinct peers accepted; seventeenth rejected with ERR_FULL
+// Verifies: REQ-3.3.5
+//
+// ORDERING_PEER_COUNT == MAX_PEER_NODES == 16. Confirms that the peer table
+// accepts exactly 16 simultaneous ordered-channel sources and rejects the 17th
+// (returns ERR_FULL rather than silently dropping or delivering out of order).
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.3.5
+static bool test_ordering_sixteen_peers()
+{
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    MessageEnvelope out;
+    envelope_init(out);
+
+    // Power of 10 Rule 2: bounded loop (ORDERING_PEER_COUNT iterations)
+    for (uint32_t i = 0U; i < ORDERING_PEER_COUNT; ++i) {
+        MessageEnvelope m;
+        // Source IDs 100..115 — all distinct; seq=1 is in-order for each new peer
+        NodeId src = static_cast<NodeId>(100U + i);
+        make_ordered(m, src, 1U, static_cast<uint8_t>(i & 0xFFU));
+        Result r = buf.ingest(m, out, 1000000ULL);
+        assert(r == Result::OK);         // Assert: peer slot allocated; seq=1 delivered
+        assert(out.sequence_num == 1U);  // Assert: delivered message is seq=1
+    }
+
+    // Seventeenth peer: peer table exhausted — ordering contract cannot be upheld.
+    // ingest() must return ERR_FULL (Issue 5 fix: explicit rejection, not silent drop).
+    MessageEnvelope m17;
+    make_ordered(m17, 200U, 1U, 0xFFU);
+    Result r17 = buf.ingest(m17, out, 1000001ULL);
+    assert(r17 == Result::ERR_FULL);  // Assert: seventeenth peer rejected
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -311,6 +349,10 @@ int main()
     if (!test_ordering_duplicate_seq_discarded()) {
         printf("FAIL: test_ordering_duplicate_seq_discarded\n"); ++failed;
     } else { printf("PASS: test_ordering_duplicate_seq_discarded\n"); }
+
+    if (!test_ordering_sixteen_peers()) {
+        printf("FAIL: test_ordering_sixteen_peers\n"); ++failed;
+    } else { printf("PASS: test_ordering_sixteen_peers\n"); }
 
     return (failed > 0) ? 1 : 0;
 }
