@@ -41,8 +41,9 @@ Synchronous call in the caller's thread.
    - If no free slot: logs `WARNING_HI`; returns `Result::ERR_FULL`. `reserve_bookkeeping()` returns `ERR_FULL` to `send()`.
    - For `RELIABLE_ACK`: after successful `track()`, `reserve_bookkeeping()` returns `OK` (no `schedule()` needed).
 6. `book_res != OK` — `record_send_failure()` called; `send()` returns `ERR_FULL` immediately. No wire I/O occurs.
-7. On `book_res == OK` (slot reserved): **`send_via_transport(work, now_us)`** is called. Inside: expiry check, then `m_transport->send_message(work)` → `TcpBackend::send_message()`. Serialization, impairment pass-through, and `::send()` happen as in UC_01.
-   - If `send_res != OK`: **`rollback_on_transport_failure()`** is called, which calls `m_ack_tracker.cancel(work.source_id, work.message_id)` to free the slot (PENDING→FREE, no stat bump). `send()` returns the transport error.
+7. On `book_res == OK` (slot reserved): **`send_fragments(work, now_us)`** is called, which calls `send_via_transport()` per frame. Inside: expiry check, then `m_transport->send_message(work)` → `TcpBackend::send_message()`. Serialization, impairment pass-through, and `::send()` happen as in UC_01.
+   - If `send_fragments()` returns `ERR_IO` (first frame failed — nothing on wire): **`rollback_on_transport_failure()`** is called via `handle_send_fragments_failure()`, which calls `m_ack_tracker.cancel(work.source_id, work.message_id)` to free the slot (PENDING→FREE, no stat bump). `send()` returns `ERR_IO`.
+   - If `send_fragments()` returns `ERR_IO_PARTIAL` (≥1 frame already transmitted): bookkeeping slot is **preserved** (AckTracker deadline remains active). `send()` returns `ERR_IO`. The ACK timeout sweep will eventually fire if no ACK arrives.
 8. On `send_res == OK`: `++m_stats.msgs_sent`.
 9. `NEVER_COMPILED_OUT_ASSERT(env.source_id == m_local_id)` and `NEVER_COMPILED_OUT_ASSERT(env.message_id != 0ULL)`.
 10. Returns `Result::OK` to the User.
@@ -73,7 +74,7 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
 
 ## 5. Key Components Involved
 
-- **`DeliveryEngine`** — Coordinates send + ACK slot registration. The two steps (bookkeeping then wire send) are sequenced deliberately: `reserve_bookkeeping()` runs first so that if the tracker is full, the caller gets `ERR_FULL` before any byte is sent to the wire. If `send_via_transport()` fails after bookkeeping, `rollback_on_transport_failure()` frees the `AckTracker` slot via `cancel()` so no spurious timeout fires.
+- **`DeliveryEngine`** — Coordinates send + ACK slot registration. The two steps (bookkeeping then wire send) are sequenced deliberately: `reserve_bookkeeping()` runs first so that if the tracker is full, the caller gets `ERR_FULL` before any byte is sent to the wire. If `send_fragments()` fails and nothing reached the wire (`ERR_IO`), `rollback_on_transport_failure()` frees the `AckTracker` slot via `cancel()` so no spurious timeout fires. If `send_fragments()` fails after at least one frame was transmitted (`ERR_IO_PARTIAL`), the slot is intentionally **preserved** — rolling it back would orphan partial reassembly state at the receiver and suppress the retry that would recover the message.
 - **`MessageIdGen`** — Assigns the unique ID that AckTracker will look for when an ACK arrives.
 - **`AckTracker`** — Fixed-capacity table (32 slots). Stores `(message_id, source_id, deadline_us)` in `PENDING` state. Required so `sweep_ack_timeouts()` and `on_ack()` can resolve outstanding sends.
 - **`TcpBackend`** — Performs the actual socket write. Identical to UC_01 path.
@@ -87,7 +88,8 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
 | `reliability_class == RELIABLE_ACK` | Enter `reserve_bookkeeping()` path | Not this UC |
 | AckTracker slot available (inside `reserve_bookkeeping`) | `track()` OK; proceed | `track()` returns `ERR_FULL`; `send()` returns `ERR_FULL` |
 | `book_res != OK` | Return `ERR_FULL` without I/O | Proceed to `send_via_transport()` |
-| `send_res != OK` | `rollback_on_transport_failure()`; return error | Proceed; `msgs_sent++` |
+| `send_fragments()` returns `ERR_IO` (nothing sent) | `rollback_on_transport_failure()` via `handle_send_fragments_failure()`; return `ERR_IO` | Proceed; `msgs_sent++` |
+| `send_fragments()` returns `ERR_IO_PARTIAL` (≥1 frame sent) | Preserve AckTracker slot; return `ERR_IO` | — |
 
 ---
 

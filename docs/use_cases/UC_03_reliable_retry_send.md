@@ -14,7 +14,8 @@
 - **Error outcomes:**
   - `Result::ERR_EXPIRED` — expiry check fails in `send_via_transport()`.
   - `Result::ERR_FULL` from `reserve_bookkeeping()` (AckTracker or RetryManager full) — logged at `WARNING_HI`; send returns `ERR_FULL` immediately with no wire I/O.
-  - Any non-OK from transport — propagated; bookkeeping slots rolled back via `rollback_on_transport_failure()`.
+  - `ERR_IO` when the **first** fragment fails (nothing on wire) — bookkeeping slots rolled back via `rollback_on_transport_failure()`.
+  - `ERR_IO` (normalised from `ERR_IO_PARTIAL`) when ≥1 fragment was already transmitted — bookkeeping slots **preserved**; retry will fire when backoff timer expires.
 
 ---
 
@@ -114,7 +115,8 @@ DeliveryEngine::send()                          [DeliveryEngine.cpp]
 ## 9. Error Handling Flow
 
 - **`ERR_FULL` from `reserve_bookkeeping()`:** `send()` returns `ERR_FULL` before any wire I/O. If `AckTracker` is full, returns immediately. If `RetryManager` is full, the already-reserved `AckTracker` slot is rolled back via `cancel()` before returning. Caller must handle `ERR_FULL`.
-- **Transport failure after bookkeeping:** `rollback_on_transport_failure()` cancels both the `AckTracker` and `RetryManager` slots (no stat bump), preventing spurious timeout sweeps or phantom retries. The transport error is returned.
+- **Transport failure after bookkeeping — nothing sent:** If the first fragment fails (`ERR_IO` from `send_fragments()`), `rollback_on_transport_failure()` via `handle_send_fragments_failure()` cancels both the `AckTracker` and `RetryManager` slots (no stat bump), preventing spurious timeout sweeps or phantom retries. `send()` returns `ERR_IO`.
+- **Transport failure after bookkeeping — partial send:** If ≥1 fragment was already transmitted (`ERR_IO_PARTIAL` from `send_fragments()`), bookkeeping slots are **preserved** so the retry mechanism can retransmit the logical message when the backoff timer fires. `send()` returns `ERR_IO` (normalised). Rolling back here would orphan partial reassembly state at the receiver and suppress the recovery retry.
 - **`ERR_EXPIRED`:** Send aborted before socket; nothing allocated.
 
 ---
