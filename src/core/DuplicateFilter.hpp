@@ -56,10 +56,10 @@ public:
     /// If window is full (m_count == DEDUP_WINDOW_SIZE), evicts the oldest entry.
     void record(NodeId src, uint64_t msg_id);
 
-    // Safety-critical (SC): HAZ-003 — verified to M5
     /// Combined check-and-record in one call.
     /// Returns ERR_DUPLICATE if message is already known, OK otherwise.
     /// On OK, also records the message.
+    // Safety-critical (SC): HAZ-003
     Result check_and_record(NodeId src, uint64_t msg_id);
 
 private:

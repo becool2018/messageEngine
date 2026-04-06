@@ -126,7 +126,7 @@ static bool test_fifo_order()
     // Power of 10 rule 2: fixed loop bound
     for (uint32_t i = 0U; i < N; ++i) {
         MessageEnvelope env;
-        make_env(env, static_cast<uint64_t>(i + 1U), 2U);
+        make_env(env, static_cast<uint64_t>(i) + 1U, 2U);
         Result r = rb.push(env);
         assert(r == Result::OK);  // all pushes must succeed (N < MSG_RING_CAPACITY)
     }
@@ -137,7 +137,7 @@ static bool test_fifo_order()
         envelope_init(out);
         Result r = rb.pop(out);
         assert(r == Result::OK);                                    // pop must succeed
-        assert(out.message_id == static_cast<uint64_t>(i + 1U));   // FIFO order
+        assert(out.message_id == static_cast<uint64_t>(i) + 1U);   // FIFO order
     }
 
     // Buffer should be empty now
@@ -162,7 +162,7 @@ static bool test_push_full()
     // Power of 10 rule 2: fixed loop bound (MSG_RING_CAPACITY = 64)
     for (uint32_t i = 0U; i < MSG_RING_CAPACITY; ++i) {
         MessageEnvelope env;
-        make_env(env, static_cast<uint64_t>(i + 10U), 3U);
+        make_env(env, static_cast<uint64_t>(i) + 10U, 3U);
         Result r = rb.push(env);
         assert(r == Result::OK);  // must accept up to capacity
     }
@@ -190,7 +190,7 @@ static bool test_full_cycle()
     // Power of 10 rule 2: fixed loop bound
     for (uint32_t i = 0U; i < MSG_RING_CAPACITY; ++i) {
         MessageEnvelope env;
-        make_env(env, static_cast<uint64_t>(i + 100U), 4U);
+        make_env(env, static_cast<uint64_t>(i) + 100U, 4U);
         Result r = rb.push(env);
         assert(r == Result::OK);
     }
@@ -228,7 +228,7 @@ static bool test_wraparound()
     // Power of 10 rule 2: fixed loop bound
     for (uint32_t i = 0U; i < HALF; ++i) {
         MessageEnvelope env;
-        make_env(env, static_cast<uint64_t>(i + 200U), 5U);
+        make_env(env, static_cast<uint64_t>(i) + 200U, 5U);
         Result r = rb.push(env);
         assert(r == Result::OK);
     }
@@ -245,7 +245,7 @@ static bool test_wraparound()
     // Push again (tail index has wrapped relative to head)
     for (uint32_t i = 0U; i < HALF; ++i) {
         MessageEnvelope env;
-        make_env(env, static_cast<uint64_t>(i + 300U), 5U);
+        make_env(env, static_cast<uint64_t>(i) + 300U, 5U);
         Result r = rb.push(env);
         assert(r == Result::OK);  // must succeed after drain
     }
@@ -282,7 +282,7 @@ static bool test_consecutive_full_cycles()
         // Fill
         for (uint32_t i = 0U; i < MSG_RING_CAPACITY; ++i) {
             MessageEnvelope env;
-            uint64_t id = static_cast<uint64_t>(cycle * 1000U + i + 1U);
+            uint64_t id = static_cast<uint64_t>(cycle) * 1000U + static_cast<uint64_t>(i) + 1U;
             make_env(env, id, 6U);
             Result r = rb.push(env);
             assert(r == Result::OK);
@@ -302,7 +302,7 @@ static bool test_consecutive_full_cycles()
             envelope_init(out);
             Result r = rb.pop(out);
             assert(r == Result::OK);
-            uint64_t expected = static_cast<uint64_t>(cycle * 1000U + i + 1U);
+            uint64_t expected = static_cast<uint64_t>(cycle) * 1000U + static_cast<uint64_t>(i) + 1U;
             assert(out.message_id == expected);  // FIFO order per cycle
         }
 
@@ -367,7 +367,7 @@ static bool test_init_resets()
     // Push a few items
     for (uint32_t i = 0U; i < 4U; ++i) {
         MessageEnvelope env;
-        make_env(env, static_cast<uint64_t>(i + 1U), 8U);
+        make_env(env, static_cast<uint64_t>(i) + 1U, 8U);
         Result r = rb.push(env);
         assert(r == Result::OK);
     }

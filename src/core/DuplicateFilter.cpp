@@ -30,6 +30,9 @@
 #include "DuplicateFilter.hpp"
 #include "Assert.hpp"
 
+// M-2: Guard the modulo wrap against a zero divisor — porting error / macro redefinition.
+static_assert(DEDUP_WINDOW_SIZE > 0U, "DEDUP_WINDOW_SIZE must be nonzero");
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Initialization
 // ─────────────────────────────────────────────────────────────────────────────

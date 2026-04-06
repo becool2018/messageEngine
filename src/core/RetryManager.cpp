@@ -44,13 +44,12 @@ static bool slot_has_expired(uint64_t expiry_us, uint64_t now_us)
 static uint32_t advance_backoff(uint32_t current_ms)
 {
     NEVER_COMPILED_OUT_ASSERT(current_ms <= 60000U);  // Power of 10: pre-condition
-    const uint64_t doubled = static_cast<uint64_t>(current_ms) * 2U;
-    if (doubled > 60000U) {
-        // Cap reached; the surrounding if already proves doubled > 60000U
-        return 60000U;
-    }
-    NEVER_COMPILED_OUT_ASSERT(doubled <= 60000U);  // Power of 10: post-condition
-    return static_cast<uint32_t>(doubled);
+    // Cap before multiply: structurally prevents overflow even if
+    // the precondition is weakened on a future embedded port.
+    const uint32_t capped = (current_ms > 30000U) ? 30000U : current_ms;
+    const uint32_t result  = capped * 2U;
+    NEVER_COMPILED_OUT_ASSERT(result <= 60000U);  // Power of 10: post-condition
+    return result;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
