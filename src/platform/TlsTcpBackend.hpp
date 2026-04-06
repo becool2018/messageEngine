@@ -183,6 +183,18 @@ private:
     /// Does nothing if no pending connection or table is full.
     Result accept_and_handshake();
 
+    /// Perform TLS setup (set_block, ssl_setup, BIO, handshake, set_nonblock)
+    /// for the server-accepted socket at @p slot.
+    /// Extracted from accept_and_handshake() to keep its CC ≤ 10 (Fix B-2b).
+    /// On failure, frees and re-inits m_ssl[slot] and m_client_net[slot].
+    Result do_tls_server_handshake(uint32_t slot);
+
+    /// Read the 4-byte length-prefix header from the TLS record layer,
+    /// enforcing @p timeout_ms on WANT_READ retries (Fix B-2c).
+    /// Extracted from tls_recv_frame() to keep its CC ≤ 10.
+    /// @return true on success (exactly 4 bytes read); false on error/timeout.
+    bool read_tls_header(uint32_t idx, uint8_t* hdr, uint32_t timeout_ms);
+
     /// Receive and deserialize one frame from client at index @p idx.
     Result recv_from_client(uint32_t idx, uint32_t timeout_ms);
 
@@ -266,10 +278,12 @@ private:
     bool tls_write_all(uint32_t idx, const uint8_t* buf, uint32_t len);
 
     /// Read exactly @p payload_len bytes from m_ssl[idx] into @p buf, handling
-    /// MBEDTLS_ERR_SSL_WANT_READ continuations. Sets *out_len on success.
-    /// Extracted from tls_recv_frame() to reduce its CC.
+    /// MBEDTLS_ERR_SSL_WANT_READ continuations with a timeout-gated poll.
+    /// Sets *out_len on success. Extracted from tls_recv_frame() to reduce CC.
+    /// Fix B-2c: timeout_ms enforced via mbedtls_net_poll on WANT_READ.
     bool tls_read_payload(uint32_t idx, uint8_t* buf,
-                          uint32_t payload_len, uint32_t* out_len);
+                          uint32_t payload_len, uint32_t timeout_ms,
+                          uint32_t* out_len);
 
     /// Route a deserialized inbound envelope through the ImpairmentEngine.
     /// Checks partition state (inbound drop) then calls process_inbound()

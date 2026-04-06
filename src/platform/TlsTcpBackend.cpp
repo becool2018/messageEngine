@@ -475,6 +475,58 @@ Result TlsTcpBackend::connect_to_server()
 // accept_and_handshake() — server mode, accept one pending connection
 // ─────────────────────────────────────────────────────────────────────────────
 
+// do_tls_server_handshake() — CC-reduction helper for accept_and_handshake()
+// Performs set_block, ssl_setup, BIO bind, handshake, and set_nonblock (Fix B-2b).
+// On any failure, cleans up m_ssl[slot] and m_client_net[slot] before returning.
+Result TlsTcpBackend::do_tls_server_handshake(uint32_t slot)
+{
+    NEVER_COMPILED_OUT_ASSERT(slot < MAX_TCP_CONNECTIONS);
+    NEVER_COMPILED_OUT_ASSERT(m_tls_enabled);
+
+    // Blocking mode required for the handshake multi-round I/O sequence.
+    int ret = mbedtls_net_set_block(&m_client_net[slot]);
+    if (ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "net_set_block (client)", ret);
+        mbedtls_net_free(&m_client_net[slot]);
+        mbedtls_net_init(&m_client_net[slot]);
+        return Result::ERR_IO;
+    }
+
+    ret = mbedtls_ssl_setup(&m_ssl[slot], &m_ssl_conf);
+    if (ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "ssl_setup (accept)", ret);
+        mbedtls_net_free(&m_client_net[slot]);
+        mbedtls_net_init(&m_client_net[slot]);
+        return Result::ERR_IO;
+    }
+    mbedtls_ssl_set_bio(&m_ssl[slot], &m_client_net[slot],
+                        mbedtls_net_send, mbedtls_net_recv, nullptr);
+
+    // TLS handshake (init-phase — Power of 10 Rule 3 deviation documented)
+    ret = mbedtls_ssl_handshake(&m_ssl[slot]);
+    if (ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "ssl_handshake (accept)", ret);
+        mbedtls_ssl_free(&m_ssl[slot]);
+        mbedtls_ssl_init(&m_ssl[slot]);
+        mbedtls_net_free(&m_client_net[slot]);
+        mbedtls_net_init(&m_client_net[slot]);
+        return Result::ERR_IO;
+    }
+
+    // Fix B-2b: restore non-blocking so the poll loop does not stall.
+    ret = mbedtls_net_set_nonblock(&m_client_net[slot]);
+    if (ret != 0) {
+        // Non-fatal: Fix B-2a poll guard prevents stall (defence-in-depth).
+        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
+                    "set_nonblock after handshake failed: %d", ret);
+    }
+
+    Logger::log(Severity::INFO, "TlsTcpBackend",
+                "TLS handshake complete (server slot %u): cipher=%s",
+                slot, mbedtls_ssl_get_ciphersuite(&m_ssl[slot]));
+    return Result::OK;
+}
+
 Result TlsTcpBackend::accept_and_handshake()
 {
     NEVER_COMPILED_OUT_ASSERT(m_is_server);
@@ -493,41 +545,11 @@ Result TlsTcpBackend::accept_and_handshake()
     }
 
     if (m_tls_enabled) {
-        // Set client socket to blocking mode before TLS handshake.
-        // mbedtls_net_accept() on a non-blocking listen socket returns a
-        // client socket that inherits O_NONBLOCK; the TLS handshake requires
-        // blocking I/O to complete its multi-round read/write sequence.
-        ret = mbedtls_net_set_block(&m_client_net[slot]);
-        if (ret != 0) {
-            log_mbedtls_err("TlsTcpBackend", "net_set_block (client)", ret);
-            mbedtls_net_free(&m_client_net[slot]);
-            mbedtls_net_init(&m_client_net[slot]);
-            return Result::ERR_IO;
+        // Extracted to do_tls_server_handshake() to keep this function CC ≤ 10.
+        Result hs_r = do_tls_server_handshake(slot);
+        if (!result_ok(hs_r)) {
+            return hs_r;
         }
-
-        ret = mbedtls_ssl_setup(&m_ssl[slot], &m_ssl_conf);
-        if (ret != 0) {
-            log_mbedtls_err("TlsTcpBackend", "ssl_setup (accept)", ret);
-            mbedtls_net_free(&m_client_net[slot]);
-            mbedtls_net_init(&m_client_net[slot]);
-            return Result::ERR_IO;
-        }
-        mbedtls_ssl_set_bio(&m_ssl[slot], &m_client_net[slot],
-                            mbedtls_net_send, mbedtls_net_recv, nullptr);
-
-        // TLS handshake (init-phase — Power of 10 Rule 3 deviation documented)
-        ret = mbedtls_ssl_handshake(&m_ssl[slot]);
-        if (ret != 0) {
-            log_mbedtls_err("TlsTcpBackend", "ssl_handshake (accept)", ret);
-            mbedtls_ssl_free(&m_ssl[slot]);
-            mbedtls_ssl_init(&m_ssl[slot]);
-            mbedtls_net_free(&m_client_net[slot]);
-            mbedtls_net_init(&m_client_net[slot]);
-            return Result::ERR_IO;
-        }
-        Logger::log(Severity::INFO, "TlsTcpBackend",
-                    "TLS handshake complete (server slot %u): cipher=%s",
-                    slot, mbedtls_ssl_get_ciphersuite(&m_ssl[slot]));
     }
 
     ++m_client_count;
@@ -766,7 +788,8 @@ bool TlsTcpBackend::tls_send_frame(uint32_t idx,
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool TlsTcpBackend::tls_read_payload(uint32_t idx, uint8_t* buf,
-                                      uint32_t payload_len, uint32_t* out_len)
+                                      uint32_t payload_len, uint32_t timeout_ms,
+                                      uint32_t* out_len)
 {
     NEVER_COMPILED_OUT_ASSERT(buf != nullptr);
     NEVER_COMPILED_OUT_ASSERT(payload_len > 0U && payload_len <= SOCKET_RECV_BUF_BYTES);
@@ -780,7 +803,16 @@ bool TlsTcpBackend::tls_read_payload(uint32_t idx, uint8_t* buf,
         if (ret > 0) {
             received += static_cast<uint32_t>(ret);
         } else if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
-            continue;
+            // Fix B-2c: enforce timeout — poll before retrying so a silent
+            // client cannot block indefinitely on a non-blocking socket.
+            int poll_r = mbedtls_net_poll(&m_client_net[idx],
+                                          MBEDTLS_NET_POLL_READ,
+                                          timeout_ms);
+            if (poll_r <= 0) {
+                Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
+                            "tls_read_payload: timeout waiting for data");
+                return false;
+            }
         } else {
             log_mbedtls_err("TlsTcpBackend", "ssl_read (payload)", ret);
             return false;
@@ -802,6 +834,46 @@ bool TlsTcpBackend::tls_read_payload(uint32_t idx, uint8_t* buf,
 // tls_recv_frame() — receive 4-byte length prefix + payload
 // ─────────────────────────────────────────────────────────────────────────────
 
+// read_tls_header() — CC-reduction helper for tls_recv_frame()
+// Reads the 4-byte big-endian length prefix from the TLS record layer.
+// Fix B-2c: WANT_READ retries are gated by a timeout-enforced poll so the
+// call cannot block indefinitely even when the socket is still blocking.
+bool TlsTcpBackend::read_tls_header(uint32_t idx, uint8_t* hdr,
+                                     uint32_t timeout_ms)
+{
+    NEVER_COMPILED_OUT_ASSERT(hdr != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(idx < MAX_TCP_CONNECTIONS);
+
+    uint32_t hdr_received = 0U;
+    // Power of 10 Rule 2: bound = 8 — ≤4 byte-progress iters + ≤4 WANT_READ retries
+    for (uint32_t iter = 0U; iter < 8U && hdr_received < 4U; ++iter) {
+        int ret = mbedtls_ssl_read(&m_ssl[idx], hdr + hdr_received,
+                                   static_cast<size_t>(4U - hdr_received));
+        if (ret > 0) {
+            hdr_received += static_cast<uint32_t>(ret);
+        } else if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
+            // Poll with timeout before retrying (Fix B-2c).
+            int poll_r = mbedtls_net_poll(&m_client_net[idx],
+                                          MBEDTLS_NET_POLL_READ,
+                                          timeout_ms);
+            if (poll_r <= 0) {
+                Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
+                            "tls_recv_frame: timeout on header read");
+                return false;
+            }
+        } else {
+            log_mbedtls_err("TlsTcpBackend", "ssl_read (header)", ret);
+            return false;
+        }
+    }
+    if (hdr_received != 4U) {
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "tls_recv_frame: short header read %u/4", hdr_received);
+        return false;
+    }
+    return true;
+}
+
 bool TlsTcpBackend::tls_recv_frame(uint32_t idx,
                                     uint8_t* buf, uint32_t buf_cap,
                                     uint32_t timeout_ms, uint32_t* out_len)
@@ -816,26 +888,9 @@ bool TlsTcpBackend::tls_recv_frame(uint32_t idx,
                                       timeout_ms, out_len);
     }
 
-    // TLS path: read 4-byte header first.
-    // Security fix F2: loop to handle partial header reads from mbedtls_ssl_read().
+    // TLS path: read 4-byte header (extracted to read_tls_header() for CC).
     uint8_t hdr[4U];
-    uint32_t hdr_received = 0U;
-    // Power of 10 Rule 2: bounded loop — at most 4 iterations for 4-byte header
-    for (uint32_t iter = 0U; iter < 4U && hdr_received < 4U; ++iter) {
-        int ret = mbedtls_ssl_read(&m_ssl[idx], hdr + hdr_received,
-                                   static_cast<size_t>(4U - hdr_received));
-        if (ret > 0) {
-            hdr_received += static_cast<uint32_t>(ret);
-        } else if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
-            continue;
-        } else {
-            log_mbedtls_err("TlsTcpBackend", "ssl_read (header)", ret);
-            return false;
-        }
-    }
-    if (hdr_received != 4U) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "tls_recv_frame: short header read %u/4", hdr_received);
+    if (!read_tls_header(idx, hdr, timeout_ms)) {
         return false;
     }
 
@@ -852,7 +907,7 @@ bool TlsTcpBackend::tls_recv_frame(uint32_t idx,
     }
 
     // Read payload via helper (Power of 10 Rule 4: CC-reduction extraction)
-    return tls_read_payload(idx, buf, payload_len, out_len);
+    return tls_read_payload(idx, buf, payload_len, timeout_ms, out_len);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1093,11 +1148,37 @@ void TlsTcpBackend::poll_clients_once(uint32_t timeout_ms)
         (void)accept_and_handshake();
     }
 
-    // Power of 10 Rule 2: fixed loop bound
-    // Iterate backwards to avoid index shift from remove_client() inside the loop
+    // Fix B-2a: poll all active client fds at once so:
+    //   (a) we only call recv_from_client() on readable slots, and
+    //   (b) the poll() call provides proper back-pressure (waits up to
+    //       timeout_ms for any client to have data, instead of spinning).
+    // Power of 10 Rule 2: fixed array bound (MAX_TCP_CONNECTIONS).
+    struct pollfd pfds[MAX_TCP_CONNECTIONS];
+    uint32_t nfds = 0U;
+    for (uint32_t j = 0U; j < m_client_count; ++j) {
+        pfds[j].fd     = m_client_net[j].fd;
+        pfds[j].events  = POLLIN;
+        pfds[j].revents = 0;
+        ++nfds;
+    }
+    if (nfds > 0U) {
+        // Block until at least one client is readable or timeout expires.
+        (void)poll(pfds, static_cast<nfds_t>(nfds),
+                   static_cast<int>(timeout_ms));
+    }
+
+    // Iterate backwards to avoid index shift from remove_client() inside the loop.
     uint32_t i = m_client_count;
     while (i > 0U) {
         --i;
+        // Gate on OS readiness from the poll above, or on mbedTLS internal buffer
+        // (which may already hold decrypted bytes from a prior partial TLS record).
+        bool has_data = (m_tls_enabled &&
+                         (mbedtls_ssl_get_bytes_avail(&m_ssl[i]) > 0U));
+        has_data = has_data || ((pfds[i].revents & POLLIN) != 0U);
+        if (!has_data) {
+            continue;   // No data on this slot; skip without closing
+        }
         (void)recv_from_client(i, timeout_ms);
     }
 }
