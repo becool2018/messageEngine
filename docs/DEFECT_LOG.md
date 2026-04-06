@@ -852,3 +852,152 @@ Moderator: Don Jessup — 2026-04-06. All six defects (DEF-016-1 through DEF-016
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-04-06. All five defects (DEF-014-1 through DEF-014-5) resolved in commit 77c7106. All entry and exit criteria satisfied. Inspection INSP-014 closed PASS.
+
+---
+
+### INSP-017 — Security hardening: G-series (G-1 through G-8) and SEC-005 through SEC-008 (2026-04-06)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-06 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | CLOSED — 12 security/robustness defects found and fixed (commits d7584dd, 3d58a1c) |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `src/core/AckTracker.cpp`, `src/core/RetryManager.cpp` | G-1: replace monotonic-time `NEVER_COMPILED_OUT_ASSERT(now_us >= m_last_sweep_us)` with defensive WARNING_HI + clamp so a clock glitch degrades gracefully instead of triggering abort/reset |
+| `src/core/ReassemblyBuffer.cpp`, `src/core/ReassemblyBuffer.hpp` | G-2: change `record_fragment()` from void to Result; replace buffer-bounds asserts with ERR_INVALID returns; `ingest_multifrag()` frees slot and propagates error on failure |
+| `src/platform/TcpBackend.cpp`, `src/platform/TcpBackend.hpp` | G-3: add `close_and_evict_slot()` helper; call from duplicate-NodeId rejection and duplicate-HELLO paths to prevent resource hold and retry flooding |
+| `src/core/DuplicateFilter.cpp`, `src/core/DuplicateFilter.hpp` | G-4: extract `find_evict_idx()` private helper; use `DEDUP_WINDOW_SIZE` sentinel to avoid silently defaulting to slot 0 before any slot is evaluated |
+| `src/app/Server.cpp` | G-5: fix `send_echo_reply()` to stamp `reply.source_id = LOCAL_SERVER_NODE_ID` instead of attacker-controlled `received.destination_id` |
+| `src/platform/SocketUtils.cpp` | G-6: tighten `socket_accept()` postcondition to `client_fd > 2` (stdin/stdout/stderr must not be re-used as sockets) |
+| `src/core/OrderingBuffer.cpp` | G-7: fix `find_lru_peer_idx()` to use `ORDERING_PEER_COUNT` sentinel and skip inactive peers so LRU search never silently picks an inactive slot |
+| `src/platform/TcpBackend.cpp` | G-8: guard `send_hello_frame()` against `m_client_fds[0] == -1` before passing to `send_frame()` |
+| `src/platform/DtlsUdpBackend.cpp` | SEC-005: `validate_source()` plaintext-mismatch path upgraded WARNING_LO → WARNING_HI per REQ-6.3.2 severity classification |
+| `src/platform/DtlsUdpBackend.cpp`, `src/platform/TlsTcpBackend.cpp` | SEC-006: `mbedtls_platform_zeroize(&m_pkey, sizeof(m_pkey))` added after `mbedtls_pk_free()` in both destructors (§7c / CWE-14) |
+| `src/core/DeliveryEngine.cpp`, `src/core/DeliveryEngine.hpp` | SEC-007: `m_last_now_us` member added; non-monotonic `now_us` guard at entry of `send()`, `receive()`, `pump_retries()`, `sweep_ack_timeouts()` |
+| `src/core/DeliveryEngine.cpp`, `src/core/Serializer.cpp` | SEC-008: `static_assert(Serializer::WIRE_HEADER_SIZE + FRAG_MAX_PAYLOAD_BYTES <= SOCKET_RECV_BUF_BYTES)` added at file scope; compile-time wire buffer invariant |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations (CC ≤ 10 enforced) | PASS |
+| `make run_tests` all tests green | PASS |
+| All new/modified `src/` files carry `// Implements: REQ-x.x` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Defects found
+
+| ID | File : function | Description | Severity | Disposition | Resolution |
+|----|----------------|-------------|----------|-------------|------------|
+| DEF-017-1 | `src/core/AckTracker.cpp` / `src/core/RetryManager.cpp` : `sweep_expired()` / `collect_due()` | **G-1: Monotonic-time assert causes abort on clock glitch in a live server.** `NEVER_COMPILED_OUT_ASSERT(now_us >= m_last_sweep_us)` triggers `abort()` when a backward timestamp is supplied (NTP step, test harness, VM migration). In a server that services many clients, one clock glitch kills the entire process. Severity: MAJOR (availability; correctness preserved by clamp). | MAJOR | FIX | Assert replaced with WARNING_HI + `now_us = m_last_sweep_us` clamp. Process degrades gracefully. Assert retained for `now_us != 0ULL` (zero is never valid). |
+| DEF-017-2 | `src/core/ReassemblyBuffer.cpp` : `record_fragment()` / `ingest_multifrag()` | **G-2: Buffer-bounds assertion in record_fragment() aborts on malformed fragment.** `NEVER_COMPILED_OUT_ASSERT(offset + len <= BUF_SIZE)` fired on any fragment with a malformed `fragment_index`; this brought down the process rather than rejecting the bad frame. Return type was void, making error propagation impossible. | MAJOR | FIX | `record_fragment()` changed to `Result`; bounds check returns `ERR_INVALID`; `ingest_multifrag()` frees the slot and returns `ERR_INVALID` to caller on any fragment error. |
+| DEF-017-3 | `src/platform/TcpBackend.cpp` : `handle_hello_frame()` / `process_hello_frame()` | **G-3: Rejected HELLO left socket open, enabling resource hold and retry flooding.** Duplicate-NodeId and duplicate-HELLO rejections logged a warning and returned early without closing the offending fd, leaving the slot table entry occupied and allowing the rejected peer to retry indefinitely. | MAJOR | FIX | `close_and_evict_slot(client_fd)` helper added; called from both rejection paths. Offending connection is closed and slot compacted before return. |
+| DEF-017-4 | `src/core/DuplicateFilter.cpp` : eviction logic | **G-4: DuplicateFilter eviction silently defaulted to slot 0 before first evaluation.** `find_evict_idx()` was inlined in `check_and_record()` with `evict_idx = 0` as pre-loop default; if the very first slot was newer than all others (impossible but structurally hidden), slot 0 was always evicted. Correct sentinel value is `DEDUP_WINDOW_SIZE` (no slot selected yet). | MINOR | FIX | `find_evict_idx()` extracted as private helper; initialized with `DEDUP_WINDOW_SIZE` sentinel; valid slots preferred over invalid slots; always selects the globally oldest valid entry. |
+| DEF-017-5 | `src/app/Server.cpp` : `send_echo_reply()` | **G-5: Echo reply source_id set from attacker-controlled destination_id field.** `reply.source_id = received.destination_id` allowed a malicious client to inject an arbitrary source_id into the echo reply, bypassing source-address consistency checks in the receiver. | CRITICAL | FIX | `reply.source_id = LOCAL_SERVER_NODE_ID`; reply source is always the local server identity, not the received envelope's destination. |
+| DEF-017-6 | `src/platform/SocketUtils.cpp` : `socket_accept()` | **G-6: `socket_accept()` postcondition allowed fd=0,1,2 (stdin/stdout/stderr).** The postcondition `NEVER_COMPILED_OUT_ASSERT(client_fd >= 0)` admitted stdin/stdout/stderr file descriptors as valid socket fds, which would cause all reads/writes on those "sockets" to corrupt standard I/O. | MAJOR | FIX | Postcondition tightened to `NEVER_COMPILED_OUT_ASSERT(client_fd > 2)`. |
+| DEF-017-7 | `src/core/OrderingBuffer.cpp` : `find_lru_peer_idx()` | **G-7: LRU eviction scan silently selected inactive peer slots.** `find_lru_peer_idx()` iterated all slots without skipping inactive ones; an inactive slot with a stale `last_used_us` field could be selected as the eviction candidate, evicting the wrong peer and corrupting ordering state. | MAJOR | FIX | Scan skips `!active` slots; uses `ORDERING_PEER_COUNT` as sentinel; only active slots are candidates. |
+| DEF-017-8 | `src/platform/TcpBackend.cpp` : `send_hello_frame()` | **G-8: HELLO frame sent on fd=-1 when connection not yet established.** `send_hello_frame()` passed `m_client_fds[0]` to `send_frame()` without checking if it was -1; passing -1 to the underlying `send()` syscall is UB and typically results in EBADF, with the error return silently discarded. | MAJOR | FIX | Guard added: if `m_client_fds[0U] < 0`, log WARNING_HI and return `ERR_IO` before calling `send_frame()`. |
+| DEF-017-9 | `src/platform/DtlsUdpBackend.cpp` : `validate_source()` | **SEC-005: Source mismatch in plaintext mode logged at WARNING_LO instead of WARNING_HI.** REQ-6.3.2 requires source-address mismatch (a potential spoofing indicator) to be logged at WARNING_HI. Using WARNING_LO suppressed the event in environments filtering below WARNING_HI. | MINOR | FIX | Severity upgraded to WARNING_HI per REQ-6.3.2. |
+| DEF-017-10 | `src/platform/DtlsUdpBackend.cpp`, `src/platform/TlsTcpBackend.cpp` : destructors | **SEC-006: Private key not zeroed before mbedtls_pk_free() — duplicate of DEF-016-2/3 pattern confirmed to cover both backends.** Additional zeroize call added to cover `m_pkey` in TlsTcpBackend destructor path that had not been addressed in DEF-016-2. (CLAUDE.md §7c / CWE-14.) | CRITICAL | FIX | `mbedtls_platform_zeroize(static_cast<void*>(&m_pkey), sizeof(m_pkey))` added after `mbedtls_pk_free()` in both backends. |
+| DEF-017-11 | `src/core/DeliveryEngine.cpp`, `src/core/DeliveryEngine.hpp` : `send()`, `receive()`, `pump_retries()`, `sweep_ack_timeouts()` | **SEC-007: DeliveryEngine had no monotonic-time guard at its own API boundary.** AckTracker and RetryManager each enforced their own monotonic contracts, but DeliveryEngine's public API (`send`, `receive`, `pump_retries`, `sweep_ack_timeouts`) accepted any `now_us` without checking. A backward timestamp passed to `send()` would not be caught until the inner component boundary, by which time state corruption was possible. | MAJOR | FIX | `m_last_now_us` member added (zero = not yet seen); guard at entry of all four public methods; backward timestamp logs WARNING_HI + returns `ERR_INVALID`. Reset to 0 in `init()`. |
+| DEF-017-12 | `src/core/DeliveryEngine.cpp` | **SEC-008: No compile-time verification that one wire fragment fits in the socket receive buffer.** `FRAG_MAX_PAYLOAD_BYTES + WIRE_HEADER_SIZE` was not statically checked against `SOCKET_RECV_BUF_BYTES`. A misconfigured constant change could silently create a buffer that is too small to hold a single fragment. | MINOR | FIX | `static_assert(Serializer::WIRE_HEADER_SIZE + FRAG_MAX_PAYLOAD_BYTES <= SOCKET_RECV_BUF_BYTES, ...)` added at file scope. |
+
+#### Checklist reference
+
+All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
+- DEF-017-5 (CRITICAL): `send_echo_reply()` source_id is now always `LOCAL_SERVER_NODE_ID`; attacker-controlled field is no longer used. ✓
+- DEF-017-10 (CRITICAL): Both TlsTcpBackend and DtlsUdpBackend destructors zeroize m_pkey before pk_free; no raw memset used. ✓
+- DEF-017-1: AckTracker and RetryManager invariants updated in STATE_MACHINES.md §1–§2. ✓
+- DEF-017-11: SECURITY_ASSUMPTIONS.md §1 updated for DeliveryEngine boundary enforcement. ✓
+- Power of 10 Rule 3: `m_last_now_us` is a member (init-phase); no heap allocation. ✓
+- MISRA C++:2023: no C-style casts; all static_cast. ✓
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-06. All 12 defects (DEF-017-1 through DEF-017-12) resolved in commits d7584dd and 3d58a1c. All entry and exit criteria satisfied. Inspection INSP-017 closed PASS.
+
+---
+
+### INSP-018 — Security hardening: H-series (SEC-009 through SEC-022) (2026-04-06)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-06 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | CLOSED — 14 security defects found and fixed (commit 4cda101) |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `src/core/Timestamp.hpp` | SEC-009: CERT INT30-C overflow guard before `tv_sec * 1000000ULL`; returns UINT64_MAX on overflow |
+| `src/platform/PrngEngine.hpp` | SEC-010: `m_state` initialized at declaration (`= 0ULL`) per §7b (CWE-457) |
+| `src/platform/TlsTcpBackend.cpp` | SEC-011: Client-mode source_id locking — first non-invalid source_id from server is recorded; subsequent frames with a different source_id are dropped with WARNING_HI |
+| `src/platform/TlsTcpBackend.cpp`, `src/platform/TlsTcpBackend.hpp` (via `tests/test_TlsTcpBackend.cpp`) | SEC-012: `handle_hello_frame()` scans all active slots for duplicate NodeId; evicts new slot if collision found (mirrors TcpBackend G-3 + F-13 guard) |
+| `src/platform/TlsTcpBackend.cpp` | SEC-013: `classify_inbound_frame()` calls `remove_client(idx)` on duplicate HELLO detection to prevent resource hold |
+| `src/core/RequestReplyEngine.cpp` | SEC-014: CERT INT30-C saturation guards before `now_us + timeout_us` and `now_us + 5000000ULL` |
+| `src/core/RequestReplyEngine.cpp` | SEC-015: `NEVER_COMPILED_OUT_ASSERT(!m_request_stash[slot].active)` added before stash write |
+| `src/core/DeliveryEngine.cpp` | SEC-016: Verification comment confirming SEC-007 monotonic guards present |
+| `src/platform/DtlsUdpBackend.cpp` | SEC-017: CERT INT31-C clamp of `connect_timeout_ms` to `INT_MAX` before `static_cast<int>` in `server_wait_and_handshake()` |
+| `src/platform/DtlsUdpBackend.cpp`, `src/platform/DtlsUdpBackend.hpp` | SEC-018: `m_local_node_id` stored in `register_local_id()`; new `NodeId m_local_node_id = NODE_ID_INVALID` member added |
+| `src/core/Logger.hpp` | SEC-019: Rate-limiting deferred — comment documents scope, design notes, and defer rationale |
+| `src/app/Client.cpp` | SEC-020: `errno = 0` before `strtol()`, `if (errno != 0)` check after (CERT ERR34-C) |
+| `src/platform/TlsTcpBackend.cpp` | SEC-021: `tls_connect_handshake()` — if `verify_peer=true && peer_hostname[0] == '\0'`, return `ERR_INVALID` + WARNING_HI; closes CWE-297 gap in TLS TCP client (mirrors DtlsUdpBackend SEC-001 / REQ-6.4.6) |
+| `src/platform/SocketUtils.cpp` | SEC-022: `NEVER_COMPILED_OUT_ASSERT(timeout_ms > 0U)` + `if (timeout_ms == 0U) { return ERR_INVALID; }` in `socket_connect_with_timeout()` |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations (CC ≤ 10 enforced) | PASS |
+| `make run_tests` all tests green | PASS |
+| All new/modified `src/` files carry `// Implements: REQ-x.x` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Defects found
+
+| ID | File : function | Description | Severity | Disposition | Resolution |
+|----|----------------|-------------|----------|-------------|------------|
+| DEF-018-1 | `src/core/Timestamp.hpp` : `timestamp_now_us()` | **SEC-009: Unsigned overflow in `tv_sec × 1000000ULL` for far-future timestamps.** On systems where `tv_sec` > UINT64_MAX/1000000 (year ~584554), the multiplication silently wraps, returning a small timestamp and causing all expiry checks to treat messages as valid indefinitely. | MAJOR | FIX | Overflow guard added: `if (static_cast<uint64_t>(ts.tv_sec) > UINT64_MAX / 1000000ULL) { return UINT64_MAX; }` before the multiplication. |
+| DEF-018-2 | `src/platform/PrngEngine.hpp` | **SEC-010: `m_state` declared without initializer (CWE-457 / §7b).** `uint64_t m_state;` was not initialized at declaration. If a code path using the PRNG ran before `seed()` was called, `m_state` held indeterminate (potentially zero) value, producing a degenerate sequence. | MAJOR | FIX | `uint64_t m_state = 0ULL;` — initialized at declaration per §7b. |
+| DEF-018-3 | `src/platform/TlsTcpBackend.cpp` : client receive path | **SEC-011: TlsTcpBackend client mode did not lock server source_id after first frame.** In TcpBackend, the server sends a HELLO and the client records the server's NodeId. TlsTcpBackend's client receive path validated inbound source_id against a recorded server NodeId, but the locking (first-non-invalid-wins) was missing, allowing a mid-session source_id change from the server to go undetected. | MAJOR | FIX | First non-invalid source_id from server locked in on receipt; subsequent frames with a different source_id logged at WARNING_HI and dropped. |
+| DEF-018-4 | `src/platform/TlsTcpBackend.cpp` : `handle_hello_frame()` | **SEC-012: TlsTcpBackend allowed two connections to register the same NodeId.** TcpBackend (via G-3 + F-13) scanned all active slots for duplicate NodeId on HELLO and evicted the newcomer. TlsTcpBackend's `handle_hello_frame()` was missing this cross-slot scan, allowing a second TLS connection to claim an already-registered NodeId, potentially hijacking the routing table entry for an active peer. | CRITICAL | FIX | `handle_hello_frame()` scans all active slots for NodeId collision; evicts new slot (calls `remove_client(idx_new)`) if collision found; logs WARNING_HI. |
+| DEF-018-5 | `src/platform/TlsTcpBackend.cpp` : `classify_inbound_frame()` | **SEC-013: Duplicate HELLO in TlsTcpBackend left connection open after rejection.** `classify_inbound_frame()` returned `ERR_INVALID` on duplicate HELLO but did not close the offending TLS slot, leaving the connection alive and the slot occupied. This mirrors DEF-017-3 (TcpBackend G-3) but was missed in TlsTcpBackend. | MAJOR | FIX | `classify_inbound_frame()` calls `remove_client(idx)` before returning `ERR_INVALID` on duplicate HELLO detection. |
+| DEF-018-6 | `src/core/RequestReplyEngine.cpp` : `send_request()` | **SEC-014: CERT INT30-C overflow in deadline computation.** `now_us + timeout_us` and `now_us + 5000000ULL` computed as plain `uint64_t` addition without overflow guards; if `now_us` is near `UINT64_MAX`, the deadline wraps to a small value and the request expires immediately. | MAJOR | FIX | Saturation addition: `deadline = (now_us > UINT64_MAX - timeout_us) ? UINT64_MAX : now_us + timeout_us`. Same pattern applied to the retry deadline. |
+| DEF-018-7 | `src/core/RequestReplyEngine.cpp` : `send_request()` | **SEC-015: Missing precondition assertion before stash write.** The stash slot at `slot` was written without asserting that `m_request_stash[slot].active == false`; a bug in the slot-selection logic could silently overwrite an active stash entry, losing the in-flight request. | MAJOR | FIX | `NEVER_COMPILED_OUT_ASSERT(!m_request_stash[slot].active)` added before the stash write. |
+| DEF-018-8 | `src/core/DeliveryEngine.cpp` | **SEC-016: Verification comment absent for SEC-007 monotonic guards.** Comment documenting the presence of monotonic guards was missing, making it harder for future reviewers to verify the invariant is enforced at the DeliveryEngine boundary. | MINOR | FIX | Comment added confirming monotonic guards present from SEC-007. |
+| DEF-018-9 | `src/platform/DtlsUdpBackend.cpp` : `server_wait_and_handshake()` | **SEC-017: CERT INT31-C narrowing of `connect_timeout_ms` from uint32_t to int.** `static_cast<int>(connect_timeout_ms)` was performed without range check; values > INT_MAX wrap to negative, potentially disabling the timeout or causing `poll()` to block indefinitely. | MAJOR | FIX | Clamp added: `if (connect_timeout_ms > static_cast<uint32_t>(INT_MAX)) { connect_timeout_ms = static_cast<uint32_t>(INT_MAX); }` before the cast. |
+| DEF-018-10 | `src/platform/DtlsUdpBackend.cpp`, `src/platform/DtlsUdpBackend.hpp` : `register_local_id()` | **SEC-018: DtlsUdpBackend::register_local_id() inherited default no-op but did not store local NodeId.** The local NodeId registered at init time was never saved in DtlsUdpBackend; this prevented any future per-peer diagnostic that needs to know the local identity. (REQ-6.1.10.) | MINOR | FIX | New member `NodeId m_local_node_id = NODE_ID_INVALID` added; `register_local_id()` overrides the default and stores `id`. |
+| DEF-018-11 | `src/core/Logger.hpp` | **SEC-019: No log-rate-limiting mechanism.** A peer that generates many errors can flood the log, exhausting stderr bandwidth. Rate limiting requires a fixed-size ring buffer, per-tag counters, and monotonic timestamps — infrastructure not yet present. | MINOR | DEFER | Deferred comment added documenting design notes and scope. Tracked for future implementation (requires new infrastructure out-of-scope for this series). |
+| DEF-018-12 | `src/app/Client.cpp` : command-line argument parsing | **SEC-020: `strtol()` called without `errno` reset or post-call errno check (CERT ERR34-C).** A strtol() overflow or invalid input sets `errno` but the code did not check it, potentially proceeding with a silently clamped or undefined conversion result. | MAJOR | FIX | `errno = 0` added before `strtol()`; `if (errno != 0)` guard after with error log and early exit. |
+| DEF-018-13 | `src/platform/TlsTcpBackend.cpp` : `tls_connect_handshake()` | **SEC-021 (HIGH): CWE-297 — TLS TCP client accepted verify_peer=true with empty peer_hostname without error.** `verify_peer=true` with an empty `peer_hostname` bypassed CN/SAN binding: CA-chain validation passed but any certificate from the same trusted CA would be accepted, opening a MitM window. The same defect was fixed for DtlsUdpBackend in SEC-001; TlsTcpBackend was missed. | CRITICAL | FIX | Guard added at entry of `tls_connect_handshake()`: if `m_cfg.verify_peer && m_cfg.peer_hostname[0] == '\0'`, log WARNING_HI and return `ERR_INVALID`. Closes CWE-297 for TLS TCP client path. |
+| DEF-018-14 | `src/platform/SocketUtils.cpp` : `socket_connect_with_timeout()` | **SEC-022: `timeout_ms == 0` passed to `poll()` causes instant timeout, silently failing all non-blocking connects.** No guard rejected zero before `poll(poll_fds, 1, timeout_ms)`; a zero timeout polls without waiting, any pending handshake appears to time out immediately, and the caller receives `ERR_IO` with no log context. | MAJOR | FIX | `NEVER_COMPILED_OUT_ASSERT(timeout_ms > 0U)` + early-return guard `if (timeout_ms == 0U) { return ERR_INVALID; }` added before the `poll()` call. |
+
+#### Checklist reference
+
+All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
+- DEF-018-4 (CRITICAL): TlsTcpBackend cross-slot scan mirrors TcpBackend G-3+F-13; test updated to assign unique NodeIds per client thread. ✓
+- DEF-018-13 (CRITICAL / CWE-297): TLS TCP client now rejects verify_peer+empty hostname consistently with DTLS client (SEC-001). SECURITY_ASSUMPTIONS.md §8 updated to cover TLS TCP. ✓
+- DEF-018-6: RequestReplyEngine deadline arithmetic uses saturation addition; no overflow path remains. ✓
+- DEF-018-9: CERT INT31-C: clamp to INT_MAX before cast; `poll()` timeout arg is signed int. ✓
+- Power of 10 Rule 3: `m_local_node_id` is a member initialized at declaration; no heap allocation. ✓
+- MISRA C++:2023: all casts are static_cast with explicit narrowing rationale. ✓
+- FMEA: HAZARD_ANALYSIS.md §2 updated for SEC-012 and SEC-021 TlsTcpBackend rows. ✓
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-06. All 14 defects (DEF-018-1 through DEF-018-14) resolved in commit 4cda101. All entry and exit criteria satisfied. Inspection INSP-018 closed PASS.

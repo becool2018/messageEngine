@@ -60,7 +60,7 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 
 | Function | Worst-case operations | Bound | Notes |
 |----------|----------------------|-------|-------|
-| `timestamp_now_us()` | 1 clock_gettime syscall | O(1) | Syscall latency non-deterministic on POSIX |
+| `timestamp_now_us()` | 1 clock_gettime syscall + 1 overflow guard comparison (SEC-009) | O(1) | SEC-009 adds 1 comparison before the multiply: `if (tv_sec > UINT64_MAX/1000000ULL) return UINT64_MAX`. CERT INT30-C. No change to asymptotic bound. |
 | `timestamp_expired()` | 2 comparisons | O(1) | |
 | `timestamp_deadline_us()` | 1 addition + 1 comparison | O(1) | |
 
@@ -106,10 +106,10 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 
 | Function | Worst-case operations | Bound | Notes |
 |----------|----------------------|-------|-------|
-| `DeliveryEngine::send()` | serialize + process_outbound + track + schedule | O(P + I + A) | Dominated by serialize O(P) |
-| `DeliveryEngine::receive()` | receive_message + is_duplicate + check_and_record | O(P + D) | Dominated by deserialize O(P) and dedup O(D) |
-| `DeliveryEngine::pump_retries()` | collect_due (O(A)) + per-due: send_via_transport → serialize (O(P)) + process_outbound + collect_deliverable (O(I)) | O(A × (P + I)) = O(32 × 4128) = O(132096) | **Worst case: all 32 slots due simultaneously; each retry traverses Serializer + ImpairmentEngine.** DEF-002-1 resolved: output buffer is now member `m_retry_buf` (init-phase allocated). |
-| `DeliveryEngine::sweep_ack_timeouts()` | sweep_expired O(A) | O(A) = O(32) | DEF-002-1 resolved: output buffer is now member `m_timeout_buf` (init-phase allocated). |
+| `DeliveryEngine::send()` | 1 monotonic guard (SEC-007) + serialize + process_outbound + track + schedule | O(P + I + A) | SEC-007 adds O(1) guard at entry: `if (now_us < m_last_now_us) return ERR_INVALID`. Dominated by serialize O(P). |
+| `DeliveryEngine::receive()` | 1 monotonic guard (SEC-007) + receive_message + is_duplicate + check_and_record | O(P + D) | SEC-007 adds O(1) guard at entry. Dominated by deserialize O(P) and dedup O(D). |
+| `DeliveryEngine::pump_retries()` | 1 monotonic guard (SEC-007) + collect_due (O(A)) + per-due: send_via_transport → serialize (O(P)) + process_outbound + collect_deliverable (O(I)) | O(A × (P + I)) = O(32 × 4128) = O(132096) | **Worst case: all 32 slots due simultaneously; each retry traverses Serializer + ImpairmentEngine.** SEC-007 adds O(1) guard at entry. DEF-002-1 resolved: output buffer is now member `m_retry_buf` (init-phase allocated). |
+| `DeliveryEngine::sweep_ack_timeouts()` | 1 monotonic guard (SEC-007) + sweep_expired O(A) | O(A) = O(32) | SEC-007 adds O(1) guard at entry. DEF-002-1 resolved: output buffer is now member `m_timeout_buf` (init-phase allocated). |
 
 ### src/core/TransportInterface.hpp (concrete implementations)
 

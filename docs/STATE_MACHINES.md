@@ -46,8 +46,11 @@ equivalent) for all state machines documented here.
 - A slot in `ACKED` state is freed on the very next `sweep_expired()` call.
 - A slot in `PENDING` state is freed by: (a) `sweep_expired()` when the deadline passes — copied to `expired_buf` if space available; or (b) `cancel()` on send-failure rollback — freed directly to `FREE` with no stat bump and no copy to `expired_buf`.
 - `on_ack()` never decrements `m_count` — only `sweep_expired()` does.
+- `now_us` must be non-zero at entry. A backward `now_us` (now < m_last_sweep_us) triggers WARNING_HI and is **clamped** to `m_last_sweep_us`; processing continues with the clamped value (G-1 behavior, commit d7584dd). This replaces the prior `NEVER_COMPILED_OUT_ASSERT` which would have aborted the process.
 
 > **Note:** `cancel()` is a rollback-only path, callable exclusively from `DeliveryEngine::send()` on transport failure before any wire I/O. It must not be called after a message has been delivered to the wire.
+
+> **G-1 monotonic behavior change (commit d7584dd):** Prior to G-1, a backward timestamp triggered `NEVER_COMPILED_OUT_ASSERT(now_us >= m_last_sweep_us)` and aborted the process. G-1 replaced this with a defensive clamp + WARNING_HI. The invariant is preserved (slots expire correctly at worst one sweep late). See SECURITY_ASSUMPTIONS.md §1.
 
 > **Defect fixed (DEF-003-1):** `on_ack(src, msg_id)` matches on `slot.env.source_id == src`. Previously, `DeliveryEngine::receive()` passed `env.source_id` (the remote ACK sender's ID) as `src`, which never matched the locally-assigned `source_id` stored at `track()` time. Fixed by passing `env.destination_id` (the local node ID — the original message sender) instead. The PENDING→ACKED transition now fires correctly in normal two-node deployments.
 
@@ -108,8 +111,11 @@ logical states are:
 - `retry_count` is monotonically non-decreasing per slot.
 - A slot transitions to `INACTIVE` only through: ACK received, exhausted, or expired.
 - The `schedule()` call sets `next_retry_us = now_us` so the first retry fires immediately.
+- `now_us` must be non-zero at entry. A backward `now_us` (now < m_last_collect_us) triggers WARNING_HI and is **clamped** to `m_last_collect_us`; processing continues with the clamped value (G-1 behavior, commit d7584dd). This replaces the prior `NEVER_COMPILED_OUT_ASSERT`.
 
 > **Defect fixed (DEF-003-1):** The source_id mismatch described for AckTracker §1 applied equally to RetryManager. `DeliveryEngine::receive()` now passes `env.destination_id` (local node ID) to `RetryManager::on_ack()`, which correctly matches the stored `slot.env.source_id` (also the local node ID set at `schedule()` time). ACK receipt now cancels retry slots via `on_ack()` in both AckTracker and RetryManager as intended.
+
+> **G-1 monotonic behavior change (commit d7584dd):** Prior to G-1, a backward timestamp triggered `NEVER_COMPILED_OUT_ASSERT(now_us >= m_last_collect_us)` and aborted the process. G-1 replaced this with a defensive clamp + WARNING_HI. See SECURITY_ASSUMPTIONS.md §1.
 
 ---
 
@@ -335,17 +341,23 @@ as the lightweight formal specification required for Class C review.
 
 | From State | Event | Guard | To State | Action |
 |---|---|---|---|---|
-| UNREGISTERED | HELLO frame received | source_id != NODE_ID_INVALID | REGISTERED | Store source_id → slot in m_client_node_ids[]; log INFO "Registered client NodeId N at slot S" |
-| REGISTERED | HELLO frame received (re-registration) | source_id == existing entry | REGISTERED | Idempotent; no change. Log INFO. |
-| REGISTERED | HELLO frame received (new NodeId) | source_id != existing entry | REGISTERED | Overwrite slot entry; log WARNING_HI "duplicate NodeId registration — overwriting slot S" |
+| UNREGISTERED | HELLO frame received | source_id != NODE_ID_INVALID AND source_id not already registered in any other slot | REGISTERED | Store source_id → slot in m_client_node_ids[]; log INFO "Registered client NodeId N at slot S" |
+| UNREGISTERED | HELLO frame received | source_id already registered in a different slot | (slot evicted) | Evict NEW slot: call close_and_evict_slot() / remove_client(); log WARNING_HI. Existing registration is preserved. |
+| REGISTERED | HELLO frame received (re-registration) | source_id == existing entry for this slot | REGISTERED | Idempotent; no change. Log INFO. |
+| REGISTERED | HELLO frame received (duplicate HELLO on same slot) | second HELLO, source_id any | (slot evicted) | Evict this slot: call close_and_evict_slot() / remove_client(); log WARNING_HI. (REQ-6.1.8 one-HELLO-per-connection rule.) |
 | REGISTERED | Client disconnects | — | (slot freed) | Clear m_client_node_ids[slot] = NODE_ID_INVALID; compact table |
 | UNREGISTERED | Client disconnects | — | (slot freed) | Clear slot; compact table |
 
 ### Invariants
 
 1. `m_client_node_ids[i] == NODE_ID_INVALID` for all slots `i >= m_client_count`.
-2. No two active slots hold the same non-zero NodeId after any single HELLO is processed (the second registration overwrites, so at most one slot holds a given NodeId at any time).
+2. **No two active slots hold the same non-zero NodeId at any time.** (TcpBackend: G-3 + F-13; TlsTcpBackend: SEC-012 / DEF-018-4.) When a new HELLO arrives claiming a NodeId already present in another slot, the **new** connection is evicted; the existing registration is preserved.
 3. HELLO frames never reach DeliveryEngine::receive(); they are consumed at the transport layer and return ERR_AGAIN to the poll loop.
+4. A slot that sends a second HELLO is evicted immediately (TcpBackend: G-3; TlsTcpBackend: SEC-013 / DEF-018-5).
+
+> **SEC-012 (TlsTcpBackend, commit 4cda101):** Prior to SEC-012, TlsTcpBackend's `handle_hello_frame()` did not scan other slots for duplicate NodeId. A second TLS connection could claim a NodeId already registered by an active peer, hijacking the routing table entry and allowing source_id spoofing. SEC-012 adds the same cross-slot scan that TcpBackend received in G-3 + F-13.
+
+> **TcpBackend vs TlsTcpBackend invariant alignment:** Both backends now enforce identical invariants for client registration. The TlsTcpBackend uses `remove_client(idx)` (in-place TLS context re-init + slot deactivation) rather than `close_and_evict_slot()` / array compaction, but the observable invariant is the same.
 
 ### Guard on outbound unicast (REQ-6.1.9)
 
