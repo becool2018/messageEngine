@@ -66,6 +66,7 @@
 #include <mbedtls/ssl.h>
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/x509_crt.h>
+#include <mbedtls/x509_crl.h>    // Fix CRL: certificate revocation list support (REQ-6.3.4)
 #include <mbedtls/pk.h>
 #include <mbedtls/ssl_ticket.h>   // Fix 2: session ticket key context (REQ-6.3.4)
 
@@ -116,6 +117,8 @@ private:
     mbedtls_x509_crt    m_cert;                            ///< Own certificate chain
     mbedtls_x509_crt    m_ca_cert;                         ///< CA certificate for verification
     mbedtls_pk_context  m_pkey;                            ///< Own private key
+    mbedtls_x509_crl    m_crl;                             ///< CRL for certificate revocation checking. REQ-6.3.4
+    bool                m_crl_loaded;                      ///< True if a CRL was loaded. REQ-6.3.4
     mbedtls_net_context m_listen_net;                      ///< Server listen socket
     mbedtls_net_context m_client_net[MAX_TCP_CONNECTIONS]; ///< Per-client net contexts
     mbedtls_ssl_context m_ssl[MAX_TCP_CONNECTIONS];        ///< Per-client TLS sessions
@@ -160,6 +163,23 @@ private:
     /// Load CA cert (if verify_peer), own cert, private key; bind to ssl_conf.
     /// Extracted from setup_tls_config() to reduce its CC.
     Result load_tls_certs(const TlsConfig& tls_cfg);
+
+    /// Load the CA cert and (if configured) the CRL; register via ca_chain.
+    /// Called only when verify_peer is true and ca_file is non-empty.
+    /// Extracted from load_tls_certs() to keep its CC ≤ 10. REQ-6.3.4.
+    Result load_ca_and_crl(const TlsConfig& tls_cfg);
+
+    /// Load CRL from tls_cfg.crl_file when verify_peer is true and the path is
+    /// non-empty. Sets m_crl_loaded on success. Extracted from load_ca_and_crl()
+    /// to keep its CC ≤ 10. REQ-6.3.4.
+    Result load_crl_if_configured(const TlsConfig& tls_cfg);
+
+    /// Execute a bounded mbedTLS handshake retry loop on @p ssl, retrying up
+    /// to 32 times while the result is WANT_READ or WANT_WRITE (EINTR/EAGAIN).
+    /// Extracted from tls_connect_handshake() and do_tls_server_handshake() to
+    /// keep their CC ≤ 10. REQ-6.3.3.
+    /// @return 0 on success, non-zero mbedTLS error code on failure.
+    static int run_tls_handshake_loop(mbedtls_ssl_context* ssl);
 
     /// Set up the session ticket context and register callbacks on m_ssl_conf.
     /// Fix 2: extracted from setup_tls_config() to keep its CC ≤ 10 (REQ-6.3.4).

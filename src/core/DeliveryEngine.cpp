@@ -19,13 +19,23 @@
  * Applies Power of 10 rules: fixed loop bounds, ≥2 assertions per function,
  * checked return values, bounded resource usage.
  *
- * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+ * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5,
+ *             REQ-5.2.4, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
  */
-// Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+// Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5,
+//             REQ-5.2.4, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
 
 #include "DeliveryEngine.hpp"
 #include "Assert.hpp"
 #include "AssertState.hpp"
+
+// REQ-5.2.4: OS entropy for message ID seed (prevents ID-prediction attacks).
+// arc4random_buf is available on macOS/BSD without a separate header;
+// getrandom() requires <sys/random.h> on Linux.
+#include <ctime>
+#if !defined(__APPLE__)
+#include <sys/random.h>
+#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 // File-static helper: validate routing and expiry of a received envelope.
@@ -147,14 +157,45 @@ void DeliveryEngine::init(TransportInterface* transport,
     m_retry_manager.init();
     m_dedup.init();
 
-    // Initialize message ID generator: mix local_id with current timestamp to
-    // prevent the sequence from being trivially predictable (CERT INT30-C / S2).
-    // timestamp_now_us() is available via Timestamp.hpp (included in DeliveryEngine.hpp).
-    const uint64_t ts_seed = timestamp_now_us();
-    uint64_t id_seed = (static_cast<uint64_t>(local_id) << 32U) ^ ts_seed;
-    if (id_seed == 0ULL) {
-        id_seed = 1ULL;  // Ensure non-zero (0 is reserved for invalid messages)
+    // REQ-5.2.4: seed mixed with OS entropy to prevent ID prediction attacks.
+    // A knowledgeable attacker who can observe local_id and a timestamp can predict
+    // all future message IDs and pre-poison the deduplication window; OS entropy
+    // closes that oracle. local_id is XORed in to ensure IDs remain node-distinct
+    // even when two nodes happen to draw identical entropy words.
+    // Power of 10 Rule 5: assertions below verify the entropy read and final seed.
+    uint64_t entropy = 0ULL;
+#if defined(__APPLE__)
+    // arc4random_buf() always succeeds on macOS; no return value to check.
+    arc4random_buf(&entropy, sizeof(entropy));
+    NEVER_COMPILED_OUT_ASSERT(entropy != 0ULL ||
+        (static_cast<uint64_t>(local_id) << 32U) != 0ULL);  // Assert: seed will be non-zero
+#else
+    {
+        // CERT INT31-C: cast sizeof result to ssize_t for comparison with signed return.
+        const ssize_t expected = static_cast<ssize_t>(sizeof(entropy));
+        // MISRA C++:2023: getrandom() accepts void*; implicit conversion from
+        // uint64_t* to void* is safe and requires no cast.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        ssize_t got = getrandom(static_cast<void*>(&entropy), sizeof(entropy), 0U);
+        if (got != expected) {
+            // Degraded fallback: getrandom() failed (e.g., early-boot entropy pool not
+            // ready). Log WARNING_HI per REQ-5.2.4 and fall back to clock-based entropy.
+            // This is still weaker than OS entropy; the warning alerts operators.
+            Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                        "getrandom() returned %ld; falling back to clock-based seed",
+                        static_cast<long>(got));
+            entropy = static_cast<uint64_t>(clock());
+        }
+        NEVER_COMPILED_OUT_ASSERT(got == expected || entropy != 0ULL);  // Assert: entropy obtained
     }
+#endif
+    // Mix in local_id for node-scoping (keeps IDs node-distinct even with same entropy).
+    uint64_t id_seed = entropy ^ (static_cast<uint64_t>(local_id) << 32U);
+    // Guard against zero seed (PRNG requirement: seed must be non-zero).
+    if (id_seed == 0ULL) {
+        id_seed = static_cast<uint64_t>(local_id) | 1ULL;
+    }
+    NEVER_COMPILED_OUT_ASSERT(id_seed != 0ULL);  // Assert: seed is non-zero before init
     m_id_gen.init(id_seed);
 
     // Power of 10 Rule 3: zero-initialize pre-allocated output buffers during

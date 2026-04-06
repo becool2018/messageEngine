@@ -62,10 +62,10 @@
  *   - F-Prime style: Result return codes; Logger::log() for events.
  *
  * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.10,
- *             REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4,
- *             REQ-6.4.5, REQ-7.1.1
+ *             REQ-6.2.4, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3,
+ *             REQ-6.4.4, REQ-6.4.5, REQ-7.1.1
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.10, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1, REQ-7.2.4
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.10, REQ-6.2.4, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1, REQ-7.2.4
 
 #ifndef PLATFORM_DTLS_UDP_BACKEND_HPP
 #define PLATFORM_DTLS_UDP_BACKEND_HPP
@@ -74,6 +74,7 @@
 #include <mbedtls/ssl.h>
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/x509_crt.h>
+#include <mbedtls/x509_crl.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/ssl_cookie.h>
 #include <mbedtls/timing.h>
@@ -131,6 +132,7 @@ private:
     mbedtls_ssl_config           m_ssl_conf;    ///< Shared DTLS configuration
     mbedtls_x509_crt             m_cert;        ///< Own certificate chain
     mbedtls_x509_crt             m_ca_cert;     ///< CA certificate for peer verification
+    mbedtls_x509_crl             m_crl;         ///< CRL for certificate revocation checking. REQ-6.3.4
     mbedtls_pk_context           m_pkey;        ///< Own private key
     mbedtls_ssl_context          m_ssl;         ///< Single DTLS session (single-peer model)
     mbedtls_ssl_cookie_ctx       m_cookie_ctx;  ///< DTLS cookie context (server, REQ-6.4.2)
@@ -150,6 +152,9 @@ private:
     bool            m_open;                           ///< True after successful init()
     bool            m_is_server;                      ///< Role derived from config
     bool            m_tls_enabled;                    ///< From config.tls.tls_enabled
+    bool            m_crl_loaded;                     ///< True if a CRL was loaded in load_certs_and_key(). REQ-6.3.4
+    NodeId          m_peer_node_id;                   ///< Peer NodeId learned from HELLO (NODE_ID_INVALID until received). REQ-6.2.4
+    bool            m_peer_hello_received;            ///< True once HELLO received from peer. REQ-6.1.8
     uint32_t        m_connections_opened;             ///< REQ-7.2.4: successful handshake/bind events
     uint32_t        m_connections_closed;             ///< REQ-7.2.4: close events
 
@@ -199,11 +204,33 @@ private:
     /// @return true if a message was pushed to m_recv_queue; false otherwise.
     bool apply_inbound_impairment(const MessageEnvelope& env);
 
+    /// Deserialize @p out_len bytes from m_wire_buf, run HELLO/source_id
+    /// validation, and push deliverable envelopes via apply_inbound_impairment().
+    /// Extracted from recv_one_dtls_datagram() to keep its CC ≤ 10.
+    /// @param out_len Number of bytes in m_wire_buf to deserialize.
+    /// @return true if a message was pushed to m_recv_queue.
+    bool deserialize_and_dispatch(uint32_t out_len);
+
+    /// REQ-6.2.4 / REQ-6.1.8: process an inbound HELLO or validate source_id on
+    /// data frames using the registered peer NodeId.
+    /// Extracted from recv_one_dtls_datagram() to keep its CC ≤ 10.
+    /// @param[in]  env        Deserialized inbound envelope.
+    /// @param[out] consumed   Set to true if the envelope was consumed (HELLO) and
+    ///                        must not be passed to the impairment engine.
+    /// @return false if the envelope must be dropped (spoofing or duplicate HELLO);
+    ///         true if the envelope is allowed through (or was consumed as HELLO).
+    bool process_hello_or_validate(const MessageEnvelope& env, bool& consumed);
+
     // ── CC-reduction helpers (extracted to keep each caller CC ≤ 10) ─────────
 
     /// Load CA cert (if verify_peer), own cert, private key; bind to ssl_conf.
     /// Extracted from setup_dtls_config to reduce its CC.
     Result load_certs_and_key(const TlsConfig& tls_cfg);
+
+    /// Load CRL from tls_cfg.crl_file (if non-empty) and bind to ssl_conf.
+    /// Called from load_certs_and_key() after the CA cert is loaded.
+    /// Extracted to keep load_certs_and_key() CC ≤ 10. REQ-6.3.4
+    Result load_crl_if_configured(const TlsConfig& tls_cfg);
 
     /// Configure DTLS cookie anti-replay context (server role only, REQ-6.4.2).
     /// Extracted from setup_dtls_config to reduce its CC.

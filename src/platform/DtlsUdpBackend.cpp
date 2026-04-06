@@ -47,7 +47,7 @@
  *             REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4,
  *             REQ-6.4.5, REQ-7.1.1
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.1.10, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6, REQ-7.1.1, REQ-7.2.4
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.1.10, REQ-6.2.4, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6, REQ-7.1.1, REQ-7.2.4
 
 #include "platform/DtlsUdpBackend.hpp"
 #include "platform/ISocketOps.hpp"
@@ -94,12 +94,14 @@ static void log_mbedtls_err(const char* tag, const char* func, int ret)
 // ─────────────────────────────────────────────────────────────────────────────
 
 DtlsUdpBackend::DtlsUdpBackend()
-    : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_pkey{},
+    : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_crl{}, m_pkey{},
       m_ssl{}, m_cookie_ctx{}, m_timer{}, m_net_ctx{},
       m_sock_ops(&SocketOpsImpl::instance()),
       m_ops(&MbedtlsOpsImpl::instance()),
       m_sock_fd(-1), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false), m_tls_enabled(false),
+      m_crl_loaded(false),
+      m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
       m_connections_opened(0U), m_connections_closed(0U)
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
@@ -107,6 +109,7 @@ DtlsUdpBackend::DtlsUdpBackend()
     mbedtls_ssl_config_init(&m_ssl_conf);
     mbedtls_x509_crt_init(&m_cert);
     mbedtls_x509_crt_init(&m_ca_cert);
+    mbedtls_x509_crl_init(&m_crl);
     mbedtls_pk_init(&m_pkey);
     mbedtls_ssl_init(&m_ssl);
     mbedtls_ssl_cookie_init(&m_cookie_ctx);
@@ -114,12 +117,14 @@ DtlsUdpBackend::DtlsUdpBackend()
 }
 
 DtlsUdpBackend::DtlsUdpBackend(IMbedtlsOps& ops)
-    : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_pkey{},
+    : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_crl{}, m_pkey{},
       m_ssl{}, m_cookie_ctx{}, m_timer{}, m_net_ctx{},
       m_sock_ops(&SocketOpsImpl::instance()),
       m_ops(&ops),
       m_sock_fd(-1), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false), m_tls_enabled(false),
+      m_crl_loaded(false),
+      m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
       m_connections_opened(0U), m_connections_closed(0U)
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
@@ -127,6 +132,7 @@ DtlsUdpBackend::DtlsUdpBackend(IMbedtlsOps& ops)
     mbedtls_ssl_config_init(&m_ssl_conf);
     mbedtls_x509_crt_init(&m_cert);
     mbedtls_x509_crt_init(&m_ca_cert);
+    mbedtls_x509_crl_init(&m_crl);
     mbedtls_pk_init(&m_pkey);
     mbedtls_ssl_init(&m_ssl);
     mbedtls_ssl_cookie_init(&m_cookie_ctx);
@@ -134,12 +140,14 @@ DtlsUdpBackend::DtlsUdpBackend(IMbedtlsOps& ops)
 }
 
 DtlsUdpBackend::DtlsUdpBackend(ISocketOps& sock_ops, IMbedtlsOps& tls_ops)
-    : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_pkey{},
+    : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_crl{}, m_pkey{},
       m_ssl{}, m_cookie_ctx{}, m_timer{}, m_net_ctx{},
       m_sock_ops(&sock_ops),
       m_ops(&tls_ops),
       m_sock_fd(-1), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false), m_tls_enabled(false),
+      m_crl_loaded(false),
+      m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
       m_connections_opened(0U), m_connections_closed(0U)
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
@@ -147,6 +155,7 @@ DtlsUdpBackend::DtlsUdpBackend(ISocketOps& sock_ops, IMbedtlsOps& tls_ops)
     mbedtls_ssl_config_init(&m_ssl_conf);
     mbedtls_x509_crt_init(&m_cert);
     mbedtls_x509_crt_init(&m_ca_cert);
+    mbedtls_x509_crl_init(&m_crl);
     mbedtls_pk_init(&m_pkey);
     mbedtls_ssl_init(&m_ssl);
     mbedtls_ssl_cookie_init(&m_cookie_ctx);
@@ -159,6 +168,7 @@ DtlsUdpBackend::~DtlsUdpBackend()
     mbedtls_ssl_config_free(&m_ssl_conf);
     mbedtls_x509_crt_free(&m_cert);
     mbedtls_x509_crt_free(&m_ca_cert);
+    mbedtls_x509_crl_free(&m_crl);  // REQ-6.3.4: release CRL memory
     mbedtls_pk_free(&m_pkey);
     mbedtls_ssl_cookie_free(&m_cookie_ctx);
     // mbedtls_ssl_free() already called inside close()
@@ -180,7 +190,9 @@ Result DtlsUdpBackend::load_certs_and_key(const TlsConfig& tls_cfg)
             log_mbedtls_err("DtlsUdpBackend", "x509_crt_parse_file (CA)", ret);
             return Result::ERR_IO;
         }
-        mbedtls_ssl_conf_ca_chain(&m_ssl_conf, &m_ca_cert, nullptr);
+        // REQ-6.3.4: load CRL (if configured) and bind CA chain + CRL to ssl_conf.
+        Result crl_res = load_crl_if_configured(tls_cfg);
+        if (!result_ok(crl_res)) { return crl_res; }
     }
 
     int ret = m_ops->x509_crt_parse_file(&m_cert, tls_cfg.cert_file);
@@ -201,6 +213,35 @@ Result DtlsUdpBackend::load_certs_and_key(const TlsConfig& tls_cfg)
         return Result::ERR_IO;
     }
 
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// load_crl_if_configured() — CC-reduction helper for load_certs_and_key
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Parses the CRL file when tls_cfg.crl_file is non-empty; updates m_crl_loaded.
+// Then calls mbedtls_ssl_conf_ca_chain() with m_crl when loaded, nullptr otherwise.
+// Power of 10 Rule 3 deviation: mbedtls_x509_crl_parse_file() may heap-allocate
+// internally; this occurs exclusively in init() (not on the send/receive path).
+
+Result DtlsUdpBackend::load_crl_if_configured(const TlsConfig& tls_cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(tls_cfg.verify_peer);  // pre: only called when verify_peer
+    NEVER_COMPILED_OUT_ASSERT(tls_cfg.ca_file[0] != '\0');  // pre: CA cert was loaded
+
+    if (tls_cfg.crl_file[0] != '\0') {
+        int crl_ret = mbedtls_x509_crl_parse_file(&m_crl, tls_cfg.crl_file);
+        if (crl_ret != 0) {
+            log_mbedtls_err("DtlsUdpBackend", "x509_crl_parse_file", crl_ret);
+            return Result::ERR_IO;
+        }
+        m_crl_loaded = true;
+    }
+
+    // Bind CA cert + CRL (or nullptr if not loaded) to ssl_conf.
+    mbedtls_ssl_conf_ca_chain(&m_ssl_conf, &m_ca_cert,
+                              m_crl_loaded ? &m_crl : nullptr);
     return Result::OK;
 }
 
@@ -573,7 +614,9 @@ bool DtlsUdpBackend::validate_source(const char* src_ip, uint16_t src_port) cons
     NEVER_COMPILED_OUT_ASSERT(m_cfg.peer_ip[0] != '\0');  // Pre-condition
 
     // REQ-6.2.4: DTLS path — connect() + DTLS record MAC already filter non-peer
-    // datagrams at the kernel and TLS record layers.  No additional check needed.
+    // datagrams at the kernel and TLS record layers.  The envelope source_id is
+    // validated in recv_one_dtls_datagram() via HELLO-based NodeId registration
+    // (m_peer_node_id / m_peer_hello_received) — see REQ-6.2.4 handling there.
     if (m_tls_enabled) {
         return true;
     }
@@ -621,6 +664,37 @@ bool DtlsUdpBackend::try_tls_recv(uint32_t* out_len)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// deserialize_and_dispatch() — CC-reduction helper for recv_one_dtls_datagram
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool DtlsUdpBackend::deserialize_and_dispatch(uint32_t out_len)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_open);
+    NEVER_COMPILED_OUT_ASSERT(out_len > 0U);
+
+    MessageEnvelope env;
+    Result res = Serializer::deserialize(m_wire_buf, out_len, env);
+    if (!result_ok(res)) {
+        Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
+                    "deserialize_and_dispatch: deserialize failed: %u",
+                    static_cast<uint8_t>(res));
+        return false;
+    }
+
+    // REQ-6.2.4 / REQ-6.1.8: process HELLO or validate source_id before delivery.
+    bool consumed = false;
+    if (!process_hello_or_validate(env, consumed)) {
+        return false;  // spoofing attempt or duplicate HELLO — drop
+    }
+    if (consumed) {
+        return false;  // HELLO consumed; must not reach DeliveryEngine
+    }
+
+    // REQ-5.1.5, REQ-5.1.6: apply inbound impairment; push to queue if deliverable
+    return apply_inbound_impairment(env);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // recv_one_dtls_datagram() — private helper
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -635,30 +709,80 @@ bool DtlsUdpBackend::recv_one_dtls_datagram(uint32_t timeout_ms)
         if (!try_tls_recv(&out_len)) { return false; }
     } else {
         // Plaintext path: delegate to ISocketOps (REQ-6.4.5)
-        char     src_ip[48];
-        uint16_t src_port = 0U;
+        char     src_ip[48]  = {};
+        uint16_t src_port    = 0U;
         if (!m_sock_ops->recv_from(m_sock_fd, m_wire_buf, SOCKET_RECV_BUF_BYTES,
                                    timeout_ms, &out_len, src_ip, &src_port)) {
             return false;
         }
-
         // REQ-6.2.4: validate source before deserialization (drop spoofed datagrams)
         if (!validate_source(src_ip, src_port)) {
             return false;
         }
     }
 
-    MessageEnvelope env;
-    Result res = Serializer::deserialize(m_wire_buf, out_len, env);
-    if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
-                    "recv_one_dtls_datagram: deserialize failed: %u",
-                    static_cast<uint8_t>(res));
+    // Deserialize, validate source_id, apply impairment, push to queue
+    return deserialize_and_dispatch(out_len);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// process_hello_or_validate() — REQ-6.2.4 / REQ-6.1.8 source-id validation
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// DTLS is point-to-point (single-peer model) so there is at most one peer.
+// An authorized DTLS peer can still set source_id to any value in the envelope
+// payload.  This helper enforces that source_id matches the NodeId the peer
+// announced in its HELLO frame.
+//
+// HELLO frame rules (REQ-6.1.8):
+//   - First HELLO from peer: store source_id in m_peer_node_id, set flag.
+//   - Duplicate HELLO: log WARNING_HI, return false (drop).
+//
+// Data frame rules (REQ-6.2.4):
+//   - No HELLO received yet (m_peer_node_id == NODE_ID_INVALID): allow through
+//     for backward compatibility with peers that do not send HELLO.
+//   - HELLO received: if source_id != m_peer_node_id, log WARNING_HI, drop.
+
+bool DtlsUdpBackend::process_hello_or_validate(const MessageEnvelope& env,
+                                                bool& consumed)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_open);  // pre: transport must be open
+    NEVER_COMPILED_OUT_ASSERT(m_sock_fd >= 0);  // pre: socket valid
+
+    consumed = false;
+
+    if (env.message_type == MessageType::HELLO) {
+        if (m_peer_hello_received) {
+            // REQ-6.1.8: only one HELLO per connection allowed
+            Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
+                        "process_hello_or_validate: duplicate HELLO from NodeId=%u; dropping",
+                        static_cast<unsigned int>(env.source_id));
+            return false;
+        }
+        // First HELLO: register the peer NodeId
+        m_peer_node_id       = env.source_id;
+        m_peer_hello_received = true;
+        Logger::log(Severity::INFO, "DtlsUdpBackend",
+                    "DTLS: HELLO received, peer NodeId %u registered",
+                    static_cast<unsigned int>(m_peer_node_id));
+        consumed = true;  // HELLO consumed; must not reach DeliveryEngine
+        return true;
+    }
+
+    // Data / ACK / etc.: check source_id if peer is registered
+    if (m_peer_node_id != static_cast<NodeId>(NODE_ID_INVALID) &&
+        env.source_id  != m_peer_node_id) {
+        // REQ-6.2.4: source_id in envelope does not match registered HELLO NodeId
+        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
+                    "process_hello_or_validate: source_id %u != registered %u; "
+                    "spoofing attempt — dropping",
+                    static_cast<unsigned int>(env.source_id),
+                    static_cast<unsigned int>(m_peer_node_id));
         return false;
     }
 
-    // REQ-5.1.5, REQ-5.1.6: apply inbound impairment; push to queue if deliverable
-    return apply_inbound_impairment(env);
+    // Allow: either peer unregistered (backward compat) or source_id matches
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -811,6 +935,11 @@ Result DtlsUdpBackend::init(const TransportConfig& config)
     m_cfg         = config;
     m_is_server   = config.is_server;
     m_tls_enabled = config.tls.tls_enabled;
+
+    // REQ-6.2.4: reset peer registration state for a fresh init()
+    m_peer_node_id       = static_cast<NodeId>(NODE_ID_INVALID);
+    m_peer_hello_received = false;
+    m_crl_loaded          = false;
 
     m_recv_queue.init();
 
@@ -1036,6 +1165,10 @@ void DtlsUdpBackend::close()
         m_sock_fd = -1;
         ++m_connections_closed;  // REQ-7.2.4: socket close event
     }
+
+    // REQ-6.2.4: reset peer registration so a subsequent init() starts fresh
+    m_peer_node_id       = static_cast<NodeId>(NODE_ID_INVALID);
+    m_peer_hello_received = false;
 
     m_open = false;
     Logger::log(Severity::INFO, "DtlsUdpBackend",

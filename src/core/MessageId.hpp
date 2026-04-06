@@ -27,7 +27,12 @@
  * We use a simple counter starting from a seed, never returning 0 (which is
  * reserved for invalid/uninitialized messages).
  *
- * Implements: REQ-3.2.1
+ * The seed passed to init() must be derived from a cryptographically unpredictable
+ * source (OS entropy via arc4random_buf / getrandom) as required by REQ-5.2.4.
+ * A fixed literal seed or a time-only seed is prohibited in production — see
+ * DeliveryEngine::init() for the compliant seed-construction path.
+ *
+ * Implements: REQ-3.2.1, REQ-5.2.4
  */
 
 #ifndef CORE_MESSAGE_ID_HPP

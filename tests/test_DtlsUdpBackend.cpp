@@ -38,7 +38,7 @@
  *           REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4,
  *           REQ-6.4.5, REQ-7.1.1
  */
-// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6, REQ-7.1.1
+// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.2.4, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6, REQ-7.1.1
 // Verification: M1 + M2 + M4 + M5 (fault injection via IMbedtlsOps / ISocketOps)
 
 #include <cstdio>
@@ -2025,6 +2025,228 @@ static void test_dtls_inbound_partition_drops_received()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test HELLO registration: first HELLO registers peer NodeId; subsequent DATA
+// with matching source_id is allowed through.
+// Verifies: REQ-6.2.4, REQ-6.1.8
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.2.4, REQ-6.1.8
+static void test_hello_registers_peer_and_data_passes()
+{
+    // Verifies: REQ-6.2.4, REQ-6.1.8
+    // Strategy: server receives a HELLO from source_id=2, then a DATA from
+    // source_id=2.  Because source_id matches the registered peer, DATA must
+    // reach receive_message() as Result::OK.
+    static const uint16_t PORT = 14701U;
+
+    DtlsUdpBackend server;
+    TransportConfig srv_cfg;
+    make_dtls_config(srv_cfg, true, PORT, false);
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    DtlsUdpBackend client;
+    TransportConfig cli_cfg;
+    make_dtls_config(cli_cfg, false, PORT, false);
+    Result cli_init = client.init(cli_cfg);
+    assert(cli_init == Result::OK);
+    assert(client.is_open() == true);
+
+    // Send HELLO: registers source_id=2 as the peer on the server
+    MessageEnvelope hello_env;
+    envelope_init(hello_env);
+    hello_env.message_type      = MessageType::HELLO;
+    hello_env.message_id        = 0xA001ULL;
+    hello_env.source_id         = 2U;
+    hello_env.destination_id    = 1U;
+    hello_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    hello_env.payload_length    = 0U;
+
+    Result send_h = client.send_message(hello_env);
+    assert(send_h == Result::OK);
+
+    // First receive on server: HELLO arrives but is consumed → ERR_TIMEOUT
+    // (nothing pushed into recv_queue per REQ-6.1.8)
+    MessageEnvelope rcv1;
+    Result r1 = server.receive_message(rcv1, 500U);
+    assert(r1 == Result::ERR_TIMEOUT);  // HELLO consumed, not delivered
+
+    // Now send a DATA envelope with same source_id=2
+    MessageEnvelope data_env;
+    envelope_init(data_env);
+    data_env.message_type      = MessageType::DATA;
+    data_env.message_id        = 0xA002ULL;
+    data_env.source_id         = 2U;
+    data_env.destination_id    = 1U;
+    data_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    Result send_d = client.send_message(data_env);
+    assert(send_d == Result::OK);
+
+    // Server: DATA from source_id=2 matches registered peer → delivered
+    MessageEnvelope rcv2;
+    Result r2 = server.receive_message(rcv2, 500U);
+    assert(r2 == Result::OK);
+    assert(rcv2.source_id   == 2U);
+    assert(rcv2.message_type == MessageType::DATA);
+
+    client.close();
+    server.close();
+
+    printf("PASS: test_hello_registers_peer_and_data_passes\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test source_id spoofing: after HELLO from NodeId=2, a DATA with source_id=99
+// must be silently dropped (WARNING_HI logged; server receives ERR_TIMEOUT).
+// Verifies: REQ-6.2.4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.2.4
+static void test_source_id_spoof_after_hello_dropped()
+{
+    // Verifies: REQ-6.2.4
+    // Strategy: server receives HELLO from NodeId=2 (registers peer as 2).
+    // Then receives DATA with source_id=99 (spoof).  Spoofed frame must be
+    // dropped: server receive_message() returns ERR_TIMEOUT.
+    static const uint16_t PORT = 14702U;
+
+    DtlsUdpBackend server;
+    TransportConfig srv_cfg;
+    make_dtls_config(srv_cfg, true, PORT, false);
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    DtlsUdpBackend client;
+    TransportConfig cli_cfg;
+    make_dtls_config(cli_cfg, false, PORT, false);
+    Result cli_init = client.init(cli_cfg);
+    assert(cli_init == Result::OK);
+
+    // Step 1: send HELLO to register source_id=2
+    MessageEnvelope hello_env;
+    envelope_init(hello_env);
+    hello_env.message_type   = MessageType::HELLO;
+    hello_env.message_id     = 0xB001ULL;
+    hello_env.source_id      = 2U;
+    hello_env.destination_id = 1U;
+    hello_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    hello_env.payload_length = 0U;
+
+    Result sh = client.send_message(hello_env);
+    assert(sh == Result::OK);
+
+    // Drain the HELLO (consumed internally, timeout expected)
+    MessageEnvelope dummy;
+    Result rh = server.receive_message(dummy, 500U);
+    assert(rh == Result::ERR_TIMEOUT);  // HELLO consumed
+
+    // Step 2: send DATA with spoofed source_id=99
+    MessageEnvelope spoof_env;
+    envelope_init(spoof_env);
+    spoof_env.message_type   = MessageType::DATA;
+    spoof_env.message_id     = 0xB002ULL;
+    spoof_env.source_id      = 99U;  // spoofed — does not match registered peer 2
+    spoof_env.destination_id = 1U;
+    spoof_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    // Use a second client (source_id is in the envelope, not the socket address)
+    Result sd = client.send_message(spoof_env);
+    assert(sd == Result::OK);
+
+    // Server must drop the spoofed frame → ERR_TIMEOUT
+    MessageEnvelope rcv;
+    Result r = server.receive_message(rcv, 500U);
+    assert(r == Result::ERR_TIMEOUT);  // spoofed frame silently dropped
+
+    client.close();
+    server.close();
+
+    printf("PASS: test_source_id_spoof_after_hello_dropped\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test duplicate HELLO: second HELLO from same peer must be rejected.
+// Verifies: REQ-6.1.8
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.8
+static void test_duplicate_hello_rejected()
+{
+    // Verifies: REQ-6.1.8
+    // Strategy: send two HELLO frames from the same client. The first is
+    // accepted (peer registered). The second must be rejected (WARNING_HI).
+    // After both, a DATA with the registered source_id must be delivered.
+    static const uint16_t PORT = 14703U;
+
+    DtlsUdpBackend server;
+    TransportConfig srv_cfg;
+    make_dtls_config(srv_cfg, true, PORT, false);
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    DtlsUdpBackend client;
+    TransportConfig cli_cfg;
+    make_dtls_config(cli_cfg, false, PORT, false);
+    Result cli_init = client.init(cli_cfg);
+    assert(cli_init == Result::OK);
+
+    // First HELLO — accepted
+    MessageEnvelope h1;
+    envelope_init(h1);
+    h1.message_type   = MessageType::HELLO;
+    h1.message_id     = 0xC001ULL;
+    h1.source_id      = 3U;
+    h1.destination_id = 1U;
+    h1.reliability_class = ReliabilityClass::BEST_EFFORT;
+    h1.payload_length = 0U;
+
+    assert(client.send_message(h1) == Result::OK);
+    // Drain first HELLO (consumed; ERR_TIMEOUT expected)
+    MessageEnvelope d1;
+    assert(server.receive_message(d1, 500U) == Result::ERR_TIMEOUT);
+
+    // Second HELLO — must be rejected (duplicate HELLO)
+    MessageEnvelope h2;
+    envelope_init(h2);
+    h2.message_type   = MessageType::HELLO;
+    h2.message_id     = 0xC002ULL;
+    h2.source_id      = 3U;
+    h2.destination_id = 1U;
+    h2.reliability_class = ReliabilityClass::BEST_EFFORT;
+    h2.payload_length = 0U;
+
+    assert(client.send_message(h2) == Result::OK);
+    // Duplicate HELLO dropped; ERR_TIMEOUT still expected
+    MessageEnvelope d2;
+    assert(server.receive_message(d2, 500U) == Result::ERR_TIMEOUT);
+
+    // DATA from registered peer (source_id=3) must be delivered
+    MessageEnvelope data;
+    envelope_init(data);
+    data.message_type   = MessageType::DATA;
+    data.message_id     = 0xC003ULL;
+    data.source_id      = 3U;
+    data.destination_id = 1U;
+    data.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    assert(client.send_message(data) == Result::OK);
+
+    MessageEnvelope rcv;
+    Result r = server.receive_message(rcv, 500U);
+    assert(r == Result::OK);
+    assert(rcv.source_id == 3U);
+
+    client.close();
+    server.close();
+
+    printf("PASS: test_duplicate_hello_rejected\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2081,6 +2303,11 @@ int main()
 
     // Inbound impairment wiring tests (REQ-5.1.5, REQ-5.1.6)
     test_dtls_inbound_partition_drops_received();
+
+    // HELLO-based source_id validation tests (REQ-6.2.4, REQ-6.1.8)
+    test_hello_registers_peer_and_data_passes();
+    test_source_id_spoof_after_hello_dropped();
+    test_duplicate_hello_rejected();
 
     printf("=== test_DtlsUdpBackend: ALL TESTS PASSED ===\n");
     return 0;

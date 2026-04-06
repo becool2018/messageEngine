@@ -109,6 +109,7 @@ static void log_mbedtls_err(const char* tag, const char* func, int ret)
 
 TlsTcpBackend::TlsTcpBackend()
     : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_pkey{},
+      m_crl{}, m_crl_loaded(false),
       m_listen_net{}, m_client_net{}, m_ssl{},
       m_saved_session{}, m_session_saved(false), m_ticket_ctx{},
       m_sock_ops(&SocketOpsImpl::instance()),
@@ -123,6 +124,7 @@ TlsTcpBackend::TlsTcpBackend()
     mbedtls_x509_crt_init(&m_cert);
     mbedtls_x509_crt_init(&m_ca_cert);
     mbedtls_pk_init(&m_pkey);
+    mbedtls_x509_crl_init(&m_crl);   // REQ-6.3.4: CRL context init
     mbedtls_net_init(&m_listen_net);
     mbedtls_ssl_session_init(&m_saved_session);
     mbedtls_ssl_ticket_init(&m_ticket_ctx);  // Fix 2: REQ-6.3.4
@@ -136,6 +138,7 @@ TlsTcpBackend::TlsTcpBackend()
 
 TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops)
     : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_pkey{},
+      m_crl{}, m_crl_loaded(false),
       m_listen_net{}, m_client_net{}, m_ssl{},
       m_saved_session{}, m_session_saved(false), m_ticket_ctx{},
       m_sock_ops(&sock_ops),
@@ -150,6 +153,7 @@ TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops)
     mbedtls_x509_crt_init(&m_cert);
     mbedtls_x509_crt_init(&m_ca_cert);
     mbedtls_pk_init(&m_pkey);
+    mbedtls_x509_crl_init(&m_crl);   // REQ-6.3.4: CRL context init
     mbedtls_net_init(&m_listen_net);
     mbedtls_ssl_session_init(&m_saved_session);
     mbedtls_ssl_ticket_init(&m_ticket_ctx);  // Fix 2: REQ-6.3.4
@@ -169,6 +173,7 @@ TlsTcpBackend::~TlsTcpBackend()
     mbedtls_ssl_config_free(&m_ssl_conf);
     mbedtls_x509_crt_free(&m_cert);
     mbedtls_x509_crt_free(&m_ca_cert);
+    mbedtls_x509_crl_free(&m_crl);            // REQ-6.3.4: CRL context free
     mbedtls_pk_free(&m_pkey);
     mbedtls_net_free(&m_listen_net);
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
@@ -182,6 +187,93 @@ TlsTcpBackend::~TlsTcpBackend()
 // setup_tls_config() — load certs/keys; configure mbedTLS shared object
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// load_ca_and_crl() — CC-reduction helper for load_tls_certs()
+// Parses the CA cert, optionally loads the CRL, then calls ssl_conf_ca_chain.
+// Called only when verify_peer is true and ca_file is non-empty.
+// Extracted from load_tls_certs() to keep its CC ≤ 10. REQ-6.3.4.
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result TlsTcpBackend::load_ca_and_crl(const TlsConfig& tls_cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(tls_cfg.verify_peer);
+    NEVER_COMPILED_OUT_ASSERT(tls_cfg.ca_file[0] != '\0');
+
+    int ret = mbedtls_x509_crt_parse_file(&m_ca_cert, tls_cfg.ca_file);
+    if (ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "x509_crt_parse_file (CA)", ret);
+        return Result::ERR_IO;
+    }
+
+    // REQ-6.3.4: optionally load CRL; extracted to load_crl_if_configured().
+    Result crl_res = load_crl_if_configured(tls_cfg);
+    if (!result_ok(crl_res)) { return crl_res; }
+
+    // REQ-6.3.4: CRL loaded and passed to ca_chain for revocation checking.
+    mbedtls_ssl_conf_ca_chain(&m_ssl_conf, &m_ca_cert,
+                              m_crl_loaded ? &m_crl : nullptr);
+
+    NEVER_COMPILED_OUT_ASSERT(m_ca_cert.version > 0);
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// load_crl_if_configured() — CC-reduction helper for load_ca_and_crl()
+// Loads the CRL when verify_peer is true and crl_file is non-empty.
+// Sets m_crl_loaded on success. Extracted from load_ca_and_crl() to keep its
+// CC ≤ 10. REQ-6.3.4.
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result TlsTcpBackend::load_crl_if_configured(const TlsConfig& tls_cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(tls_cfg.verify_peer);
+    NEVER_COMPILED_OUT_ASSERT(tls_cfg.ca_file[0] != '\0');
+
+    if (tls_cfg.crl_file[0] == '\0') {
+        // No CRL configured — skip; not an error.
+        return Result::OK;
+    }
+
+    int crl_ret = mbedtls_x509_crl_parse_file(&m_crl, tls_cfg.crl_file);
+    if (crl_ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "x509_crl_parse_file", crl_ret);
+        return Result::ERR_IO;
+    }
+    m_crl_loaded = true;
+    Logger::log(Severity::INFO, "TlsTcpBackend",
+                "CRL loaded: %s (REQ-6.3.4)", tls_cfg.crl_file);
+
+    NEVER_COMPILED_OUT_ASSERT(m_crl_loaded);
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// run_tls_handshake_loop() — CC-reduction helper for handshake functions
+// Bounded retry loop: retries mbedtls_ssl_handshake() up to 32 times on
+// WANT_READ / WANT_WRITE (transient EINTR/EAGAIN on blocking socket).
+// Power of 10 Rule 2: bounded loop — max 32 iterations.
+// REQ-6.3.3: prevents spurious connection failures from transient conditions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+int TlsTcpBackend::run_tls_handshake_loop(mbedtls_ssl_context* ssl)
+{
+    NEVER_COMPILED_OUT_ASSERT(ssl != nullptr);
+
+    // Power of 10 Rule 2: bounded retry loop — max 32 iterations for WANT_READ/WANT_WRITE.
+    // REQ-6.3.3: handles EINTR/EAGAIN on blocking socket.
+    int hs_ret = 0;
+    uint32_t hs_iter = 0U;
+    do {
+        hs_ret = mbedtls_ssl_handshake(ssl);
+        ++hs_iter;
+    } while ((hs_ret == MBEDTLS_ERR_SSL_WANT_READ ||
+              hs_ret == MBEDTLS_ERR_SSL_WANT_WRITE) &&
+             hs_iter < 32U);
+
+    NEVER_COMPILED_OUT_ASSERT(hs_iter >= 1U);
+    return hs_ret;
+}
+
 /// Load CA cert (if verify_peer), own cert, private key; bind to ssl_conf.
 /// Extracted from setup_tls_config() to reduce its CC.
 Result TlsTcpBackend::load_tls_certs(const TlsConfig& tls_cfg)
@@ -190,12 +282,9 @@ Result TlsTcpBackend::load_tls_certs(const TlsConfig& tls_cfg)
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.key_file[0] != '\0');
 
     if (tls_cfg.verify_peer && tls_cfg.ca_file[0] != '\0') {
-        int ret = mbedtls_x509_crt_parse_file(&m_ca_cert, tls_cfg.ca_file);
-        if (ret != 0) {
-            log_mbedtls_err("TlsTcpBackend", "x509_crt_parse_file (CA)", ret);
-            return Result::ERR_IO;
-        }
-        mbedtls_ssl_conf_ca_chain(&m_ssl_conf, &m_ca_cert, nullptr);
+        // Extracted to load_ca_and_crl() to keep this function's CC ≤ 10.
+        Result ca_res = load_ca_and_crl(tls_cfg);
+        if (!result_ok(ca_res)) { return ca_res; }
     }
 
     int ret = mbedtls_x509_crt_parse_file(&m_cert, tls_cfg.cert_file);
@@ -506,10 +595,12 @@ Result TlsTcpBackend::tls_connect_handshake()
     mbedtls_ssl_set_bio(&m_ssl[0U], &m_client_net[0U],
                         mbedtls_net_send, mbedtls_net_recv, nullptr);
 
-    // TLS handshake (Power of 10 Rule 3 deviation: init-phase heap alloc)
-    ret = mbedtls_ssl_handshake(&m_ssl[0U]);
-    if (ret != 0) {
-        log_mbedtls_err("TlsTcpBackend", "ssl_handshake (client)", ret);
+    // TLS handshake with bounded WANT_READ/WANT_WRITE retry (Finding #7).
+    // Extracted to run_tls_handshake_loop() to keep this function's CC ≤ 10.
+    // Power of 10 Rule 3 deviation: init-phase heap alloc in mbedTLS.
+    int hs_ret = run_tls_handshake_loop(&m_ssl[0U]);
+    if (hs_ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "ssl_handshake (client)", hs_ret);
         mbedtls_ssl_free(&m_ssl[0U]);
         mbedtls_ssl_init(&m_ssl[0U]);
         mbedtls_net_free(&m_client_net[0U]);
@@ -597,10 +688,12 @@ Result TlsTcpBackend::do_tls_server_handshake(uint32_t slot)
     mbedtls_ssl_set_bio(&m_ssl[slot], &m_client_net[slot],
                         mbedtls_net_send, mbedtls_net_recv, nullptr);
 
-    // TLS handshake (init-phase — Power of 10 Rule 3 deviation documented)
-    ret = mbedtls_ssl_handshake(&m_ssl[slot]);
-    if (ret != 0) {
-        log_mbedtls_err("TlsTcpBackend", "ssl_handshake (accept)", ret);
+    // TLS handshake with bounded WANT_READ/WANT_WRITE retry (Finding #7).
+    // Extracted to run_tls_handshake_loop() to keep this function's CC ≤ 10.
+    // Power of 10 Rule 3 deviation: init-phase heap alloc in mbedTLS.
+    int hs_ret = run_tls_handshake_loop(&m_ssl[slot]);
+    if (hs_ret != 0) {
+        log_mbedtls_err("TlsTcpBackend", "ssl_handshake (accept)", hs_ret);
         mbedtls_ssl_free(&m_ssl[slot]);
         mbedtls_ssl_init(&m_ssl[slot]);
         mbedtls_net_free(&m_client_net[slot]);
@@ -1554,6 +1647,10 @@ void TlsTcpBackend::close()
     // Fix 2: free and re-init ticket context so it is safe for re-use after close().
     mbedtls_ssl_ticket_free(&m_ticket_ctx);
     mbedtls_ssl_ticket_init(&m_ticket_ctx);
+    // REQ-6.3.4: free and re-init CRL so the object can be safely re-used after close().
+    mbedtls_x509_crl_free(&m_crl);
+    mbedtls_x509_crl_init(&m_crl);
+    m_crl_loaded = false;
     // REQ-7.2.4: count clients still connected at graceful shutdown
     m_connections_closed += m_client_count;
     m_client_count = 0U;
