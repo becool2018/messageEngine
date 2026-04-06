@@ -66,7 +66,7 @@ public:
 
     // TransportInterface implementation
     Result init(const TransportConfig& config) override;
-    // NSC: UDP has no per-client registration; no-op per REQ-6.1.10.
+    // SC: stores local NodeId for reference; overrides TransportInterface no-op per REQ-6.1.10.
     Result register_local_id(NodeId id) override;
     // Safety-critical (SC): HAZ-005, HAZ-006 — verified to M5
     Result send_message(const MessageEnvelope& envelope) override;
@@ -90,10 +90,20 @@ private:
     bool              m_open;                            ///< Transport open/closed state
     uint32_t          m_connections_opened;              ///< REQ-7.2.4: bind/connect events
     uint32_t          m_connections_closed;              ///< REQ-7.2.4: close events
+    NodeId            m_peer_node_id;                    ///< NodeId registered by peer HELLO (REQ-6.1.8, REQ-6.2.4)
+    bool              m_peer_hello_received;             ///< True after first valid HELLO from peer
+    NodeId            m_local_node_id;                   ///< Local NodeId stored by register_local_id()
 
     // ───────────────────────────────────────────────────────────────────────
     // Private helper methods (Power of 10: small, single-purpose functions)
     // ───────────────────────────────────────────────────────────────────────
+
+    /// Enforce HELLO-before-data and source_id consistency (REQ-6.1.8, REQ-6.2.4).
+    /// Mirrors DtlsUdpBackend::process_hello_or_validate() for the plaintext UDP path.
+    /// @param[in]  env       Deserialized inbound envelope.
+    /// @param[out] consumed  Set true if env was a HELLO and must not reach DeliveryEngine.
+    /// @return true if the frame should proceed; false if it must be dropped.
+    bool process_hello_or_validate(const MessageEnvelope& env, bool& consumed);
 
     /// Validate that the source address of a received datagram matches the
     /// configured peer (REQ-6.2.4).  Logs WARNING_LO and returns false on mismatch.

@@ -160,6 +160,12 @@ private:
     /// SEC-018: local NodeId stored by register_local_id() for future use
     /// (e.g., source_id stamping in outbound frames). NODE_ID_INVALID until set.
     NodeId          m_local_node_id;                  ///< Local NodeId (REQ-6.1.10, SEC-018)
+    /// SEC-023: peer source port learned from first accepted plaintext datagram.
+    /// 0 = not yet learned (learning phase); non-zero = locked (enforced by validate_source).
+    /// Prevents a rogue process on the trusted host IP from injecting datagrams
+    /// after the real peer establishes the port binding.  DTLS mode is unaffected
+    /// (validate_source returns true immediately on the DTLS path).
+    uint16_t        m_peer_src_port;                  ///< Locked peer source port (plaintext server only). SEC-023
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
@@ -188,7 +194,7 @@ private:
     /// @param[in] src_ip    Source IP string returned by recv_from().
     /// @param[in] src_port  Source port returned by recv_from().
     /// @return true if source is acceptable; false otherwise.
-    bool validate_source(const char* src_ip, uint16_t src_port) const;
+    bool validate_source(const char* src_ip, uint16_t src_port);
 
     /// Attempt to receive one datagram (DTLS or plaintext), deserialize it,
     /// and push the resulting envelope to m_recv_queue.

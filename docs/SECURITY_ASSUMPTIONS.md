@@ -118,6 +118,25 @@ REQ-6.1.11 is now enforced:
   frames from the server with a different `source_id` are logged at WARNING_HI and dropped.
   This prevents mid-session source_id substitution on the client side.
 
+REQ-6.2.4 is now enforced:
+
+- **DtlsUdpBackend:** `process_hello_or_validate()` requires a HELLO frame before any
+  DATA frame. The first HELLO locks in `m_peer_node_id`; subsequent data frames whose
+  `source_id` does not match the registered NodeId are silently discarded with WARNING_HI.
+  Duplicate HELLO frames are also rejected (HAZ-011 / DEF-015-3).
+
+- **UdpBackend (plaintext UDP):** `process_hello_or_validate()` mirrors the DtlsUdpBackend
+  logic. A peer at the correct IP:port must send a HELLO before any DATA frame; the HELLO
+  locks `m_peer_node_id`; subsequent data frames with a mismatched `source_id` are silently
+  discarded with WARNING_HI. This closes the source_id rotation attack on the plaintext path
+  (REQ-6.2.4 / REQ-6.1.8). Prior to this fix, `validate_source()` checked IP:port only —
+  a peer at the right address could exhaust `DuplicateFilter` and `OrderingBuffer` capacity
+  by cycling through arbitrary `source_id` values.
+
+**Invariant:** All four transport backends (TcpBackend, TlsTcpBackend, DtlsUdpBackend,
+UdpBackend) now enforce HELLO-before-data and source_id binding before any envelope
+reaches `DeliveryEngine::receive()`.
+
 **Risk if violated:** A peer that spoofs another peer's `source_id` can inject
 messages that are processed as if from the legitimate peer, potentially
 corrupting ordering state or triggering spurious ACK/duplicate handling.

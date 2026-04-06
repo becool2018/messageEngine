@@ -87,6 +87,20 @@ static void make_test_envelope(MessageEnvelope& env, uint64_t id)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helper — minimal HELLO envelope for source NodeId registration (REQ-6.1.8)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void make_hello_envelope(MessageEnvelope& env, NodeId src)
+{
+    envelope_init(env);
+    env.message_type      = MessageType::HELLO;
+    env.message_id        = 0U;
+    env.source_id         = src;
+    env.destination_id    = NODE_ID_INVALID;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test 1: override TransportKind to UDP; verify config fields
 // Verifies: REQ-4.1.1
 // ─────────────────────────────────────────────────────────────────────────────
@@ -171,13 +185,18 @@ static void test_udp_loopback_send_receive()
     assert(side_a.init(cfg_a) == Result::OK);
     assert(side_b.init(cfg_b) == Result::OK);
 
+    // REQ-6.1.8 / REQ-6.2.4: HELLO required before DATA; side_a registers with side_b.
+    MessageEnvelope hello_env;
+    make_hello_envelope(hello_env, 1U);  // source_id matches DATA frames
+    assert(side_a.send_message(hello_env) == Result::OK);
+
     // Side A sends; datagram enters OS kernel buffer immediately (non-blocking)
     MessageEnvelope send_env;
     make_test_envelope(send_env, TEST_ID);
     Result r = side_a.send_message(send_env);
     assert(r == Result::OK);
 
-    // Side B polls; datagram is in buffer, first poll should retrieve it
+    // Side B polls; HELLO is consumed, then DATA is retrieved
     MessageEnvelope recv_env;
     r = side_b.receive_message(recv_env, 1000U);
     assert(r == Result::OK);
@@ -210,6 +229,12 @@ static void test_udp_multiple_messages()
 
     assert(side_a.init(cfg_a) == Result::OK);
     assert(side_b.init(cfg_b) == Result::OK);
+
+    // REQ-6.1.8 / REQ-6.2.4: HELLO required before DATA
+    MessageEnvelope hello;
+    make_hello_envelope(hello, 1U);
+    Result rh = side_a.send_message(hello);
+    assert(rh == Result::OK);
 
     // Send N messages from A to B
     // Power of 10 Rule 2: fixed loop bound (N = 4)
@@ -810,6 +835,14 @@ static void test_udp_inbound_partition_drops_received()
     assert(r == Result::OK);
     assert(side_b.is_open() == true);
 
+    // REQ-6.1.8 / REQ-6.2.4: HELLO required before DATA; side_a (source_id=2) registers.
+    {
+        MessageEnvelope hello;
+        make_hello_envelope(hello, 2U);  // matches warmup and test datagram source_id
+        r = side_a.send_message(hello);
+        assert(r == Result::OK);
+    }
+
     // Step 1: send a warm-up datagram; side_b receives it (partition not yet
     // active — first call to is_partition_active() just initialises the timer).
     MessageEnvelope warmup;
@@ -819,6 +852,7 @@ static void test_udp_inbound_partition_drops_received()
     r = side_a.send_message(warmup);
     assert(r == Result::OK);
 
+    // HELLO is consumed first, then warmup DATA arrives in the same receive_message call.
     MessageEnvelope warmup_recv;
     r = side_b.receive_message(warmup_recv, 500U);
     assert(r == Result::OK);  // warm-up message must arrive (partition not active yet)
@@ -841,6 +875,188 @@ static void test_udp_inbound_partition_drops_received()
     side_a.close();
     side_b.close();
     printf("PASS: test_udp_inbound_partition_drops_received\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 21: HELLO registers peer NodeId; HELLO frame is consumed and not
+// returned to the caller; subsequent DATA with matching source_id is accepted.
+// Verifies: REQ-6.1.8, REQ-6.2.4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.8, REQ-6.2.4
+static void test_udp_hello_registration()
+{
+    static const uint16_t PORT_A = 19700U;
+    static const uint16_t PORT_B = 19701U;
+
+    UdpBackend side_a;
+    UdpBackend side_b;
+
+    TransportConfig cfg_a;
+    TransportConfig cfg_b;
+    make_udp_cfg(cfg_a, PORT_A, PORT_B);
+    make_udp_cfg(cfg_b, PORT_B, PORT_A);
+
+    assert(side_a.init(cfg_a) == Result::OK);
+    assert(side_b.init(cfg_b) == Result::OK);
+
+    // Step 1: HELLO is consumed — receive_message must NOT return it to the caller.
+    MessageEnvelope hello;
+    make_hello_envelope(hello, 1U);
+    assert(side_a.send_message(hello) == Result::OK);
+
+    MessageEnvelope recv_hello;
+    Result r = side_b.receive_message(recv_hello, 500U);
+    assert(r == Result::ERR_TIMEOUT);  // HELLO consumed; never reaches app layer
+
+    // Step 2: DATA with matching source_id is accepted after HELLO.
+    MessageEnvelope data;
+    make_test_envelope(data, 0xAB12ULL);
+    assert(side_a.send_message(data) == Result::OK);
+
+    MessageEnvelope recv_data;
+    r = side_b.receive_message(recv_data, 500U);
+    assert(r == Result::OK);
+    assert(recv_data.message_id == 0xAB12ULL);
+
+    side_a.close();
+    side_b.close();
+    printf("PASS: test_udp_hello_registration\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 22: DATA frame received before HELLO is dropped (REQ-6.1.8, REQ-6.2.4).
+// Verifies: REQ-6.1.8, REQ-6.2.4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.8, REQ-6.2.4
+static void test_udp_data_before_hello_dropped()
+{
+    static const uint16_t PORT_A = 19702U;
+    static const uint16_t PORT_B = 19703U;
+
+    UdpBackend side_a;
+    UdpBackend side_b;
+
+    TransportConfig cfg_a;
+    TransportConfig cfg_b;
+    make_udp_cfg(cfg_a, PORT_A, PORT_B);
+    make_udp_cfg(cfg_b, PORT_B, PORT_A);
+
+    assert(side_a.init(cfg_a) == Result::OK);
+    assert(side_b.init(cfg_b) == Result::OK);
+
+    // Send DATA without prior HELLO — side_b must drop it (WARNING_HI logged).
+    MessageEnvelope data;
+    make_test_envelope(data, 0xBAD1ULL);
+    assert(side_a.send_message(data) == Result::OK);
+
+    MessageEnvelope recv;
+    Result r = side_b.receive_message(recv, 500U);
+    assert(r == Result::ERR_TIMEOUT);  // data-before-HELLO dropped
+
+    side_a.close();
+    side_b.close();
+    printf("PASS: test_udp_data_before_hello_dropped\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 23: source_id rotation after HELLO is rejected (REQ-6.2.4).
+// After HELLO registers source_id=1, a DATA with source_id=99 must be dropped.
+// Verifies: REQ-6.2.4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.2.4
+static void test_udp_source_id_rotation_rejected()
+{
+    static const uint16_t PORT_A = 19704U;
+    static const uint16_t PORT_B = 19705U;
+
+    UdpBackend side_a;
+    UdpBackend side_b;
+
+    TransportConfig cfg_a;
+    TransportConfig cfg_b;
+    make_udp_cfg(cfg_a, PORT_A, PORT_B);
+    make_udp_cfg(cfg_b, PORT_B, PORT_A);
+
+    assert(side_a.init(cfg_a) == Result::OK);
+    assert(side_b.init(cfg_b) == Result::OK);
+
+    // Register HELLO with source_id=1; consume it.
+    MessageEnvelope hello;
+    make_hello_envelope(hello, 1U);
+    assert(side_a.send_message(hello) == Result::OK);
+
+    MessageEnvelope recv_hello;
+    Result r = side_b.receive_message(recv_hello, 500U);
+    assert(r == Result::ERR_TIMEOUT);  // HELLO consumed
+
+    // Attempt source_id rotation: send DATA with source_id=99 (not registered).
+    MessageEnvelope spoofed;
+    make_test_envelope(spoofed, 0xBAD2ULL);
+    spoofed.source_id = 99U;  // does not match registered NodeId 1
+    assert(side_a.send_message(spoofed) == Result::OK);
+
+    // side_b must drop — source_id mismatch (WARNING_HI logged).
+    MessageEnvelope recv_data;
+    r = side_b.receive_message(recv_data, 500U);
+    assert(r == Result::ERR_TIMEOUT);
+
+    side_a.close();
+    side_b.close();
+    printf("PASS: test_udp_source_id_rotation_rejected\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 24: duplicate HELLO is dropped; existing registration survives.
+// First HELLO registers source_id=1; second HELLO is rejected (WARNING_HI).
+// Subsequent DATA with source_id=1 is still accepted.
+// Verifies: REQ-6.1.8
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.8
+static void test_udp_duplicate_hello_dropped()
+{
+    static const uint16_t PORT_A = 19706U;
+    static const uint16_t PORT_B = 19707U;
+
+    UdpBackend side_a;
+    UdpBackend side_b;
+
+    TransportConfig cfg_a;
+    TransportConfig cfg_b;
+    make_udp_cfg(cfg_a, PORT_A, PORT_B);
+    make_udp_cfg(cfg_b, PORT_B, PORT_A);
+
+    assert(side_a.init(cfg_a) == Result::OK);
+    assert(side_b.init(cfg_b) == Result::OK);
+
+    // First HELLO: registers source_id=1.
+    MessageEnvelope hello1;
+    make_hello_envelope(hello1, 1U);
+    assert(side_a.send_message(hello1) == Result::OK);
+
+    // Second HELLO: duplicate; dropped with WARNING_HI.
+    MessageEnvelope hello2;
+    make_hello_envelope(hello2, 1U);
+    assert(side_a.send_message(hello2) == Result::OK);
+
+    // DATA with registered source_id=1 must still be accepted.
+    MessageEnvelope data;
+    make_test_envelope(data, 0xAB34ULL);
+    assert(side_a.send_message(data) == Result::OK);
+
+    // receive_message iterates: HELLO1 consumed, HELLO2 (duplicate) dropped,
+    // then DATA accepted.
+    MessageEnvelope recv;
+    Result r = side_b.receive_message(recv, 1000U);
+    assert(r == Result::OK);
+    assert(recv.message_id == 0xAB34ULL);
+
+    side_a.close();
+    side_b.close();
+    printf("PASS: test_udp_duplicate_hello_dropped\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -883,6 +1099,12 @@ int main()
 
     // Inbound impairment wiring tests (REQ-5.1.5, REQ-5.1.6)
     test_udp_inbound_partition_drops_received();
+
+    // REQ-6.1.8 / REQ-6.2.4: HELLO-before-data enforcement and source_id binding
+    test_udp_hello_registration();
+    test_udp_data_before_hello_dropped();
+    test_udp_source_id_rotation_rejected();
+    test_udp_duplicate_hello_dropped();
 
     printf("=== ALL PASSED ===\n");
     return 0;
