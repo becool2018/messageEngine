@@ -52,6 +52,7 @@
 #include <mbedtls/platform_util.h>  // SEC-002: mbedtls_platform_zeroize() (CLAUDE.md §7c)
 #include <psa/crypto.h>
 #include <sys/stat.h>     // lstat() — F-2 symlink validation
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 
@@ -380,9 +381,11 @@ void TlsTcpBackend::apply_cipher_policy()
     // Fix 1: restrict to AEAD-only cipher suites; prohibit CBC, NULL, RSA key exchange.
     // Power of 10 Rule 3: static const array — no dynamic allocation.
     static const int k_tls_ciphersuites[] = {
+#if MBEDTLS_VERSION_NUMBER >= 0x03000000
         MBEDTLS_TLS1_3_AES_128_GCM_SHA256,
         MBEDTLS_TLS1_3_AES_256_GCM_SHA384,
         MBEDTLS_TLS1_3_CHACHA20_POLY1305_SHA256,
+#endif
         MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
         MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
         MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
@@ -391,11 +394,23 @@ void TlsTcpBackend::apply_cipher_policy()
     };
     mbedtls_ssl_conf_ciphersuites(&m_ssl_conf, k_tls_ciphersuites);
     // Enforce minimum TLS 1.2; prohibit TLS 1.0/1.1.
+    // mbedTLS 3.x+: mbedtls_ssl_conf_min_tls_version / MBEDTLS_SSL_VERSION_TLS1_2.
+    // mbedTLS 2.x:  mbedtls_ssl_conf_min_version / major=3, minor=3 (TLS 1.2 IANA encoding).
+#if MBEDTLS_VERSION_NUMBER >= 0x03000000
     (void)mbedtls_ssl_conf_min_tls_version(&m_ssl_conf, MBEDTLS_SSL_VERSION_TLS1_2);
+#else
+    mbedtls_ssl_conf_min_version(&m_ssl_conf,
+                                 MBEDTLS_SSL_MAJOR_VERSION_3,
+                                 MBEDTLS_SSL_MINOR_VERSION_3);
+#endif
 
     // Power of 10 Rule 5: ≥2 assertions — array sentinel and return-value void.
     NEVER_COMPILED_OUT_ASSERT(k_tls_ciphersuites[0] != 0);   // array non-empty
-    NEVER_COMPILED_OUT_ASSERT(k_tls_ciphersuites[7] == 0);   // sentinel present
+#if MBEDTLS_VERSION_NUMBER >= 0x03000000
+    NEVER_COMPILED_OUT_ASSERT(k_tls_ciphersuites[7] == 0);   // sentinel: 7 suites + terminator
+#else
+    NEVER_COMPILED_OUT_ASSERT(k_tls_ciphersuites[4] == 0);   // sentinel: 4 suites + terminator
+#endif
 }
 
 Result TlsTcpBackend::setup_tls_config(const TlsConfig& tls_cfg)
@@ -497,15 +512,24 @@ Result TlsTcpBackend::setup_session_tickets(uint32_t lifetime_s)
     NEVER_COMPILED_OUT_ASSERT(lifetime_s > 0U);
     NEVER_COMPILED_OUT_ASSERT(lifetime_s <= 604800U);  // ≤ 7 days (TLS 1.3 max)
 
-    // PSA-native API (mbedTLS 4.0): alg, key_type, key_bits, lifetime.
     // AES-256-GCM for ticket AEAD — FIPS-approved, 256-bit key.
     // Power of 10 Rule 3: no dynamic allocation; PSA manages the key internally.
+    // mbedTLS 4.0+: PSA-native API (alg, key_type, key_bits, lifetime).
+    // mbedTLS 2.x/3.x: legacy API (f_rng, p_rng, cipher_type, lifetime).
+#if MBEDTLS_VERSION_MAJOR >= 4
     int ticket_ret = mbedtls_ssl_ticket_setup(
         &m_ticket_ctx,
         PSA_ALG_GCM,
         PSA_KEY_TYPE_AES,
         static_cast<psa_key_bits_t>(256U),
         lifetime_s);
+#else
+    int ticket_ret = mbedtls_ssl_ticket_setup(
+        &m_ticket_ctx,
+        mbedtls_psa_get_random, MBEDTLS_PSA_RANDOM_STATE,
+        MBEDTLS_CIPHER_AES_256_GCM,
+        lifetime_s);
+#endif
     if (ticket_ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_ticket_setup", ticket_ret);
         return Result::ERR_IO;
