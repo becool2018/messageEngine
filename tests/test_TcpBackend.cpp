@@ -41,10 +41,10 @@
  *
  * Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4,
  *           REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4,
- *           REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.3.5, REQ-7.1.1,
- *           REQ-5.1.5, REQ-5.1.6
+ *           REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9,
+ *           REQ-6.1.10, REQ-6.3.5, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.3.5, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
+// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.3.5, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
 // Verification: M1 + M2 + M4 + M5 (fault injection via ISocketOps)
 
 #include <cstdio>
@@ -1535,6 +1535,386 @@ static void test_tcp_inbound_reorder_buffers_message()
     printf("PASS: test_tcp_inbound_reorder_buffers_message\n");
 }
 // ─────────────────────────────────────────────────────────────────────────────
+// HELLO registration and unicast routing tests (REQ-6.1.8, REQ-6.1.9, REQ-6.1.10)
+//
+// Ports 19742–19748 reserved for these tests.
+// Ports 19742-19748 are sub-range of the 19700-19760 block assigned to
+// TcpBackend tests and do not conflict with existing tests (19700-19741).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: client mode register_local_id sends HELLO to server
+// Uses MockSocketOps in client mode to confirm send_frame is called after
+// register_local_id(); the frame count increments only when HELLO is sent.
+// Verifies: REQ-6.1.8, REQ-6.1.10
+// Verification: M1 + M2 + M4 + M5 (fault injection via ISocketOps)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.8, REQ-6.1.10
+static void test_register_local_id_client_sends_hello()
+{
+    MockSocketOps mock;
+    TcpBackend backend(mock);
+
+    // Client mode: connect_to_server succeeds via mock → m_client_fds[0]=FAKE_FD
+    TransportConfig cfg;
+    make_tcp_client_cfg(cfg, 19742U);
+    Result r = backend.init(cfg);
+    assert(r == Result::OK);
+    assert(backend.is_open());
+
+    // Baseline: no send_frame calls yet (init does not send HELLO on its own)
+    uint32_t frames_before = mock.send_frame_count;
+
+    // register_local_id in client mode must call send_hello_frame() → send_frame
+    r = backend.register_local_id(42U);
+    assert(r == Result::OK);
+
+    // At least one send_frame call must have occurred for the HELLO frame.
+    assert(mock.send_frame_count > frames_before);
+
+    backend.close();
+    printf("PASS: test_register_local_id_client_sends_hello\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: server mode register_local_id stores NodeId but does NOT send HELLO
+// Verifies: REQ-6.1.10
+// Verification: M1 + M2 + M4 + M5 (fault injection via ISocketOps)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.10
+static void test_register_local_id_server_no_hello()
+{
+    MockSocketOps mock;
+    TcpBackend backend(mock);
+
+    // Server mode: bind_and_listen uses mock; do_accept returns -1 (EAGAIN).
+    TransportConfig cfg;
+    make_tcp_server_cfg(cfg, 19743U);
+    Result r = backend.init(cfg);
+    assert(r == Result::OK);
+    assert(backend.is_open());
+
+    // In server mode, register_local_id stores the id but sends no HELLO.
+    uint32_t frames_before = mock.send_frame_count;
+    r = backend.register_local_id(7U);
+    assert(r == Result::OK);
+
+    // Server must NOT call send_frame for its own HELLO.
+    assert(mock.send_frame_count == frames_before);
+
+    backend.close();
+    printf("PASS: test_register_local_id_server_no_hello\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Loopback thread: client registers local_id=55 then closes.
+// Used by test_hello_received_by_server_populates_routing_table and
+// test_hello_frame_not_delivered_to_delivery_engine.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct HelloClientArg {
+    uint16_t port;
+    NodeId   local_id;
+    Result   result;
+};
+
+static void* hello_client_thread(void* raw)
+{
+    HelloClientArg* a = static_cast<HelloClientArg*>(raw);
+    assert(a != nullptr);
+
+    usleep(80000U);  // 80 ms: give server time to bind
+
+    TcpBackend client;
+    TransportConfig cfg;
+    make_tcp_client_cfg(cfg, a->port);
+    a->result = client.init(cfg);
+    if (a->result != Result::OK) { return nullptr; }
+
+    // Send HELLO to server; server routing table is populated.
+    a->result = client.register_local_id(a->local_id);
+
+    usleep(200000U);  // 200 ms: let server receive the HELLO
+    client.close();
+    return nullptr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: server receives HELLO and populates routing table; unicast then works
+//
+// 1. Client connects and calls register_local_id(55U) → sends HELLO frame.
+// 2. Server's receive_message consumes the HELLO (returns ERR_AGAIN/ERR_EMPTY).
+// 3. Server sends DATA with destination_id=55U → routed to the single slot.
+// 4. Verify: send_message returns OK (slot found); no ERR_INVALID.
+//
+// Verifies: REQ-6.1.8, REQ-6.1.9
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.8, REQ-6.1.9
+static void test_hello_received_by_server_populates_routing_table()
+{
+    static const uint16_t PORT    = 19744U;
+    static const NodeId   CLI_ID  = 55U;
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+    assert(server.is_open());
+
+    HelloClientArg cli_arg;
+    cli_arg.port     = PORT;
+    cli_arg.local_id = CLI_ID;
+    cli_arg.result   = Result::ERR_IO;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t cli_tid;
+    (void)pthread_create(&cli_tid, &attr, hello_client_thread, &cli_arg);
+
+    // Server polls: accepts client, then receives (and internally consumes) HELLO.
+    // Power of 10: fixed loop bound (max 10 iterations × 100 ms = 1 s).
+    for (uint32_t i = 0U; i < 10U; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    // After HELLO is processed, send a unicast DATA to CLI_ID.
+    // find_client_slot(55U) must return a valid slot; send must succeed.
+    MessageEnvelope data_env;
+    make_test_envelope(data_env, 0xBEEF1001ULL);
+    data_env.destination_id = CLI_ID;  // unicast to registered node
+    Result send_r = server.send_message(data_env);
+    assert(send_r == Result::OK);  // slot found → unicast send succeeds
+
+    (void)pthread_join(cli_tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+    server.close();
+
+    assert(cli_arg.result == Result::OK);
+    printf("PASS: test_hello_received_by_server_populates_routing_table\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: HELLO frame is NOT delivered to the application via receive_message
+//
+// The server calls receive_message() after the client sends HELLO. HELLO must
+// be consumed internally; receive_message must not return it as OK to the
+// application.  It returns ERR_AGAIN (consumed) or ERR_TIMEOUT (poll expired).
+//
+// Verifies: REQ-6.1.8
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.8
+static void test_hello_frame_not_delivered_to_delivery_engine()
+{
+    static const uint16_t PORT = 19745U;
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+
+    HelloClientArg cli_arg;
+    cli_arg.port     = PORT;
+    cli_arg.local_id = 33U;
+    cli_arg.result   = Result::ERR_IO;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t cli_tid;
+    (void)pthread_create(&cli_tid, &attr, hello_client_thread, &cli_arg);
+
+    // A single receive_message call: client sends HELLO after ~80 ms.
+    // receive_message must NOT return OK (HELLO is consumed, not delivered).
+    MessageEnvelope env;
+    Result recv_r = server.receive_message(env, 500U);
+    assert(recv_r != Result::OK);  // HELLO consumed internally; not delivered
+
+    (void)pthread_join(cli_tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+    server.close();
+
+    assert(cli_arg.result == Result::OK);
+    printf("PASS: test_hello_frame_not_delivered_to_delivery_engine\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Thread arg: two-client HELLO routing test
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct DualHelloCliArg {
+    uint16_t port;
+    NodeId   local_id;
+    uint32_t connect_delay_us;
+    Result   result;
+};
+
+static void* dual_hello_client_thread(void* raw)
+{
+    DualHelloCliArg* a = static_cast<DualHelloCliArg*>(raw);
+    assert(a != nullptr);
+
+    usleep(a->connect_delay_us);
+
+    TcpBackend client;
+    TransportConfig cfg;
+    make_tcp_client_cfg(cfg, a->port);
+    a->result = client.init(cfg);
+    if (a->result != Result::OK) { return nullptr; }
+
+    // Register so the server knows our NodeId; HELLO is sent on-wire.
+    a->result = client.register_local_id(a->local_id);
+
+    usleep(300000U);  // 300 ms: keep connection alive while server tests routing
+    client.close();
+    return nullptr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: unicast routes to the registered slot only (not broadcast)
+//
+// Two clients connect: slot 0 = NodeId 10, slot 1 = NodeId 20.
+// Server sends DATA with destination_id=10 → only slot 0 should receive it.
+// Behavioral proof: send returns OK (slot found); server remains open.
+//
+// Verifies: REQ-6.1.9
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.9
+static void test_unicast_routes_to_registered_slot()
+{
+    static const uint16_t PORT = 19746U;
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+    assert(server.is_open());
+
+    DualHelloCliArg cli1_arg;
+    cli1_arg.port             = PORT;
+    cli1_arg.local_id         = 10U;
+    cli1_arg.connect_delay_us = 80000U;   // 80 ms
+    cli1_arg.result           = Result::ERR_IO;
+
+    DualHelloCliArg cli2_arg;
+    cli2_arg.port             = PORT;
+    cli2_arg.local_id         = 20U;
+    cli2_arg.connect_delay_us = 160000U;  // 160 ms
+    cli2_arg.result           = Result::ERR_IO;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t cli1_tid;
+    (void)pthread_create(&cli1_tid, &attr, dual_hello_client_thread, &cli1_arg);
+    pthread_t cli2_tid;
+    (void)pthread_create(&cli2_tid, &attr, dual_hello_client_thread, &cli2_arg);
+
+    // Drain until both HELLOs are consumed (Power of 10: fixed bound, 20 iters)
+    for (uint32_t i = 0U; i < 20U; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    // Send unicast DATA to node 10 — must succeed (slot found in routing table).
+    MessageEnvelope data_env;
+    make_test_envelope(data_env, 0xBEEF2001ULL);
+    data_env.destination_id = 10U;
+    Result send_r = server.send_message(data_env);
+    assert(send_r == Result::OK);  // unicast to registered node 10
+
+    // Send unicast DATA to node 20 — must also succeed.
+    MessageEnvelope data_env2;
+    make_test_envelope(data_env2, 0xBEEF2002ULL);
+    data_env2.destination_id = 20U;
+    Result send_r2 = server.send_message(data_env2);
+    assert(send_r2 == Result::OK);  // unicast to registered node 20
+
+    (void)pthread_join(cli1_tid, nullptr);
+    (void)pthread_join(cli2_tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+    server.close();
+
+    assert(cli1_arg.result == Result::OK);
+    assert(cli2_arg.result == Result::OK);
+    printf("PASS: test_unicast_routes_to_registered_slot\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: broadcast when destination_id == NODE_ID_INVALID (0)
+//
+// Two clients connect and register their NodeIds. Server sends DATA with
+// destination_id=NODE_ID_INVALID (broadcast). send_message returns OK and
+// the message is fanned out to both slots.
+//
+// Verifies: REQ-6.1.9
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.9
+static void test_broadcast_when_destination_id_zero()
+{
+    static const uint16_t PORT = 19747U;
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+    assert(server.is_open());
+
+    DualHelloCliArg cli1_arg;
+    cli1_arg.port             = PORT;
+    cli1_arg.local_id         = 11U;
+    cli1_arg.connect_delay_us = 80000U;
+    cli1_arg.result           = Result::ERR_IO;
+
+    DualHelloCliArg cli2_arg;
+    cli2_arg.port             = PORT;
+    cli2_arg.local_id         = 22U;
+    cli2_arg.connect_delay_us = 160000U;
+    cli2_arg.result           = Result::ERR_IO;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t cli1_tid;
+    (void)pthread_create(&cli1_tid, &attr, dual_hello_client_thread, &cli1_arg);
+    pthread_t cli2_tid;
+    (void)pthread_create(&cli2_tid, &attr, dual_hello_client_thread, &cli2_arg);
+
+    // Drain HELLOs: Power of 10 fixed bound (20 iters × 100 ms = 2 s max)
+    for (uint32_t i = 0U; i < 20U; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    // Broadcast: destination_id == NODE_ID_INVALID → all clients receive it.
+    MessageEnvelope bcast_env;
+    make_test_envelope(bcast_env, 0xBEEF3001ULL);
+    bcast_env.destination_id = NODE_ID_INVALID;  // broadcast sentinel
+    Result send_r = server.send_message(bcast_env);
+    assert(send_r == Result::OK);  // broadcast succeeds with connected clients
+
+    (void)pthread_join(cli1_tid, nullptr);
+    (void)pthread_join(cli2_tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+    server.close();
+
+    assert(cli1_arg.result == Result::OK);
+    assert(cli2_arg.result == Result::OK);
+    printf("PASS: test_broadcast_when_destination_id_zero\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1578,6 +1958,14 @@ int main()
     // Inbound impairment tests (REQ-5.1.5, REQ-5.1.6)
     test_tcp_inbound_partition_drops_received();
     test_tcp_inbound_reorder_buffers_message();
+
+    // HELLO registration and unicast routing tests (REQ-6.1.8, REQ-6.1.9, REQ-6.1.10)
+    test_register_local_id_client_sends_hello();
+    test_register_local_id_server_no_hello();
+    test_hello_received_by_server_populates_routing_table();
+    test_hello_frame_not_delivered_to_delivery_engine();
+    test_unicast_routes_to_registered_slot();
+    test_broadcast_when_destination_id_zero();
 
     printf("=== ALL PASSED ===\n");
     return 0;

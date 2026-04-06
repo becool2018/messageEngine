@@ -35,7 +35,8 @@
  *   - Raw assert() permitted in tests/ per CLAUDE.md §9 table.
  *   - STL exempted in tests/ for test fixture setup only.
  *
- * Verifies: REQ-6.1.6, REQ-6.1.7, REQ-6.3.4, REQ-5.1.6
+ * Verifies: REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10,
+ *           REQ-6.3.4, REQ-5.1.6
  */
 
 #include <cstdio>
@@ -2478,6 +2479,400 @@ static void test_f3_bio_reassoc_after_remove_client()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// HELLO registration and unicast routing tests (REQ-6.1.8, REQ-6.1.9, REQ-6.1.10)
+//
+// Ports 19901–19907 reserved for these tests.
+// Ports 19901-19907 are within the 19870-19910 range already allocated for
+// TlsTcpBackend tests and do not conflict with existing tests (≤ 19900).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test tls_: client mode register_local_id sends HELLO on-wire (loopback)
+//
+// TlsTcpBackend uses mbedtls_net_connect() for connection setup — it does not
+// route through ISocketOps, so MockSocketOps cannot intercept the connect path.
+// Instead, we use a real plaintext loopback: start a server in a thread, connect
+// a client, call register_local_id(42), and verify the call returns OK.
+// Because send_hello_frame() propagates its send_frame() result back to the
+// caller, a successful return proves the HELLO was serialised and written to the
+// wire socket without error.  Test 3 (test_tls_hello_received_by_server_populates
+// _routing_table) independently verifies the server receives and records the NodeId.
+//
+// Verifies: REQ-6.1.8, REQ-6.1.10
+// Verification: M1 + M2 + M4 (loopback path)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Helper thread: server that accepts one client and holds the connection open.
+struct TlsHello1ServerArg {
+    uint16_t port;
+    Result   result;
+};
+
+static void* tls_hello1_server_thread(void* raw)
+{
+    TlsHello1ServerArg* a = static_cast<TlsHello1ServerArg*>(raw);
+    assert(a != nullptr);
+
+    TlsTcpBackend server;
+    TransportConfig cfg;
+    make_transport_config(cfg, true, a->port, false);
+    a->result = server.init(cfg);
+    if (a->result != Result::OK) { return nullptr; }
+
+    // Poll for 600 ms to accept and drain the HELLO; hold connection open.
+    // Power of 10 Rule 2: bounded poll loop (max 12 iterations × 50 ms = 600 ms).
+    static const int MAX_POLL_ITERS = 12;
+    for (int i = 0; i < MAX_POLL_ITERS; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 50U);
+    }
+    server.close();
+    return nullptr;
+}
+
+// Verifies: REQ-6.1.8, REQ-6.1.10
+static void test_tls_register_local_id_client_sends_hello()
+{
+    // Note: TlsTcpBackend routes connection through mbedtls_net_connect(), not
+    // ISocketOps, so a real loopback server is required for the client to connect.
+    static const uint16_t PORT = 19901U;
+
+    TlsHello1ServerArg srv_arg;
+    srv_arg.port   = PORT;
+    srv_arg.result = Result::ERR_IO;
+
+    pthread_t srv_tid = create_thread_4mb(tls_hello1_server_thread, &srv_arg);
+    usleep(80000U);  // 80 ms: allow server to bind and listen
+
+    TlsTcpBackend client;
+    TransportConfig cli_cfg;
+    make_transport_config(cli_cfg, false, PORT, false);
+    Result r = client.init(cli_cfg);
+    assert(r == Result::OK);
+    assert(client.is_open() == true);
+
+    // register_local_id in client mode calls send_hello_frame(); the frame is
+    // sent on the real socket; the return value propagates the send result.
+    r = client.register_local_id(42U);
+    assert(r == Result::OK);
+
+    client.close();
+    (void)pthread_join(srv_tid, nullptr);
+    assert(srv_arg.result == Result::OK);
+    printf("PASS: test_tls_register_local_id_client_sends_hello\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test tls_: server mode register_local_id stores NodeId but does NOT send HELLO
+// Verifies: REQ-6.1.10
+// Verification: M1 + M2 + M4 + M5 (fault injection via ISocketOps)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.10
+static void test_tls_register_local_id_server_no_hello()
+{
+    MockSocketOps mock;
+    TlsTcpBackend backend(mock);
+
+    // Server mode, plaintext: mock bind/listen succeed; do_accept returns -1.
+    TransportConfig cfg;
+    make_transport_config(cfg, true, 19902U, false);
+    Result r = backend.init(cfg);
+    assert(r == Result::OK);
+    assert(backend.is_open() == true);
+
+    // In server mode, register_local_id stores the id but sends no HELLO.
+    uint32_t frames_before = mock.send_frame_count;
+    r = backend.register_local_id(7U);
+    assert(r == Result::OK);
+
+    // Server must NOT call send_frame for its own HELLO.
+    assert(mock.send_frame_count == frames_before);
+
+    backend.close();
+    printf("PASS: test_tls_register_local_id_server_no_hello\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Loopback helper: TlsTcpBackend client that registers its NodeId then waits.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct TlsHelloClientArg {
+    uint16_t port;
+    NodeId   local_id;
+    uint32_t connect_delay_us;
+    bool     tls_on;
+    Result   result;
+};
+
+static void* tls_hello_client_thread(void* raw)
+{
+    TlsHelloClientArg* a = static_cast<TlsHelloClientArg*>(raw);
+    assert(a != nullptr);
+
+    usleep(a->connect_delay_us);
+
+    TlsTcpBackend client;
+    TransportConfig cfg;
+    make_transport_config(cfg, false, a->port, a->tls_on);
+    a->result = client.init(cfg);
+    if (a->result != Result::OK) { return nullptr; }
+
+    // Send HELLO to server; server routing table is populated.
+    a->result = client.register_local_id(a->local_id);
+
+    usleep(300000U);  // 300 ms: keep connection alive while server tests routing
+    client.close();
+    return nullptr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test tls_: server receives HELLO and populates routing table; unicast works
+//
+// Uses plaintext TlsTcpBackend loopback.  Client registers NodeId=55 via HELLO.
+// Server drains HELLOs, then sends unicast DATA to destination_id=55.
+// send_message must return OK (slot found in routing table).
+//
+// Verifies: REQ-6.1.8, REQ-6.1.9
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.8, REQ-6.1.9
+static void test_tls_hello_received_by_server_populates_routing_table()
+{
+    static const uint16_t PORT   = 19903U;
+    static const NodeId   CLI_ID = 55U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+    assert(server.is_open() == true);
+
+    TlsHelloClientArg cli_arg;
+    cli_arg.port             = PORT;
+    cli_arg.local_id         = CLI_ID;
+    cli_arg.connect_delay_us = 80000U;
+    cli_arg.tls_on           = false;
+    cli_arg.result           = Result::ERR_IO;
+
+    pthread_t cli_tid = create_thread_4mb(tls_hello_client_thread, &cli_arg);
+
+    // Drain until HELLO is consumed (Power of 10: fixed bound, 10 iters × 100 ms)
+    for (uint32_t i = 0U; i < 10U; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    // Unicast DATA to CLI_ID — routing table must have the slot.
+    MessageEnvelope data_env;
+    envelope_init(data_env);
+    data_env.message_type      = MessageType::DATA;
+    data_env.message_id        = 0xBEEF4001ULL;
+    data_env.source_id         = 1U;
+    data_env.destination_id    = CLI_ID;
+    data_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    data_env.timestamp_us      = 1U;
+    data_env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+
+    Result send_r = server.send_message(data_env);
+    assert(send_r == Result::OK);  // unicast to registered CLI_ID succeeds
+
+    (void)pthread_join(cli_tid, nullptr);
+    server.close();
+
+    assert(cli_arg.result == Result::OK);
+    printf("PASS: test_tls_hello_received_by_server_populates_routing_table\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test tls_: HELLO frame is NOT delivered to the application via receive_message
+//
+// Client sends HELLO.  Server's receive_message must consume it internally and
+// must NOT return OK to the application (HELLO is a control frame, not data).
+//
+// Verifies: REQ-6.1.8
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.8
+static void test_tls_hello_frame_not_delivered_to_delivery_engine()
+{
+    static const uint16_t PORT = 19904U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+
+    TlsHelloClientArg cli_arg;
+    cli_arg.port             = PORT;
+    cli_arg.local_id         = 33U;
+    cli_arg.connect_delay_us = 80000U;
+    cli_arg.tls_on           = false;
+    cli_arg.result           = Result::ERR_IO;
+
+    pthread_t cli_tid = create_thread_4mb(tls_hello_client_thread, &cli_arg);
+
+    // receive_message must NOT return OK for a HELLO frame.
+    MessageEnvelope env;
+    Result recv_r = server.receive_message(env, 500U);
+    assert(recv_r != Result::OK);  // HELLO consumed internally; not delivered
+
+    (void)pthread_join(cli_tid, nullptr);
+    server.close();
+
+    assert(cli_arg.result == Result::OK);
+    printf("PASS: test_tls_hello_frame_not_delivered_to_delivery_engine\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test tls_: unicast routes to the registered slot only
+//
+// Two plaintext clients connect and register NodeId 10 and NodeId 20.
+// Server sends unicast DATA to 10, then 20 — both succeed (slot found).
+//
+// Verifies: REQ-6.1.9
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.9
+static void test_tls_unicast_routes_to_registered_slot()
+{
+    static const uint16_t PORT = 19905U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+    assert(server.is_open() == true);
+
+    TlsHelloClientArg cli1_arg;
+    cli1_arg.port             = PORT;
+    cli1_arg.local_id         = 10U;
+    cli1_arg.connect_delay_us = 80000U;
+    cli1_arg.tls_on           = false;
+    cli1_arg.result           = Result::ERR_IO;
+
+    TlsHelloClientArg cli2_arg;
+    cli2_arg.port             = PORT;
+    cli2_arg.local_id         = 20U;
+    cli2_arg.connect_delay_us = 160000U;
+    cli2_arg.tls_on           = false;
+    cli2_arg.result           = Result::ERR_IO;
+
+    pthread_t cli1_tid = create_thread_4mb(tls_hello_client_thread, &cli1_arg);
+    pthread_t cli2_tid = create_thread_4mb(tls_hello_client_thread, &cli2_arg);
+
+    // Drain HELLOs: Power of 10 fixed bound (20 iters × 100 ms = 2 s max)
+    for (uint32_t i = 0U; i < 20U; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    // Unicast to node 10.
+    MessageEnvelope d1;
+    envelope_init(d1);
+    d1.message_type      = MessageType::DATA;
+    d1.message_id        = 0xBEEF5001ULL;
+    d1.source_id         = 1U;
+    d1.destination_id    = 10U;
+    d1.reliability_class = ReliabilityClass::BEST_EFFORT;
+    d1.timestamp_us      = 1U;
+    d1.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+    Result s1 = server.send_message(d1);
+    assert(s1 == Result::OK);
+
+    // Unicast to node 20.
+    MessageEnvelope d2;
+    envelope_init(d2);
+    d2.message_type      = MessageType::DATA;
+    d2.message_id        = 0xBEEF5002ULL;
+    d2.source_id         = 1U;
+    d2.destination_id    = 20U;
+    d2.reliability_class = ReliabilityClass::BEST_EFFORT;
+    d2.timestamp_us      = 1U;
+    d2.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+    Result s2 = server.send_message(d2);
+    assert(s2 == Result::OK);
+
+    (void)pthread_join(cli1_tid, nullptr);
+    (void)pthread_join(cli2_tid, nullptr);
+    server.close();
+
+    assert(cli1_arg.result == Result::OK);
+    assert(cli2_arg.result == Result::OK);
+    printf("PASS: test_tls_unicast_routes_to_registered_slot\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test tls_: broadcast when destination_id == NODE_ID_INVALID (0)
+//
+// Two plaintext clients connect and register NodeIds 11 and 22.
+// Server sends broadcast DATA (destination_id=0) — send_message returns OK.
+//
+// Verifies: REQ-6.1.9
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.9
+static void test_tls_broadcast_when_destination_id_zero()
+{
+    static const uint16_t PORT = 19906U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+    assert(server.is_open() == true);
+
+    TlsHelloClientArg cli1_arg;
+    cli1_arg.port             = PORT;
+    cli1_arg.local_id         = 11U;
+    cli1_arg.connect_delay_us = 80000U;
+    cli1_arg.tls_on           = false;
+    cli1_arg.result           = Result::ERR_IO;
+
+    TlsHelloClientArg cli2_arg;
+    cli2_arg.port             = PORT;
+    cli2_arg.local_id         = 22U;
+    cli2_arg.connect_delay_us = 160000U;
+    cli2_arg.tls_on           = false;
+    cli2_arg.result           = Result::ERR_IO;
+
+    pthread_t cli1_tid = create_thread_4mb(tls_hello_client_thread, &cli1_arg);
+    pthread_t cli2_tid = create_thread_4mb(tls_hello_client_thread, &cli2_arg);
+
+    // Drain HELLOs: Power of 10 fixed bound (20 iters × 100 ms = 2 s max)
+    for (uint32_t i = 0U; i < 20U; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    // Broadcast to all connected clients.
+    MessageEnvelope bcast;
+    envelope_init(bcast);
+    bcast.message_type      = MessageType::DATA;
+    bcast.message_id        = 0xBEEF6001ULL;
+    bcast.source_id         = 1U;
+    bcast.destination_id    = NODE_ID_INVALID;  // 0 = broadcast sentinel
+    bcast.reliability_class = ReliabilityClass::BEST_EFFORT;
+    bcast.timestamp_us      = 1U;
+    bcast.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+
+    Result send_r = server.send_message(bcast);
+    assert(send_r == Result::OK);  // broadcast to all connected clients succeeds
+
+    (void)pthread_join(cli1_tid, nullptr);
+    (void)pthread_join(cli2_tid, nullptr);
+    server.close();
+
+    assert(cli1_arg.result == Result::OK);
+    assert(cli2_arg.result == Result::OK);
+    printf("PASS: test_tls_broadcast_when_destination_id_zero\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2528,6 +2923,14 @@ int main()
     // Security fix tests (F2 and F3):
     test_f2_recv_frame_short_read_via_mock();
     test_f3_bio_reassoc_after_remove_client();
+
+    // HELLO registration and unicast routing tests (REQ-6.1.8, REQ-6.1.9, REQ-6.1.10)
+    test_tls_register_local_id_client_sends_hello();
+    test_tls_register_local_id_server_no_hello();
+    test_tls_hello_received_by_server_populates_routing_table();
+    test_tls_hello_frame_not_delivered_to_delivery_engine();
+    test_tls_unicast_routes_to_registered_slot();
+    test_tls_broadcast_when_destination_id_zero();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);

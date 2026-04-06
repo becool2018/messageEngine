@@ -628,8 +628,10 @@ Result TlsTcpBackend::send_hello_frame()
     uint32_t timeout_ms = (m_cfg.num_channels > 0U)
                           ? m_cfg.channels[0U].send_timeout_ms
                           : 1000U;
-    bool failed = tls_send_frame(0U, m_wire_buf, wire_len, timeout_ms);
-    if (failed) {
+    // tls_send_frame returns true on success, false on failure (same convention
+    // as ISocketOps::send_frame and SocketUtils::tcp_send_frame).
+    bool sent_ok = tls_send_frame(0U, m_wire_buf, wire_len, timeout_ms);
+    if (!sent_ok) {
         Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
                     "send_hello_frame: tls_send_frame failed");
         return Result::ERR_IO;
