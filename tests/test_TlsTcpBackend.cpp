@@ -2463,6 +2463,16 @@ static void test_f3_bio_reassoc_after_remove_client()
     // Must have received all 3 frames: 0xF301, 0xF302, 0xF303.
     // Order may vary (slot 0 or slot 1 polled first).
     assert(got == 3U);
+    // Verify all three expected message IDs were received (order may vary)
+    bool saw_f301 = false;
+    bool saw_f302 = false;
+    bool saw_f303 = false;
+    for (uint32_t k = 0U; k < 3U; ++k) {
+        if (ids[k] == 0xF301ULL) { saw_f301 = true; }
+        if (ids[k] == 0xF302ULL) { saw_f302 = true; }
+        if (ids[k] == 0xF303ULL) { saw_f303 = true; }
+    }
+    assert(saw_f301 && saw_f302 && saw_f303);
 
     printf("PASS: test_f3_bio_reassoc_after_remove_client\n");
 }
