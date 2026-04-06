@@ -619,6 +619,17 @@ Result TlsTcpBackend::tls_connect_handshake()
     NEVER_COMPILED_OUT_ASSERT(m_tls_enabled);
     NEVER_COMPILED_OUT_ASSERT(m_client_net[0U].fd >= 0);
 
+    // SEC-021: REQ-6.4.6 analogue for TLS/TCP — refuse to connect when
+    // verify_peer is true but no peer_hostname is configured. An empty
+    // hostname means ssl_set_hostname(NULL) will not bind a CN/SAN check,
+    // defeating the certificate peer-identity verification entirely.
+    if (m_cfg.tls.verify_peer && (m_cfg.tls.peer_hostname[0] == '\0')) {
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "SEC-021: verify_peer=true but peer_hostname is empty;"
+                    " refusing handshake (REQ-6.4.6 analogue)");
+        return Result::ERR_INVALID;
+    }
+
     // mbedtls_net_connect returns a blocking socket by default; set explicitly.
     int ret = mbedtls_net_set_block(&m_client_net[0U]);
     if (ret != 0) {
@@ -929,6 +940,24 @@ void TlsTcpBackend::handle_hello_frame(uint32_t idx, NodeId src_id)
     NEVER_COMPILED_OUT_ASSERT(idx < MAX_TCP_CONNECTIONS);
     NEVER_COMPILED_OUT_ASSERT(src_id != NODE_ID_INVALID);
 
+    // SEC-012: reject duplicate NodeId — scan all OTHER active slots to ensure
+    // no two connections claim the same node identity. Evict the NEW slot (idx)
+    // to preserve the existing authenticated connection.
+    // Power of 10 Rule 2: bounded loop — at most MAX_TCP_CONNECTIONS iterations.
+    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
+        if ((i != idx) && m_client_slot_active[i] &&
+            (m_client_node_ids[i] == src_id)) {
+            Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                        "SEC-012: duplicate NodeId=%u on existing slot %u;"
+                        " evicting new slot %u",
+                        static_cast<unsigned>(src_id),
+                        static_cast<unsigned>(i),
+                        static_cast<unsigned>(idx));
+            remove_client(idx);
+            return;
+        }
+    }
+
     m_client_node_ids[idx] = src_id;
     Logger::log(Severity::INFO, "TlsTcpBackend",
                 "HELLO from client slot %u node_id=%u", idx, src_id);
@@ -941,6 +970,11 @@ void TlsTcpBackend::handle_hello_frame(uint32_t idx, NodeId src_id)
 bool TlsTcpBackend::validate_source_id(uint32_t slot, NodeId claimed_id) const
 {
     NEVER_COMPILED_OUT_ASSERT(slot < MAX_TCP_CONNECTIONS);
+    // SEC-011: m_client_node_ids[slot] is dual-use:
+    //   Server mode: populated via handle_hello_frame() when client sends HELLO.
+    //   Client mode: slot 0 populated in recv_from_client() after first accepted
+    //                inbound frame, recording the server's NodeId for subsequent
+    //                frame validation (REQ-6.1.11 applied symmetrically).
     const NodeId registered = m_client_node_ids[slot];
     if (registered == NODE_ID_INVALID) {
         NEVER_COMPILED_OUT_ASSERT(true);  // post: unregistered slot, allow
@@ -1271,8 +1305,11 @@ Result TlsTcpBackend::classify_inbound_frame(uint32_t idx,
         if (m_is_server) {
             if (m_client_hello_received[idx]) {
                 Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                            "duplicate HELLO from slot %u: dropping (REQ-6.1.8)",
+                            "SEC-013: duplicate HELLO from slot %u: evicting (REQ-6.1.8)",
                             static_cast<unsigned>(idx));
+                // SEC-013: evict the misbehaving slot — a replayed HELLO could
+                // trigger NodeId re-assignment and confuse the routing table.
+                remove_client(idx);
                 return Result::ERR_INVALID;
             }
             m_client_hello_received[idx] = true;
@@ -1334,6 +1371,19 @@ Result TlsTcpBackend::recv_from_client(uint32_t idx, uint32_t timeout_ms)
     // Safety-critical (SC): HAZ-009
     if (!validate_source_id(idx, env.source_id)) {
         return Result::ERR_INVALID;  // silent discard; WARNING_HI already logged
+    }
+
+    // SEC-011 (client mode): lock in the server's NodeId from the first
+    // accepted inbound frame. validate_source_id() allowed it (slot was
+    // NODE_ID_INVALID); record it now so all subsequent frames are validated.
+    // Uses m_client_node_ids[0] — the only slot in client mode. No new member
+    // required; see validate_source_id() comment for the dual-use rationale.
+    if (!m_is_server && (m_client_node_ids[0U] == NODE_ID_INVALID) &&
+        (env.source_id != NODE_ID_INVALID)) {
+        m_client_node_ids[0U] = env.source_id;
+        Logger::log(Severity::INFO, "TlsTcpBackend",
+                    "SEC-011: server NodeId locked in as %u (REQ-6.1.11)",
+                    static_cast<unsigned>(env.source_id));
     }
 
     // REQ-5.1.5, REQ-5.1.6: route through impairment before queuing.

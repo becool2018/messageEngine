@@ -997,6 +997,7 @@ Result DeliveryEngine::handle_data_path(MessageEnvelope& env, uint64_t now_us)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DeliveryEngine::pump_retries()
+// SEC-016 verified: monotonic guard present (SEC-007) — see guard below.
 // ─────────────────────────────────────────────────────────────────────────────
 uint32_t DeliveryEngine::pump_retries(uint64_t now_us)
 {
@@ -1053,6 +1054,7 @@ uint32_t DeliveryEngine::pump_retries(uint64_t now_us)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DeliveryEngine::sweep_ack_timeouts()
+// SEC-016 verified: monotonic guard present (SEC-007) — see guard below.
 // ─────────────────────────────────────────────────────────────────────────────
 uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
 {

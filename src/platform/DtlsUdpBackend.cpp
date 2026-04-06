@@ -73,6 +73,7 @@
 #include <sys/socket.h>   // connect(), recvfrom(), MSG_PEEK
 #include <sys/stat.h>     // lstat() — F-2 symlink validation
 #include <netinet/in.h>   // sockaddr_in, sockaddr_storage
+#include <climits>        // INT_MAX — SEC-017 CERT INT31-C poll timeout clamp
 #include <poll.h>         // poll()
 #include <cstring>
 
@@ -137,7 +138,8 @@ DtlsUdpBackend::DtlsUdpBackend()
       m_open(false), m_is_server(false), m_tls_enabled(false),
       m_crl_loaded(false),
       m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
-      m_connections_opened(0U), m_connections_closed(0U)
+      m_connections_opened(0U), m_connections_closed(0U),
+      m_local_node_id(NODE_ID_INVALID)  // SEC-018: initialized at declaration
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
     NEVER_COMPILED_OUT_ASSERT(DTLS_MAX_DATAGRAM_BYTES > 0U);
@@ -160,7 +162,8 @@ DtlsUdpBackend::DtlsUdpBackend(IMbedtlsOps& ops)
       m_open(false), m_is_server(false), m_tls_enabled(false),
       m_crl_loaded(false),
       m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
-      m_connections_opened(0U), m_connections_closed(0U)
+      m_connections_opened(0U), m_connections_closed(0U),
+      m_local_node_id(NODE_ID_INVALID)  // SEC-018: initialized at declaration
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
     NEVER_COMPILED_OUT_ASSERT(DTLS_MAX_DATAGRAM_BYTES > 0U);
@@ -183,7 +186,8 @@ DtlsUdpBackend::DtlsUdpBackend(ISocketOps& sock_ops, IMbedtlsOps& tls_ops)
       m_open(false), m_is_server(false), m_tls_enabled(false),
       m_crl_loaded(false),
       m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
-      m_connections_opened(0U), m_connections_closed(0U)
+      m_connections_opened(0U), m_connections_closed(0U),
+      m_local_node_id(NODE_ID_INVALID)  // SEC-018: initialized at declaration
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
     NEVER_COMPILED_OUT_ASSERT(DTLS_MAX_DATAGRAM_BYTES > 0U);
@@ -521,8 +525,15 @@ Result DtlsUdpBackend::server_wait_and_handshake()
     struct pollfd pfd;
     pfd.fd     = m_sock_fd;
     pfd.events = POLLIN;
-    int wait_ms = static_cast<int>(m_cfg.connect_timeout_ms > 0U
-                                   ? m_cfg.connect_timeout_ms : 30000U);
+    // SEC-017: CERT INT31-C — clamp uint32_t timeout to INT_MAX before
+    // narrowing to int for poll(). Values > INT_MAX cast to a negative int,
+    // which POSIX defines as "block indefinitely" — an unintended DoS path.
+    static const uint32_t k_poll_max_ms = static_cast<uint32_t>(INT_MAX);
+    const uint32_t raw_timeout = (m_cfg.connect_timeout_ms > 0U)
+                                 ? m_cfg.connect_timeout_ms : 30000U;
+    const uint32_t clamped_timeout = (raw_timeout > k_poll_max_ms)
+                                     ? k_poll_max_ms : raw_timeout;
+    int wait_ms = static_cast<int>(clamped_timeout);
     int pr = poll(&pfd, 1, wait_ms);
     if (pr <= 0) {
         Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
@@ -1103,8 +1114,11 @@ Result DtlsUdpBackend::init(const TransportConfig& config)
 Result DtlsUdpBackend::register_local_id(NodeId id)
 {
     NEVER_COMPILED_OUT_ASSERT(id != NODE_ID_INVALID);  // pre-condition: valid NodeId
-    (void)id;  // REQ-6.1.10: DTLS/UDP has no connection-oriented registration
     NEVER_COMPILED_OUT_ASSERT(m_open);  // pre-condition: transport must be initialised
+    // SEC-018: store local NodeId for outbound frame source_id stamping and
+    // observability. DTLS/UDP has no connection-oriented HELLO registration
+    // (REQ-6.1.10), but recording the NodeId enables future source_id injection.
+    m_local_node_id = id;
     return Result::OK;
 }
 
