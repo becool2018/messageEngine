@@ -42,12 +42,12 @@
  *   All use only library-defined symbols; no application-level function pointer
  *   declarations are introduced.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4,
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.10,
  *             REQ-5.1.5, REQ-5.1.6,
  *             REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4,
  *             REQ-6.4.5, REQ-7.1.1
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1, REQ-7.2.4
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.1.10, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1, REQ-7.2.4
 
 #include "platform/DtlsUdpBackend.hpp"
 #include "platform/ISocketOps.hpp"
@@ -786,6 +786,18 @@ Result DtlsUdpBackend::init(const TransportConfig& config)
     if (!result_ok(res)) { return res; }
 
     NEVER_COMPILED_OUT_ASSERT(m_open);
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// register_local_id()
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result DtlsUdpBackend::register_local_id(NodeId id)
+{
+    NEVER_COMPILED_OUT_ASSERT(id != NODE_ID_INVALID);  // pre-condition: valid NodeId
+    (void)id;  // REQ-6.1.10: DTLS/UDP has no connection-oriented registration
+    NEVER_COMPILED_OUT_ASSERT(m_open);  // pre-condition: transport must be initialised
     return Result::OK;
 }
 

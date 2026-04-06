@@ -29,7 +29,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: Result enum returns, event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1, REQ-7.2.4
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.10, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1, REQ-7.2.4
  */
 
 #ifndef PLATFORM_UDP_BACKEND_HPP
@@ -66,6 +66,8 @@ public:
 
     // TransportInterface implementation
     Result init(const TransportConfig& config) override;
+    // NSC: UDP has no per-client registration; no-op per REQ-6.1.10.
+    Result register_local_id(NodeId id) override;
     // Safety-critical (SC): HAZ-005, HAZ-006 — verified to M5
     Result send_message(const MessageEnvelope& envelope) override;
     // Safety-critical (SC): HAZ-004, HAZ-005 — verified to M5

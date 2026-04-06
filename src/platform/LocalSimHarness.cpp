@@ -24,7 +24,7 @@
  *   - MISRA C++: no exceptions, all return values checked.
  *   - F-Prime style: event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.3.2, REQ-7.2.4
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.3.2, REQ-6.1.10, REQ-7.2.4
  */
 
 #include "platform/LocalSimHarness.hpp"
@@ -83,6 +83,18 @@ Result LocalSimHarness::init(const TransportConfig& config)
                config.local_node_id);
 
     NEVER_COMPILED_OUT_ASSERT(m_open);  // Post-condition
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// register_local_id()
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result LocalSimHarness::register_local_id(NodeId id)
+{
+    NEVER_COMPILED_OUT_ASSERT(id != NODE_ID_INVALID);  // pre-condition: valid NodeId
+    (void)id;  // REQ-6.1.10: LocalSim has no connection-oriented registration
+    NEVER_COMPILED_OUT_ASSERT(m_open);  // pre-condition: transport must be initialised
     return Result::OK;
 }
 

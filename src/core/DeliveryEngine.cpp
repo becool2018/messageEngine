@@ -19,9 +19,9 @@
  * Applies Power of 10 rules: fixed loop bounds, ≥2 assertions per function,
  * checked return values, bounded resource usage.
  *
- * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+ * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
  */
-// Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+// Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
 
 #include "DeliveryEngine.hpp"
 #include "Assert.hpp"
@@ -196,6 +196,15 @@ void DeliveryEngine::init(TransportInterface* transport,
     m_held_pending_valid = false;
 
     m_initialized = true;
+
+    // REQ-6.1.10: notify transport of our NodeId so TCP/TLS clients can send
+    // the on-connect HELLO registration frame.
+    Result reg_res = m_transport->register_local_id(local_id);
+    if (!result_ok(reg_res)) {
+        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                    "register_local_id failed: %u", static_cast<uint8_t>(reg_res));
+        // Non-fatal: transport is open; routing may be degraded for TCP/TLS unicast.
+    }
 
     // Power of 10 rule 5: post-condition assertion
     NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: engine marked initialized

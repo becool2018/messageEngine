@@ -32,7 +32,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: Result enum returns, event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.3.2, REQ-7.2.4
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.3.2, REQ-6.1.10, REQ-7.2.4
  */
 
 #ifndef PLATFORM_LOCAL_SIM_HARNESS_HPP
@@ -58,6 +58,8 @@ public:
 
     // TransportInterface implementation
     Result init(const TransportConfig& config) override;
+    // NSC: LocalSim has no per-client registration; no-op per REQ-6.1.10.
+    Result register_local_id(NodeId id) override;
     // Safety-critical (SC): HAZ-001, HAZ-003, HAZ-005, HAZ-006
     Result send_message(const MessageEnvelope& envelope) override;
     // Safety-critical (SC): HAZ-001, HAZ-004, HAZ-005

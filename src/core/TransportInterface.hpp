@@ -24,7 +24,7 @@
  *   - Architecture rule: higher layers depend on this abstraction, never on
  *     raw socket APIs.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-7.2.4
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.10, REQ-7.2.4
  */
 
 #ifndef CORE_TRANSPORT_INTERFACE_HPP
@@ -54,6 +54,24 @@ public:
      * (Power of 10 rule 3)
      */
     virtual Result init(const TransportConfig& config) = 0;
+
+    /**
+     * @brief Notify the transport of this endpoint's local NodeId.
+     *
+     * Called by DeliveryEngine::init() immediately after init() returns OK.
+     * TCP/TLS client backends use this to send the on-connect HELLO registration
+     * frame (REQ-6.1.8, REQ-6.1.10). TCP/TLS server backends store the local
+     * NodeId for reference. All other transports return OK without action.
+     *
+     * @param[in] id  Local NodeId; must not be NODE_ID_INVALID.
+     * @return OK on success; ERR_IO if the HELLO frame could not be sent.
+     */
+    // NSC: registration is a lifecycle call, not on the message delivery path.
+    virtual Result register_local_id(NodeId id)
+    {
+        (void)id;       // default: no-op for non-TCP transports
+        return Result::OK;
+    }
 
     // Safety-critical (SC): HAZ-001, HAZ-005, HAZ-006 — verified to M5
     /**
