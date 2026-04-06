@@ -93,8 +93,9 @@ private:
     bool               m_is_server;                           ///< Server vs client mode
     uint32_t           m_connections_opened;                  ///< REQ-7.2.4: successful connect/accept events
     uint32_t           m_connections_closed;                  ///< REQ-7.2.4: disconnect events
-    NodeId             m_client_node_ids[MAX_TCP_CONNECTIONS]; ///< NodeId for each client slot (NODE_ID_INVALID = unknown)
-    NodeId             m_local_node_id;                        ///< Our own node identity (set by register_local_id)
+    NodeId             m_client_node_ids[MAX_TCP_CONNECTIONS];     ///< NodeId for each client slot (NODE_ID_INVALID = unknown)
+    NodeId             m_local_node_id;                            ///< Our own node identity (set by register_local_id)
+    bool               m_client_hello_received[MAX_TCP_CONNECTIONS]; ///< True once HELLO received for this slot — REQ-6.1.8
 
     // ───────────────────────────────────────────────────────────────────────
     // Private helper methods (Power of 10: small, single-purpose functions)
@@ -179,6 +180,23 @@ private:
     /// Build and send a HELLO envelope to the server (client mode only).
     /// Called once from register_local_id() after m_local_node_id is set.
     Result send_hello_frame();
+
+    /// CC-reduction helper for recv_from_client().
+    /// Processes an inbound HELLO frame under the one-HELLO-per-connection rule
+    /// (REQ-6.1.8 / Fix 4). Looks up the slot for @p client_fd, rejects duplicate
+    /// HELLOs, and on first HELLO calls handle_hello_frame() and marks the slot.
+    /// @param[in] client_fd  File descriptor that sent the HELLO.
+    /// @param[in] src_id     NodeId from the HELLO envelope's source_id field.
+    /// @return ERR_INVALID if this is a duplicate HELLO; ERR_AGAIN otherwise
+    ///         (indicating the frame was consumed and must not reach DeliveryEngine).
+    Result process_hello_frame(int client_fd, NodeId src_id);
+
+    /// CC-reduction helper for recv_from_client() (Fix 3).
+    /// Checks whether a non-HELLO frame from @p client_fd should be rejected
+    /// because the slot has not yet completed HELLO registration (REQ-6.1.11 / HAZ-009).
+    /// @param[in] client_fd  File descriptor of the sending client.
+    /// @return true if the frame must be dropped (slot unregistered); false if allowed.
+    bool is_unregistered_slot(int client_fd) const;
 
     /// Record the NodeId of a connecting client in the routing table.
     /// @param[in] client_fd  File descriptor that sent the HELLO.

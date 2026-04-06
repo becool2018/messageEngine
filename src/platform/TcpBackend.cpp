@@ -52,8 +52,9 @@ TcpBackend::TcpBackend()
     // Power of 10 rule 3: initialize to safe state
     NEVER_COMPILED_OUT_ASSERT(MAX_TCP_CONNECTIONS > 0U);  // Invariant
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
-        m_client_fds[i]      = -1;
-        m_client_node_ids[i] = NODE_ID_INVALID;
+        m_client_fds[i]            = -1;
+        m_client_node_ids[i]       = NODE_ID_INVALID;
+        m_client_hello_received[i] = false;  // REQ-6.1.8: no HELLO received yet
     }
 }
 
@@ -67,8 +68,9 @@ TcpBackend::TcpBackend(ISocketOps& ops)
     // Power of 10 rule 3: initialize to safe state
     NEVER_COMPILED_OUT_ASSERT(MAX_TCP_CONNECTIONS > 0U);  // Invariant
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
-        m_client_fds[i]      = -1;
-        m_client_node_ids[i] = NODE_ID_INVALID;
+        m_client_fds[i]            = -1;
+        m_client_node_ids[i]       = NODE_ID_INVALID;
+        m_client_hello_received[i] = false;  // REQ-6.1.8: no HELLO received yet
     }
 }
 
@@ -161,7 +163,8 @@ Result TcpBackend::init(const TransportConfig& config)
     // Power of 10 rule 2: fixed loop bound (MAX_TCP_CONNECTIONS)
     m_local_node_id = NODE_ID_INVALID;
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
-        m_client_node_ids[i] = NODE_ID_INVALID;
+        m_client_node_ids[i]       = NODE_ID_INVALID;
+        m_client_hello_received[i] = false;  // REQ-6.1.8: no HELLO received yet
     }
 
     Result res;
@@ -244,7 +247,8 @@ Result TcpBackend::accept_clients()
 
     // Add new client to array
     NEVER_COMPILED_OUT_ASSERT(m_client_count < MAX_TCP_CONNECTIONS);
-    m_client_fds[m_client_count] = client_fd;
+    m_client_fds[m_client_count]            = client_fd;
+    m_client_hello_received[m_client_count] = false;  // REQ-6.1.8: must receive HELLO before data
     ++m_client_count;
     ++m_connections_opened;  // REQ-7.2.4: successful server accept
 
@@ -268,14 +272,16 @@ void TcpBackend::remove_client_fd(int client_fd)
         if (m_client_fds[i] == client_fd) {
             m_sock_ops->do_close(m_client_fds[i]);
             m_client_fds[i] = -1;
-            // Compact the fd and node-id arrays by shifting left
+            // Compact the fd, node-id, and hello-flag arrays by shifting left.
             // Power of 10 rule 2: bound is m_client_count - 1 (< MAX_TCP_CONNECTIONS)
             for (uint32_t j = i; j < m_client_count - 1U; ++j) {
-                m_client_fds[j]      = m_client_fds[j + 1U];
-                m_client_node_ids[j] = m_client_node_ids[j + 1U];
+                m_client_fds[j]            = m_client_fds[j + 1U];
+                m_client_node_ids[j]       = m_client_node_ids[j + 1U];
+                m_client_hello_received[j] = m_client_hello_received[j + 1U];  // REQ-6.1.8
             }
-            m_client_fds[m_client_count - 1U]      = -1;
-            m_client_node_ids[m_client_count - 1U] = NODE_ID_INVALID;
+            m_client_fds[m_client_count - 1U]            = -1;
+            m_client_node_ids[m_client_count - 1U]       = NODE_ID_INVALID;
+            m_client_hello_received[m_client_count - 1U] = false;  // REQ-6.1.8
             --m_client_count;
             ++m_connections_closed;  // REQ-7.2.4: connection removed
             NEVER_COMPILED_OUT_ASSERT(m_client_count < MAX_TCP_CONNECTIONS);  // Power of 10: post-condition
@@ -365,13 +371,24 @@ Result TcpBackend::recv_from_client(int client_fd, uint32_t timeout_ms)
     }
 
     // REQ-6.1.8: intercept HELLO frames before impairment processing.
-    // HELLO frames register the client's NodeId in the routing table and
-    // are never delivered to the DeliveryEngine.
+    // process_hello_frame() enforces one-HELLO-per-connection (Fix 4) and
+    // registers the client's NodeId in the routing table. HELLO frames are
+    // never delivered to the DeliveryEngine.
     if (env.message_type == MessageType::HELLO) {
         if (m_is_server) {
-            handle_hello_frame(client_fd, env.source_id);
+            return process_hello_frame(client_fd, env.source_id);
         }
-        return Result::ERR_AGAIN;  // consumed; not delivered to DeliveryEngine
+        return Result::ERR_AGAIN;  // client received HELLO echo; consumed
+    }
+
+    // REQ-6.1.11 / HAZ-009: reject data frames from unregistered slots (Fix 3).
+    // Clients must complete HELLO registration before any data frame is accepted.
+    // Security fix: prevents source_id spoofing from never-registered connections.
+    if (is_unregistered_slot(client_fd)) {
+        Logger::log(Severity::WARNING_HI, "TcpBackend",
+                    "data frame from unregistered slot fd=%d: dropping (REQ-6.1.11)",
+                    client_fd);
+        return Result::ERR_INVALID;
     }
 
     // REQ-6.1.11: validate envelope source_id against this slot's registered
@@ -838,6 +855,80 @@ void TcpBackend::handle_hello_frame(int client_fd, NodeId src_id)
     }
     Logger::log(Severity::WARNING_LO, "TcpBackend",
                 "handle_hello_frame: fd not found");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// is_unregistered_slot() — CC-reduction helper for recv_from_client (Fix 3)
+// REQ-6.1.11 / HAZ-009: detect non-HELLO frames from slots that never sent HELLO.
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Returns true when client_fd is found in the slot table AND its registered
+// NodeId is NODE_ID_INVALID (meaning HELLO has not yet been received).
+// Returns false when the slot is registered OR when fd is not in the table
+// (client-mode path — server never sends HELLO, so server slot has no NodeId).
+
+bool TcpBackend::is_unregistered_slot(int client_fd) const
+{
+    NEVER_COMPILED_OUT_ASSERT(client_fd >= 0);                        // Pre-condition
+    NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS); // Invariant
+
+    // Power of 10 rule 2: fixed loop bound (m_client_count ≤ MAX_TCP_CONNECTIONS)
+    for (uint32_t s = 0U; s < m_client_count; ++s) {
+        if (m_client_fds[s] == client_fd) {
+            return (m_client_node_ids[s] == static_cast<NodeId>(NODE_ID_INVALID));
+        }
+    }
+    // fd not found: client-mode path (server fd has no registered NodeId); allow.
+    return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// process_hello_frame() — REQ-6.1.8: one-HELLO-per-connection enforcement (Fix 4)
+// CC-reduction helper for recv_from_client().
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Looks up the slot for client_fd, rejects a second HELLO from an already-
+// registered slot (WARNING_HI + ERR_INVALID), and on first HELLO calls
+// handle_hello_frame() and sets m_client_hello_received[slot].
+// Returns ERR_AGAIN on success (frame consumed; not forwarded to DeliveryEngine).
+
+Result TcpBackend::process_hello_frame(int client_fd, NodeId src_id)
+{
+    NEVER_COMPILED_OUT_ASSERT(client_fd >= 0);              // Pre-condition: valid fd
+    NEVER_COMPILED_OUT_ASSERT(src_id != NODE_ID_INVALID);   // Pre-condition: valid NodeId
+
+    // Find the slot for this fd.
+    // Power of 10 rule 2: fixed loop bound (m_client_count ≤ MAX_TCP_CONNECTIONS)
+    uint32_t slot_idx = MAX_TCP_CONNECTIONS;
+    for (uint32_t i = 0U; i < m_client_count; ++i) {
+        if (m_client_fds[i] == client_fd) {
+            slot_idx = i;
+            break;
+        }
+    }
+
+    if (slot_idx >= MAX_TCP_CONNECTIONS) {
+        // fd not found — should never happen if called from recv_from_client
+        Logger::log(Severity::WARNING_HI, "TcpBackend",
+                    "process_hello_frame: fd=%d not in slot table", client_fd);
+        return Result::ERR_AGAIN;  // consume frame; nothing else we can do
+    }
+
+    // REQ-6.1.8 / Fix 4: reject duplicate HELLO from an already-registered slot.
+    if (m_client_hello_received[slot_idx]) {
+        Logger::log(Severity::WARNING_HI, "TcpBackend",
+                    "duplicate HELLO from slot %u fd=%d node_id=%u: dropping (REQ-6.1.8)",
+                    static_cast<unsigned>(slot_idx), client_fd,
+                    static_cast<unsigned>(src_id));
+        return Result::ERR_INVALID;
+    }
+
+    // First HELLO: register NodeId and mark slot as registered.
+    handle_hello_frame(client_fd, src_id);
+    m_client_hello_received[slot_idx] = true;
+
+    NEVER_COMPILED_OUT_ASSERT(m_client_hello_received[slot_idx]);  // Post-condition
+    return Result::ERR_AGAIN;  // consumed; not delivered to DeliveryEngine
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
