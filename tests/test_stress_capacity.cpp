@@ -1013,8 +1013,15 @@ static void test_reassembly_slot_recycling()
     static const uint64_t PAST_EXPIRY = 1ULL;                  // already expired
     static const uint64_t SWEEP_NOW   = 1000000ULL;            // t = 1 s
 
-    static const NodeId FRAG_SRC_A = 20U;  // source for Phase A (completion)
-    static const NodeId FRAG_SRC_B = 21U;  // source for Phase B (expiry)
+    static const NodeId FRAG_SRC_A = 20U;  // source for Phase A slots 0..(REASM_PER_SRC_MAX-1)
+    // H-series F-1: k_reasm_per_src_max = REASSEMBLY_SLOT_COUNT/2 in ReassemblyBuffer.cpp.
+    // A single peer may hold at most this many open reassembly slots.  Distribute Phase A
+    // sessions across two sources to stay within the per-source cap while still filling
+    // the global buffer to capacity.
+    static const uint32_t REASM_PER_SRC_MAX = REASSEMBLY_SLOT_COUNT / 2U;
+    static const NodeId FRAG_SRC_A2 = 40U;  // source for Phase A slots REASM_PER_SRC_MAX..end
+    static const NodeId FRAG_SRC_B  = 21U;  // source for Phase B slots 0..(REASM_PER_SRC_MAX-1)
+    static const NodeId FRAG_SRC_B2 = 41U;  // source for Phase B slots REASM_PER_SRC_MAX..end
 
     // Phase B IDs start far above Phase A to avoid any (src, msg_id) collision.
     static const uint64_t PHASE_B_BASE = 1000000ULL;
@@ -1023,16 +1030,19 @@ static void test_reassembly_slot_recycling()
     // Power of 10 Rule 2: bounded outer loop
     for (uint32_t cycle = 0U; cycle < REASSEMBLY_COMPLETE_CYCLES; ++cycle) {
 
-        // Open all 8 sessions (frag 0 only — session COLLECTING, not complete)
+        // Open all 8 sessions (frag 0 only — session COLLECTING, not complete).
+        // Distribute across FRAG_SRC_A and FRAG_SRC_A2 (REASM_PER_SRC_MAX each) to
+        // stay within the H-series F-1 per-source slot cap while filling the global buffer.
         // Power of 10 Rule 2: bounded inner loop
         for (uint32_t s = 0U; s < REASSEMBLY_SLOT_COUNT; ++s) {
             const uint64_t msg_id =
                 static_cast<uint64_t>(cycle) * static_cast<uint64_t>(REASSEMBLY_SLOT_COUNT)
                 + static_cast<uint64_t>(s) + 1ULL;
+            const NodeId src_a = (s < REASM_PER_SRC_MAX) ? FRAG_SRC_A : FRAG_SRC_A2;
             MessageEnvelope frag;
             MessageEnvelope out;
             envelope_init(out);
-            stress_make_frag(frag, msg_id, FRAG_SRC_A, 0U, 2U, TOTAL_LEN,
+            stress_make_frag(frag, msg_id, src_a, 0U, 2U, TOTAL_LEN,
                              FAR_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
             Result r = buf.ingest(frag, out, 1000000ULL);
             assert(r == Result::ERR_AGAIN);  // frag 0: session opens, not yet complete
@@ -1051,16 +1061,18 @@ static void test_reassembly_slot_recycling()
             assert(r == Result::ERR_FULL);  // no slot overrun permitted
         }
 
-        // Complete all 8 sessions (frag 1 → assemble_and_free() frees the slot)
+        // Complete all 8 sessions (frag 1 → assemble_and_free() frees the slot).
+        // Must use the same source distribution as the open loop above.
         // Power of 10 Rule 2: bounded inner loop
         for (uint32_t s = 0U; s < REASSEMBLY_SLOT_COUNT; ++s) {
             const uint64_t msg_id =
                 static_cast<uint64_t>(cycle) * static_cast<uint64_t>(REASSEMBLY_SLOT_COUNT)
                 + static_cast<uint64_t>(s) + 1ULL;
+            const NodeId src_a = (s < REASM_PER_SRC_MAX) ? FRAG_SRC_A : FRAG_SRC_A2;
             MessageEnvelope frag;
             MessageEnvelope out;
             envelope_init(out);
-            stress_make_frag(frag, msg_id, FRAG_SRC_A, 1U, 2U, TOTAL_LEN,
+            stress_make_frag(frag, msg_id, src_a, 1U, 2U, TOTAL_LEN,
                              FAR_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
             Result r = buf.ingest(frag, out, 1000000ULL);
             assert(r == Result::OK);           // frag 1: message complete
@@ -1091,16 +1103,19 @@ static void test_reassembly_slot_recycling()
     // Power of 10 Rule 2: bounded outer loop
     for (uint32_t cycle = 0U; cycle < REASSEMBLY_EXPIRY_CYCLES; ++cycle) {
 
-        // Open all 8 sessions with an already-expired expiry_us
+        // Open all 8 sessions with an already-expired expiry_us.
+        // Distribute across FRAG_SRC_B and FRAG_SRC_B2 (REASM_PER_SRC_MAX each) to
+        // stay within the H-series F-1 per-source slot cap while filling the global buffer.
         // Power of 10 Rule 2: bounded inner loop
         for (uint32_t s = 0U; s < REASSEMBLY_SLOT_COUNT; ++s) {
             const uint64_t msg_id = PHASE_B_BASE
                 + static_cast<uint64_t>(cycle) * static_cast<uint64_t>(REASSEMBLY_SLOT_COUNT)
                 + static_cast<uint64_t>(s) + 1ULL;
+            const NodeId src_b = (s < REASM_PER_SRC_MAX) ? FRAG_SRC_B : FRAG_SRC_B2;
             MessageEnvelope frag;
             MessageEnvelope out;
             envelope_init(out);
-            stress_make_frag(frag, msg_id, FRAG_SRC_B, 0U, 2U, TOTAL_LEN,
+            stress_make_frag(frag, msg_id, src_b, 0U, 2U, TOTAL_LEN,
                              PAST_EXPIRY, &FRAG_BYTE, FRAG_BYTES);
             Result r = buf.ingest(frag, out, 1000000ULL);
             assert(r == Result::ERR_AGAIN);  // frag 0 accepted; session COLLECTING
