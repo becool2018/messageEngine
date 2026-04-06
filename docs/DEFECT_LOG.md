@@ -758,6 +758,55 @@ Moderator: Don Jessup — 2026-04-06. All five defects (DEF-015-1 through DEF-01
 
 ---
 
+### INSP-016 — Security hardening: PRNG div-by-zero, key zeroize, ASLR leak, seq overflow, entropy fallback (2026-04-06)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-06 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | CLOSED — 5 security defects found and fixed (commit 18e6d1a) |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `src/platform/PrngEngine.hpp`, `tests/test_PrngEngine.cpp` | DEF-016-1: next_range() range computed as uint64_t — eliminates CERT INT33-C divide-by-zero UB when hi==UINT32_MAX. New full-span test sub-case added. |
+| `src/platform/TlsTcpBackend.cpp`, `src/platform/DtlsUdpBackend.cpp` | DEF-016-2/3: mbedtls_platform_zeroize(&m_pkey) added after pk_free() in both destructors; cert structs also zeroized (§7c / CWE-14). |
+| `src/platform/ImpairmentEngine.cpp` | DEF-016-4: Remove reinterpret_cast<uintptr_t>(this) ASLR-leaking XOR; replace 0xDEADBEEFCAFEBABE known-constant fallback with clock()^getpid() mix (REQ-5.2.4). |
+| `src/core/OrderingBuffer.cpp`, `src/core/OrderingBuffer.hpp`, `tests/test_OrderingBuffer.cpp` | DEF-016-5: seq_next_guarded() helper wraps UINT32_MAX+1 to 1 (not 0) in sweep_expired_holds() — CERT INT30-C. New test14 verifies no permanent stall. |
+| `src/core/DeliveryEngine.cpp` | DEF-016-6: get_seed_entropy() helper adds /dev/urandom secondary fallback; last resort mixes clock()^getpid()^timestamp instead of clock() alone (REQ-5.2.4). |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations | PASS |
+| `make run_tests` all tests green | PASS |
+| All modified `src/` files carry `// Implements: REQ-x.x` tags | PASS |
+| No raw `assert()` in `src/` | PASS |
+| No dynamic allocation on critical paths after init | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Defects found
+
+| ID | File | Description | Severity | Disposition |
+|----|------|-------------|----------|-------------|
+| DEF-016-1 | `src/platform/PrngEngine.hpp` | next_range() computes hi-lo+1 as uint32_t; hi==UINT32_MAX wraps to 0; raw%0 is UB (CERT INT33-C, HAZ-013). Crash under boundary impairment config. | CRITICAL | Fixed: range64 = (uint64_t)hi - (uint64_t)lo + 1ULL; never zero for valid inputs. |
+| DEF-016-2 | `src/platform/TlsTcpBackend.cpp` | mbedtls_pk_free() called without mbedtls_platform_zeroize(); private key recoverable from freed heap (§7c / CWE-14, HAZ-012). | CRITICAL | Fixed: mbedtls_platform_zeroize(&m_pkey, sizeof(m_pkey)) added after pk_free() in destructor. |
+| DEF-016-3 | `src/platform/DtlsUdpBackend.cpp` | Same as DEF-016-2 on DTLS side (HAZ-012). | CRITICAL | Fixed: same pattern as DEF-016-2. |
+| DEF-016-4 | `src/platform/ImpairmentEngine.cpp` | seed XORed with reinterpret_cast<uintptr_t>(this) leaks ASLR base; 0xDEADBEEFCAFEBABE fallback is a known constant — both violate REQ-5.2.4. | MAJOR | Fixed: this-pointer XOR removed; known-constant replaced with clock()^getpid() mix. |
+| DEF-016-5 | `src/core/OrderingBuffer.cpp` | sweep_expired_holds() passes sequence_num+1U to advance_sequence(); wraps to 0 on UINT32_MAX — ordering gate stalls permanently (CERT INT30-C, HAZ-014). | MAJOR | Fixed: seq_next_guarded() wraps to 1 (not 0); new test14 verifies behavior. |
+| DEF-016-6 | `src/core/DeliveryEngine.cpp` | getrandom() failure falls back to clock() only (~10-20 bits entropy) — violates REQ-5.2.4 prohibition on time-only seeds. | MAJOR | Fixed: /dev/urandom tried first; last resort mixes clock()^getpid()^timestamp. |
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-06. All six defects (DEF-016-1 through DEF-016-6) resolved in commit 18e6d1a. All entry and exit criteria satisfied. Inspection INSP-016 closed PASS.
+
+---
+
 ### INSP-014 — Security hardening: integer safety and input validation (S1–S5) (2026-04-06)
 
 | Field       | Value |
