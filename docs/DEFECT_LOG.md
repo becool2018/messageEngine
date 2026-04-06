@@ -647,3 +647,62 @@ Moderator: Don Jessup — 2026-04-05. DEF-011-1 resolved. All entry and exit cri
 
 **Exit**: All defects dispositioned. make lint and make run_tests pass. Traceability complete.
 
+---
+
+### INSP-013 — Security hardening: cipher suite restriction, session ticket key management, unregistered-slot blocking, one-HELLO-per-connection, ssl_context copy elimination
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-06 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | CLOSED — 5 security defects found and fixed (commits 4c714bd, ca961de, 0057d56) |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `src/platform/DtlsUdpBackend.cpp` | Fix 1: `setup_dtls_config()` now calls `mbedtls_ssl_conf_ciphersuites()` with AEAD-only allowlist and enforces TLS 1.2 minimum via `mbedtls_ssl_conf_min_tls_version()`; prohibits CBC, RSA key exchange, and NULL ciphers |
+| `src/platform/TlsTcpBackend.cpp` | Fix 1: `setup_tls_config()` same cipher suite restriction and TLS 1.2 minimum enforcement; Fix 2: `setup_session_tickets()` helper calls `mbedtls_ssl_ticket_setup()` with configured `session_ticket_lifetime_s`; ticket context freed/re-inited in `close()` and destructor; Fix 3: `recv_from_client()` rejects non-HELLO frames from slots where `m_client_node_ids[slot] == NODE_ID_INVALID`; Fix 4: second HELLO from same slot rejected with WARNING_HI; Fix 5: `m_client_slot_active[]` flag array replaces ssl context array compaction in `remove_client()`, eliminating UB bitwise copy of opaque mbedTLS structs |
+| `src/platform/TlsTcpBackend.hpp` | Fix 2: added `mbedtls_ssl_ticket_context m_ticket_ctx`; Fix 4: added `m_client_hello_received[MAX_TCP_CONNECTIONS]`; Fix 5: added `m_client_slot_active[MAX_TCP_CONNECTIONS]` |
+| `src/platform/TcpBackend.cpp` | Fix 3: `recv_from_client()` rejects non-HELLO frames from unregistered slots; Fix 4: second HELLO from same slot rejected with WARNING_HI |
+| `src/platform/TcpBackend.hpp` | Fix 4: added `m_client_hello_received[MAX_TCP_CONNECTIONS]` |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations (CC ≤ 10 enforced) | PASS |
+| `make run_tests` all tests green | PASS |
+| All new/modified `src/` files carry `// Implements: REQ-x.x` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Defects found
+
+| ID | File : function | Description | Severity | Disposition | Resolution |
+|----|----------------|-------------|----------|-------------|------------|
+| DEF-013-1 | `src/platform/DtlsUdpBackend.cpp` / `src/platform/TlsTcpBackend.cpp` : `setup_dtls_config()` / `setup_tls_config()` | **Cipher suite downgrade not blocked.** Neither backend restricted the negotiated cipher suite; a peer could negotiate CBC, NULL, or RSA key-exchange ciphers, undermining transport confidentiality and integrity guarantees. Affects DtlsUdpBackend (ca961de) and TlsTcpBackend (0057d56). | MAJOR | FIX | `mbedtls_ssl_conf_ciphersuites()` called with AEAD-only allowlist; `mbedtls_ssl_conf_min_tls_version()` enforces TLS 1.2 minimum in both backends. |
+| DEF-013-2 | `src/platform/TlsTcpBackend.cpp` : `setup_tls_config()` | **Session ticket key not managed.** TLS session resumption was wired but the ticket context was never initialized with a server key, leaving session ticket encryption undefined. Commit 0057d56. | MAJOR | FIX | Added `mbedtls_ssl_ticket_context m_ticket_ctx`; `maybe_setup_session_tickets()` calls `mbedtls_ssl_ticket_setup()` with configured lifetime; context freed/re-inited in `close()` and destructor. |
+| DEF-013-3 | `src/platform/TcpBackend.cpp`, `src/platform/TlsTcpBackend.cpp` : `recv_from_client()` | **Data frames accepted from unregistered slots.** Both TCP backends passed non-HELLO frames to DeliveryEngine before a HELLO had been received for the slot, allowing data injection before NodeId binding. Directly mitigates HAZ-009 / REQ-6.1.11. Commits 4c714bd, 0057d56. | MAJOR | FIX | `is_unregistered_slot()` / `classify_inbound_frame()` now rejects any non-HELLO frame from a slot where `m_client_node_ids[slot] == NODE_ID_INVALID`; frame silently discarded with WARNING_HI. |
+| DEF-013-4 | `src/platform/TcpBackend.cpp`, `src/platform/TlsTcpBackend.cpp` : `recv_from_client()` | **HELLO frame could be replayed mid-session to hijack NodeId.** A second HELLO from an already-registered slot was accepted and silently overwrote the routing table entry, enabling NodeId substitution after initial registration. Commits 4c714bd, 0057d56. | MAJOR | FIX | Added `m_client_hello_received[MAX_TCP_CONNECTIONS]`; `process_hello_frame()` / `classify_inbound_frame()` rejects duplicate HELLO with WARNING_HI; routing table entry is immutable after first registration. |
+| DEF-013-5 | `src/platform/TlsTcpBackend.cpp` : `remove_client()` | **Undefined behavior via ssl_context shallow copy.** `remove_client()` used array compaction (memmove / struct assignment) to close gaps in the `m_ssl[]` array. Bitwise copy of opaque `mbedtls_ssl_context` structs is explicitly prohibited by the mbedTLS API and produces undefined behavior, risking use-after-free of internal pointers. Commit 0057d56. | CRITICAL | FIX | Added `m_client_slot_active[MAX_TCP_CONNECTIONS]` flag array. `remove_client()` now marks slot inactive and re-inits the ssl context in-place; all iteration loops skip inactive slots. No ssl context is ever copied. |
+
+#### Checklist reference
+
+All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
+- DEF-013-5 (CRITICAL): `mbedtls_ssl_context` is never bitwise-copied; `remove_client()` uses in-place free + re-init at fixed slot index. ✓
+- DEF-013-3/4: `recv_from_client()` SC classification updated to HAZ-009 in HAZARD_ANALYSIS.md §3. ✓
+- Power of 10 Rule 3: `m_client_hello_received[]` and `m_client_slot_active[]` are fixed-size member arrays; no heap allocation. ✓
+- Power of 10 Rule 2: all loops over `MAX_TCP_CONNECTIONS` are statically bounded. ✓
+- MISRA C++:2023: no C-style casts; no reinterpret_cast on ssl context; no UB copy. ✓
+- FMEA: five new rows added to HAZARD_ANALYSIS.md §2. ✓
+- §7c secure zeroing: `mbedtls_ssl_ticket_free()` called in `close()` and destructor for Fix 2. ✓
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-06. All five defects (DEF-013-1 through DEF-013-5) resolved in commits 4c714bd, ca961de, 0057d56. All entry and exit criteria satisfied. Inspection INSP-013 closed PASS.
+
