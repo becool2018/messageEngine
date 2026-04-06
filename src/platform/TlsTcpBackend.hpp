@@ -53,19 +53,21 @@
  *
  * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4,
  *             REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6,
- *             REQ-6.1.8, REQ-6.1.9, REQ-6.1.10,
+ *             REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11,
  *             REQ-6.3.4, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #ifndef PLATFORM_TLS_TCP_BACKEND_HPP
 #define PLATFORM_TLS_TCP_BACKEND_HPP
 
 #include <cstdint>
+#include <poll.h>          // struct pollfd — used in build_poll_fds() helper
 #include <mbedtls/ssl.h>
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/pk.h>
+#include <mbedtls/ssl_ticket.h>   // Fix 2: session ticket key context (REQ-6.3.4)
 
 #include "core/Assert.hpp"
 #include "core/TransportInterface.hpp"
@@ -122,9 +124,13 @@ private:
     /// Saved TLS session for client-side resumption (session tickets, RFC 5077).
     /// Fixed-size mbedTLS struct — no dynamic allocation (Power of 10 Rule 3).
     /// Initialized in both constructors; freed in close() and destructor.
-    mbedtls_ssl_session m_saved_session;
+    mbedtls_ssl_session    m_saved_session;
     /// true when m_saved_session contains a valid, resumable TLS session.
-    bool                m_session_saved;
+    bool                   m_session_saved;
+    /// Fix 2: session ticket key context — holds ticket encryption key and lifetime.
+    /// Initialized in both constructors; setup in setup_tls_config(); freed in
+    /// close() and destructor. Server-side only (REQ-6.3.4).
+    mbedtls_ssl_ticket_context m_ticket_ctx;
 
     // ── Injected socket operations interface ─────────────────────────────────
     ISocketOps*       m_sock_ops;                          ///< Non-owning; never null after ctor
@@ -142,6 +148,8 @@ private:
     uint32_t          m_connections_closed;       ///< REQ-7.2.4: disconnect events
     NodeId            m_client_node_ids[MAX_TCP_CONNECTIONS];  ///< NodeId per client slot (NODE_ID_INVALID = unknown) — REQ-6.1.9
     NodeId            m_local_node_id;            ///< Our own node identity (set by register_local_id) — REQ-6.1.10
+    bool              m_client_hello_received[MAX_TCP_CONNECTIONS]; ///< True once HELLO received for this slot — REQ-6.1.8
+    bool              m_client_slot_active[MAX_TCP_CONNECTIONS]; ///< Fix 5: true = slot in use; avoids ssl_context copy
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
@@ -152,6 +160,33 @@ private:
     /// Load CA cert (if verify_peer), own cert, private key; bind to ssl_conf.
     /// Extracted from setup_tls_config() to reduce its CC.
     Result load_tls_certs(const TlsConfig& tls_cfg);
+
+    /// Set up the session ticket context and register callbacks on m_ssl_conf.
+    /// Fix 2: extracted from setup_tls_config() to keep its CC ≤ 10 (REQ-6.3.4).
+    /// Called only when session_resumption_enabled is true.
+    Result setup_session_tickets(uint32_t lifetime_s);
+
+    /// Apply Fix 1 cipher suite restriction and minimum TLS version to m_ssl_conf.
+    /// Extracted from setup_tls_config() to reduce its cognitive complexity.
+    void apply_cipher_policy();
+
+    /// Configure session tickets if session_resumption_enabled; no-op otherwise.
+    /// Fix 2: extracted from setup_tls_config() to reduce its CC (REQ-6.3.4).
+    Result maybe_setup_session_tickets(const TlsConfig& tls_cfg);
+
+    /// Handle an inbound HELLO frame (Fix 4) or reject data from unregistered
+    /// slots (Fix 3). Extracted from recv_from_client() to keep its CC ≤ 10.
+    /// @param[in]  idx  Client slot index.
+    /// @param[in]  env  Deserialized inbound envelope.
+    /// @return ERR_AGAIN if HELLO consumed; ERR_INVALID if rejected;
+    ///         OK if envelope should proceed to validate_source_id + impairment.
+    Result classify_inbound_frame(uint32_t idx, const MessageEnvelope& env);
+
+    /// Build pollfd array for active client slots and run poll().
+    /// Fix 5: extracted from poll_clients_once() to keep its CC ≤ 10.
+    /// Fills pfds[] and slot_of[] and returns the number of fds populated.
+    uint32_t build_poll_fds(struct pollfd* pfds, uint32_t* slot_of,
+                            uint32_t timeout_ms) const;
 
     /// Bind listen socket and start accepting (server mode).
     Result bind_and_listen(const char* ip, uint16_t port);
@@ -223,10 +258,12 @@ private:
 
     /// Find the client array slot for a given destination NodeId.
     /// REQ-6.1.9: unicast routing lookup.
-    /// @return slot index in [0, m_client_count) or MAX_TCP_CONNECTIONS if not found.
+    /// Fix 5: iterates MAX_TCP_CONNECTIONS, skipping inactive slots.
+    /// @return slot index in [0, MAX_TCP_CONNECTIONS) or MAX_TCP_CONNECTIONS if not found.
     uint32_t find_client_slot(NodeId dst) const;
 
     /// Send serialized data to a single client slot via tls_send_frame.
+    /// Fix 5: validates m_client_slot_active[slot] before sending.
     /// @param[in] slot  Client array index.
     /// @param[in] buf   Serialized frame data.
     /// @param[in] len   Frame length in bytes.
