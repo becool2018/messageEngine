@@ -118,6 +118,14 @@ REQ-6.1.11 is now enforced:
   frames from the server with a different `source_id` are logged at WARNING_HI and dropped.
   This prevents mid-session source_id substitution on the client side.
 
+- **Client mode (TcpBackend — plaintext TCP):** The first non-invalid `source_id`
+  received from the server is locked in to `m_client_node_ids[0U]` (SEC-025). Subsequent
+  frames from the server fd with a different `source_id` are rejected by
+  `validate_source_id()` with WARNING_HI and discarded. Mirrors TlsTcpBackend SEC-011.
+  Prior to this fix, the client-mode slot remained `NODE_ID_INVALID` for the session
+  lifetime, allowing an attacker with access to the TCP stream to exhaust `DuplicateFilter`
+  and `OrderingBuffer` capacity by rotating arbitrary `source_id` values (HAZ-016).
+
 REQ-6.2.4 is now enforced:
 
 - **DtlsUdpBackend:** `process_hello_or_validate()` requires a HELLO frame before any
