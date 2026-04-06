@@ -146,6 +146,12 @@ private:
     /// On wraparound (0xFFFFFFFF -> 0), logs WARNING_HI and resets to 1U.
     /// Power of 10 Rule 5: 2 assertions. CC <= 10.
     void advance_next_expected(uint32_t peer_idx);
+
+    /// Return seq + 1, guarded against uint32_t wraparound.
+    /// CERT INT30-C: if seq == UINT32_MAX, returns 1 (matching advance_next_expected()
+    /// wraparound policy) and logs WARNING_HI. Never returns 0 (the UNORDERED sentinel).
+    /// Power of 10 Rule 5: 2 assertions. CC <= 10.
+    static uint32_t seq_next_guarded(uint32_t seq);
 };
 
 #endif // CORE_ORDERING_BUFFER_HPP

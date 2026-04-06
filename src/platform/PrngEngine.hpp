@@ -123,8 +123,15 @@ public:
     /**
      * @brief Generate a pseudorandom integer in [lo, hi].
      *
-     * Uses modulo arithmetic: lo + (next() % (hi - lo + 1)).
-     * Assumes hi >= lo (asserted).
+     * Uses modulo arithmetic: lo + (next() % range64), where range64 is
+     * computed as uint64_t to prevent unsigned wrap when hi == UINT32_MAX
+     * and lo == 0 (which would produce range==0 and trigger divide-by-zero
+     * UB if range were kept as uint32_t — CERT INT33-C).
+     *
+     * range64 is always in [1, 2^32] for valid hi >= lo inputs, so it is
+     * never zero.  The modulo result fits in uint32_t: when range64 == 2^32
+     * the result spans [0, UINT32_MAX], all of which fit; for smaller
+     * range64 the result is strictly less than range64 <= UINT32_MAX.
      *
      * @param[in] lo Lower bound (inclusive).
      * @param[in] hi Upper bound (inclusive).
@@ -134,13 +141,26 @@ public:
     {
         // Power of 10 rule 5: precondition assertions
         NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL);  // Assert: state initialized
-        NEVER_COMPILED_OUT_ASSERT(hi >= lo);  // Assert: valid range
+        NEVER_COMPILED_OUT_ASSERT(hi >= lo);          // Assert: valid range
 
         uint64_t raw = next();
-        uint32_t range = hi - lo + 1U;
 
-        // Compute result in [lo, hi]
-        uint32_t offset = static_cast<uint32_t>(raw % static_cast<uint64_t>(range));
+        // CERT INT33-C: compute range as uint64_t to prevent unsigned wrap
+        // when hi == UINT32_MAX and lo == 0 (uint32_t result would be 0,
+        // causing divide-by-zero UB).  Cast both operands to uint64_t before
+        // subtraction so no intermediate result can wrap.
+        uint64_t range64 = static_cast<uint64_t>(hi)
+                         - static_cast<uint64_t>(lo)
+                         + 1ULL;
+
+        // Assert: range is non-zero for all valid hi >= lo inputs (CERT INT33-C).
+        NEVER_COMPILED_OUT_ASSERT(range64 > 0ULL);
+
+        // Safe narrowing: raw % range64 < range64.  When range64 == 2^32,
+        // raw % range64 is in [0, UINT32_MAX], which fits in uint32_t.
+        // For all smaller range64 the value is strictly less than UINT32_MAX.
+        // MISRA C++:2023: static_cast used for all conversions (no C-style casts).
+        uint32_t offset = static_cast<uint32_t>(raw % range64);
         uint32_t result = lo + offset;
 
         // Power of 10 rule 5: postcondition assertion

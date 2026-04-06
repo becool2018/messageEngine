@@ -24,6 +24,7 @@
  *   - next_double() always in [0.0, 1.0)
  *   - next_range(lo, hi) always in [lo, hi]
  *   - next_range(lo, lo) always returns lo (degenerate single-value range)
+ *   - next_range(0, UINT32_MAX) — full span, formerly caused divide-by-zero UB
  *   - Two independent engines seeded identically produce the same sequence
  *
  * Rules applied:
@@ -230,33 +231,47 @@ static bool test_next_range_degenerate()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 10: next_range with a large (but non-overflowing) span [0, UINT32_MAX-1]
+// Test 10: next_range with wide spans including the full [0, UINT32_MAX] range.
 //
-// Note: next_range(0, UINT32_MAX) overflows the internal range computation
-// (hi - lo + 1 wraps to 0) and is therefore not a valid input.  The largest
-// valid call is next_range(0, UINT32_MAX - 1).
+// The CERT INT33-C fix computes the range as uint64_t, so next_range(0,
+// UINT32_MAX) is now valid — range64 == 2^32, which is non-zero, and every
+// result in [0, UINT32_MAX] fits in uint32_t.
 // ─────────────────────────────────────────────────────────────────────────────
 // Verifies: REQ-5.2.4
 static bool test_next_range_wide_span()
 {
+    // Sub-test A: full-span [0, UINT32_MAX] — previously triggered divide-by-zero
+    // due to uint32_t wrap; now safe with uint64_t range computation (CERT INT33-C).
     PrngEngine prng;
     prng.seed(161803398ULL);
 
-    static const uint32_t WIDE_HI = UINT32_MAX - 1U;  // largest non-overflowing hi
-
     // Power of 10 rule 2: fixed loop bound
     for (uint32_t i = 0U; i < 16U; ++i) {
-        uint32_t v = prng.next_range(0U, WIDE_HI);
+        uint32_t v = prng.next_range(0U, UINT32_MAX);
+        // Every uint32_t value is in [0, UINT32_MAX] by definition;
+        // the postcondition assert inside next_range() also checks this.
+        (void)v;
+        assert(v <= UINT32_MAX);  // tautological, but documents the intent
+    }
+
+    // Sub-test B: [0, UINT32_MAX - 1] — original "wide but non-overflowing" case,
+    // retained to verify the ordinary large-span path is still correct.
+    PrngEngine prng_b;
+    prng_b.seed(271828182ULL);
+    static const uint32_t WIDE_HI = UINT32_MAX - 1U;
+
+    for (uint32_t i = 0U; i < 16U; ++i) {
+        uint32_t v = prng_b.next_range(0U, WIDE_HI);
         assert(v <= WIDE_HI);  // must stay within [0, WIDE_HI]
         (void)v;
     }
 
-    // Verify with a large lo as well
-    PrngEngine prng2;
-    prng2.seed(1ULL);
+    // Sub-test C: large lo value near UINT32_MAX
+    PrngEngine prng_c;
+    prng_c.seed(1ULL);
     static const uint32_t LARGE_LO = 0xFFFFFFF0U;
     static const uint32_t LARGE_HI = 0xFFFFFFFEU;  // hi - lo + 1 = 15, no overflow
-    uint32_t v = prng2.next_range(LARGE_LO, LARGE_HI);
+    uint32_t v = prng_c.next_range(LARGE_LO, LARGE_HI);
     assert(v >= LARGE_LO);  // lower bound
     assert(v <= LARGE_HI);  // upper bound
 

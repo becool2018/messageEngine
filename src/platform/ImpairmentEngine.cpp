@@ -33,6 +33,7 @@
 #include "core/Logger.hpp"
 #include <cstring>
 #include <ctime>
+#include <unistd.h>
 #if !defined(__APPLE__)
 #include <sys/random.h>
 #endif
@@ -110,13 +111,20 @@ void ImpairmentEngine::init(const ImpairmentConfig& cfg)
             }
         }
 #endif
-        // XOR with address of the engine instance for additional process-specific entropy.
-        // reinterpret_cast: MISRA 5.2.4 — converting pointer to integer for entropy mixing;
-        // no safer cast available; this is the only use.
-        entropy ^= reinterpret_cast<uintptr_t>(this);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
-        // Guard: if entropy is still 0 after gathering (astronomically unlikely), use a
-        // non-zero fallback so the PRNG is never seeded with a known-weak value.
-        seed = (entropy != 0ULL) ? entropy : 0xDEADBEEFCAFEBABEULL;
+        // Guard: entropy all-zero after OS gather is astronomically unlikely but possible.
+        // Mix additional sources rather than fall back to a known literal (REQ-5.2.4).
+        if (entropy == 0ULL) {
+            // POSIX: getpid() returns the process ID; combined with clock() gives ~30+ bits.
+            // Neither alone is cryptographic but the combination avoids a known-constant seed.
+            entropy = (static_cast<uint64_t>(clock()) << 32U)
+                      ^ static_cast<uint64_t>(getpid());
+            // Ensure non-zero (PrngEngine requires non-zero seed)
+            if (entropy == 0ULL) { entropy = 1ULL; }
+            Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
+                        "OS entropy was zero; using clock/pid fallback — not cryptographically secure");
+        }
+        // REQ-5.2.4: no known-constant fallback
+        seed = entropy;
     }
     m_prng.seed(seed);
 

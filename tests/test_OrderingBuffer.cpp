@@ -602,6 +602,83 @@ static bool test_sweep_expired_holds_no_expiry()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 14: sweep_expired_holds() with sequence_num == UINT32_MAX (CERT INT30-C)
+// Verifies: REQ-3.3.5
+//
+// When a held slot has sequence_num == UINT32_MAX, the naive "+1U" wraps to 0
+// (the UNORDERED sentinel); advance_sequence() is then a no-op (0 > next_expected
+// is always false), stalling the gate.  The guard resets to 1 instead, consistent
+// with advance_next_expected()'s wraparound policy.
+//
+// Scenario: advance next_expected to UINT32_MAX-1, hold seq=UINT32_MAX (expired),
+// sweep → freed==1, then deliver UINT32_MAX-1 and UINT32_MAX in-order to confirm
+// the gate wraps correctly to next_expected==1.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.3.5
+static bool test_sweep_expired_holds_sequence_num_uint32_max()
+{
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    const NodeId SRC = 98U;
+
+    // Register peer via in-order delivery of seq=1.
+    MessageEnvelope m1;
+    make_ordered(m1, SRC, 1U, 0x01U);
+    MessageEnvelope out;
+    envelope_init(out);
+    Result r1 = buf.ingest(m1, out, 1000000ULL);
+    assert(r1 == Result::OK);        // Assert: seq=1 delivered; peer registered
+    assert(out.sequence_num == 1U);  // Assert: correct sequence delivered
+
+    // Advance next_expected to UINT32_MAX-1; seq=UINT32_MAX is one step ahead.
+    buf.advance_sequence(SRC, 0xFFFFFFFEU);
+
+    // Ingest seq=UINT32_MAX with a past expiry — held (out-of-order by 1).
+    MessageEnvelope mmax;
+    make_ordered(mmax, SRC, 0xFFFFFFFFU, 0xFFU);
+    mmax.expiry_time_us = 1U;
+    Result rmax = buf.ingest(mmax, out, 2000000ULL);
+    assert(rmax == Result::ERR_AGAIN);  // Assert: held out-of-order
+
+    // Sweep at future time — CERT INT30-C guard fires: next_seq = 1 (not 0).
+    MessageEnvelope freed_buf[ORDERING_HOLD_COUNT];
+    for (uint32_t i = 0U; i < ORDERING_HOLD_COUNT; ++i) {
+        envelope_init(freed_buf[i]);
+    }
+    uint32_t freed = buf.sweep_expired_holds(3000000ULL, freed_buf, ORDERING_HOLD_COUNT);
+    assert(freed == 1U);                              // Assert: exactly one slot freed
+    assert(freed_buf[0].sequence_num == 0xFFFFFFFFU); // Assert: freed UINT32_MAX slot
+    assert(freed_buf[0].source_id == SRC);            // Assert: correct source
+
+    // Deliver seq=UINT32_MAX-1 (current next_expected) in-order.
+    MessageEnvelope mfe;
+    make_ordered(mfe, SRC, 0xFFFFFFFEU, 0xFEU);
+    mfe.expiry_time_us = 9000000ULL;
+    Result rfe = buf.ingest(mfe, out, 3000001ULL);
+    assert(rfe == Result::OK);               // Assert: seq=UINT32_MAX-1 in-order
+    assert(out.sequence_num == 0xFFFFFFFEU); // Assert: correct sequence
+
+    // Deliver seq=UINT32_MAX in-order; advance_next_expected() wraps to 1.
+    MessageEnvelope mff;
+    make_ordered(mff, SRC, 0xFFFFFFFFU, 0xFEU);
+    mff.expiry_time_us = 9000000ULL;
+    Result rff = buf.ingest(mff, out, 3000002ULL);
+    assert(rff == Result::OK);               // Assert: seq=UINT32_MAX delivered
+    assert(out.sequence_num == 0xFFFFFFFFU); // Assert: correct sequence
+
+    // next_expected is now 1; seq=1 must be accepted as in-order.
+    MessageEnvelope m1b;
+    make_ordered(m1b, SRC, 1U, 0xA1U);
+    m1b.expiry_time_us = 9000000ULL;
+    Result r1b = buf.ingest(m1b, out, 3000003ULL);
+    assert(r1b == Result::OK);       // Assert: seq=1 accepted after full wraparound
+    assert(out.sequence_num == 1U);  // Assert: correct sequence returned
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -659,6 +736,10 @@ int main()
     if (!test_sweep_expired_holds_no_expiry()) {
         printf("FAIL: test_sweep_expired_holds_no_expiry\n"); ++failed;
     } else { printf("PASS: test_sweep_expired_holds_no_expiry\n"); }
+
+    if (!test_sweep_expired_holds_sequence_num_uint32_max()) {
+        printf("FAIL: test_sweep_expired_holds_sequence_num_uint32_max\n"); ++failed;
+    } else { printf("PASS: test_sweep_expired_holds_sequence_num_uint32_max\n"); }
 
     return (failed > 0) ? 1 : 0;
 }

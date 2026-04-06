@@ -312,6 +312,32 @@ void OrderingBuffer::advance_sequence(NodeId src, uint32_t up_to_seq)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// OrderingBuffer::seq_next_guarded (private, static)
+// Returns seq + 1, guarded against uint32_t wraparound (CERT INT30-C).
+// If seq == UINT32_MAX, logs WARNING_HI and returns 1 (matching
+// advance_next_expected() wraparound policy).  Never returns 0.
+// Power of 10 Rule 5: 2 assertions. CC <= 10.
+// ─────────────────────────────────────────────────────────────────────────────
+uint32_t OrderingBuffer::seq_next_guarded(uint32_t seq)
+{
+    NEVER_COMPILED_OUT_ASSERT(seq != 0U);  // Assert: 0 is the UNORDERED sentinel; must not be held
+
+    uint32_t next = seq;
+    if (seq < UINT32_MAX) {
+        next = seq + 1U;
+    } else {
+        // CERT INT30-C: UINT32_MAX + 1 would wrap to 0 (the UNORDERED sentinel).
+        // Reset to 1 instead, consistent with advance_next_expected() policy.
+        Logger::log(Severity::WARNING_HI, "OrderingBuffer",
+                    "sequence_num UINT32_MAX in seq_next_guarded; resetting to 1");
+        next = 1U;
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(next != 0U);  // Assert: result is never the UNORDERED sentinel
+    return next;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // OrderingBuffer::sweep_expired_holds — SC: HAZ-001 (Issue 3 fix)
 // Walks held slots; for any whose expiry_time_us has passed, copies the freed
 // envelope into out_freed[] (if capacity allows), calls advance_sequence()
@@ -342,8 +368,9 @@ uint32_t OrderingBuffer::sweep_expired_holds(uint64_t         now_us,
                 envelope_copy(out_freed[freed], m_hold[i].env);
             }
             // Advance past this sequence so later frames can be delivered.
+            // seq_next_guarded() enforces CERT INT30-C: never wraps to 0.
             advance_sequence(m_hold[i].env.source_id,
-                             m_hold[i].env.sequence_num + 1U);
+                             seq_next_guarded(m_hold[i].env.sequence_num));
             m_hold[i].active = false;
             ++freed;
         }
