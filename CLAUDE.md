@@ -336,6 +336,13 @@ The impairment engine must be able to apply, per channel or globally:
   - [REQ-6.4.5] When `tls_enabled == false`, fall through to the plain UDP socket path
     (no handshake, no certificate loading); allow the same DtlsUdpBackend code to operate
     in plaintext mode for testing without changing higher layers.
+- [REQ-6.4.6] DTLS peer hostname verification:
+    When `verify_peer == true` and `peer_hostname` is non-empty, the DTLS client
+    must call `mbedtls_ssl_set_hostname()` after `ssl_setup` and before the
+    handshake to bind the expected certificate CN/SAN. Failure to bind constitutes
+    an incomplete certificate validation and must cause
+    `client_connect_and_handshake()` to return ERR_IO. When `peer_hostname` is
+    empty, nullptr is passed (opt-out is explicit).
 
 7. Logging, metrics, and observability
 

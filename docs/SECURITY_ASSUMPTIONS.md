@@ -146,6 +146,18 @@ are active in a production environment.
 
 ---
 
+## §8 — DTLS peer certificate hostname validation
+
+When `TlsConfig::verify_peer` is true and `TlsConfig::peer_hostname` is non-empty,
+the DTLS client validates that the server certificate's CN or SAN matches
+`peer_hostname` via `mbedtls_ssl_set_hostname()` (REQ-6.4.6). Without this binding,
+CA-chain validation alone does not prevent impersonation by any certificate from
+the same trusted CA (CWE-297 / MitM). The `DtlsUdpBackend` client path is required
+to call `ssl_set_hostname` after `ssl_setup` and treat any non-zero return as fatal
+(returns `ERR_IO`). See HAZ-008 in docs/HAZARD_ANALYSIS.md.
+
+---
+
 ## References
 
 - `docs/HAZARD_ANALYSIS.md` — hazard catalogue and SC function classification

@@ -63,6 +63,7 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-6.4.3 | DTLS retransmission timer callbacks                | src/platform/DtlsUdpBackend.hpp, src/platform/DtlsUdpBackend.cpp | tests/test_DtlsUdpBackend.cpp :: test_dtls_loopback  |
 | REQ-6.4.4 | DTLS MTU enforcement (DTLS_MAX_DATAGRAM_BYTES)     | src/core/Types.hpp, src/platform/DtlsUdpBackend.hpp, src/platform/DtlsUdpBackend.cpp | tests/test_DtlsUdpBackend.cpp :: test_oversized_payload_rejected |
 | REQ-6.4.5 | DTLS plaintext fallback (swappable without changing higher layers) | src/platform/DtlsUdpBackend.hpp, src/platform/DtlsUdpBackend.cpp | tests/test_DtlsUdpBackend.cpp :: test_plaintext_loopback |
+| REQ-6.4.6 | DTLS peer hostname verification                                    | src/platform/DtlsUdpBackend.cpp (`client_connect_and_handshake`), src/platform/IMbedtlsOps.hpp, src/platform/MbedtlsOpsImpl.hpp | tests/test_DtlsUdpBackend.cpp :: test_mock_client_ssl_set_hostname_fail, test_mock_client_ssl_set_hostname_called |
 | REQ-7.1.1 | Log connection establishment and teardown          | src/core/Logger.hpp, src/platform/TcpBackend.cpp, src/platform/UdpBackend.cpp, src/platform/DtlsUdpBackend.cpp | — (observable in output) |
 | REQ-7.1.2 | Log major state changes                            | src/core/Logger.hpp                                         | — (observable in output)                             |
 | REQ-7.1.3 | Log errors and FATAL with debug context            | src/core/Logger.hpp                                         | — (observable in output)                             |

@@ -18,6 +18,7 @@
 | HAZ-005 | **Silent data corruption** — a message is delivered with a corrupted payload or incorrect header fields, with no error indication to the caller | Cat I | Serializer buffer overflow or underflow; truncated TCP frame accepted as complete; endian conversion error | Serializer validates all field ranges and returns `ERR_OVERFLOW`/`ERR_INVALID` on any violation; `tcp_recv_frame` reads exact declared length | All Serializer read/write paths bounds-check before access; `tcp_recv_frame` / `socket_recv_exact` enforce exact frame length; `ERR_` return codes propagated to caller |
 | HAZ-006 | **Resource exhaustion** — a queue, retry table, or ACK tracker becomes full and silently drops messages without notifying the caller | Cat II | High send rate with slow ACK; capacity constants too small; `ERR_FULL` return ignored by caller | `ERR_FULL` returned from `RingBuffer::push()`, `AckTracker::track()`, `RetryManager::schedule()`; `WARNING_HI` logged on full | All capacity limits are compile-time constants; `ERR_FULL` returned and logged at `WARNING_HI`; callers required by Power of 10 Rule 7 to check all return values |
 | HAZ-007 | **Partition masking** — ImpairmentEngine hides real connectivity loss, giving upper layers false confidence in link availability | Cat III | Impairment engine enabled without partition configuration; `is_partition_active()` not called; `ERR_IO` from `process_outbound()` ignored | `is_partition_active()` called first in every `process_outbound()` invocation; `ERR_IO` returned (not `OK`) for dropped messages | `process_outbound()` checks partition state on every outbound message; `ERR_IO` return forces caller acknowledgement; partition state logged at `WARNING_LO` |
+| HAZ-008 | **Untrusted peer impersonation via incomplete certificate validation** — DTLS handshake succeeds for a peer whose certificate does not match the expected server identity because `mbedtls_ssl_set_hostname()` was never called. CA-chain validation passes but hostname is unbound. | Cat I | `client_connect_and_handshake()` omits `ssl_set_hostname()` call; `verify_peer=true` but no CN/SAN binding enforced | `mbedtls_ssl_set_hostname()` called after `ssl_setup` in client path; non-zero return treated as fatal (`ERR_IO`); verified by `test_mock_client_ssl_set_hostname_fail` and `test_mock_client_ssl_set_hostname_called` | `client_connect_and_handshake()` calls `m_ops->ssl_set_hostname()` after `ssl_setup`; returns `ERR_IO` on failure (REQ-6.4.6); any certificate from the trusted CA that does not match `peer_hostname` is rejected at handshake |
 
 ---
 
@@ -100,6 +101,7 @@
 | DTLS cookie exchange bypass | Amplification attack vector; unverified client | Cat II | `mbedtls_ssl_conf_dtls_cookies()` armed in server `setup_dtls_config()`; cookie checked on every ServerHello | Cookie context initialised and armed before any handshake; `HELLO_VERIFY_REQUIRED` handled in `run_dtls_handshake()` (REQ-6.4.2) |
 | Serialized payload exceeds DTLS MTU | IP fragmentation or send failure | Cat III HAZ-005 | `wire_len > DTLS_MAX_DATAGRAM_BYTES` check in `send_message()`; returns `ERR_INVALID` | Hard check before every send; `mbedtls_ssl_set_mtu()` configures DTLS record MTU (REQ-6.4.4) |
 | DTLS handshake timeout (server never receives first datagram) | `init()` returns `ERR_TIMEOUT`; transport not opened | Cat III | `poll()` in `server_wait_and_handshake()` times out after `connect_timeout_ms` | `ERR_TIMEOUT` propagated to caller; upper layer must retry or abort |
+| HAZ-008: `ssl_set_hostname()` not called before handshake | Impersonation / MitM — encrypted session to wrong peer | Cat I | mbedTLS returns handshake error on CN/SAN mismatch (when `verify_peer=true`) | REQ-6.4.6 — `ssl_set_hostname()` called after `ssl_setup` in client path |
 
 ### IMbedtlsOps / MbedtlsOpsImpl
 
@@ -398,6 +400,7 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `init()` | `DtlsUdpBackend` | NSC | — |
 | `send_message()` | `DtlsUdpBackend` | SC | HAZ-005, HAZ-006 |
 | `receive_message()` | `DtlsUdpBackend` | SC | HAZ-004, HAZ-005 |
+| `client_connect_and_handshake()` | `DtlsUdpBackend` | SC | HAZ-008 |
 | `close()` | `DtlsUdpBackend` | NSC | — |
 | `is_open()` | `DtlsUdpBackend` | NSC | — |
 | `get_transport_stats()` | `DtlsUdpBackend` | NSC | — |

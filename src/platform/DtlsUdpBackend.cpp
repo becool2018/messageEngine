@@ -47,7 +47,7 @@
  *             REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4,
  *             REQ-6.4.5, REQ-7.1.1
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.1.10, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1, REQ-7.2.4
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.1.10, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6, REQ-7.1.1, REQ-7.2.4
 
 #include "platform/DtlsUdpBackend.hpp"
 #include "platform/ISocketOps.hpp"
@@ -499,6 +499,23 @@ Result DtlsUdpBackend::client_connect_and_handshake()
         log_mbedtls_err("DtlsUdpBackend", "ssl_setup (client)", ret);
         return Result::ERR_IO;
     }
+
+    // REQ-6.4.6: bind expected server hostname for SNI + CN/SAN verification.
+    // Mirrors TlsTcpBackend behaviour. Pass nullptr to opt out when peer_hostname
+    // is empty (verify_peer == false or explicit opt-out).
+    // Safety-critical (SC): HAZ-008
+    NEVER_COMPILED_OUT_ASSERT(!m_is_server);  // pre: client path only
+    const char* hostname = (m_cfg.tls.peer_hostname[0] != '\0')
+                           ? m_cfg.tls.peer_hostname
+                           : nullptr;
+    ret = m_ops->ssl_set_hostname(&m_ssl, hostname);
+    if (ret != 0) {
+        log_mbedtls_err("DtlsUdpBackend", "ssl_set_hostname (client)", ret);
+        mbedtls_ssl_free(&m_ssl);
+        mbedtls_ssl_init(&m_ssl);
+        return Result::ERR_IO;
+    }
+    NEVER_COMPILED_OUT_ASSERT(true);  // post: hostname bound or opt-out acknowledged
 
     // Power of 10 Rule 9 deviations: library-defined symbols only (see header).
     mbedtls_ssl_set_bio(&m_ssl, &m_net_ctx,

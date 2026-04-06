@@ -106,6 +106,13 @@ public:
     virtual int ssl_setup(mbedtls_ssl_context*  ssl,
                           mbedtls_ssl_config*   conf) = 0;
 
+    /// Bind the expected server hostname for SNI and certificate CN/SAN
+    /// verification. Wraps mbedtls_ssl_set_hostname(). Pass nullptr to
+    /// explicitly opt out (verify_peer == false or peer_hostname empty).
+    /// Safety-critical (SC): HAZ-008
+    virtual int ssl_set_hostname(mbedtls_ssl_context* ssl,
+                                 const char*          hostname) = 0;
+
     /// Bind the peer's transport ID (address bytes) to @p ssl for DTLS
     /// cookie verification.  Wraps mbedtls_ssl_set_client_transport_id().
     /// @return 0 on success; non-zero on failure.

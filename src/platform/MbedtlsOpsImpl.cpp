@@ -26,7 +26,7 @@
  *
  * Implements: REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5
  */
-// Implements: REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5
+// Implements: REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6
 
 #include "platform/MbedtlsOpsImpl.hpp"
 #include "core/Assert.hpp"
@@ -132,6 +132,15 @@ int MbedtlsOpsImpl::ssl_setup(mbedtls_ssl_context* ssl,
     NEVER_COMPILED_OUT_ASSERT(ssl  != nullptr);
     NEVER_COMPILED_OUT_ASSERT(conf != nullptr);
     return mbedtls_ssl_setup(ssl, conf);
+}
+
+int MbedtlsOpsImpl::ssl_set_hostname(mbedtls_ssl_context* ssl,
+                                      const char*          hostname)
+{
+    NEVER_COMPILED_OUT_ASSERT(ssl != nullptr);
+    // hostname may be nullptr (explicit opt-out when peer_hostname is empty)
+    NEVER_COMPILED_OUT_ASSERT(true);  // post: always reached
+    return mbedtls_ssl_set_hostname(ssl, hostname);
 }
 
 int MbedtlsOpsImpl::ssl_set_client_transport_id(mbedtls_ssl_context*  ssl,

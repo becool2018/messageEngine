@@ -38,7 +38,7 @@
  *           REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4,
  *           REQ-6.4.5, REQ-7.1.1
  */
-// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-7.1.1
+// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6, REQ-7.1.1
 // Verification: M1 + M2 + M4 + M5 (fault injection via IMbedtlsOps / ISocketOps)
 
 #include <cstdio>
@@ -995,6 +995,8 @@ struct DtlsMockOps : public IMbedtlsOps {
     ssize_t      r_recvfrom_peek                  = 1;  ///< > 0 = success
     int          r_net_connect                    = 0;
     int          r_ssl_setup                      = 0;
+    int          r_ssl_set_hostname               = 0;
+    char         last_set_hostname[256U]          = {'\0'};  // Power of 10: fixed-size capture buffer
     int          r_ssl_set_client_transport_id    = 0;
     int          r_inet_pton                      = 1;  ///< 1 = success
     int          r_ssl_write                      = 1;  ///< > 0 = success
@@ -1042,6 +1044,19 @@ struct DtlsMockOps : public IMbedtlsOps {
                   mbedtls_ssl_config*  /*conf*/) override
     {
         return r_ssl_setup;
+    }
+
+    int ssl_set_hostname(mbedtls_ssl_context* /*ssl*/,
+                         const char*          hostname) override {
+        if (hostname != nullptr) {
+            // Power of 10 Rule 3: fixed buffer, no dynamic allocation
+            uint32_t len = static_cast<uint32_t>(sizeof(last_set_hostname) - 1U);
+            (void)strncpy(last_set_hostname, hostname, len);
+            last_set_hostname[len] = '\0';
+        } else {
+            last_set_hostname[0] = '\0';
+        }
+        return r_ssl_set_hostname;
     }
 
     int ssl_set_client_transport_id(mbedtls_ssl_context*  /*ssl*/,
@@ -1448,6 +1463,56 @@ static void test_mock_client_ssl_setup_fail()
     assert(!backend.is_open());
 
     printf("PASS: test_mock_client_ssl_setup_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock test 11: ssl_set_hostname failure (client) → client_connect_and_handshake
+// Covers: client_connect_and_handshake() ssl_set_hostname != 0 → ERR_IO branch
+// Verifies: REQ-6.4.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.4.6
+static void test_mock_client_ssl_set_hostname_fail()
+{
+    // When ssl_set_hostname returns an error, client path must return ERR_IO.
+    DtlsMockOps mock;
+    mock.r_ssl_set_hostname = MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
+    DtlsUdpBackend backend(mock);
+    TransportConfig cfg;
+    make_mock_client_cfg(cfg, 14610U);
+    (void)strncpy(cfg.tls.peer_hostname, "test.example.com",
+                  sizeof(cfg.tls.peer_hostname) - 1U);
+    cfg.tls.peer_hostname[sizeof(cfg.tls.peer_hostname) - 1U] = '\0';
+    cfg.tls.verify_peer = true;
+    const Result r = backend.init(cfg);
+    assert(r == Result::ERR_IO);  // Verifies: REQ-6.4.6
+    assert(mock.last_set_hostname[0] != '\0');  // hostname was attempted
+    printf("PASS: test_mock_client_ssl_set_hostname_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock test 12: ssl_set_hostname called with peer_hostname value (client)
+// Covers: client_connect_and_handshake() ssl_set_hostname call path
+// Verifies: REQ-6.4.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.4.6
+static void test_mock_client_ssl_set_hostname_called()
+{
+    // When peer_hostname is set, ssl_set_hostname must be called with that value.
+    DtlsMockOps mock;
+    DtlsUdpBackend backend(mock);
+    TransportConfig cfg;
+    make_mock_client_cfg(cfg, 14611U);
+    (void)strncpy(cfg.tls.peer_hostname, "test.example.com",
+                  sizeof(cfg.tls.peer_hostname) - 1U);
+    cfg.tls.peer_hostname[sizeof(cfg.tls.peer_hostname) - 1U] = '\0';
+    cfg.tls.verify_peer = true;
+    (void)backend.init(cfg);
+    assert(mock.last_set_hostname[0] != '\0');  // hostname was passed  // Verifies: REQ-6.4.6
+    assert(strncmp(mock.last_set_hostname, "test.example.com",
+                   sizeof(mock.last_set_hostname)) == 0);
+    printf("PASS: test_mock_client_ssl_set_hostname_called\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1998,6 +2063,8 @@ int main()
     test_mock_server_ssl_set_transport_id_fail();
     test_mock_client_net_connect_fail();
     test_mock_client_ssl_setup_fail();
+    test_mock_client_ssl_set_hostname_fail();
+    test_mock_client_ssl_set_hostname_called();
     test_mock_dtls_ssl_write_fail();
     test_mock_dtls_handshake_iteration_limit();
     test_mock_dtls_ssl_read_error();

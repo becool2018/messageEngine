@@ -24,9 +24,9 @@
  * Power of 10 Rule 9: virtual dispatch (vtable) is the permitted exception
  *   for TransportInterface polymorphism; same exception applies here.
  *
- * Implements: REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5
+ * Implements: REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6
  */
-// Implements: REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5
+// Implements: REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6
 
 #ifndef PLATFORM_MBEDTLS_OPS_IMPL_HPP
 #define PLATFORM_MBEDTLS_OPS_IMPL_HPP
@@ -57,6 +57,8 @@ public:
                           mbedtls_pk_context* pk_key) override;
     int ssl_cookie_setup(mbedtls_ssl_cookie_ctx* ctx) override;
     int ssl_setup(mbedtls_ssl_context* ssl, mbedtls_ssl_config* conf) override;
+    int ssl_set_hostname(mbedtls_ssl_context* ssl,
+                         const char*          hostname) override;
     int ssl_set_client_transport_id(mbedtls_ssl_context* ssl,
                                     const unsigned char* info,
                                     size_t ilen) override;
