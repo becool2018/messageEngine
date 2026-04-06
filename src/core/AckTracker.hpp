@@ -90,6 +90,20 @@ public:
     /// NSC: read-only lookup; no state change.
     Result get_send_timestamp(NodeId src, uint64_t msg_id, uint64_t& out_ts) const;
 
+    // Safety-critical (SC): HAZ-002 — forge-ACK prevention (F-7)
+    /// Look up the destination_id (peer) recorded in a PENDING slot.
+    /// Used by DeliveryEngine::process_ack() to verify that an incoming ACK
+    /// was sent by the node we actually sent the message to, preventing
+    /// ACK forgery by any node that learns our node_id and a pending message_id.
+    /// @param our_id   [in]  our local node ID (matches env.source_id in the slot)
+    /// @param msg_id   [in]  message ID of the tracked message
+    /// @param out_dst  [out] populated with env.destination_id (the expected sender
+    ///                        of the ACK) on success
+    /// @return OK if a PENDING slot matching (our_id, msg_id) was found;
+    ///         ERR_INVALID if no such slot exists.
+    /// NSC: read-only lookup; no state change.
+    Result get_tracked_destination(NodeId our_id, uint64_t msg_id, NodeId& out_dst) const;
+
     /// Return a snapshot of ACK-tracker statistics (REQ-7.2.3).
     /// NSC: read-only observability accessor.
     /// Power of 10 rule 5: ≥2 assertions enforced inside.

@@ -110,6 +110,23 @@ static void process_ack(AckTracker&          ack_tracker,
     NEVER_COMPILED_OUT_ASSERT(env.message_type == MessageType::ACK);  // pre-condition
     NEVER_COMPILED_OUT_ASSERT(envelope_is_control(env));               // pre-condition
 
+    // F-7 forge-ACK prevention (SECfix-7): verify the ACK was sent by the node we
+    // originally sent the message to, not by any peer that happens to know our node_id
+    // and a pending message_id.  ACK envelope: src=remote, dst=local.  Tracker slot:
+    // source_id=local, destination_id=remote.  We must confirm env.source_id matches
+    // the destination_id recorded in the tracker slot.
+    NodeId expected_ack_sender = NODE_ID_INVALID;
+    Result dst_res = ack_tracker.get_tracked_destination(
+                         env.destination_id, env.message_id, expected_ack_sender);
+    if (dst_res == Result::OK && expected_ack_sender != env.source_id) {
+        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                    "FORGE-ACK: msg_id=%llu expected ack from node=%u got node=%u; discarding",
+                    (unsigned long long)env.message_id,
+                    static_cast<unsigned>(expected_ack_sender),
+                    static_cast<unsigned>(env.source_id));
+        return;
+    }
+
     // Look up by destination_id: ACK carries (src=remote, dst=local); tracker slot was
     // originally created with source_id = local node in send().
     Result ack_res = ack_tracker.on_ack(env.destination_id, env.message_id);

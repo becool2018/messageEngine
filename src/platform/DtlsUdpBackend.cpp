@@ -70,6 +70,7 @@
 #include <psa/crypto.h>
 
 #include <sys/socket.h>   // connect(), recvfrom(), MSG_PEEK
+#include <sys/stat.h>     // lstat() — F-2 symlink validation
 #include <netinet/in.h>   // sockaddr_in, sockaddr_storage
 #include <poll.h>         // poll()
 #include <cstring>
@@ -87,6 +88,39 @@ static void log_mbedtls_err(const char* tag, const char* func, int ret)
     mbedtls_strerror(ret, err_buf, sizeof(err_buf) - 1U);
     Logger::log(Severity::WARNING_HI, tag, "%s failed: -0x%04X (%s)",
                 func, static_cast<unsigned int>(-ret), err_buf);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// File-local helper — F-2 symlink TOCTOU guard
+// Reject paths that resolve to a symlink.  A symlink can be swapped after
+// tls_path_valid() checks the string but before fopen()/parse_file() opens it
+// (TOCTOU window).  By calling lstat() immediately before each parse_file()
+// call we shrink the window to the irreducible OS race and detect most attacks.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns true if path is a regular file (not a symlink or other special file).
+/// @param path  NUL-terminated file path (caller must have validated NUL termination).
+/// @param tag   Logging tag for the calling backend.
+static bool tls_path_is_regular_file(const char* path, const char* tag)
+{
+    NEVER_COMPILED_OUT_ASSERT(path != nullptr);  // pre-condition: non-null path
+    NEVER_COMPILED_OUT_ASSERT(tag  != nullptr);  // pre-condition: non-null tag
+
+    struct stat st;
+    // MISRA C++:2023 Rule 5.2.4 exemption: lstat() is a POSIX API; no application-level
+    // pointer cast is performed here.
+    if (lstat(path, &st) != 0) {
+        Logger::log(Severity::WARNING_HI, tag,
+                    "tls_path_is_regular_file: lstat('%s') failed: %d", path, errno);
+        return false;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        Logger::log(Severity::WARNING_HI, tag,
+                    "tls_path_is_regular_file: '%s' is not a regular file (mode=0%o)",
+                    path, static_cast<unsigned>(st.st_mode));
+        return false;
+    }
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -190,6 +224,10 @@ Result DtlsUdpBackend::load_certs_and_key(const TlsConfig& tls_cfg)
     if (tls_cfg.verify_peer && tls_cfg.ca_file[0] != '\0') {
         // SECfix-5: verify NUL termination within TLS_PATH_MAX before passing to fopen()
         NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.ca_file));
+        // F-2: reject symlink attacks immediately before parse_file() to narrow TOCTOU window.
+        if (!tls_path_is_regular_file(tls_cfg.ca_file, "DtlsUdpBackend")) {
+            return Result::ERR_IO;
+        }
         int ret = m_ops->x509_crt_parse_file(&m_ca_cert, tls_cfg.ca_file);
         if (ret != 0) {
             log_mbedtls_err("DtlsUdpBackend", "x509_crt_parse_file (CA)", ret);
@@ -200,12 +238,36 @@ Result DtlsUdpBackend::load_certs_and_key(const TlsConfig& tls_cfg)
         if (!result_ok(crl_res)) { return crl_res; }
     }
 
+    return load_own_cert_and_key(tls_cfg);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// load_own_cert_and_key() — CC-reduction helper for load_certs_and_key (F-2)
+// Validates cert/key paths via lstat(), parses the certificate and private key,
+// and binds them to ssl_conf.  Extracted to keep load_certs_and_key() CC ≤ 10.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result DtlsUdpBackend::load_own_cert_and_key(const TlsConfig& tls_cfg)
+{
+    // SECfix-5 / F-2: path validity and symlink guards
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.cert_file));
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.key_file));
+
+    // F-2: reject symlink attacks immediately before parse_file() to narrow TOCTOU window.
+    if (!tls_path_is_regular_file(tls_cfg.cert_file, "DtlsUdpBackend")) {
+        return Result::ERR_IO;
+    }
     int ret = m_ops->x509_crt_parse_file(&m_cert, tls_cfg.cert_file);
     if (ret != 0) {
         log_mbedtls_err("DtlsUdpBackend", "x509_crt_parse_file (cert)", ret);
         return Result::ERR_IO;
     }
 
+    // F-2: reject symlink attacks immediately before pk_parse_keyfile() to narrow TOCTOU window.
+    if (!tls_path_is_regular_file(tls_cfg.key_file, "DtlsUdpBackend")) {
+        return Result::ERR_IO;
+    }
     ret = m_ops->pk_parse_keyfile(&m_pkey, tls_cfg.key_file, nullptr);
     if (ret != 0) {
         log_mbedtls_err("DtlsUdpBackend", "pk_parse_keyfile", ret);
@@ -239,6 +301,10 @@ Result DtlsUdpBackend::load_crl_if_configured(const TlsConfig& tls_cfg)
     NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.crl_file));
 
     if (tls_cfg.crl_file[0] != '\0') {
+        // F-2: reject symlink attacks immediately before crl_parse_file() to narrow TOCTOU window.
+        if (!tls_path_is_regular_file(tls_cfg.crl_file, "DtlsUdpBackend")) {
+            return Result::ERR_IO;
+        }
         int crl_ret = mbedtls_x509_crl_parse_file(&m_crl, tls_cfg.crl_file);
         if (crl_ret != 0) {
             log_mbedtls_err("DtlsUdpBackend", "x509_crl_parse_file", crl_ret);
@@ -288,6 +354,11 @@ Result DtlsUdpBackend::setup_cookie_if_server(const TlsConfig& tls_cfg)
 Result DtlsUdpBackend::setup_dtls_config(const TlsConfig& tls_cfg)
 {
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.tls_enabled);
+    // F-19: verify DTLS_MAX_DATAGRAM_BYTES is large enough to hold at least one
+    // byte of payload beyond the wire header; catches misconfigured builds where
+    // someone sets DTLS_MAX_DATAGRAM_BYTES ≤ WIRE_HEADER_SIZE.
+    static_assert(DTLS_MAX_DATAGRAM_BYTES > Serializer::WIRE_HEADER_SIZE,
+                  "DTLS_MAX_DATAGRAM_BYTES must exceed WIRE_HEADER_SIZE");
     // SECfix-5: verify NUL termination within TLS_PATH_MAX before passing to fopen()
     NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.cert_file));
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.cert_file[0] != '\0');

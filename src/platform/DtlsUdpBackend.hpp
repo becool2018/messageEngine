@@ -231,6 +231,11 @@ private:
     /// Extracted from setup_dtls_config to reduce its CC.
     Result load_certs_and_key(const TlsConfig& tls_cfg);
 
+    /// Validate cert/key paths via lstat(), parse own cert and private key,
+    /// and bind them to ssl_conf via ssl_conf_own_cert().
+    /// Extracted from load_certs_and_key() to keep its CC ≤ 10 (F-2 lstat additions).
+    Result load_own_cert_and_key(const TlsConfig& tls_cfg);
+
     /// Load CRL from tls_cfg.crl_file (if non-empty) and bind to ssl_conf.
     /// Called from load_certs_and_key() after the CA cert is loaded.
     /// Extracted to keep load_certs_and_key() CC ≤ 10. REQ-6.3.4

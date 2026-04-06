@@ -255,6 +255,32 @@ Result AckTracker::get_send_timestamp(NodeId src, uint64_t msg_id, uint64_t& out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AckTracker::get_tracked_destination() — F-7 forge-ACK prevention helper
+// NSC: read-only lookup; no state change.
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result AckTracker::get_tracked_destination(NodeId our_id, uint64_t msg_id, NodeId& out_dst) const
+{
+    // Power of 10 rule 5: pre-condition assertions
+    NEVER_COMPILED_OUT_ASSERT(our_id != NODE_ID_INVALID);         // Assert: valid local id
+    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);   // Assert: count consistent
+
+    // Power of 10 rule 2: bounded search
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        if ((m_slots[i].state == EntryState::PENDING) &&
+            (m_slots[i].env.source_id == our_id) &&
+            (m_slots[i].env.message_id == msg_id)) {
+            out_dst = m_slots[i].env.destination_id;
+            NEVER_COMPILED_OUT_ASSERT(out_dst != NODE_ID_INVALID);  // Assert: valid destination
+            return Result::OK;
+        }
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count still valid
+    return Result::ERR_INVALID;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // AckTracker::get_stats() — REQ-7.2.3 observability accessor
 // NSC: read-only; no state change.
 // ─────────────────────────────────────────────────────────────────────────────

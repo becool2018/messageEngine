@@ -42,6 +42,11 @@ static_assert(DEDUP_WINDOW_SIZE > 0U, "DEDUP_WINDOW_SIZE must be nonzero");
 
 void DuplicateFilter::init()
 {
+    // F-11: verify m_window element count matches DEDUP_WINDOW_SIZE at compile time.
+    // Must be inside a member function to access the private m_window array.
+    static_assert(sizeof(m_window) / sizeof(m_window[0]) == DEDUP_WINDOW_SIZE,
+                  "m_window element count must equal DEDUP_WINDOW_SIZE");
+
     // Power of 10 rule 3: zero-initialize fixed buffer during init phase
     (void)memset(m_window, 0, sizeof(m_window));
 
