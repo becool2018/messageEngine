@@ -1224,6 +1224,14 @@ Result TlsTcpBackend::init(const TransportConfig& config)
     NEVER_COMPILED_OUT_ASSERT(config.kind == TransportKind::TCP);
     NEVER_COMPILED_OUT_ASSERT(!m_open);
 
+    // S5: validate config before any channels[] access (REQ-6.1.1, ChannelConfig.hpp).
+    if (!transport_config_valid(config)) {
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "init: num_channels=%u exceeds MAX_CHANNELS; rejecting config",
+                    config.num_channels);
+        return Result::ERR_INVALID;
+    }
+
     m_cfg          = config;
     m_is_server    = config.is_server;
     m_tls_enabled  = config.tls.tls_enabled;

@@ -81,6 +81,15 @@ inline void channel_config_default(ChannelConfig& cfg, uint8_t id)
     impairment_config_default(cfg.impairment);
 }
 
+/// Validate a TransportConfig before passing it to any backend init().
+/// Returns true iff num_channels <= MAX_CHANNELS and all other invariants hold.
+/// Call at the start of every backend's init() to catch misconfigured configs
+/// before any channels[] array access (prevents out-of-bounds reads, S5).
+inline bool transport_config_valid(const TransportConfig& cfg)
+{
+    return cfg.num_channels <= static_cast<uint32_t>(MAX_CHANNELS);
+}
+
 /// Default-fill a TransportConfig for local loopback TCP.
 inline void transport_config_default(TransportConfig& cfg)
 {

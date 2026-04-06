@@ -189,7 +189,18 @@ uint64_t ImpairmentEngine::compute_jitter_us()
     uint32_t lo_ms = (m_cfg.jitter_variance_ms <= m_cfg.jitter_mean_ms)
         ? (m_cfg.jitter_mean_ms - m_cfg.jitter_variance_ms)
         : 0U;
-    uint32_t hi_ms = m_cfg.jitter_mean_ms + m_cfg.jitter_variance_ms;
+    // CERT INT30-C: guard uint32_t addition overflow before computing hi_ms (S1).
+    // Clamp to UINT32_MAX-1 (not UINT32_MAX) so that next_range(lo_ms, hi_ms)
+    // can never produce range = hi-lo+1 = 0 via uint32 wrap (PrngEngine line 140).
+    uint32_t hi_ms = 0U;
+    if (m_cfg.jitter_variance_ms > (UINT32_MAX - m_cfg.jitter_mean_ms)) {
+        Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
+                    "jitter overflow: mean=%u variance=%u; clamping hi to UINT32_MAX-1",
+                    m_cfg.jitter_mean_ms, m_cfg.jitter_variance_ms);
+        hi_ms = UINT32_MAX - 1U;
+    } else {
+        hi_ms = m_cfg.jitter_mean_ms + m_cfg.jitter_variance_ms;
+    }
 
     NEVER_COMPILED_OUT_ASSERT(hi_ms >= lo_ms);  // Power of 10: range is non-negative
 

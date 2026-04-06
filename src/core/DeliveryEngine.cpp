@@ -147,11 +147,13 @@ void DeliveryEngine::init(TransportInterface* transport,
     m_retry_manager.init();
     m_dedup.init();
 
-    // Initialize message ID generator with a seed based on local_id
-    // Power of 10: deterministic seed for testing
-    uint64_t id_seed = static_cast<uint64_t>(local_id);
+    // Initialize message ID generator: mix local_id with current timestamp to
+    // prevent the sequence from being trivially predictable (CERT INT30-C / S2).
+    // timestamp_now_us() is available via Timestamp.hpp (included in DeliveryEngine.hpp).
+    const uint64_t ts_seed = timestamp_now_us();
+    uint64_t id_seed = (static_cast<uint64_t>(local_id) << 32U) ^ ts_seed;
     if (id_seed == 0ULL) {
-        id_seed = 1ULL;  // Ensure non-zero seed
+        id_seed = 1ULL;  // Ensure non-zero (0 is reserved for invalid messages)
     }
     m_id_gen.init(id_seed);
 

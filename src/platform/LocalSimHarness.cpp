@@ -120,6 +120,13 @@ void LocalSimHarness::link(LocalSimHarness* peer)
 Result LocalSimHarness::inject(const MessageEnvelope& envelope)
 {
     NEVER_COMPILED_OUT_ASSERT(m_open);  // Pre-condition
+    // S3: validate envelope before accepting into receive queue (same check as
+    // send_message() and deliver_from_peer()); prevents malformed envelopes from
+    // bypassing validation and reaching DeliveryEngine::receive().
+    if (!envelope_valid(envelope)) {
+        NEVER_COMPILED_OUT_ASSERT(true);  // post: invalid envelope discarded
+        return Result::ERR_INVALID;
+    }
 
     Result res = m_recv_queue.push(envelope);
     if (!result_ok(res)) {

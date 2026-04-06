@@ -167,6 +167,11 @@ Result Serializer::serialize(const MessageEnvelope& env,
         return Result::ERR_INVALID;
     }
 
+    // CERT INT30-C: direct uint32_t addition overflow guard — self-contained and
+    // independent of envelope_valid() having been called first (S4).
+    if (env.payload_length > (UINT32_MAX - WIRE_HEADER_SIZE)) {
+        return Result::ERR_INVALID;
+    }
     // Power of 10 rule 2: fixed bounds check
     uint32_t required_len = WIRE_HEADER_SIZE + env.payload_length;
     if (buf_len < required_len) {
