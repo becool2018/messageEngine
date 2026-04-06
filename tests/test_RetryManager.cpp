@@ -748,6 +748,93 @@ static void test_collect_due_monotonic_sequence()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 24: reap_terminated_slots — multiple expired entries reaped in one call
+// Verifies: REQ-3.2.5, REQ-7.2.3 — reap_terminated_slots via collect_due()
+//
+// Schedules three messages all with expiry in the past.  A single collect_due()
+// call must reap all three (via Phase-1 reap_terminated_slots) without returning
+// any of them as due retries.  slots_expired stat increments to 3.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_reap_multiple_expired()
+{
+    // Verifies: REQ-3.2.5, REQ-7.2.3
+    RetryManager mgr;
+    mgr.init();
+
+    const uint64_t NOW = 5000000ULL;  // "current" time (5 s)
+    const uint64_t OLD = 1ULL;        // expiry well in the past
+
+    // Schedule three messages whose expiry is far in the past.
+    // Power of 10: bounded loop (3 iterations, compile-time constant)
+    for (uint32_t i = 0U; i < 3U; ++i) {
+        MessageEnvelope env;
+        make_test_envelope(env,
+                           static_cast<uint64_t>(i) + 1U,  // msg_id 1, 2, 3
+                           OLD);                             // expiry = 1 us
+        Result r = mgr.schedule(env, 5U, 100U, 1ULL);
+        assert(r == Result::OK);  // Assert: scheduling succeeded
+    }
+
+    // collect_due: Phase 1 reaps all three expired slots; Phase 2 finds nothing active.
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+    uint32_t collected = mgr.collect_due(NOW, buf, ACK_TRACKER_CAPACITY);
+    assert(collected == 0U);                                  // Assert: no retries delivered
+
+    const RetryStats& s = mgr.get_stats();
+    assert(s.slots_expired == 3U);    // Assert: all three expired entries counted
+    assert(s.slots_exhausted == 0U);  // Assert: not counted as exhausted
+
+    printf("PASS: test_reap_multiple_expired\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 25: reap_terminated_slots — mixed expired and exhausted entries
+// Verifies: REQ-3.2.5, REQ-7.2.3 — reap_terminated_slots discriminates types
+//
+// Schedules two messages: one already past expiry and one already exhausted
+// (retry_count will reach max_retries after the first collect_due, so a second
+// call reaps it as exhausted).  Verifies both stat counters independently.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_reap_mixed_expired_and_exhausted()
+{
+    // Verifies: REQ-3.2.5, REQ-7.2.3
+    RetryManager mgr;
+    mgr.init();
+
+    const uint64_t T = 1000000ULL;
+
+    // Message A: will expire (expiry set in past relative to second call)
+    MessageEnvelope env_a;
+    make_test_envelope(env_a, 10ULL, T + 100ULL);  // expires at T+100 us
+    Result ra = mgr.schedule(env_a, 5U, 100U, T);
+    assert(ra == Result::OK);  // Assert: env_a scheduled
+
+    // Message B: will be exhausted (max_retries=1 → reaped after first collect)
+    MessageEnvelope env_b;
+    make_test_envelope(env_b, 20ULL, T + 60000000ULL);  // long expiry
+    Result rb = mgr.schedule(env_b, 1U, 100U, T);
+    assert(rb == Result::OK);  // Assert: env_b scheduled
+
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+
+    // First collect at T: env_a fires (and is counted as retry), env_b fires
+    // (retry_count becomes 1 == max_retries).  Neither reaped yet.
+    uint32_t c1 = mgr.collect_due(T, buf, ACK_TRACKER_CAPACITY);
+    assert(c1 == 2U);  // Assert: both messages sent in first round
+
+    // Second collect at T+200: env_a is past its expiry (T+100), env_b is exhausted.
+    // Phase 1 reaps both.  Phase 2 has nothing to deliver.
+    uint32_t c2 = mgr.collect_due(T + 200ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(c2 == 0U);  // Assert: no retries in second round
+
+    const RetryStats& s = mgr.get_stats();
+    assert(s.slots_expired == 1U);    // Assert: env_a counted as expired
+    assert(s.slots_exhausted == 1U);  // Assert: env_b counted as exhausted
+
+    printf("PASS: test_reap_mixed_expired_and_exhausted\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -775,6 +862,8 @@ int main()
     test_retry_manager_cancel();
     test_collect_due_accepts_equal_now_us();
     test_collect_due_monotonic_sequence();
+    test_reap_multiple_expired();
+    test_reap_mixed_expired_and_exhausted();
 
     printf("ALL RetryManager tests passed.\n");
     return 0;

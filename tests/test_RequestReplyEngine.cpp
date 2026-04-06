@@ -954,6 +954,154 @@ static void test_rre_request_stash_fifo_reuse()
     printf("PASS: test_rre_request_stash_fifo_reuse\n");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 15: sweep_timeouts — multiple simultaneous expired entries
+// Verifies: REQ-3.2.4
+//
+// Send two requests with short timeouts; advance time past both; verify
+// sweep_timeouts() returns 2 and subsequent receive_response() fails for each.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_sweep_multiple_timeouts()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    static const uint64_t SHORT_TIMEOUT = 500ULL;  // 500 us
+
+    // Send two requests with short timeouts; no responses will be sent.
+    const uint8_t req1[] = {0x11U};
+    const uint8_t req2[] = {0x22U};
+    uint64_t cid1 = 0U;
+    uint64_t cid2 = 0U;
+    Result r1 = rrea.send_request(NODE_B, req1, 1U, SHORT_TIMEOUT, NOW_US, cid1);
+    Result r2 = rrea.send_request(NODE_B, req2, 1U, SHORT_TIMEOUT, NOW_US, cid2);
+    assert(r1 == Result::OK);   // Assert: first request sent
+    assert(r2 == Result::OK);   // Assert: second request sent
+    assert(cid1 != 0U);
+    assert(cid2 != 0U);
+    assert(cid1 != cid2);       // Assert: distinct correlation IDs
+
+    // Advance past both expiry times and sweep.
+    const uint64_t LATE = NOW_US + SHORT_TIMEOUT + 1ULL;
+    uint32_t freed = rrea.sweep_timeouts(LATE);
+    assert(freed == 2U);  // Assert: both pending entries freed
+
+    // receive_response must now return ERR_INVALID for each (slots freed).
+    uint8_t  out[64];
+    uint32_t out_len = 0U;
+    Result check1 = rrea.receive_response(cid1, out, 64U, out_len, LATE);
+    assert(check1 == Result::ERR_INVALID);  // Assert: cid1 slot is gone
+
+    out_len = 0U;
+    Result check2 = rrea.receive_response(cid2, out, 64U, out_len, LATE);
+    assert(check2 == Result::ERR_INVALID);  // Assert: cid2 slot is gone
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_sweep_multiple_timeouts\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 16: sweep_timeouts — never-expiring entry (expires_us == 0) is not swept
+// Verifies: REQ-3.2.4
+//
+// Send a request with timeout_us == 0 (never expires).  Even when sweep_timeouts
+// is called with a very large now_us the entry must survive (freed == 0) and
+// receive_response can still find it.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_sweep_never_expiring_skipped()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    // timeout_us == 0 → expires_us stored as 0 → never swept.
+    const uint8_t req[] = {0x55U};
+    uint64_t cid = 0U;
+    Result r = rrea.send_request(NODE_B, req, 1U,
+                                 0ULL /*never expires*/, NOW_US, cid);
+    assert(r == Result::OK);  // Assert: request sent
+
+    // Sweep at a very large timestamp; never-expiring entry must survive.
+    const uint64_t FAR_FUTURE = UINT64_MAX / 2ULL;
+    uint32_t freed = rrea.sweep_timeouts(FAR_FUTURE);
+    assert(freed == 0U);  // Assert: nothing freed (entry has expires_us == 0)
+
+    // Now send the response from B; receive_response on A must still find the slot.
+    // receive_request on B first so B knows the cid.
+    uint8_t  rx_buf[64U];
+    uint32_t rx_len = 0U;
+    NodeId   rx_src = 0U;
+    uint64_t rx_cid = 0U;
+    Result rr = rreb.receive_request(rx_buf, 64U, rx_len, rx_src, rx_cid, NOW_US);
+    assert(rr == Result::OK);   // Assert: B received the request
+
+    const uint8_t resp_data[] = {0xAAU};
+    Result sr = rreb.send_response(NODE_A, rx_cid, resp_data, 1U, NOW_US);
+    assert(sr == Result::OK);   // Assert: response sent
+
+    uint8_t  out[64U];
+    uint32_t out_len = 0U;
+    Result recv_r = rrea.receive_response(cid, out, 64U, out_len, NOW_US);
+    assert(recv_r == Result::OK);  // Assert: response received after sweep
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_sweep_never_expiring_skipped\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 17: sweep_timeouts — entry at exact expiry boundary (now_us == expires_us)
+// Verifies: REQ-3.2.4
+//
+// The sweep uses now_us >= expires_us, so a request whose expiry is exactly
+// NOW_US must be freed when sweep_timeouts is called with now_us == expires_us.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_sweep_exact_expiry_boundary()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    // Use exactly 1000 us timeout so expires_us == NOW_US + 1000.
+    const uint64_t TIMEOUT_US = 1000ULL;
+    const uint8_t req[] = {0x77U};
+    uint64_t cid = 0U;
+    Result r = rrea.send_request(NODE_B, req, 1U, TIMEOUT_US, NOW_US, cid);
+    assert(r == Result::OK);  // Assert: request sent
+
+    // Call sweep at exactly the expiry time; entry must be freed.
+    const uint64_t EXACT = NOW_US + TIMEOUT_US;
+    uint32_t freed = rrea.sweep_timeouts(EXACT);
+    assert(freed == 1U);  // Assert: entry freed at exact boundary
+
+    // Slot is gone; receive_response must return ERR_INVALID.
+    uint8_t  out[64U];
+    uint32_t out_len = 0U;
+    Result chk = rrea.receive_response(cid, out, 64U, out_len, EXACT);
+    assert(chk == Result::ERR_INVALID);  // Assert: slot no longer present
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_sweep_exact_expiry_boundary\n");
+}
+
 int main()
 {
     printf("=== test_RequestReplyEngine ===\n");
@@ -972,6 +1120,9 @@ int main()
     test_rre_nonzero_pad_rejected();
     test_rre_big_endian_cid_encoding();
     test_rre_request_stash_fifo_reuse();
+    test_rre_sweep_multiple_timeouts();
+    test_rre_sweep_never_expiring_skipped();
+    test_rre_sweep_exact_expiry_boundary();
 
     printf("=== ALL TESTS PASSED ===\n");
     return 0;

@@ -2787,6 +2787,114 @@ static void test_mock_fragmented_partial_send_keeps_bookkeeping()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: msgs_dropped_misrouted stat increments when receive() drops a message
+//       addressed to a different node.
+// Verifies: REQ-7.2.3 — DeliveryStats.msgs_dropped_misrouted counter
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_dropped_misrouted()
+{
+    // Verifies: REQ-7.2.3
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);  // engine local_id = 1
+
+    DeliveryStats s0;
+    engine.get_stats(s0);
+    assert(s0.msgs_dropped_misrouted == 0U);  // Assert: counter starts at zero
+
+    // Inject a DATA envelope destined for node 3 (not local_id=1, not broadcast 0).
+    // engine.receive() must drop it and increment msgs_dropped_misrouted.
+    MessageEnvelope bad_env;
+    make_data_envelope(bad_env, 2U, 3U, 77777ULL, ReliabilityClass::BEST_EFFORT);
+    Result inj = harness_a.inject(bad_env);
+    assert(inj == Result::OK);  // Assert: injection succeeded
+
+    MessageEnvelope out_env;
+    Result recv_r = engine.receive(out_env, 100U, NOW_US);
+    assert(recv_r == Result::ERR_INVALID);  // Assert: engine rejected misrouted message
+
+    DeliveryStats s1;
+    engine.get_stats(s1);
+    assert(s1.msgs_dropped_misrouted == 1U);  // Assert: counter incremented exactly once
+    assert(s1.msgs_dropped_expired == 0U);    // Assert: not counted as expired
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_stats_dropped_misrouted\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: latency_min_us and latency_max_us track the minimum and maximum RTT
+//       across multiple ACK receipts.
+// Verifies: REQ-7.2.1 — DeliveryStats.latency_min_us, latency_max_us
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_latency_min_max()
+{
+    // Verifies: REQ-7.2.1
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // ── First message (larger RTT = 5000 us) ──────────────────────────────────
+    MessageEnvelope env1;
+    make_data_envelope(env1, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+    Result s1 = engine.send(env1, NOW_US);
+    assert(s1 == Result::OK);  // Assert: send succeeded
+
+    const uint64_t id1 = env1.message_id;
+    const uint64_t RTT_LARGE = 5000ULL;  // 5 ms RTT for message 1
+
+    MessageEnvelope ack1;
+    make_ack_envelope(ack1, 2U, 1U, id1);
+    ack1.timestamp_us = NOW_US + RTT_LARGE;
+    Result inj1 = harness_b.send_message(ack1);
+    assert(inj1 == Result::OK);
+
+    // Receive at exactly NOW_US + RTT_LARGE so RTT = RTT_LARGE (no off-by-one).
+    MessageEnvelope recv1;
+    Result r1 = engine.receive(recv1, 100U, NOW_US + RTT_LARGE);
+    assert(r1 == Result::OK);  // Assert: ACK for message 1 processed
+
+    // ── Second message (smaller RTT = 500 us) ─────────────────────────────────
+    MessageEnvelope env2;
+    make_data_envelope(env2, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+    const uint64_t T2 = NOW_US + RTT_LARGE + 1ULL;
+    Result s2 = engine.send(env2, T2);
+    assert(s2 == Result::OK);  // Assert: send succeeded
+
+    const uint64_t id2 = env2.message_id;
+    const uint64_t RTT_SMALL = 500ULL;  // 0.5 ms RTT for message 2
+
+    MessageEnvelope ack2;
+    make_ack_envelope(ack2, 2U, 1U, id2);
+    ack2.timestamp_us = T2 + RTT_SMALL;
+    Result inj2 = harness_b.send_message(ack2);
+    assert(inj2 == Result::OK);
+
+    // Receive at exactly T2 + RTT_SMALL so RTT = RTT_SMALL.
+    MessageEnvelope recv2;
+    Result r2 = engine.receive(recv2, 100U, T2 + RTT_SMALL);
+    assert(r2 == Result::OK);  // Assert: ACK for message 2 processed
+
+    // ── Verify latency statistics ─────────────────────────────────────────────
+    DeliveryStats stats;
+    engine.get_stats(stats);
+
+    assert(stats.latency_sample_count == 2U);       // Assert: two ACKs processed
+    assert(stats.latency_min_us == RTT_SMALL);      // Assert: minimum is the smaller RTT
+    assert(stats.latency_max_us == RTT_LARGE);      // Assert: maximum is the larger RTT
+    assert(stats.latency_sum_us == RTT_LARGE + RTT_SMALL);  // Assert: sum correct
+
+    harness_a.close();
+    harness_b.close();
+
+    printf("PASS: test_stats_latency_min_max\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -2849,6 +2957,8 @@ int main()
     test_de_ordering_full_stat();
     test_de_held_pending_expiry_event();
     test_mock_fragmented_partial_send_keeps_bookkeeping();
+    test_stats_dropped_misrouted();
+    test_stats_latency_min_max();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;

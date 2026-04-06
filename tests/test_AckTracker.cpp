@@ -523,6 +523,88 @@ static void test_sweep_expired_monotonic_sequence()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 17: get_send_timestamp — matching PENDING entry returns OK and timestamp
+// Verifies: REQ-7.2.1 — AckTracker.get_send_timestamp latency helper
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_get_send_timestamp_found()
+{
+    // Verifies: REQ-7.2.1
+    AckTracker tracker;
+    tracker.init();
+
+    // Track a message; timestamp_us is set to 1000000ULL by make_test_envelope.
+    MessageEnvelope env;
+    make_test_envelope(env, 42ULL);
+    const uint64_t expected_ts = env.timestamp_us;  // 1000000ULL
+
+    Result track_r = tracker.track(env, 9000000ULL);
+    assert(track_r == Result::OK);  // Assert: tracking succeeded
+
+    uint64_t out_ts = 0ULL;
+    Result res = tracker.get_send_timestamp(1U, 42ULL, out_ts);
+    assert(res == Result::OK);             // Assert: found matching PENDING entry
+    assert(out_ts == expected_ts);         // Assert: returned timestamp matches send time
+
+    printf("PASS: test_get_send_timestamp_found\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 18: get_send_timestamp — no matching entry returns ERR_INVALID
+// Verifies: REQ-7.2.1 — AckTracker.get_send_timestamp not-found path
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_get_send_timestamp_not_found()
+{
+    // Verifies: REQ-7.2.1
+    AckTracker tracker;
+    tracker.init();
+
+    // Nothing tracked; any query must return ERR_INVALID.
+    uint64_t out_ts = 0xDEADBEEFULL;
+    Result res = tracker.get_send_timestamp(1U, 42ULL, out_ts);
+    assert(res == Result::ERR_INVALID);   // Assert: ERR_INVALID when entry absent
+    assert(out_ts == 0xDEADBEEFULL);      // Assert: out_ts untouched on failure
+
+    printf("PASS: test_get_send_timestamp_not_found\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 19: get_send_timestamp — two tracked messages; each returns its own ts
+// Verifies: REQ-7.2.1 — AckTracker.get_send_timestamp with multiple entries
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_get_send_timestamp_multiple_entries()
+{
+    // Verifies: REQ-7.2.1
+    AckTracker tracker;
+    tracker.init();
+
+    // Build two envelopes with distinct message IDs and timestamps.
+    MessageEnvelope env1;
+    make_test_envelope(env1, 10ULL);
+    env1.timestamp_us = 111000ULL;
+
+    MessageEnvelope env2;
+    make_test_envelope(env2, 20ULL);
+    env2.timestamp_us = 222000ULL;
+
+    Result r1 = tracker.track(env1, 9000000ULL);
+    Result r2 = tracker.track(env2, 9000000ULL);
+    assert(r1 == Result::OK);  // Assert: first track succeeded
+    assert(r2 == Result::OK);  // Assert: second track succeeded
+
+    uint64_t ts1 = 0ULL;
+    Result res1 = tracker.get_send_timestamp(1U, 10ULL, ts1);
+    assert(res1 == Result::OK);       // Assert: found env1
+    assert(ts1 == 111000ULL);         // Assert: correct timestamp for msg 10
+
+    uint64_t ts2 = 0ULL;
+    Result res2 = tracker.get_send_timestamp(1U, 20ULL, ts2);
+    assert(res2 == Result::OK);       // Assert: found env2
+    assert(ts2 == 222000ULL);         // Assert: correct timestamp for msg 20
+
+    printf("PASS: test_get_send_timestamp_multiple_entries\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -543,6 +625,9 @@ int main()
     test_ack_tracker_cancel();
     test_sweep_expired_accepts_equal_now_us();
     test_sweep_expired_monotonic_sequence();
+    test_get_send_timestamp_found();
+    test_get_send_timestamp_not_found();
+    test_get_send_timestamp_multiple_entries();
 
     printf("ALL AckTracker tests passed.\n");
     return 0;
