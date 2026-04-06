@@ -165,7 +165,9 @@ tests: \
     build/test_RequestReplyEngine \
     build/test_Fragmentation \
     build/test_ReassemblyBuffer \
-    build/test_OrderingBuffer
+    build/test_OrderingBuffer \
+    build/test_PrngEngine \
+    build/test_RingBuffer
 
 build/test_%: $(ALL_LIB_OBJS) build/objs/tests/test_%.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
@@ -234,7 +236,9 @@ sanitize_tests: \
     build/san/test_RequestReplyEngine \
     build/san/test_Fragmentation \
     build/san/test_ReassemblyBuffer \
-    build/san/test_OrderingBuffer
+    build/san/test_OrderingBuffer \
+    build/san/test_PrngEngine \
+    build/san/test_RingBuffer
 
 run_sanitize: sanitize_tests
 	@echo "=== Sanitizer tests: ASan + UBSan ($(if $(SAN_RUN_ENV),$(SAN_RUN_ENV),no LSan suppression needed)) ==="
@@ -259,6 +263,8 @@ run_sanitize: sanitize_tests
 	@$(SAN_RUN_ENV) build/san/test_Fragmentation
 	@$(SAN_RUN_ENV) build/san/test_ReassemblyBuffer
 	@$(SAN_RUN_ENV) build/san/test_OrderingBuffer
+	@$(SAN_RUN_ENV) build/san/test_PrngEngine
+	@$(SAN_RUN_ENV) build/san/test_RingBuffer
 	@echo "=== SANITIZER TESTS PASSED ==="
 
 build/san/test_%: $(SAN_LIB_OBJS) $(SAN_OBJ_DIR)/tests/test_%.o
@@ -698,4 +704,6 @@ run_tests: tests
 	@echo "=== test_Fragmentation ==="; build/test_Fragmentation
 	@echo "=== test_ReassemblyBuffer ==="; build/test_ReassemblyBuffer
 	@echo "=== test_OrderingBuffer ==="; build/test_OrderingBuffer
+	@echo "=== test_PrngEngine ==="; build/test_PrngEngine
+	@echo "=== test_RingBuffer ==="; build/test_RingBuffer
 	@echo "=== ALL TESTS PASSED ==="
