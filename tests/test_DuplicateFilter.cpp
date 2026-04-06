@@ -176,6 +176,87 @@ static bool test_window_wraparound()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 6: Interleaved entries from multiple sources in the same window
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.6
+static bool test_multiple_sources_interleaved()
+{
+    DuplicateFilter filter;
+    filter.init();
+
+    // Record alternating entries from two sources
+    // Power of 10 Rule 2: bounded loop
+    for (uint32_t i = 0U; i < 10U; ++i) {
+        uint64_t msg_id = static_cast<uint64_t>(i) + 1ULL;
+        filter.record(1U, msg_id);
+        filter.record(2U, msg_id);
+    }
+
+    // All recorded entries from both sources must be recognized as duplicates
+    for (uint32_t i = 0U; i < 10U; ++i) {
+        uint64_t msg_id = static_cast<uint64_t>(i) + 1ULL;
+        assert(filter.is_duplicate(1U, msg_id) == true);  // source 1 entry present
+        assert(filter.is_duplicate(2U, msg_id) == true);  // source 2 entry present
+    }
+
+    // Same message_id from a third source must NOT be a duplicate (not recorded)
+    assert(filter.is_duplicate(3U, 1ULL) == false);  // source 3 never recorded
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 7: Exact boundary — adding one entry to a full window evicts oldest
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.6
+static bool test_single_entry_eviction()
+{
+    DuplicateFilter filter;
+    filter.init();
+
+    // Fill the window exactly (DEDUP_WINDOW_SIZE entries, all from source 10)
+    // Power of 10 Rule 2: bounded by DEDUP_WINDOW_SIZE constant
+    for (uint32_t i = 0U; i < DEDUP_WINDOW_SIZE; ++i) {
+        filter.record(10U, static_cast<uint64_t>(i));
+    }
+
+    // Entry 0 must still be present (window exactly full, no eviction yet)
+    assert(filter.is_duplicate(10U, 0ULL) == true);   // Assert: oldest still visible
+
+    // Add one more: entry 0 is now evicted (oldest entry in FIFO ring)
+    filter.record(10U, static_cast<uint64_t>(DEDUP_WINDOW_SIZE));
+
+    assert(filter.is_duplicate(10U, 0ULL) == false);  // Assert: entry 0 evicted
+    assert(filter.is_duplicate(10U, static_cast<uint64_t>(DEDUP_WINDOW_SIZE)) == true);  // newest present
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 8: check_and_record idempotence — second call on same ID is ERR_DUPLICATE
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.6
+static bool test_check_and_record_idempotent()
+{
+    DuplicateFilter filter;
+    filter.init();
+
+    // First call: message not seen → OK and records it
+    Result r1 = filter.check_and_record(5U, 77ULL);
+    assert(r1 == Result::OK);  // Assert: first call succeeds
+
+    // Second call: same message → ERR_DUPLICATE
+    Result r2 = filter.check_and_record(5U, 77ULL);
+    assert(r2 == Result::ERR_DUPLICATE);  // Assert: duplicate detected
+
+    // Third call: still ERR_DUPLICATE (idempotent duplicate detection)
+    Result r3 = filter.check_and_record(5U, 77ULL);
+    assert(r3 == Result::ERR_DUPLICATE);  // Assert: still a duplicate
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -215,6 +296,27 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_window_wraparound\n");
+    }
+
+    if (!test_multiple_sources_interleaved()) {
+        printf("FAIL: test_multiple_sources_interleaved\n");
+        ++failed;
+    } else {
+        printf("PASS: test_multiple_sources_interleaved\n");
+    }
+
+    if (!test_single_entry_eviction()) {
+        printf("FAIL: test_single_entry_eviction\n");
+        ++failed;
+    } else {
+        printf("PASS: test_single_entry_eviction\n");
+    }
+
+    if (!test_check_and_record_idempotent()) {
+        printf("FAIL: test_check_and_record_idempotent\n");
+        ++failed;
+    } else {
+        printf("PASS: test_check_and_record_idempotent\n");
     }
 
     return (failed > 0) ? 1 : 0;

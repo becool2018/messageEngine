@@ -474,6 +474,137 @@ static bool test_advance_sequence_no_wraparound_normal()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 11: sweep_expired_holds() advances ordering gate past stale held messages
+// Verifies: REQ-3.3.5
+//
+// Scenario:
+//   1. seq=2 arrives before seq=1 → held (expiry_time_us set to a past value).
+//   2. sweep_expired_holds() at a future time frees the slot and advances past seq=2.
+//   3. A subsequent seq=3 (now in-order after advance) is delivered immediately.
+//   4. A null out_freed pointer and zero cap are handled safely.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.3.5
+static bool test_sweep_expired_holds_advances_gate()
+{
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    const NodeId SRC = 95U;
+
+    // seq=2 with expiry in the near past (will expire when swept at T+1000000)
+    MessageEnvelope m2;
+    make_ordered(m2, SRC, 2U, 0x22U);
+    m2.expiry_time_us = 1000000ULL;  // expires at 1 second
+
+    MessageEnvelope out;
+    envelope_init(out);
+
+    // Ingest seq=2 out-of-order → held (seq=1 not yet received)
+    Result r2 = buf.ingest(m2, out, 500000ULL);
+    assert(r2 == Result::ERR_AGAIN);  // Assert: held, seq=1 still missing
+
+    // Sweep at a time past the expiry → the held seq=2 slot must be freed
+    MessageEnvelope freed_buf[ORDERING_HOLD_COUNT];
+    // Power of 10 Rule 2: bounded by ORDERING_HOLD_COUNT
+    for (uint32_t i = 0U; i < ORDERING_HOLD_COUNT; ++i) {
+        envelope_init(freed_buf[i]);
+    }
+    uint32_t freed = buf.sweep_expired_holds(2000000ULL, freed_buf, ORDERING_HOLD_COUNT);
+    assert(freed == 1U);               // Assert: exactly one expired hold freed
+    assert(freed_buf[0].source_id == SRC);  // Assert: freed envelope belongs to SRC
+    assert(freed_buf[0].sequence_num == 2U);  // Assert: freed seq=2
+
+    // After advance, next_expected for SRC is now 3.
+    // seq=3 arriving should be in-order (== next_expected).
+    MessageEnvelope m3;
+    make_ordered(m3, SRC, 3U, 0x33U);
+    m3.expiry_time_us = 9000000ULL;
+
+    Result r3 = buf.ingest(m3, out, 2000001ULL);
+    assert(r3 == Result::OK);          // Assert: seq=3 delivered in order
+    assert(out.sequence_num == 3U);    // Assert: correct sequence number
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 12: sweep_expired_holds() with nullptr out_freed (null-safe path)
+// Verifies: REQ-3.3.5
+//
+// Ensures sweep_expired_holds() handles a null out_freed buffer without
+// crashing — the caller may pass nullptr when it does not need freed envelopes.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.3.5
+static bool test_sweep_expired_holds_null_out()
+{
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    const NodeId SRC = 96U;
+
+    // Hold seq=2 with an already-expired expiry
+    MessageEnvelope m2;
+    make_ordered(m2, SRC, 2U, 0x42U);
+    m2.expiry_time_us = 100U;  // expires immediately
+
+    MessageEnvelope out;
+    envelope_init(out);
+
+    Result r2 = buf.ingest(m2, out, 50U);
+    assert(r2 == Result::ERR_AGAIN);  // Assert: held out-of-order
+
+    // Sweep with nullptr out_freed and capacity 0 — must not crash
+    uint32_t freed = buf.sweep_expired_holds(200U, nullptr, 0U);
+    assert(freed == 1U);  // Assert: slot freed despite null buffer
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 13: sweep_expired_holds() leaves non-expired slots untouched
+// Verifies: REQ-3.3.5
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.3.5
+static bool test_sweep_expired_holds_no_expiry()
+{
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    const NodeId SRC = 97U;
+
+    // Hold seq=2 with a far-future expiry (will not expire at sweep time)
+    MessageEnvelope m2;
+    make_ordered(m2, SRC, 2U, 0x52U);
+    m2.expiry_time_us = 9999999999ULL;  // very far in the future
+
+    MessageEnvelope out;
+    envelope_init(out);
+
+    Result r2 = buf.ingest(m2, out, 1000000ULL);
+    assert(r2 == Result::ERR_AGAIN);  // Assert: held
+
+    // Sweep at a time well before the expiry — nothing should be freed
+    MessageEnvelope freed_buf[ORDERING_HOLD_COUNT];
+    uint32_t freed = buf.sweep_expired_holds(2000000ULL, freed_buf, ORDERING_HOLD_COUNT);
+    assert(freed == 0U);  // Assert: no slots freed (not yet expired)
+
+    // The held slot must still be reachable — seq=1 delivered fills the gap
+    MessageEnvelope m1;
+    make_ordered(m1, SRC, 1U, 0x51U);
+    m1.expiry_time_us = 9999999999ULL;
+    Result r1 = buf.ingest(m1, out, 2000001ULL);
+    assert(r1 == Result::OK);      // Assert: seq=1 delivered
+    assert(out.sequence_num == 1U); // Assert: correct sequence
+
+    // try_release_next must yield the previously held seq=2
+    Result rr = buf.try_release_next(SRC, out);
+    assert(rr == Result::OK);      // Assert: seq=2 released from hold
+    assert(out.sequence_num == 2U); // Assert: correct sequence
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -519,6 +650,18 @@ int main()
     if (!test_advance_sequence_no_wraparound_normal()) {
         printf("FAIL: test_advance_sequence_no_wraparound_normal\n"); ++failed;
     } else { printf("PASS: test_advance_sequence_no_wraparound_normal\n"); }
+
+    if (!test_sweep_expired_holds_advances_gate()) {
+        printf("FAIL: test_sweep_expired_holds_advances_gate\n"); ++failed;
+    } else { printf("PASS: test_sweep_expired_holds_advances_gate\n"); }
+
+    if (!test_sweep_expired_holds_null_out()) {
+        printf("FAIL: test_sweep_expired_holds_null_out\n"); ++failed;
+    } else { printf("PASS: test_sweep_expired_holds_null_out\n"); }
+
+    if (!test_sweep_expired_holds_no_expiry()) {
+        printf("FAIL: test_sweep_expired_holds_no_expiry\n"); ++failed;
+    } else { printf("PASS: test_sweep_expired_holds_no_expiry\n"); }
 
     return (failed > 0) ? 1 : 0;
 }
