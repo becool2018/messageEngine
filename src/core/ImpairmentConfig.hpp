@@ -86,7 +86,10 @@ struct ImpairmentConfig {
     uint32_t partition_gap_ms;
 
     /// PRNG seed for deterministic impairment decisions.
-    /// 0 = use default seed (42); non-zero = use provided seed.
+    /// REQ-5.2.4: 0 = derive seed from cryptographic entropy (getrandom/arc4random_buf);
+    ///            non-zero = use exactly this seed (deterministic/test mode only).
+    /// A literal seed must never be used in production; set prng_seed = 0 for all
+    /// production configurations so ImpairmentEngine::init() gathers OS entropy.
     uint64_t prng_seed;
 };
 
@@ -108,7 +111,7 @@ inline void impairment_config_default(ImpairmentConfig& cfg)
     cfg.partition_enabled          = false;
     cfg.partition_duration_ms      = 0U;
     cfg.partition_gap_ms           = 0U;
-    cfg.prng_seed                  = 42ULL;  // Default deterministic seed
+    cfg.prng_seed                  = 0ULL;   // REQ-5.2.4: 0 = gather OS entropy in init()
 }
 
 #endif // CORE_IMPAIRMENT_CONFIG_HPP

@@ -25,13 +25,17 @@
  *   - MISRA C++: no STL, no exceptions, no templates.
  *   - F-Prime style: Result enum return codes, Logger::log() for events.
  *
- * Implements: REQ-5.1.1, REQ-5.1.2, REQ-5.1.3, REQ-5.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.2.2, REQ-5.2.5, REQ-5.3.1, REQ-5.3.2, REQ-7.2.2
+ * Implements: REQ-5.1.1, REQ-5.1.2, REQ-5.1.3, REQ-5.1.4, REQ-5.1.5, REQ-5.1.6, REQ-5.2.2, REQ-5.2.4, REQ-5.2.5, REQ-5.3.1, REQ-5.3.2, REQ-7.2.2
  */
 
 #include "ImpairmentEngine.hpp"
 #include "core/Assert.hpp"
 #include "core/Logger.hpp"
 #include <cstring>
+#include <ctime>
+#if !defined(__APPLE__)
+#include <sys/random.h>
+#endif
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constructor
@@ -45,8 +49,10 @@ ImpairmentEngine::ImpairmentEngine()
     // Power of 10 rule 3: zero all statically allocated buffers
     (void)memset(m_delay_buf, 0, sizeof(m_delay_buf));
     (void)memset(m_reorder_buf, 0, sizeof(m_reorder_buf));
-    // Seed PRNG to known non-zero state; init() will reseed with config value
-    m_prng.seed(1ULL);
+    // Seed placeholder — init() must be called before use; do not use PRNG before init().
+    // REQ-5.2.4: 0 is an explicit sentinel meaning "not yet seeded"; init() will reseed
+    // with cryptographic entropy (or the caller-supplied test seed from cfg.prng_seed).
+    m_prng.seed(0ULL);
     NEVER_COMPILED_OUT_ASSERT(!m_initialized);          // Power of 10: precondition
     NEVER_COMPILED_OUT_ASSERT(IMPAIR_DELAY_BUF_SIZE > 0U);  // Power of 10: bounds check
 }
@@ -69,8 +75,49 @@ void ImpairmentEngine::init(const ImpairmentConfig& cfg)
     // Store configuration
     m_cfg = cfg;
 
-    // Seed PRNG; use default seed 42 if cfg specifies 0
-    uint64_t seed = (cfg.prng_seed != 0ULL) ? cfg.prng_seed : 42ULL;
+    // Implements: REQ-5.2.4
+    // Seed PRNG: if cfg.prng_seed is non-zero, use it directly (test/deterministic mode).
+    // If cfg.prng_seed == 0, gather cryptographic entropy from the OS so that the seed
+    // cannot be predicted from a known message sequence (SECURITY_ASSUMPTIONS.md §7).
+    uint64_t seed = 0U;
+    if (cfg.prng_seed != 0ULL) {
+        // REQ-5.2.4: caller-supplied deterministic seed (test mode); non-zero means explicit.
+        seed = cfg.prng_seed;
+    } else {
+        // REQ-5.2.4: seed from cryptographically unpredictable entropy source.
+        uint64_t entropy = 0U;
+#if defined(__APPLE__)
+        // macOS: arc4random_buf() is always available and uses the kernel CSPRNG; no include needed.
+        arc4random_buf(&entropy, sizeof(entropy));
+#else
+        // Linux / POSIX: getrandom() — requires <sys/random.h> (included above).
+        // MISRA 5.2.4 deviation: reinterpret_cast to void* is required by the getrandom()
+        // POSIX API signature; no safer cast exists for this OS call.
+        // CERT INT32-C: getrandom() returns ssize_t; compare against cast sizeof to avoid
+        // signed/unsigned mismatch warning (-Wsign-compare).
+        {
+            ssize_t got = getrandom(
+                static_cast<void*>(&entropy),       // MISRA 5.2.4: void* required by POSIX API
+                sizeof(entropy), 0U);
+            if (got != static_cast<ssize_t>(sizeof(entropy))) {
+                // Degraded-mode fallback: entropy source unavailable (e.g., early boot).
+                // This is NOT production-safe alone; log WARNING_HI so the operator is aware.
+                Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
+                            "getrandom() failed (got=%ld); falling back to clock()-based seed "
+                            "— not cryptographically secure",
+                            static_cast<long>(got));
+                entropy = static_cast<uint64_t>(clock());
+            }
+        }
+#endif
+        // XOR with address of the engine instance for additional process-specific entropy.
+        // reinterpret_cast: MISRA 5.2.4 — converting pointer to integer for entropy mixing;
+        // no safer cast available; this is the only use.
+        entropy ^= reinterpret_cast<uintptr_t>(this);  // NOLINT(cppcoreguidelines-pro-type-reinterpret-cast)
+        // Guard: if entropy is still 0 after gathering (astronomically unlikely), use a
+        // non-zero fallback so the PRNG is never seeded with a known-weak value.
+        seed = (entropy != 0ULL) ? entropy : 0xDEADBEEFCAFEBABEULL;
+    }
     m_prng.seed(seed);
 
     // Zero-fill delay buffer (Power of 10: memset with fixed bounds)

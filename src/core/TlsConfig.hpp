@@ -94,6 +94,12 @@ struct TlsConfig {
     /// Leave empty ("") only when verify_peer is false (no cert check performed).
     char peer_hostname[TLS_PATH_MAX];
 
+    /// Path to the PEM-encoded CRL (Certificate Revocation List) file.
+    /// Optional. When non-empty and verify_peer is true, the CA chain
+    /// verification is performed against this CRL to reject revoked certs.
+    /// Leave empty ("") to skip CRL checking (e.g. in testing).
+    char crl_file[TLS_PATH_MAX];
+
     /// Enable TLS session ticket resumption (REQ-6.3.4 extension point).
     /// Client: saves the session after a successful handshake and presents it
     ///         on reconnect to skip the full handshake (RFC 5077 / TLS 1.3 PSK).
@@ -124,6 +130,7 @@ inline void tls_config_default(TlsConfig& cfg)
     (void)memset(cfg.key_file,      0, TLS_PATH_MAX);
     (void)memset(cfg.ca_file,       0, TLS_PATH_MAX);
     (void)memset(cfg.peer_hostname, 0, TLS_PATH_MAX);
+    (void)memset(cfg.crl_file,      0, TLS_PATH_MAX);
     cfg.verify_peer                = true;   // Secure default: always verify when TLS is on
     cfg.session_resumption_enabled = false;  // Off by default — backward-compatible
     cfg.session_ticket_lifetime_s  = 86400U; // 24 h default ticket lifetime
