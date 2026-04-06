@@ -443,9 +443,11 @@ static bool test_record_fragment_offset_boundary()
     ReassemblyBuffer buf;
     buf.init();
 
-    // Build a 4-fragment message with fragment_index = FRAG_MAX_COUNT-1 (maximum)
-    // total_payload_length = FRAG_MAX_COUNT * FRAG_MAX_PAYLOAD_BYTES (maximum valid)
-    static const uint32_t TOTAL = FRAG_MAX_COUNT * FRAG_MAX_PAYLOAD_BYTES;
+    // Build a 4-fragment message with fragment_index = FRAG_MAX_COUNT-1 (maximum).
+    // Each fragment carries 4 bytes; total_payload_length = 4 * 4 = 16 so the
+    // F-6 received_bytes integrity check (received_bytes == total_length) passes.
+    static const uint32_t FRAG_PAYLOAD = 4U;
+    static const uint32_t TOTAL = static_cast<uint32_t>(FRAG_MAX_COUNT) * FRAG_PAYLOAD;
     static const uint8_t p[4U] = { 0x01U, 0x02U, 0x03U, 0x04U };
 
     // Send all four fragments, ending with the max-index one
@@ -697,6 +699,119 @@ static bool test_sweep_expired_zero_expiry_never_freed()
 // ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 15: Per-source slot cap — one peer cannot exhaust the reassembly table
+// Verifies: REQ-3.2.9
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario:
+//   1. One peer (source=1) opens k_reasm_per_src_max distinct in-progress slots.
+//   2. A further fragment from source=1 must be rejected with ERR_FULL even
+//      though global free slots remain.
+//   3. A second peer (source=2) can still open a new slot (global cap not hit).
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_per_source_slot_cap()
+{
+    ReassemblyBuffer buf;
+    buf.init();
+
+    // k_reasm_per_src_max = REASSEMBLY_SLOT_COUNT / 2.
+    // Use this compile-time expression directly so the test does not depend on a
+    // specific numeric value.
+    static const uint32_t PER_SRC_MAX = REASSEMBLY_SLOT_COUNT / 2U;
+
+    static const uint8_t p[4U] = { 0xAAU, 0xBBU, 0xCCU, 0xDDU };
+    static const uint64_t NOW = 1000000ULL;
+    static const NodeId   SRC1 = 1U;
+    static const NodeId   SRC2 = 2U;
+
+    MessageEnvelope out;
+
+    // Open PER_SRC_MAX slots from source 1 — each a distinct two-fragment message
+    // Power of 10 Rule 2: bounded loop at PER_SRC_MAX
+    for (uint32_t i = 0U; i < PER_SRC_MAX; ++i) {
+        MessageEnvelope f;
+        make_fragment(f, 15000ULL + static_cast<uint64_t>(i),
+                      SRC1, 0U, 2U, 8U, p, 4U);
+        envelope_init(out);
+        Result r = buf.ingest(f, out, NOW);
+        assert(r == Result::ERR_AGAIN);  // Assert: first fragment accepted; waiting for second
+    }
+
+    // One more fragment from source 1 must be rejected — per-source cap reached
+    MessageEnvelope f_over;
+    make_fragment(f_over, 15000ULL + static_cast<uint64_t>(PER_SRC_MAX),
+                  SRC1, 0U, 2U, 8U, p, 4U);
+    envelope_init(out);
+    Result r_over = buf.ingest(f_over, out, NOW);
+    assert(r_over == Result::ERR_FULL);  // Assert: per-source cap enforced
+
+    // Source 2 can still open a slot (global table not exhausted)
+    MessageEnvelope f2;
+    make_fragment(f2, 20000ULL, SRC2, 0U, 2U, 8U, p, 4U);
+    envelope_init(out);
+    Result r2 = buf.ingest(f2, out, NOW);
+    assert(r2 == Result::ERR_AGAIN);  // Assert: different source accepted
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 16: Two peers sharing the table each respect the per-source cap
+// Verifies: REQ-3.2.9
+// ─────────────────────────────────────────────────────────────────────────────
+// Scenario:
+//   1. Source 1 fills k_reasm_per_src_max slots.
+//   2. Source 2 fills k_reasm_per_src_max slots.
+//   3. Together they exactly fill the global table (REASSEMBLY_SLOT_COUNT).
+//   4. Any further fragment from either source — or a new third source — gets
+//      ERR_FULL because no free slots remain.
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_two_source_slot_sharing()
+{
+    ReassemblyBuffer buf;
+    buf.init();
+
+    static const uint32_t PER_SRC_MAX = REASSEMBLY_SLOT_COUNT / 2U;
+    static const uint8_t  p[4U] = { 0x01U, 0x02U, 0x03U, 0x04U };
+    static const uint64_t NOW   = 2000000ULL;
+    static const NodeId   SRC1  = 10U;
+    static const NodeId   SRC2  = 20U;
+    static const NodeId   SRC3  = 30U;
+
+    MessageEnvelope out;
+
+    // Source 1: fill PER_SRC_MAX slots
+    // Power of 10 Rule 2: bounded loop at PER_SRC_MAX
+    for (uint32_t i = 0U; i < PER_SRC_MAX; ++i) {
+        MessageEnvelope f;
+        make_fragment(f, 16000ULL + static_cast<uint64_t>(i),
+                      SRC1, 0U, 2U, 8U, p, 4U);
+        envelope_init(out);
+        Result r = buf.ingest(f, out, NOW);
+        assert(r == Result::ERR_AGAIN);  // Assert: source-1 fragment accepted
+    }
+
+    // Source 2: fill the remaining PER_SRC_MAX slots
+    // Power of 10 Rule 2: bounded loop at PER_SRC_MAX
+    for (uint32_t i = 0U; i < PER_SRC_MAX; ++i) {
+        MessageEnvelope f;
+        make_fragment(f, 17000ULL + static_cast<uint64_t>(i),
+                      SRC2, 0U, 2U, 8U, p, 4U);
+        envelope_init(out);
+        Result r = buf.ingest(f, out, NOW);
+        assert(r == Result::ERR_AGAIN);  // Assert: source-2 fragment accepted
+    }
+
+    // Global table now full — any new fragment from any source must be rejected
+    MessageEnvelope f_new;
+    make_fragment(f_new, 99000ULL, SRC3, 0U, 2U, 8U, p, 4U);
+    envelope_init(out);
+    Result r_full = buf.ingest(f_new, out, NOW);
+    assert(r_full == Result::ERR_FULL);  // Assert: global table exhausted
+
+    return true;
+}
+
 int main()
 {
     int failed = 0;
@@ -756,6 +871,14 @@ int main()
     if (!test_sweep_expired_zero_expiry_never_freed()) {
         printf("FAIL: test_sweep_expired_zero_expiry_never_freed\n"); ++failed;
     } else { printf("PASS: test_sweep_expired_zero_expiry_never_freed\n"); }
+
+    if (!test_per_source_slot_cap()) {
+        printf("FAIL: test_per_source_slot_cap\n"); ++failed;
+    } else { printf("PASS: test_per_source_slot_cap\n"); }
+
+    if (!test_two_source_slot_sharing()) {
+        printf("FAIL: test_two_source_slot_sharing\n"); ++failed;
+    } else { printf("PASS: test_two_source_slot_sharing\n"); }
 
     return (failed > 0) ? 1 : 0;
 }

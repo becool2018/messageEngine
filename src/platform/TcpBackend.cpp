@@ -381,10 +381,12 @@ Result TcpBackend::recv_from_client(int client_fd, uint32_t timeout_ms)
         return Result::ERR_AGAIN;  // client received HELLO echo; consumed
     }
 
-    // REQ-6.1.11 / HAZ-009: reject data frames from unregistered slots (Fix 3).
-    // Clients must complete HELLO registration before any data frame is accepted.
-    // Security fix: prevents source_id spoofing from never-registered connections.
-    if (is_unregistered_slot(client_fd)) {
+    // REQ-6.1.11 / HAZ-009: reject data frames from unregistered slots (server mode
+    // only). Clients must complete HELLO registration before any data frame is
+    // accepted. The guard is skipped in client mode because the server slot has
+    // NODE_ID_INVALID by design (server never sends HELLO back) and the slot would
+    // always appear unregistered, causing all client-mode receives to be dropped.
+    if (m_is_server && is_unregistered_slot(client_fd)) {
         Logger::log(Severity::WARNING_HI, "TcpBackend",
                     "data frame from unregistered slot fd=%d: dropping (REQ-6.1.11)",
                     client_fd);
@@ -476,7 +478,10 @@ Result TcpBackend::send_one_delayed(const MessageEnvelope& env, bool& failed)
         return Result::ERR_INVALID;
     }
     failed = send_to_slot(slot, m_wire_buf, wire_len);
-    return Result::OK;
+    // F-7: propagate send failure as ERR_IO so apply_send_result does not depend
+    // solely on is_current detection to surface unicast send errors. This ensures
+    // RELIABLE_RETRY messages receive ERR_IO from send_message() and are retried.
+    return failed ? Result::ERR_IO : Result::OK;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -489,7 +494,11 @@ void TcpBackend::apply_send_result(Result route_r, bool failed,
     NEVER_COMPILED_OUT_ASSERT(final_result == Result::OK ||
                               final_result == Result::ERR_IO ||
                               final_result == Result::ERR_INVALID);  // Pre-condition
+    // F-7: route_r may now be ERR_IO when send_one_delayed returns failure
+    // directly (unicast send_to_slot failed), in addition to the existing
+    // ERR_INVALID case (no routing slot for destination).
     NEVER_COMPILED_OUT_ASSERT(route_r == Result::OK ||
+                              route_r == Result::ERR_IO   ||
                               route_r == Result::ERR_INVALID);       // Pre-condition
 
     if (!result_ok(route_r) && is_current) {
@@ -616,8 +625,11 @@ void TcpBackend::poll_clients_once(uint32_t timeout_ms)
 
     // Block until a fd is readable or timeout_ms elapses.
     // Power of 10 Rule 2 deviation: infrastructure poll; bounded per-call timeout.
+    // CERT INT31-C: clamp uint32_t → int before passing to poll().
+    static const uint32_t k_poll_max_ms = static_cast<uint32_t>(INT_MAX);
+    const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
     int poll_rc = poll(pfds, static_cast<nfds_t>(nfds),
-                       static_cast<int>(timeout_ms));
+                       static_cast<int>(clamped_ms));
     if (poll_rc <= 0) {
         return;  // Timeout (0) or error (−1): nothing to accept or receive
     }
@@ -939,29 +951,53 @@ Result TcpBackend::process_hello_frame(int client_fd, NodeId src_id)
 bool TcpBackend::validate_source_id(int client_fd, NodeId claimed_id) const
 {
     NEVER_COMPILED_OUT_ASSERT(client_fd >= 0);
-    // Find the slot for this fd and look up its registered NodeId.
-    // Power of 10 Rule 2: bounded loop at MAX_TCP_CONNECTIONS.
+    NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);  // Invariant
+
+    // F-3: use m_client_count (≤ MAX_TCP_CONNECTIONS per invariant above) to avoid
+    // scanning uninitialised slots beyond the live table.  The static upper bound
+    // visible to analysis tools is MAX_TCP_CONNECTIONS.
+    // Power of 10 Rule 2: fixed loop bound (m_client_count ≤ MAX_TCP_CONNECTIONS)
     NodeId registered = NODE_ID_INVALID;
-    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
+    bool   found      = false;
+    for (uint32_t i = 0U; i < m_client_count; ++i) {
         if (m_client_fds[i] == client_fd) {
             registered = m_client_node_ids[i];
+            found      = true;
             break;
         }
     }
-    // If no HELLO has been received for this slot, we cannot validate.
-    // Allow through — covers client-mode receive path (server never sends HELLO).
+
+    // fd not found: in server mode this should never occur — is_unregistered_slot()
+    // filters unregistered fds before we reach here. Treat as untrusted and reject.
+    // In client mode the server fd is always at slot 0, so not-found is impossible
+    // during normal operation; allow as a defensive fallback.
+    if (!found) {
+        if (m_is_server) {
+            Logger::log(Severity::WARNING_HI, "TcpBackend",
+                        "validate_source_id: fd=%d not in slot table; dropping",
+                        client_fd);
+            return false;
+        }
+        return true;  // client-mode defensive fallback (should not occur)
+    }
+
+    // NODE_ID_INVALID registered means client-mode path: server never sends HELLO
+    // so its slot always carries NODE_ID_INVALID. In server mode this case is
+    // blocked upstream by the is_unregistered_slot() guard (F-2 fix).
     if (registered == NODE_ID_INVALID) {
-        NEVER_COMPILED_OUT_ASSERT(true);  // post: unregistered slot, allow
+        NEVER_COMPILED_OUT_ASSERT(!m_is_server);  // must only reach here in client mode
         return true;
     }
+
     if (claimed_id != registered) {
         Logger::log(Severity::WARNING_HI, "TcpBackend",
                     "source_id mismatch: claimed=%u registered=%u; dropping (REQ-6.1.11)",
                     static_cast<unsigned>(claimed_id),
                     static_cast<unsigned>(registered));
-        NEVER_COMPILED_OUT_ASSERT(true);  // post: mismatch detected
+        NEVER_COMPILED_OUT_ASSERT(claimed_id != registered);  // post: mismatch detected
         return false;
     }
+
     NEVER_COMPILED_OUT_ASSERT(claimed_id == registered);  // post: match verified
     return true;
 }

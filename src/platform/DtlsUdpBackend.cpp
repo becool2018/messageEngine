@@ -632,7 +632,9 @@ bool DtlsUdpBackend::validate_source(const char* src_ip, uint16_t src_port) cons
     }
 
     // Plaintext path: always validate IP address.
-    bool ip_match = (strncmp(src_ip, m_cfg.peer_ip, sizeof(m_cfg.peer_ip)) == 0);
+    // CERT: use strcmp() not strncmp(…, sizeof(buf)) — same rationale as UdpBackend:
+    // strncmp reads up to N bytes past each string's NUL, reaching uninitialised memory.
+    bool ip_match = (strcmp(src_ip, m_cfg.peer_ip) == 0);
 
     // Port validation: in client mode the server responds from its configured port;
     // in server mode the client sends from an ephemeral bind port that differs from
@@ -779,20 +781,29 @@ bool DtlsUdpBackend::process_hello_or_validate(const MessageEnvelope& env,
         return true;
     }
 
-    // Data / ACK / etc.: check source_id if peer is registered
-    if (m_peer_node_id != static_cast<NodeId>(NODE_ID_INVALID) &&
-        env.source_id  != m_peer_node_id) {
-        // REQ-6.2.4: source_id in envelope does not match registered HELLO NodeId
+    // F-2 / REQ-6.2.4 / REQ-6.1.8: HELLO is mandatory before any data frame.
+    // Backward-compatibility bypass removed — a peer that never sends HELLO could
+    // otherwise inject arbitrary source_id values for the lifetime of the connection,
+    // corrupting ordering state and exhausting the dedup window.
+    if (!m_peer_hello_received) {
+        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
+                    "process_hello_or_validate: data frame before HELLO; "
+                    "dropping (source_id=%u)",
+                    static_cast<unsigned int>(env.source_id));
+        return false;
+    }
+
+    // source_id must match the NodeId registered in the HELLO.
+    if (env.source_id != m_peer_node_id) {
         Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
                     "process_hello_or_validate: source_id %u != registered %u; "
-                    "spoofing attempt — dropping",
+                    "spoofing attempt — dropping (REQ-6.2.4)",
                     static_cast<unsigned int>(env.source_id),
                     static_cast<unsigned int>(m_peer_node_id));
         return false;
     }
 
-    // Allow: either peer unregistered (backward compat) or source_id matches
-    return true;
+    return true;  // source_id matches registered peer NodeId
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -945,6 +956,22 @@ Result DtlsUdpBackend::init(const TransportConfig& config)
     m_cfg         = config;
     m_is_server   = config.is_server;
     m_tls_enabled = config.tls.tls_enabled;
+
+    // F-5 / REQ-6.4.1: DtlsUdpBackend is IPv4-only (client_connect_and_handshake
+    // constructs sockaddr_in / AF_INET). Detect IPv6 addresses (contain ':') and
+    // fail fast here rather than silently connect() to 0.0.0.0:port after inet_pton
+    // returns 0. To add IPv6: replace inet_pton(AF_INET,...) with getaddrinfo().
+    // Power of 10 Rule 2: bounded loop — at most sizeof(peer_ip) iterations.
+    for (uint32_t ci = 0U;
+         ci < sizeof(m_cfg.peer_ip) && m_cfg.peer_ip[ci] != '\0';
+         ++ci) {
+        if (m_cfg.peer_ip[ci] == ':') {
+            Logger::log(Severity::FATAL, "DtlsUdpBackend",
+                        "IPv6 peer_ip not supported; DtlsUdpBackend is IPv4-only "
+                        "(F-5, REQ-6.4.1). Use an IPv4 address.");
+            return Result::ERR_INVALID;
+        }
+    }
 
     // REQ-6.2.4: reset peer registration state for a fresh init()
     m_peer_node_id       = static_cast<NodeId>(NODE_ID_INVALID);

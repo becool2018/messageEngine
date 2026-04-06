@@ -82,7 +82,7 @@ static void test_empty_file()
     assert(res == Result::OK);
     assert(cfg.enabled == false);
     assert(cfg.loss_probability == 0.0);
-    assert(cfg.prng_seed == 42ULL);
+    assert(cfg.prng_seed == 0ULL);  // REQ-5.2.4: default 0 = gather OS entropy in init()
 
     printf("PASS: test_empty_file\n");
 }
@@ -146,7 +146,7 @@ static void test_partial_file()
     // Missing keys must hold defaults
     assert(cfg.loss_probability == 0.0);
     assert(cfg.partition_enabled == false);
-    assert(cfg.prng_seed == 42ULL);
+    assert(cfg.prng_seed == 0ULL);  // REQ-5.2.4: default 0 = gather OS entropy in init()
 
     printf("PASS: test_partial_file\n");
 }
@@ -173,7 +173,7 @@ static void test_comment_and_blank_lines()
     assert(cfg.enabled == true);
     assert(cfg.fixed_latency_ms == 25U);
     // Comment lines must not corrupt adjacent fields
-    assert(cfg.prng_seed == 42ULL);
+    assert(cfg.prng_seed == 0ULL);  // REQ-5.2.4: default 0 = gather OS entropy in init()
 
     printf("PASS: test_comment_and_blank_lines\n");
 }
@@ -481,7 +481,7 @@ static void test_malformed_values()
     assert(cfg.partition_enabled == false);
     assert(cfg.partition_duration_ms == 0U);
     assert(cfg.partition_gap_ms == 0U);
-    assert(cfg.prng_seed == 42ULL);  // default seed unchanged
+    assert(cfg.prng_seed == 0ULL);  // REQ-5.2.4: default 0 = gather OS entropy in init()  // default seed unchanged
 
     printf("PASS: test_malformed_values\n");
 }
@@ -557,7 +557,7 @@ static void test_parse_u64_trailing_garbage()
     Result res = impairment_config_load(TEST_FILE, cfg);
 
     assert(res == Result::OK);
-    assert(cfg.prng_seed == 42ULL);  // rejected — default seed retained
+    assert(cfg.prng_seed == 0ULL);  // REQ-5.2.4: default 0 = gather OS entropy in init()  // rejected — default seed retained
     assert(cfg.enabled == false);
 
     printf("PASS: test_parse_u64_trailing_garbage\n");

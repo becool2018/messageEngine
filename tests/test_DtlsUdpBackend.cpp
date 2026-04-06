@@ -161,6 +161,17 @@ static void* dtls_client_thread(void* arg)
     assert(a->result == Result::OK);
     assert(client.is_open() == true);
 
+    // REQ-6.1.8: send HELLO before DATA so server registers this NodeId (F-2 fix).
+    MessageEnvelope hello;
+    envelope_init(hello);
+    hello.message_type   = MessageType::HELLO;
+    hello.source_id      = 2U;
+    hello.destination_id = NODE_ID_INVALID;
+    hello.payload_length = 0U;
+    Result hello_r = client.send_message(hello);
+    assert(hello_r == Result::OK);
+    usleep(20000U);  // 20 ms: let server process HELLO before DATA arrives
+
     MessageEnvelope env;
     envelope_init(env);
     env.message_type      = MessageType::DATA;
@@ -1697,6 +1708,18 @@ static void test_delay_impairment_flush_and_recv()
     assert(cli_init == Result::OK);
     assert(client.is_open() == true);
 
+    // REQ-6.1.8: send HELLO before DATA so server registers this NodeId (F-2 fix).
+    // With fixed_latency_ms=1, the HELLO also goes into the delay buffer and is
+    // flushed together with the DATA by client.receive_message().
+    MessageEnvelope hello_env;
+    envelope_init(hello_env);
+    hello_env.message_type   = MessageType::HELLO;
+    hello_env.source_id      = 2U;
+    hello_env.destination_id = NODE_ID_INVALID;
+    hello_env.payload_length = 0U;
+    Result hello_res = client.send_message(hello_env);
+    assert(hello_res == Result::OK);
+
     MessageEnvelope env;
     envelope_init(env);
     env.message_type      = MessageType::DATA;
@@ -1767,6 +1790,18 @@ static void test_two_delayed_messages_second_recv_prequeue()
     Result cli_init = sender.init(cli_cfg);
     assert(cli_init == Result::OK);
     assert(sender.is_open());
+
+    // REQ-6.1.8: send HELLO before DATA so server registers this NodeId (F-2 fix).
+    // With fixed_latency_ms=1, the HELLO also goes into the delay buffer and is
+    // flushed together with the DATA messages by sender.receive_message().
+    MessageEnvelope hello_cc;
+    envelope_init(hello_cc);
+    hello_cc.message_type   = MessageType::HELLO;
+    hello_cc.source_id      = 3U;
+    hello_cc.destination_id = NODE_ID_INVALID;
+    hello_cc.payload_length = 0U;
+    Result hello_r = sender.send_message(hello_cc);
+    assert(hello_r == Result::OK);
 
     // Build two minimal DATA envelopes.
     MessageEnvelope env_a;
@@ -1984,7 +2019,18 @@ static void test_dtls_inbound_partition_drops_received()
     assert(r == Result::OK);
     assert(side_a.is_open() == true);
 
-    // Step 1: warm-up datagram initialises the partition timer in side_b
+    // REQ-6.1.8: send HELLO before DATA so side_b registers side_a's NodeId (F-2 fix).
+    MessageEnvelope hello_part;
+    envelope_init(hello_part);
+    hello_part.message_type   = MessageType::HELLO;
+    hello_part.source_id      = 2U;
+    hello_part.destination_id = NODE_ID_INVALID;
+    hello_part.payload_length = 0U;
+    r = side_a.send_message(hello_part);
+    assert(r == Result::OK);
+
+    // Step 1: warm-up datagram initialises the partition timer in side_b.
+    // side_b.receive_message will consume the HELLO then deliver the warmup DATA.
     MessageEnvelope warmup;
     envelope_init(warmup);
     warmup.message_type      = MessageType::DATA;

@@ -162,6 +162,15 @@ static void* client_thread_func(void* arg)
         return nullptr;
     }
 
+    // REQ-6.1.8: client must send HELLO before any DATA frame so the server
+    // can register the NodeId and accept subsequent data frames (F-3 fix).
+    Result hello_r = client.register_local_id(2U);
+    if (hello_r != Result::OK) {
+        a->result = hello_r;
+        return nullptr;
+    }
+    usleep(20000U);  // 20 ms: let server process HELLO before DATA arrives
+
     MessageEnvelope env;
     envelope_init(env);
     env.message_type   = MessageType::DATA;
@@ -397,6 +406,15 @@ static void* echo_client_thread_func(void* raw_arg)
         return nullptr;
     }
 
+    // REQ-6.1.8: send HELLO before DATA so the server registers this NodeId.
+    Result hello_r = client.register_local_id(2U);
+    if (hello_r != Result::OK) {
+        a->send_result = hello_r;
+        client.close();
+        return nullptr;
+    }
+    usleep(20000U);  // 20 ms: let server process HELLO before DATA arrives
+
     MessageEnvelope env;
     envelope_init(env);
     env.message_type      = MessageType::DATA;
@@ -541,7 +559,12 @@ static void test_echo_loopback_plaintext()
     Result recv_res = server.receive_message(received, 3000U);
     assert(recv_res == Result::OK);
 
-    // Server: send echo reply (covers send_to_all_clients loop with m_client_count=1)
+    // Server: send echo reply to the originating client (REQ-6.1.9 / F-4 fix).
+    // Swap src/dst so the reply is unicast-routed to the client's registered NodeId.
+    // The broadcast fallback was removed in F-4 — unicast routing is now required.
+    const NodeId client_node_id = received.source_id;  // 2U (registered via HELLO)
+    received.destination_id = client_node_id;
+    received.source_id      = 1U;  // server's NodeId
     Result send_res = server.send_message(received);
     assert(send_res == Result::OK);
 
@@ -630,6 +653,15 @@ static void* verify_peer_client_func(void* raw_arg)
     }
     a->result = client.init(cfg);
     if (a->result == Result::OK) {
+        // REQ-6.1.8: send HELLO before DATA so server registers this NodeId.
+        Result hello_r = client.register_local_id(2U);
+        if (hello_r != Result::OK) {
+            a->result = hello_r;
+            client.close();
+            return nullptr;
+        }
+        usleep(20000U);  // 20 ms: let server process HELLO before DATA arrives
+
         MessageEnvelope env;
         envelope_init(env);
         env.message_type      = MessageType::DATA;
@@ -720,6 +752,15 @@ static void* multi_msg_client_func(void* raw_arg)
     a->result = client.init(cfg);
     if (a->result != Result::OK) { return nullptr; }
 
+    // REQ-6.1.8: send HELLO before DATA so server registers this NodeId (F-3 fix).
+    Result hello_r = client.register_local_id(2U);
+    if (hello_r != Result::OK) {
+        a->result = hello_r;
+        client.close();
+        return nullptr;
+    }
+    usleep(20000U);  // 20 ms: let server process HELLO before DATA arrives
+
     for (uint32_t m = 0U; m < a->num_msgs; ++m) {
         MessageEnvelope env;
         envelope_init(env);
@@ -762,10 +803,14 @@ static void test_post_echo_remove_client_plaintext()
 
     pthread_t tid = create_thread_4mb(echo_client_thread_func, &args);
 
-    // Server: receive, echo, wait for client to receive echo and close
+    // Server: receive, echo, wait for client to receive echo and close.
+    // Swap src/dst so the reply is unicast-routed to the client's NodeId (F-4 fix).
     MessageEnvelope received;
     Result recv_res = server.receive_message(received, 3000U);
     assert(recv_res == Result::OK);
+    const NodeId echo_client_id = received.source_id;  // 2U
+    received.destination_id = echo_client_id;
+    received.source_id      = 1U;  // server's NodeId
     Result send_res = server.send_message(received);
     assert(send_res == Result::OK);
     (void)pthread_join(tid, nullptr);
@@ -907,7 +952,7 @@ static void test_init_bad_key_path()
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 16: Server with num_channels=0 + 4-digit port (9100)
 // Covers: L644 False  (config.num_channels > 0U → False in init())
-//         L547 False  (m_cfg.num_channels > 0U → False in send_to_all_clients())
+//         L939 False  (m_cfg.num_channels > 0U → False in send_to_slot(), 1000U fallback)
 //         L52:41 False (port_to_str loop: val==0 at i==4, loop exits via val>0U False)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -920,7 +965,7 @@ static void test_server_num_channels_zero()
     TlsTcpBackend server;
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
-    srv_cfg.num_channels = 0U;   // L644 False in init(), L547 False in send_to_all_clients()
+    srv_cfg.num_channels = 0U;   // L644 False in init(); 1000U timeout fallback in send_to_slot
 
     Result init_res = server.init(srv_cfg);
     assert(init_res == Result::OK);
@@ -936,7 +981,10 @@ static void test_server_num_channels_zero()
     Result recv_res = server.receive_message(received, 3000U);
     assert(recv_res == Result::OK);
 
-    // send_to_all_clients: num_channels==0 → timeout uses 1000U fallback (L547 False)
+    // Unicast reply to client: swap src/dst. num_channels==0 → send_to_slot uses 1000U fallback.
+    const NodeId ch0_client_id = received.source_id;  // 2U
+    received.destination_id = ch0_client_id;
+    received.source_id      = 1U;
     Result send_res = server.send_message(received);
     assert(send_res == Result::OK);
 
@@ -1129,9 +1177,10 @@ static void test_two_client_queue_prefill()
     pthread_t t1 = create_thread_4mb(multi_msg_client_func, &arg1);
     pthread_t t2 = create_thread_4mb(multi_msg_client_func, &arg2);
 
-    // Let both threads connect and send before the first receive_message call.
-    // Both TCP connections will be queued in the kernel backlog.
-    usleep(50000U);  // 50 ms
+    // Let both threads connect, send HELLO (20 ms delay in thread), then send DATA
+    // before the first receive_message call.  Both TCP connections will be queued
+    // in the kernel backlog.  150 ms gives 130 ms of margin after the 20 ms HELLO wait.
+    usleep(150000U);  // 150 ms
 
     // Call A: poll listen → accept Thread1 (first in backlog); read Thread1 msg1
     //         → push → pop → return.  Thread2 remains in the accept backlog.
@@ -1851,6 +1900,15 @@ static void* session_client_func(void* raw_arg)
         return nullptr;
     }
 
+    // REQ-6.1.8: send HELLO before DATA so server registers this NodeId (F-3 fix).
+    Result hello_r = client.register_local_id(2U);
+    if (hello_r != Result::OK) {
+        a->init_result = hello_r;
+        client.close();
+        return nullptr;
+    }
+    usleep(20000U);  // 20 ms: let server process HELLO before DATA arrives
+
     MessageEnvelope env;
     envelope_init(env);
     env.message_type      = MessageType::DATA;
@@ -1946,6 +2004,11 @@ static void* resume_client_func(void* raw_arg)
         if (a->first_init != Result::OK) {
             return nullptr;
         }
+        // REQ-6.1.8: HELLO before DATA (F-3 fix).
+        Result hello1 = client1.register_local_id(2U);
+        if (hello1 != Result::OK) { a->first_init = hello1; client1.close(); return nullptr; }
+        usleep(20000U);  // 20 ms: let server process HELLO
+
         MessageEnvelope env1;
         envelope_init(env1);
         env1.message_type      = MessageType::DATA;
@@ -1969,6 +2032,11 @@ static void* resume_client_func(void* raw_arg)
         if (a->second_init != Result::OK) {
             return nullptr;
         }
+        // REQ-6.1.8: HELLO before DATA (F-3 fix).
+        Result hello2 = client2.register_local_id(2U);
+        if (hello2 != Result::OK) { a->second_init = hello2; client2.close(); return nullptr; }
+        usleep(20000U);  // 20 ms: let server process HELLO
+
         MessageEnvelope env2;
         envelope_init(env2);
         env2.message_type      = MessageType::DATA;
@@ -2329,12 +2397,32 @@ static void* f3_raw_client_thread(void* raw_arg)
         return nullptr;
     }
 
-    // Build and send one valid serialised frame.
-    // Use a known-good serialised MessageEnvelope.  The simplest approach is to
-    // build the raw 4-byte-length-prefixed wire bytes using Serializer.
+    // Build and send frames using Serializer for wire format compatibility.
     // We use a stack buffer (Power of 10 Rule 3: no dynamic allocation).
     uint8_t wire[SOCKET_RECV_BUF_BYTES];
     uint32_t wire_len = 0U;
+    uint8_t hdr[4U];
+
+    // REQ-6.1.8: send HELLO frame before any DATA frame (F-3 fix).
+    MessageEnvelope hello_env;
+    envelope_init(hello_env);
+    hello_env.message_type   = MessageType::HELLO;
+    hello_env.source_id      = 2U;
+    hello_env.destination_id = NODE_ID_INVALID;
+    hello_env.payload_length = 0U;
+    uint32_t hello_len = 0U;
+    Result hello_ser = Serializer::serialize(hello_env, wire, SOCKET_RECV_BUF_BYTES, hello_len);
+    if (result_ok(hello_ser) && hello_len > 0U) {
+        hdr[0U] = static_cast<uint8_t>((hello_len >> 24U) & 0xFFU);
+        hdr[1U] = static_cast<uint8_t>((hello_len >> 16U) & 0xFFU);
+        hdr[2U] = static_cast<uint8_t>((hello_len >>  8U) & 0xFFU);
+        hdr[3U] = static_cast<uint8_t>( hello_len         & 0xFFU);
+        (void)f3_raw_write_all(&ssl, hdr, 4U);
+        (void)f3_raw_write_all(&ssl, wire, hello_len);
+    }
+    usleep(20000U);  // 20 ms: let server process HELLO before DATA
+
+    // Build and send one valid DATA frame.
     MessageEnvelope env;
     envelope_init(env);
     env.message_type      = MessageType::DATA;
@@ -2353,8 +2441,6 @@ static void* f3_raw_client_thread(void* raw_arg)
         return nullptr;
     }
 
-    // Build 4-byte big-endian length prefix + payload (as TlsTcpBackend would).
-    uint8_t hdr[4U];
     hdr[0U] = static_cast<uint8_t>((wire_len >> 24U) & 0xFFU);
     hdr[1U] = static_cast<uint8_t>((wire_len >> 16U) & 0xFFU);
     hdr[2U] = static_cast<uint8_t>((wire_len >>  8U) & 0xFFU);

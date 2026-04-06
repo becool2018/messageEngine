@@ -155,9 +155,9 @@ Transitions are driven by `m_next_partition_event_us` (uint64_t) and the `now_us
 | Condition | Action | Returns |
 |-----------|--------|---------|
 | `!m_cfg.partition_enabled` | No state change | `false` |
-| `m_next_partition_event_us == 0` (first call) | `m_partition_active = false`; `m_next_partition_event_us = now_us + partition_gap_ms × 1000` | `false` |
-| `!m_partition_active && now_us >= m_next_partition_event_us` | `m_partition_active = true`; `m_partition_start_us = now_us`; `m_next_partition_event_us = now_us + partition_duration_ms × 1000`; log `WARNING_LO` | `true` |
-| `m_partition_active && now_us >= m_next_partition_event_us` | `m_partition_active = false`; `m_next_partition_event_us = now_us + partition_gap_ms × 1000`; log `WARNING_LO` | `false` |
+| `m_next_partition_event_us == 0` (first call) | `m_partition_active = false`; `m_next_partition_event_us = sat_add_us(now_us, partition_gap_ms)` ¹ | `false` |
+| `!m_partition_active && now_us >= m_next_partition_event_us` | `m_partition_active = true`; `m_partition_start_us = now_us`; `m_next_partition_event_us = sat_add_us(now_us, partition_duration_ms)` ¹; log `WARNING_LO` | `true` |
+| `m_partition_active && now_us >= m_next_partition_event_us` | `m_partition_active = false`; `m_next_partition_event_us = sat_add_us(now_us, partition_gap_ms)` ¹; log `WARNING_LO` | `false` |
 | Otherwise | No state change | `m_partition_active` |
 
 Effect on `process_outbound()`:
@@ -167,7 +167,9 @@ Effect on `process_outbound()`:
 | `true` | Drop message; log `WARNING_LO`; return `ERR_IO` |
 | `false` | Apply loss/jitter/duplication; queue to delay buffer |
 
-> **Known edge case:** If `partition_gap_ms == 0`, the first call to `is_partition_active()` sets `m_next_partition_event_us = now_us`. On the very next call (same or greater `now_us`), the `!m_partition_active && now_us >= m_next_partition_event_us` guard fires, activating a partition immediately and permanently (the gap phase has zero duration). This causes a permanent partition — all messages are dropped.
+> ¹ `sat_add_us(now_us, delta_ms)` computes `now_us + delta_ms × 1000` with CERT INT30-C unsigned saturation: if the addition would overflow `UINT64_MAX`, the result is clamped to `UINT64_MAX` (effectively "never fires"), preventing deadline wrap-around (added in commit 18e6d1a).
+
+> **Edge case eliminated:** `partition_gap_ms == 0` with `partition_enabled == true` is now rejected by `ImpairmentEngine::init()` via `NEVER_COMPILED_OUT_ASSERT(!cfg.partition_enabled || cfg.partition_gap_ms > 0U)`. Callers that supply this combination receive a FATAL assertion and `init()` returns without setting `m_initialized`, so the engine cannot be used. The prior silent behaviour (permanent partition on the second call) is no longer reachable.
 
 > **Unicast routing note:** Partition drops apply to both broadcast (`destination_id == 0`) and unicast (`destination_id > 0`) paths equally. The unicast slot lookup (§6 below) occurs before the partition check in the send path in the calling TcpBackend/TlsTcpBackend, but the partition causes the send to be dropped regardless of routing result — a routable unicast slot is no protection against a simulated link outage.
 

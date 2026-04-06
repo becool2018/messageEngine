@@ -200,6 +200,8 @@ private:
     /// @param[in]  env  Deserialized inbound envelope.
     /// @return ERR_AGAIN if HELLO consumed; ERR_INVALID if rejected;
     ///         OK if envelope should proceed to validate_source_id + impairment.
+    // Safety-critical (SC): HAZ-009 — enforces one-HELLO-per-slot and rejects
+    // data from unregistered slots; failure allows NodeId hijack or pre-auth injection.
     Result classify_inbound_frame(uint32_t idx, const MessageEnvelope& env);
 
     /// Build pollfd array for active client slots and run poll().

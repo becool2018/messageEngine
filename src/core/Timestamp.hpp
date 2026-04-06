@@ -82,9 +82,16 @@ inline uint64_t timestamp_deadline_us(uint64_t now_us, uint32_t duration_ms)
     NEVER_COMPILED_OUT_ASSERT(now_us <= 0xFFFFFFFFFFFFFFFFULL);  // Assert: valid timestamp
     NEVER_COMPILED_OUT_ASSERT(duration_ms <= 0xFFFFFFFFUL);      // Assert: reasonable timeout
 
-    // Compute deadline without overflow
+    // CERT INT30-C: guard against unsigned addition overflow before computing deadline.
+    // duration_us <= UINT32_MAX * 1000 = ~4.3e12, well within uint64_t, but the sum
+    // now_us + duration_us can wrap if now_us is near UINT64_MAX (e.g., on a saturated
+    // monotonic clock).  Saturate to UINT64_MAX in that case; callers treat a deadline
+    // far in the future as "never expires", which is safe and conservative.
     uint64_t duration_us = static_cast<uint64_t>(duration_ms) * 1000ULL;
-
+    const uint64_t k_max = 0xFFFFFFFFFFFFFFFFULL;
+    if (now_us > k_max - duration_us) {
+        return k_max;  // saturate rather than wrap
+    }
     return now_us + duration_us;
 }
 

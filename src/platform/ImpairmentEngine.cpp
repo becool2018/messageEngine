@@ -39,6 +39,13 @@
 #include <sys/random.h>
 #endif
 
+// CERT / REQ-5.2.4: Prevent ALLOW_WEAK_PRNG_SEED from being compiled into release builds.
+// NDEBUG is set by production/release build profiles; a weak seed in production violates
+// REQ-5.2.4 (cryptographically unpredictable source required).
+#if defined(ALLOW_WEAK_PRNG_SEED) && defined(NDEBUG)
+#error "ALLOW_WEAK_PRNG_SEED must not be defined in release/production builds (REQ-5.2.4)"
+#endif
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Constructor
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,14 +131,30 @@ void ImpairmentEngine::init(const ImpairmentConfig& cfg)
         // Guard: entropy all-zero after OS gather is astronomically unlikely but possible.
         // Mix additional sources rather than fall back to a known literal (REQ-5.2.4).
         if (entropy == 0ULL) {
-            // POSIX: getpid() returns the process ID; combined with clock() gives ~30+ bits.
-            // Neither alone is cryptographic but the combination avoids a known-constant seed.
+            // F-8 / REQ-5.2.4: OS entropy sources (getrandom, /dev/urandom) both
+            // returned zero. A clock()+pid fallback seed is predictable (~30 bits,
+            // time-based) and is explicitly prohibited in production by REQ-5.2.4.
+            // In production builds, fail initialization rather than proceed with a
+            // guessable seed. Set ALLOW_WEAK_PRNG_SEED only in non-production
+            // environments (embedded dev boards, CI without /dev/urandom).
+#if defined(ALLOW_WEAK_PRNG_SEED)
             entropy = (static_cast<uint64_t>(clock()) << 32U)
                       ^ static_cast<uint64_t>(getpid());
-            // Ensure non-zero (PrngEngine requires non-zero seed)
             if (entropy == 0ULL) { entropy = 1ULL; }
             Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
-                        "OS entropy was zero; using clock/pid fallback — not cryptographically secure");
+                        "OS entropy was zero; using clock/pid fallback — "
+                        "NOT PRODUCTION SAFE (ALLOW_WEAK_PRNG_SEED defined)");
+#else
+            // Production: treat entropy exhaustion as a platform fault. Log FATAL
+            // and return without setting m_initialized; callers will hit their
+            // NEVER_COMPILED_OUT_ASSERT(m_initialized) guards.
+            Logger::log(Severity::FATAL, "ImpairmentEngine",
+                        "OS entropy sources exhausted; cannot seed PRNG securely "
+                        "(REQ-5.2.4). Build with -DALLOW_WEAK_PRNG_SEED to override "
+                        "in non-production environments.");
+            NEVER_COMPILED_OUT_ASSERT(false);  // Assert: unreachable in production
+            return;
+#endif
         }
         // REQ-5.2.4: no known-constant fallback
         seed = entropy;
@@ -524,6 +547,18 @@ Result ImpairmentEngine::process_inbound(const MessageEnvelope& in_env,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// sat_add_us() — saturating uint64 addition helper (CERT INT30-C)
+// Returns now_us + delta_ms*1000, saturating at UINT64_MAX instead of wrapping.
+// ─────────────────────────────────────────────────────────────────────────────
+static uint64_t sat_add_us(uint64_t now_us, uint32_t delta_ms)
+{
+    const uint64_t k_max   = 0xFFFFFFFFFFFFFFFFULL;
+    const uint64_t delta   = static_cast<uint64_t>(delta_ms) * 1000ULL;
+    NEVER_COMPILED_OUT_ASSERT(delta_ms <= 0xFFFFFFFFUL);   // Pre: fits uint32
+    return (now_us > k_max - delta) ? k_max : now_us + delta;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // is_partition_active()
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -540,7 +575,7 @@ bool ImpairmentEngine::is_partition_active(uint64_t now_us)
     // Initialize partition event timing on first call
     if (m_next_partition_event_us == 0ULL) {
         // Start with gap (no partition yet)
-        m_next_partition_event_us = now_us + static_cast<uint64_t>(m_cfg.partition_gap_ms) * 1000ULL;
+        m_next_partition_event_us = sat_add_us(now_us, m_cfg.partition_gap_ms);  // CERT INT30-C
         m_partition_active = false;
         NEVER_COMPILED_OUT_ASSERT(!m_partition_active);
         return false;
@@ -551,7 +586,7 @@ bool ImpairmentEngine::is_partition_active(uint64_t now_us)
         // Start a partition
         m_partition_active = true;
         m_partition_start_us = now_us;
-        m_next_partition_event_us = now_us + static_cast<uint64_t>(m_cfg.partition_duration_ms) * 1000ULL;
+        m_next_partition_event_us = sat_add_us(now_us, m_cfg.partition_duration_ms);  // CERT INT30-C
         Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
                    "partition started (duration: %u ms)",
                    m_cfg.partition_duration_ms);
@@ -562,7 +597,7 @@ bool ImpairmentEngine::is_partition_active(uint64_t now_us)
     if (m_partition_active && now_us >= m_next_partition_event_us) {
         // End the partition
         m_partition_active = false;
-        m_next_partition_event_us = now_us + static_cast<uint64_t>(m_cfg.partition_gap_ms) * 1000ULL;
+        m_next_partition_event_us = sat_add_us(now_us, m_cfg.partition_gap_ms);  // CERT INT30-C
         Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
                    "partition ended");
         NEVER_COMPILED_OUT_ASSERT(!m_partition_active);

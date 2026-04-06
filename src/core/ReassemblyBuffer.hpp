@@ -91,8 +91,9 @@ private:
         NodeId          source_id;                     ///< key field
         uint8_t         buf[MSG_MAX_PAYLOAD_BYTES];    ///< accumulated payload (no init needed)
         uint32_t        received_mask;                 ///< bitmask of received fragment_index values
-        uint8_t         expected_count;                ///< fragment_count from first fragment
-        uint16_t        total_length;                  ///< total_payload_length from first fragment
+        uint32_t        received_bytes;               ///< F-6: sum of payload_length across all received fragments
+        uint8_t         expected_count;               ///< fragment_count from first fragment
+        uint16_t        total_length;                 ///< total_payload_length from first fragment
         uint64_t        expiry_us;                     ///< expiry_time_us from first fragment
         uint64_t        open_time_us;                  ///< Timestamp when this slot was opened (for stale-sweep).
         MessageEnvelope header;                        ///< copy of first fragment (for metadata)
@@ -110,6 +111,10 @@ private:
     // Find a free (inactive) slot; returns REASSEMBLY_SLOT_COUNT if all are in use.
     uint32_t find_free_slot() const;
 
+    // Count active slots whose source_id matches src; used to enforce the per-source
+    // slot cap (k_reasm_per_src_max) against reassembly slot exhaustion DoS (F-1).
+    uint32_t count_open_slots_for_src(NodeId src) const;
+
     // Initialize a new slot from the first fragment received for a message.
     void open_slot(uint32_t idx, const MessageEnvelope& frag, uint64_t now_us);
 
@@ -124,7 +129,9 @@ private:
     bool is_complete(uint32_t idx) const;
 
     // Assemble the slot into a logical envelope and free the slot.
-    void assemble_and_free(uint32_t idx, MessageEnvelope& logical_out);
+    // F-6: returns OK on success; ERR_INVALID if received_bytes != total_length
+    // (inflated wire-declared length); slot is freed in both cases.
+    Result assemble_and_free(uint32_t idx, MessageEnvelope& logical_out);
 
     // Validate fragment-level metadata (bounds checks on fragment_count, index, total_length).
     // Returns ERR_INVALID on any violation, OK otherwise.

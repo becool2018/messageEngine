@@ -162,6 +162,56 @@ to call `ssl_set_hostname` after `ssl_setup` and treat any non-zero return as fa
 
 ---
 
+## §9 Non-constant-time dedup scan (timing side-channel, low risk)
+
+`DuplicateFilter::is_duplicate()` scans the dedup window linearly and returns
+early on the first matching `(source_id, message_id)` pair. The loop exit time
+therefore correlates with whether and where a match exists in the window, creating
+a timing side-channel that could theoretically allow an observer to infer whether a
+given message was seen recently.
+
+**Risk assessment — LOW**: the window is at most `DEDUP_WINDOW_SIZE` (64) entries;
+the timing delta is on the order of tens of nanoseconds; and all production transports
+run over TLS/DTLS, whose record-layer padding and MAC computation dominate any
+variation the dedup scan adds. An attacker who can make precise sub-microsecond
+timing measurements through TLS encryption has capabilities far beyond those modelled
+here.
+
+**Decision**: no code change. Document the side-channel here so future reviewers can
+re-evaluate if the transport assumptions change (e.g., plaintext UDP deployment).
+
+---
+
+## §10 Sequential message ID predictability
+
+`MessageIdGen::next_id()` returns a monotonically increasing counter seeded at
+initialization from a cryptographically unpredictable source (`arc4random_buf` on
+macOS, `getrandom` on Linux with `/dev/urandom` fallback). After observing two
+consecutive message IDs from a node, an attacker can recover the full counter state
+and predict all future IDs from that node for the lifetime of the process.
+
+**Scope of impact**: message IDs are used only for deduplication
+(`DuplicateFilter`), not for authentication, authorization, or integrity. An
+attacker who can predict future IDs cannot forge accepted messages (that requires
+bypassing TLS/DTLS) and cannot suppress legitimate messages (dedup only drops
+repeated IDs, not absent ones). The predictability affects only the collision
+probability of the dedup window under adversarial traffic.
+
+**Risk assessment — LOW for current deployment (TLS/DTLS protected transports)**.
+Becomes MEDIUM if the system is deployed over plaintext UDP (`tls_enabled = false`)
+and an attacker can both observe traffic and inject spoofed datagrams (source
+validation per REQ-6.2.4 is the primary mitigant in that scenario).
+
+**Mitigations in place**:
+- REQ-6.4.2 DTLS cookie anti-replay prevents amplification-based ID harvesting.
+- REQ-6.1.11 / REQ-6.2.4 source-address validation blocks spoofed-source injection.
+- Production seed requirement (REQ-5.2.4) prohibits fixed or time-only seeds.
+
+**Decision**: no code change. Document here and in the deployment configuration
+guide. Re-evaluate if the system is deployed on a low-latency plaintext transport.
+
+---
+
 ## References
 
 - `docs/HAZARD_ANALYSIS.md` — hazard catalogue and SC function classification

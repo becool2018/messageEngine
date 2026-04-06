@@ -31,6 +31,13 @@
 #include "Logger.hpp"
 #include <cstring>
 
+// F-1: Per-source cap — a single peer may hold at most half the total slots open
+// simultaneously. This prevents one misbehaving or malicious peer from exhausting
+// the entire reassembly table with partial fragment sets.
+// REQ-3.2.9: stale slot reclamation prevents indefinite slot hold; the per-source
+// cap prevents exhaustion before the stale sweep fires.
+static const uint32_t k_reasm_per_src_max = REASSEMBLY_SLOT_COUNT / 2U;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ReassemblyBuffer::init
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,6 +103,27 @@ uint32_t ReassemblyBuffer::find_free_slot() const
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ReassemblyBuffer::count_open_slots_for_src (private)
+// Returns the number of active slots whose source_id matches src.
+// Used by find_or_open_slot() to enforce k_reasm_per_src_max (F-1).
+// ─────────────────────────────────────────────────────────────────────────────
+uint32_t ReassemblyBuffer::count_open_slots_for_src(NodeId src) const
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);            // Assert: initialized
+    NEVER_COMPILED_OUT_ASSERT(src != 0U);                // Assert: valid source
+
+    uint32_t count = 0U;
+    // Power of 10 Rule 2: bounded loop at REASSEMBLY_SLOT_COUNT
+    for (uint32_t i = 0U; i < REASSEMBLY_SLOT_COUNT; ++i) {
+        if (m_slots[i].active && m_slots[i].source_id == src) {
+            ++count;
+        }
+    }
+    NEVER_COMPILED_OUT_ASSERT(count <= REASSEMBLY_SLOT_COUNT);  // Assert: result bounded
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // ReassemblyBuffer::open_slot (private)
 // ─────────────────────────────────────────────────────────────────────────────
 void ReassemblyBuffer::open_slot(uint32_t idx, const MessageEnvelope& frag, uint64_t now_us)
@@ -103,12 +131,13 @@ void ReassemblyBuffer::open_slot(uint32_t idx, const MessageEnvelope& frag, uint
     NEVER_COMPILED_OUT_ASSERT(idx < REASSEMBLY_SLOT_COUNT);   // Assert: valid index
     NEVER_COMPILED_OUT_ASSERT(!m_slots[idx].active);           // Assert: slot is free
 
-    m_slots[idx].active         = true;
-    m_slots[idx].message_id     = frag.message_id;
-    m_slots[idx].source_id      = frag.source_id;
-    m_slots[idx].received_mask  = 0U;
-    m_slots[idx].expected_count = frag.fragment_count;
-    m_slots[idx].total_length   = frag.total_payload_length;
+    m_slots[idx].active          = true;
+    m_slots[idx].message_id      = frag.message_id;
+    m_slots[idx].source_id       = frag.source_id;
+    m_slots[idx].received_mask   = 0U;
+    m_slots[idx].received_bytes  = 0U;   // F-6: zero byte accumulator at slot open
+    m_slots[idx].expected_count  = frag.fragment_count;
+    m_slots[idx].total_length    = frag.total_payload_length;
     m_slots[idx].expiry_us      = frag.expiry_time_us;
     m_slots[idx].open_time_us   = now_us;
     envelope_copy(m_slots[idx].header, frag);
@@ -162,6 +191,13 @@ void ReassemblyBuffer::record_fragment(uint32_t idx, const MessageEnvelope& frag
         (void)memcpy(&m_slots[idx].buf[byte_offset], frag.payload, frag.payload_length);
     }
 
+    // F-6: accumulate received byte count for integrity check at assembly.
+    // CERT INT30-C: unsigned wrap guard (byte_offset + payload_length already
+    // bounded by the assert above; received_bytes is similarly bounded).
+    NEVER_COMPILED_OUT_ASSERT(m_slots[idx].received_bytes <=
+                              MSG_MAX_PAYLOAD_BYTES - frag.payload_length);  // Assert: no wrap
+    m_slots[idx].received_bytes += frag.payload_length;
+
     // Record this fragment in the bitmask
     m_slots[idx].received_mask |= (1U << frag.fragment_index);
 }
@@ -187,18 +223,38 @@ bool ReassemblyBuffer::is_complete(uint32_t idx) const
 // ─────────────────────────────────────────────────────────────────────────────
 // ReassemblyBuffer::assemble_and_free (private)
 // ─────────────────────────────────────────────────────────────────────────────
-void ReassemblyBuffer::assemble_and_free(uint32_t idx, MessageEnvelope& logical_out)
+Result ReassemblyBuffer::assemble_and_free(uint32_t idx, MessageEnvelope& logical_out)
 {
     NEVER_COMPILED_OUT_ASSERT(idx < REASSEMBLY_SLOT_COUNT);  // Assert: valid index
     NEVER_COMPILED_OUT_ASSERT(m_slots[idx].active);           // Assert: slot active
+
+    // F-6: integrity check — sum of received fragment bytes must equal the
+    // wire-declared total_payload_length from the first fragment. A mismatch
+    // means the sender inflated total_payload_length; discard the slot to avoid
+    // handing a logically inconsistent envelope to the DeliveryEngine.
+    if (m_slots[idx].received_bytes != static_cast<uint32_t>(m_slots[idx].total_length)) {
+        Logger::log(Severity::WARNING_HI, "ReassemblyBuffer",
+                    "assemble_and_free: received_bytes=%u != total_length=%u; "
+                    "discarding (src=%u msg_id=%llu)",
+                    m_slots[idx].received_bytes,
+                    static_cast<uint32_t>(m_slots[idx].total_length),
+                    static_cast<unsigned>(m_slots[idx].source_id),
+                    static_cast<unsigned long long>(m_slots[idx].message_id));
+        m_slots[idx].active         = false;
+        m_slots[idx].received_mask  = 0U;
+        m_slots[idx].expected_count = 0U;
+        m_slots[idx].received_bytes = 0U;
+        NEVER_COMPILED_OUT_ASSERT(!m_slots[idx].active);  // Assert: slot freed on mismatch
+        return Result::ERR_INVALID;
+    }
 
     // Start from the header envelope (has all metadata)
     envelope_copy(logical_out, m_slots[idx].header);
 
     // Overwrite payload fields with reassembled data
-    logical_out.payload_length = static_cast<uint32_t>(m_slots[idx].total_length);
-    logical_out.fragment_index = 0U;
-    logical_out.fragment_count = 1U;  // reassembled: appears as single message
+    logical_out.payload_length       = static_cast<uint32_t>(m_slots[idx].total_length);
+    logical_out.fragment_index       = 0U;
+    logical_out.fragment_count       = 1U;  // reassembled: appears as single message
     logical_out.total_payload_length = m_slots[idx].total_length;
 
     // Copy assembled payload
@@ -207,11 +263,13 @@ void ReassemblyBuffer::assemble_and_free(uint32_t idx, MessageEnvelope& logical_
     }
 
     // Free the slot
-    m_slots[idx].active        = false;
-    m_slots[idx].received_mask = 0U;
+    m_slots[idx].active         = false;
+    m_slots[idx].received_mask  = 0U;
     m_slots[idx].expected_count = 0U;
+    m_slots[idx].received_bytes = 0U;
 
     NEVER_COMPILED_OUT_ASSERT(!m_slots[idx].active);  // Assert: slot freed
+    return Result::OK;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -255,7 +313,16 @@ Result ReassemblyBuffer::find_or_open_slot(const MessageEnvelope& frag, uint32_t
     uint32_t idx = find_slot(frag.source_id, frag.message_id);
 
     if (idx == REASSEMBLY_SLOT_COUNT) {
-        // New message: allocate a slot
+        // New message: enforce per-source cap before allocating a slot (F-1).
+        // A single peer may hold at most k_reasm_per_src_max (= REASSEMBLY_SLOT_COUNT/2)
+        // open slots to prevent reassembly table exhaustion via partial fragment sets.
+        if (count_open_slots_for_src(frag.source_id) >= k_reasm_per_src_max) {
+            Logger::log(Severity::WARNING_HI, "ReassemblyBuffer",
+                        "per-source slot cap reached for source=%u; dropping fragment",
+                        static_cast<unsigned>(frag.source_id));
+            return Result::ERR_FULL;
+        }
+        // Allocate a free slot.
         idx = find_free_slot();
         if (idx == REASSEMBLY_SLOT_COUNT) {
             return Result::ERR_FULL;
@@ -336,7 +403,12 @@ Result ReassemblyBuffer::ingest_multifrag(const MessageEnvelope& frag,
     }
 
     // All fragments received: assemble into logical envelope and free slot.
-    assemble_and_free(idx, logical_out);
+    // F-6: assemble_and_free returns ERR_INVALID if received_bytes != total_length;
+    // the slot is freed inside assemble_and_free in both success and error cases.
+    Result asm_r = assemble_and_free(idx, logical_out);
+    if (asm_r != Result::OK) {
+        return asm_r;  // ERR_INVALID; caller must not use logical_out
+    }
 
     NEVER_COMPILED_OUT_ASSERT(logical_out.payload_length <= MSG_MAX_PAYLOAD_BYTES);  // Assert: valid output
     return Result::OK;

@@ -59,7 +59,13 @@ public:
         // Power of 10: bounds-checked write, return value checked
         int hdr = snprintf(buf, static_cast<size_t>(LOG_LINE_MAX),
                            "[%s][%s] ", tag, module);
-        if (hdr < 0) { return; }   // snprintf error; fail silently
+        // F-1 / CERT INT31-C: snprintf returns the would-be length on truncation,
+        // not the actual written length. Guard both the error case (< 0) and the
+        // truncation case (>= LOG_LINE_MAX). Without the truncation guard, hdr is
+        // used as a pointer offset (buf + hdr → past end-of-buffer) and as the
+        // subtrahend in static_cast<size_t>(LOG_LINE_MAX - hdr), which wraps to a
+        // huge size_t, eliminating all bounds protection from the vsnprintf call.
+        if (hdr < 0 || hdr >= LOG_LINE_MAX) { return; }
 
         va_list args;
         va_start(args, fmt);

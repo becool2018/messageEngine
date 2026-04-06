@@ -270,7 +270,11 @@ bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
     pfd.events = POLLOUT;
     pfd.revents = 0;
 
-    int poll_result = poll(&pfd, 1, static_cast<int>(timeout_ms));
+    // CERT INT31-C: poll() takes int; clamp uint32_t to INT_MAX before narrowing.
+    // Values > INT_MAX cast to negative, which POSIX defines as "block indefinitely".
+    static const uint32_t k_poll_max_ms = static_cast<uint32_t>(INT_MAX);
+    const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
+    int poll_result = poll(&pfd, 1, static_cast<int>(clamped_ms));
     if (poll_result <= 0) {
         Logger::log(Severity::WARNING_LO, "SocketUtils",
                    "connect(%s:%u) timeout", ip, port);
@@ -376,7 +380,10 @@ bool socket_send_all(int fd, const uint8_t* buf, uint32_t len,
         pfd.events = POLLOUT;
         pfd.revents = 0;
 
-        int poll_result = poll(&pfd, 1, static_cast<int>(timeout_ms));
+        // CERT INT31-C: clamp before narrowing uint32_t → int for poll().
+        static const uint32_t k_poll_max_ms = static_cast<uint32_t>(INT_MAX);
+        const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
+        int poll_result = poll(&pfd, 1, static_cast<int>(clamped_ms));
         if (poll_result <= 0) {
             Logger::log(Severity::WARNING_HI, "SocketUtils",
                        "send poll timeout (sent %u of %u bytes)", sent, len);
@@ -389,6 +396,14 @@ bool socket_send_all(int fd, const uint8_t* buf, uint32_t len,
         if (send_result < 0) {
             Logger::log(Severity::WARNING_HI, "SocketUtils",
                        "send() failed: %d", errno);
+            return false;
+        }
+        // F-4: send() returning 0 means the peer closed the connection.
+        // Without this guard the loop spins indefinitely without advancing `sent`.
+        if (send_result == 0) {
+            Logger::log(Severity::WARNING_HI, "SocketUtils",
+                       "send() returned 0 (peer closed); aborting (sent %u of %u)",
+                       sent, len);
             return false;
         }
 
@@ -423,7 +438,10 @@ bool socket_recv_exact(int fd, uint8_t* buf, uint32_t len,
         pfd.events = POLLIN;
         pfd.revents = 0;
 
-        int poll_result = poll(&pfd, 1, static_cast<int>(timeout_ms));
+        // CERT INT31-C: clamp before narrowing uint32_t → int for poll().
+        static const uint32_t k_poll_max_ms = static_cast<uint32_t>(INT_MAX);
+        const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
+        int poll_result = poll(&pfd, 1, static_cast<int>(clamped_ms));
         if (poll_result <= 0) {
             Logger::log(Severity::WARNING_HI, "SocketUtils",
                        "recv poll timeout (received %u of %u bytes)", received, len);
@@ -611,7 +629,10 @@ bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,
     pfd.events = POLLIN;
     pfd.revents = 0;
 
-    int poll_result = poll(&pfd, 1, static_cast<int>(timeout_ms));
+    // CERT INT31-C: clamp before narrowing uint32_t → int for poll().
+    static const uint32_t k_poll_max_ms = static_cast<uint32_t>(INT_MAX);
+    const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
+    int poll_result = poll(&pfd, 1, static_cast<int>(clamped_ms));
     if (poll_result <= 0) {
         Logger::log(Severity::WARNING_LO, "SocketUtils",
                    "recvfrom poll timeout");

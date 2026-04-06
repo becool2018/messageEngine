@@ -143,8 +143,6 @@ public:
         NEVER_COMPILED_OUT_ASSERT(m_state != 0ULL);  // Assert: state initialized
         NEVER_COMPILED_OUT_ASSERT(hi >= lo);          // Assert: valid range
 
-        uint64_t raw = next();
-
         // CERT INT33-C: compute range as uint64_t to prevent unsigned wrap
         // when hi == UINT32_MAX and lo == 0 (uint32_t result would be 0,
         // causing divide-by-zero UB).  Cast both operands to uint64_t before
@@ -156,9 +154,28 @@ public:
         // Assert: range is non-zero for all valid hi >= lo inputs (CERT INT33-C).
         NEVER_COMPILED_OUT_ASSERT(range64 > 0ULL);
 
-        // Safe narrowing: raw % range64 < range64.  When range64 == 2^32,
-        // raw % range64 is in [0, UINT32_MAX], which fits in uint32_t.
-        // For all smaller range64 the value is strictly less than UINT32_MAX.
+        // F-9 / REQ-5.2.4: rejection sampling to eliminate modulo bias.
+        // raw % range64 is biased when range64 does not divide 2^64 evenly.
+        // threshold is the count of raw values that would produce a biased result.
+        // We discard raw < threshold and draw again.
+        // Power of 10 Rule 2: loop bounded at MAX_REJECTION_ATTEMPTS (64).
+        // If all attempts are exhausted (probability ≈ (threshold/2^64)^64, effectively
+        // zero for any practical range), use the last drawn value — the biased result
+        // is indistinguishable from noise given this probability of occurrence.
+        static const uint32_t MAX_REJECTION_ATTEMPTS = 64U;
+        // (UINT64_MAX - range64 + 1) % range64 == (2^64 - range64) % range64
+        // using unsigned wrap — equals zero when range64 divides 2^64 exactly.
+        uint64_t threshold = (UINT64_MAX - range64 + 1ULL) % range64;
+        uint64_t raw       = 0ULL;
+        for (uint32_t attempt = 0U; attempt < MAX_REJECTION_ATTEMPTS; ++attempt) {
+            raw = next();
+            if (raw >= threshold) {
+                break;  // unbiased draw obtained
+            }
+        }
+        // If loop exhausted, raw holds the last drawn value; proceed with it.
+
+        // Safe narrowing: raw % range64 < range64 ≤ UINT32_MAX+1, fits in uint32_t.
         // MISRA C++:2023: static_cast used for all conversions (no C-style casts).
         uint32_t offset = static_cast<uint32_t>(raw % range64);
         uint32_t result = lo + offset;

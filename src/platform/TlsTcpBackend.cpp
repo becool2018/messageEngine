@@ -939,7 +939,9 @@ bool TlsTcpBackend::send_to_slot(uint32_t slot, const uint8_t* buf, uint32_t len
     uint32_t timeout_ms = (m_cfg.num_channels > 0U)
                           ? m_cfg.channels[0U].send_timeout_ms
                           : 1000U;
-    bool failed = tls_send_frame(slot, buf, len, timeout_ms);
+    // tls_send_frame returns true on success, false on failure (ISocketOps convention).
+    bool ok = tls_send_frame(slot, buf, len, timeout_ms);
+    bool failed = !ok;
     if (failed) {
         Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
                     "send_to_slot %u failed", slot);
@@ -1226,15 +1228,13 @@ Result TlsTcpBackend::classify_inbound_frame(uint32_t idx,
         return Result::ERR_AGAIN;
     }
 
-    // Fix 3 — REQ-6.1.11 / HAZ-009: reject data frames from unregistered slots.
-    // Guard: m_client_hello_received[idx] is true only after a HELLO was processed.
-    // If a HELLO was received but NodeId is still NODE_ID_INVALID (impossible in
-    // normal flow), drop the frame. Clients that never send HELLO are allowed for
-    // backward compatibility; validate_source_id() still enforces NodeId consistency.
-    if (m_is_server && m_client_hello_received[idx] &&
-        (m_client_node_ids[idx] == static_cast<NodeId>(NODE_ID_INVALID))) {
+    // F-3 / REQ-6.1.11 / HAZ-009: reject data frames from any slot where HELLO
+    // has not yet been received. HELLO is mandatory before DATA (REQ-6.1.8).
+    // Backward-compatibility bypass removed — a client that skips HELLO could
+    // otherwise inject arbitrary source_id values via validate_source_id().
+    if (m_is_server && !m_client_hello_received[idx]) {
         Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "data frame from unregistered slot %u: dropping (REQ-6.1.11)",
+                    "data frame from slot %u before HELLO; dropping (REQ-6.1.11)",
                     static_cast<unsigned>(idx));
         return Result::ERR_INVALID;
     }
@@ -1331,13 +1331,13 @@ Result TlsTcpBackend::unicast_serialized(NodeId dst, const uint8_t* buf, uint32_
 
     uint32_t slot = find_client_slot(dst);
     if (slot >= MAX_TCP_CONNECTIONS) {
-        // REQ-6.1.9: no routing entry for dst (client has not yet sent HELLO).
-        // Fall back to broadcast so existing code paths are not disrupted before
-        // HELLO registration completes; log at INFO for visibility.
-        Logger::log(Severity::INFO, "TlsTcpBackend",
-                    "unicast_serialized: no slot for dst=%u — broadcast fallback", dst);
-        bool failed = send_to_all_clients(buf, len);
-        return failed ? Result::ERR_IO : Result::OK;
+        // F-4 / REQ-6.1.9: no routing entry for dst — fail with ERR_INVALID.
+        // Broadcast fallback removed: unicast-addressed data must never be sent to
+        // all peers; doing so leaks confidential application data to unintended
+        // recipients in multi-tenant server deployments.
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "unicast_serialized: no slot for dst=%u; dropping (REQ-6.1.9)", dst);
+        return Result::ERR_INVALID;
     }
     bool failed = send_to_slot(slot, buf, len);
     return failed ? Result::ERR_IO : Result::OK;
@@ -1439,8 +1439,11 @@ uint32_t TlsTcpBackend::build_poll_fds(struct pollfd* pfds, uint32_t* slot_of,
     }
     if (nfds > 0U) {
         // Block until at least one client is readable or timeout expires.
+        // CERT INT31-C: clamp uint32_t → int before passing to poll().
+        static const uint32_t k_poll_max_ms = static_cast<uint32_t>(INT_MAX);
+        const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
         (void)poll(pfds, static_cast<nfds_t>(nfds),
-                   static_cast<int>(timeout_ms));
+                   static_cast<int>(clamped_ms));
     }
 
     NEVER_COMPILED_OUT_ASSERT(nfds <= MAX_TCP_CONNECTIONS);

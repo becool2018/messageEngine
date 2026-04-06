@@ -266,11 +266,16 @@ bool UdpBackend::validate_source(const char* src_ip, uint16_t src_port) const
     NEVER_COMPILED_OUT_ASSERT(m_cfg.peer_ip[0] != '\0');            // Pre-condition
 
     // REQ-6.2.4: validate source address against configured peer.
-    bool ip_match   = (strncmp(src_ip, m_cfg.peer_ip, sizeof(m_cfg.peer_ip)) == 0);
+    // CERT: use strcmp() not strncmp(…, sizeof(buf)) — strncmp reads up to N bytes past
+    // each string's NUL terminator when the string is shorter than N, reaching into
+    // uninitialised buffer memory and breaking spoofing detection.  Both src_ip and
+    // m_cfg.peer_ip are NUL-terminated by construction (inet_ntop / config parser).
+    bool ip_match   = (strcmp(src_ip, m_cfg.peer_ip) == 0);
     bool port_match = (src_port == m_cfg.peer_port);
 
     if (!ip_match || !port_match) {
-        Logger::log(Severity::WARNING_LO, "UdpBackend",
+        // REQ-6.3.2: source spoofing is a security event; classify as WARNING_HI.
+        Logger::log(Severity::WARNING_HI, "UdpBackend",
                     "Dropped datagram from unexpected source %s:%u (expected %s:%u)",
                     src_ip, static_cast<unsigned int>(src_port),
                     m_cfg.peer_ip, static_cast<unsigned int>(m_cfg.peer_port));

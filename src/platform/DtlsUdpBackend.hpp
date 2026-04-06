@@ -209,6 +209,8 @@ private:
     /// Extracted from recv_one_dtls_datagram() to keep its CC ≤ 10.
     /// @param out_len Number of bytes in m_wire_buf to deserialize.
     /// @return true if a message was pushed to m_recv_queue.
+    // Safety-critical (SC): HAZ-005 — on the inbound wire-to-envelope path; an error
+    // here could deliver a malformed or corrupt envelope to the DeliveryEngine.
     bool deserialize_and_dispatch(uint32_t out_len);
 
     /// REQ-6.2.4 / REQ-6.1.8: process an inbound HELLO or validate source_id on
@@ -219,6 +221,8 @@ private:
     ///                        must not be passed to the impairment engine.
     /// @return false if the envelope must be dropped (spoofing or duplicate HELLO);
     ///         true if the envelope is allowed through (or was consumed as HELLO).
+    // Safety-critical (SC): HAZ-009 — enforces peer NodeId binding; failure allows
+    // source_id spoofing to corrupt ACK/retry state in the DeliveryEngine.
     bool process_hello_or_validate(const MessageEnvelope& env, bool& consumed);
 
     // ── CC-reduction helpers (extracted to keep each caller CC ≤ 10) ─────────

@@ -95,8 +95,16 @@ static bool parse_prob(const char* val, double* out)
     // are used here; they introduce no dynamic allocation and are MISRA-safe.
     if (std::isnan(v) || std::isinf(v)) { return false; }
     // Clamp to [0.0, 1.0] (Power of 10: explicit bounds check)
-    if (v < 0.0) { v = 0.0; }
-    if (v > 1.0) { v = 1.0; }
+    if (v < 0.0) {
+        Logger::log(Severity::WARNING_LO, "ConfigLoader",
+                    "Probability %.6f < 0.0; clamped to 0.0", v);
+        v = 0.0;
+    }
+    if (v > 1.0) {
+        Logger::log(Severity::WARNING_LO, "ConfigLoader",
+                    "Probability %.6f > 1.0; clamped to 1.0", v);
+        v = 1.0;
+    }
     *out = v;
     NEVER_COMPILED_OUT_ASSERT(*out >= 0.0 && *out <= 1.0);
     return true;
@@ -296,6 +304,10 @@ Result impairment_config_load(const char* path, ImpairmentConfig& cfg)
     bool eof_reached = false;
 
     for (uint32_t i = 0U; i < MAX_CONFIG_LINES; ++i) {
+        // CERT INT31-C: assert the uint32_t fits in int before narrowing cast.
+        // MAX_CONFIG_LINE_LEN = 128, well within INT_MAX on all supported platforms.
+        static_assert(MAX_CONFIG_LINE_LEN <= 2147483647U,
+                      "MAX_CONFIG_LINE_LEN exceeds INT_MAX — fgets cast is unsafe");
         const char* got = fgets(line, static_cast<int>(MAX_CONFIG_LINE_LEN), fp);
         if (got == nullptr) {
             eof_reached = true;

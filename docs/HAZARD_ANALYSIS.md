@@ -408,11 +408,15 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `recv_from_client()` | `TlsTcpBackend` | SC | HAZ-009 |
 | `send_to_slot()` | `TlsTcpBackend` | NSC | — |
 | `validate_source_id()` | `TlsTcpBackend` | SC | HAZ-009 |
+| `classify_inbound_frame()` | `TlsTcpBackend` | SC | HAZ-009 |
+| `setup_session_tickets()` | `TlsTcpBackend` | NSC | — |
+| `maybe_setup_session_tickets()` | `TlsTcpBackend` | NSC | — |
+| `apply_cipher_policy()` | `TlsTcpBackend` | NSC | — |
 | `close()` | `TlsTcpBackend` | NSC | — |
 | `is_open()` | `TlsTcpBackend` | NSC | — |
 | `get_transport_stats()` | `TlsTcpBackend` | NSC | — |
 
-`TlsTcpBackend` is a drop-in replacement for `TcpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `TcpBackend`. The TLS layer (when enabled) is an init-phase concern (cert/key loading, handshake) and does not alter the SC classification of the send/receive path. The five new functions (`register_local_id()`, `send_hello_frame()`, `find_client_slot()`, `handle_hello_frame()`, `send_to_slot()`) are classified NSC for the same reasons as the equivalent `TcpBackend` functions — see the TcpBackend rationale note above.
+`TlsTcpBackend` is a drop-in replacement for `TcpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `TcpBackend`. The TLS layer (when enabled) is an init-phase concern (cert/key loading, handshake) and does not alter the SC classification of the send/receive path. `classify_inbound_frame()` is SC (HAZ-009) because it enforces the one-HELLO-per-slot rule and rejects data from unregistered slots — failure here allows NodeId hijack or pre-registration data injection. `setup_session_tickets()`, `maybe_setup_session_tickets()`, and `apply_cipher_policy()` are NSC: all three are called exclusively during `init()` to configure cipher suite policy and session ticket keying; they carry no runtime message-delivery policy.
 
 ### src/platform/DtlsUdpBackend.hpp
 
@@ -422,11 +426,14 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `send_message()` | `DtlsUdpBackend` | SC | HAZ-005, HAZ-006 |
 | `receive_message()` | `DtlsUdpBackend` | SC | HAZ-004, HAZ-005 |
 | `client_connect_and_handshake()` | `DtlsUdpBackend` | SC | HAZ-008 |
+| `deserialize_and_dispatch()` | `DtlsUdpBackend` | SC | HAZ-005 |
+| `process_hello_or_validate()` | `DtlsUdpBackend` | SC | HAZ-009 |
+| `load_crl_if_configured()` | `DtlsUdpBackend` | NSC | — |
 | `close()` | `DtlsUdpBackend` | NSC | — |
 | `is_open()` | `DtlsUdpBackend` | NSC | — |
 | `get_transport_stats()` | `DtlsUdpBackend` | NSC | — |
 
-`DtlsUdpBackend` is a drop-in replacement for `UdpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `UdpBackend`. The DTLS layer (when enabled) is an init-phase concern (cert/key loading, DTLS handshake, cookie exchange); enabling or disabling TLS does not alter the SC classification of the send/receive path. The MTU enforcement in `send_message()` (returns `ERR_INVALID` for payloads exceeding `DTLS_MAX_DATAGRAM_BYTES`) is part of the HAZ-005 mitigation.
+`DtlsUdpBackend` is a drop-in replacement for `UdpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `UdpBackend`. The DTLS layer (when enabled) is an init-phase concern (cert/key loading, DTLS handshake, cookie exchange); enabling or disabling TLS does not alter the SC classification of the send/receive path. The MTU enforcement in `send_message()` (returns `ERR_INVALID` for payloads exceeding `DTLS_MAX_DATAGRAM_BYTES`) is part of the HAZ-005 mitigation. `deserialize_and_dispatch()` is SC (HAZ-005) as the inbound wire-to-envelope path — an error here could deliver a malformed envelope to the DeliveryEngine. `process_hello_or_validate()` is SC (HAZ-009) because it enforces DTLS peer NodeId binding; failure allows source_id spoofing to corrupt ACK/retry state. `load_crl_if_configured()` is NSC: called only during `init()` certificate loading and carries no runtime message-delivery policy.
 
 ### src/platform/IMbedtlsOps.hpp / src/platform/MbedtlsOpsImpl.hpp
 
