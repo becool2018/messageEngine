@@ -30,7 +30,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: Result enum returns, event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
  */
 
 #ifndef PLATFORM_TCP_BACKEND_HPP
@@ -74,6 +74,9 @@ public:
     /// REQ-7.2.4 / REQ-7.2.2 — NSC observability accessor.
     void get_transport_stats(TransportStats& out) const override;
 
+    /// REQ-6.1.10: store our node ID; client mode sends HELLO frame to server.
+    Result register_local_id(NodeId id) override;
+
 private:
     // ───────────────────────────────────────────────────────────────────────
     // Member state (Power of 10 rule 3: fixed allocation, no heap after init)
@@ -90,6 +93,8 @@ private:
     bool               m_is_server;                           ///< Server vs client mode
     uint32_t           m_connections_opened;                  ///< REQ-7.2.4: successful connect/accept events
     uint32_t           m_connections_closed;                  ///< REQ-7.2.4: disconnect events
+    NodeId             m_client_node_ids[MAX_TCP_CONNECTIONS]; ///< NodeId for each client slot (NODE_ID_INVALID = unknown)
+    NodeId             m_local_node_id;                        ///< Our own node identity (set by register_local_id)
 
     // ───────────────────────────────────────────────────────────────────────
     // Private helper methods (Power of 10: small, single-purpose functions)
@@ -166,6 +171,42 @@ private:
     /// @param[in] now_us Current wall-clock time in microseconds.
     /// @return true if envelope was pushed to m_recv_queue; false if dropped or buffered.
     bool apply_inbound_impairment(const MessageEnvelope& env, uint64_t now_us);
+
+    /// Build and send a HELLO envelope to the server (client mode only).
+    /// Called once from register_local_id() after m_local_node_id is set.
+    Result send_hello_frame();
+
+    /// Record the NodeId of a connecting client in the routing table.
+    /// @param[in] client_fd  File descriptor that sent the HELLO.
+    /// @param[in] src_id     NodeId extracted from the HELLO envelope.
+    void handle_hello_frame(int client_fd, NodeId src_id);
+
+    /// Find the client array slot for a given destination NodeId.
+    /// @return slot index in [0, m_client_count) or MAX_TCP_CONNECTIONS if not found.
+    uint32_t find_client_slot(NodeId dst) const;
+
+    /// Send serialized data to a single client slot.
+    /// @param[in] slot  Index into m_client_fds[].
+    /// @param[in] buf   Frame bytes.
+    /// @param[in] len   Number of bytes.
+    /// @return true if send fails, false on success.
+    bool send_to_slot(uint32_t slot, const uint8_t* buf, uint32_t len);
+
+    /// CC-reduction helper for flush_delayed_to_clients().
+    /// Serialize one delayed envelope and route it (unicast or broadcast).
+    /// @param[in]  env      Envelope to send.
+    /// @param[out] failed   Set to true if the send failed.
+    /// @return ERR_INVALID if unicast destination is unknown; OK otherwise.
+    Result send_one_delayed(const MessageEnvelope& env, bool& failed);
+
+    /// CC-reduction helper for flush_delayed_to_clients().
+    /// Update final_result based on send outcome for one delayed envelope.
+    /// @param[in]  route_r    Result from send_one_delayed().
+    /// @param[in]  failed     Whether the send call reported failure.
+    /// @param[in]  is_current True if this envelope matches the caller's current send.
+    /// @param[out] final_result Accumulates the worst error for the current envelope.
+    static void apply_send_result(Result route_r, bool failed,
+                                  bool is_current, Result& final_result);
 };
 
 #endif // PLATFORM_TCP_BACKEND_HPP

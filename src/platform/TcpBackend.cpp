@@ -24,7 +24,7 @@
  *   - MISRA C++: no exceptions, all return values checked.
  *   - F-Prime style: event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.3.5, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.3.5, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
  */
 
 #include "platform/TcpBackend.hpp"
@@ -46,12 +46,14 @@ TcpBackend::TcpBackend()
     : m_sock_ops(&SocketOpsImpl::instance()),
       m_listen_fd(-1), m_client_count(0U), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false),
-      m_connections_opened(0U), m_connections_closed(0U)
+      m_connections_opened(0U), m_connections_closed(0U),
+      m_local_node_id(NODE_ID_INVALID)
 {
     // Power of 10 rule 3: initialize to safe state
     NEVER_COMPILED_OUT_ASSERT(MAX_TCP_CONNECTIONS > 0U);  // Invariant
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
-        m_client_fds[i] = -1;
+        m_client_fds[i]      = -1;
+        m_client_node_ids[i] = NODE_ID_INVALID;
     }
 }
 
@@ -59,12 +61,14 @@ TcpBackend::TcpBackend(ISocketOps& ops)
     : m_sock_ops(&ops),
       m_listen_fd(-1), m_client_count(0U), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false),
-      m_connections_opened(0U), m_connections_closed(0U)
+      m_connections_opened(0U), m_connections_closed(0U),
+      m_local_node_id(NODE_ID_INVALID)
 {
     // Power of 10 rule 3: initialize to safe state
     NEVER_COMPILED_OUT_ASSERT(MAX_TCP_CONNECTIONS > 0U);  // Invariant
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
-        m_client_fds[i] = -1;
+        m_client_fds[i]      = -1;
+        m_client_node_ids[i] = NODE_ID_INVALID;
     }
 }
 
@@ -144,6 +148,13 @@ Result TcpBackend::init(const TransportConfig& config)
         imp_cfg = config.channels[0U].impairment;
     }
     m_impairment.init(imp_cfg);
+
+    // REQ-6.1.8, REQ-6.1.9: zero node-identity routing table during init phase
+    // Power of 10 rule 2: fixed loop bound (MAX_TCP_CONNECTIONS)
+    m_local_node_id = NODE_ID_INVALID;
+    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
+        m_client_node_ids[i] = NODE_ID_INVALID;
+    }
 
     Result res;
     if (m_is_server) {
@@ -249,11 +260,14 @@ void TcpBackend::remove_client_fd(int client_fd)
         if (m_client_fds[i] == client_fd) {
             m_sock_ops->do_close(m_client_fds[i]);
             m_client_fds[i] = -1;
-            // Compact the fd array by shifting left
+            // Compact the fd and node-id arrays by shifting left
+            // Power of 10 rule 2: bound is m_client_count - 1 (< MAX_TCP_CONNECTIONS)
             for (uint32_t j = i; j < m_client_count - 1U; ++j) {
-                m_client_fds[j] = m_client_fds[j + 1U];
+                m_client_fds[j]      = m_client_fds[j + 1U];
+                m_client_node_ids[j] = m_client_node_ids[j + 1U];
             }
-            m_client_fds[m_client_count - 1U] = -1;
+            m_client_fds[m_client_count - 1U]      = -1;
+            m_client_node_ids[m_client_count - 1U] = NODE_ID_INVALID;
             --m_client_count;
             ++m_connections_closed;  // REQ-7.2.4: connection removed
             NEVER_COMPILED_OUT_ASSERT(m_client_count < MAX_TCP_CONNECTIONS);  // Power of 10: post-condition
@@ -342,6 +356,16 @@ Result TcpBackend::recv_from_client(int client_fd, uint32_t timeout_ms)
         return res;
     }
 
+    // REQ-6.1.8: intercept HELLO frames before impairment processing.
+    // HELLO frames register the client's NodeId in the routing table and
+    // are never delivered to the DeliveryEngine.
+    if (env.message_type == MessageType::HELLO) {
+        if (m_is_server) {
+            handle_hello_frame(client_fd, env.source_id);
+        }
+        return Result::ERR_AGAIN;  // consumed; not delivered to DeliveryEngine
+    }
+
     // REQ-5.1.5, REQ-5.1.6: route through impairment before queuing.
     // Partition drops and reorder buffering apply on the inbound path.
     uint64_t now_us = timestamp_now_us();
@@ -378,6 +402,79 @@ bool TcpBackend::send_to_all_clients(const uint8_t* buf, uint32_t len)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// send_one_delayed() — CC-reduction helper for flush_delayed_to_clients
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Serializes a single delayed envelope and routes it (unicast or broadcast).
+// REQ-6.1.9: server sends to specific client by NodeId when destination is
+// known; falls back to broadcast when destination is NODE_ID_INVALID.
+// @param[in]  env     Envelope to serialize and send.
+// @param[out] failed  Set to true if the send call returned failure.
+// @return ERR_INVALID if unicast destination has no registered slot; OK otherwise.
+
+Result TcpBackend::send_one_delayed(const MessageEnvelope& env, bool& failed)
+{
+    NEVER_COMPILED_OUT_ASSERT(envelope_valid(env));  // Pre-condition
+    NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);  // Invariant
+
+    failed = false;
+
+    uint32_t wire_len = 0U;
+    Result ser_r = Serializer::serialize(env, m_wire_buf,
+                                         static_cast<uint32_t>(sizeof(m_wire_buf)),
+                                         wire_len);
+    if (!result_ok(ser_r)) {
+        Logger::log(Severity::WARNING_LO, "TcpBackend",
+                    "send_one_delayed: serialize failed");
+        failed = true;
+        return Result::OK;  // caller uses failed flag; ERR_IO not distinguishable here
+    }
+
+    // REQ-6.1.9: unicast routing — broadcast when not server or dst unknown.
+    bool do_broadcast = (!m_is_server) || (env.destination_id == NODE_ID_INVALID);
+    if (do_broadcast) {
+        failed = send_to_all_clients(m_wire_buf, wire_len);
+        return Result::OK;
+    }
+
+    uint32_t slot = find_client_slot(env.destination_id);
+    if (slot >= MAX_TCP_CONNECTIONS) {
+        Logger::log(Severity::WARNING_HI, "TcpBackend",
+                    "send_one_delayed: no slot for dst=%u", env.destination_id);
+        return Result::ERR_INVALID;
+    }
+    failed = send_to_slot(slot, m_wire_buf, wire_len);
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// apply_send_result() — CC-reduction helper for flush_delayed_to_clients
+// ─────────────────────────────────────────────────────────────────────────────
+
+void TcpBackend::apply_send_result(Result route_r, bool failed,
+                                   bool is_current, Result& final_result)
+{
+    NEVER_COMPILED_OUT_ASSERT(final_result == Result::OK ||
+                              final_result == Result::ERR_IO ||
+                              final_result == Result::ERR_INVALID);  // Pre-condition
+    NEVER_COMPILED_OUT_ASSERT(route_r == Result::OK ||
+                              route_r == Result::ERR_INVALID);       // Pre-condition
+
+    if (!result_ok(route_r) && is_current) {
+        final_result = route_r;
+        return;
+    }
+    if (failed && is_current) {
+        final_result = Result::ERR_IO;
+        return;
+    }
+    if (failed) {
+        Logger::log(Severity::WARNING_LO, "TcpBackend",
+                    "flush_delayed: send failed for non-current msg");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // flush_delayed_to_clients() — private helper
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -393,26 +490,15 @@ Result TcpBackend::flush_delayed_to_clients(const MessageEnvelope& current_env,
 
     Result final_result = Result::OK;
 
-    // Power of 10 rule 2: fixed loop bound
+    // Power of 10 rule 2: fixed loop bound (IMPAIR_DELAY_BUF_SIZE)
     for (uint32_t i = 0U; i < count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        uint32_t delayed_len = 0U;
-        Result res = Serializer::serialize(delayed[i], m_wire_buf,
-                                           SOCKET_RECV_BUF_BYTES, delayed_len);
-        if (!result_ok(res)) {
-            continue;
-        }
-        bool is_current = (delayed[i].source_id  == current_env.source_id) &&
-                          (delayed[i].message_id  == current_env.message_id);
-        bool failed = send_to_all_clients(m_wire_buf, delayed_len);
-        if (failed) {
-            if (is_current) {
-                final_result = Result::ERR_IO;
-            } else {
-                Logger::log(Severity::WARNING_LO, "TcpBackend",
-                            "flush: send failed for non-current envelope");
-            }
-        }
+        bool is_current = (delayed[i].source_id == current_env.source_id) &&
+                          (delayed[i].message_id == current_env.message_id);
+
+        bool failed = false;
+        Result route_r = send_one_delayed(delayed[i], failed);
+        apply_send_result(route_r, failed, is_current, final_result);
     }
     return final_result;
 }
@@ -653,4 +739,119 @@ void TcpBackend::get_transport_stats(TransportStats& out) const
     out.connections_opened = m_connections_opened;
     out.connections_closed = m_connections_closed;
     out.impairment         = m_impairment.get_stats();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// register_local_id() — REQ-6.1.10: store our NodeId; client sends HELLO
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result TcpBackend::register_local_id(NodeId id)
+{
+    NEVER_COMPILED_OUT_ASSERT(id != NODE_ID_INVALID);  // Pre-condition: valid node ID
+    NEVER_COMPILED_OUT_ASSERT(m_open);                 // Pre-condition: transport is open
+
+    m_local_node_id = id;
+    if (!m_is_server) {
+        return send_hello_frame();
+    }
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// send_hello_frame() — REQ-6.1.8: client announces its NodeId to the server
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result TcpBackend::send_hello_frame()
+{
+    NEVER_COMPILED_OUT_ASSERT(m_local_node_id != NODE_ID_INVALID);  // Pre-condition
+    NEVER_COMPILED_OUT_ASSERT(!m_is_server);                         // Client mode only
+
+    MessageEnvelope hello;
+    envelope_init(hello);
+    hello.message_type   = MessageType::HELLO;
+    hello.source_id      = m_local_node_id;
+    hello.destination_id = NODE_ID_INVALID;   // server NodeId not yet known
+    hello.payload_length = 0U;
+
+    uint32_t wire_len = 0U;
+    Result ser_r = Serializer::serialize(hello, m_wire_buf,
+                                         static_cast<uint32_t>(sizeof(m_wire_buf)),
+                                         wire_len);
+    if (!result_ok(ser_r)) {
+        Logger::log(Severity::WARNING_HI, "TcpBackend",
+                    "send_hello_frame: serialize failed %u",
+                    static_cast<uint8_t>(ser_r));
+        return ser_r;
+    }
+
+    // send_frame returns true on success, false on failure.
+    bool sent_ok = m_sock_ops->send_frame(m_client_fds[0U], m_wire_buf, wire_len,
+                                          m_cfg.channels[0U].send_timeout_ms);
+    if (!sent_ok) {
+        Logger::log(Severity::WARNING_HI, "TcpBackend",
+                    "send_hello_frame: send_frame failed");
+        return Result::ERR_IO;
+    }
+    Logger::log(Severity::INFO, "TcpBackend",
+                "HELLO sent: local_id=%u", m_local_node_id);
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// handle_hello_frame() — REQ-6.1.9: record client NodeId in routing table
+// ─────────────────────────────────────────────────────────────────────────────
+
+void TcpBackend::handle_hello_frame(int client_fd, NodeId src_id)
+{
+    NEVER_COMPILED_OUT_ASSERT(client_fd >= 0);             // Pre-condition: valid fd
+    NEVER_COMPILED_OUT_ASSERT(src_id != NODE_ID_INVALID);  // Pre-condition: valid NodeId
+
+    // Power of 10 rule 2: fixed loop bound (m_client_count ≤ MAX_TCP_CONNECTIONS)
+    for (uint32_t i = 0U; i < m_client_count; ++i) {
+        if (m_client_fds[i] == client_fd) {
+            m_client_node_ids[i] = src_id;
+            Logger::log(Severity::INFO, "TcpBackend",
+                        "HELLO from client slot %u node_id=%u", i, src_id);
+            return;
+        }
+    }
+    Logger::log(Severity::WARNING_LO, "TcpBackend",
+                "handle_hello_frame: fd not found");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// find_client_slot() — look up slot index by destination NodeId
+// ─────────────────────────────────────────────────────────────────────────────
+
+uint32_t TcpBackend::find_client_slot(NodeId dst) const
+{
+    NEVER_COMPILED_OUT_ASSERT(dst != NODE_ID_INVALID);               // Pre-condition
+    NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS); // Pre-condition
+
+    // Power of 10 rule 2: fixed loop bound (m_client_count ≤ MAX_TCP_CONNECTIONS)
+    for (uint32_t i = 0U; i < m_client_count; ++i) {
+        if (m_client_node_ids[i] == dst) {
+            return i;
+        }
+    }
+    return MAX_TCP_CONNECTIONS;  // not-found sentinel
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// send_to_slot() — send serialized data to one client slot
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool TcpBackend::send_to_slot(uint32_t slot, const uint8_t* buf, uint32_t len)
+{
+    NEVER_COMPILED_OUT_ASSERT(slot < m_client_count);  // Pre-condition: valid slot
+    NEVER_COMPILED_OUT_ASSERT(buf != nullptr);          // Pre-condition: valid buffer
+
+    bool ok = m_sock_ops->send_frame(m_client_fds[slot], buf, len,
+                                     m_cfg.channels[0U].send_timeout_ms);
+    if (!ok) {
+        Logger::log(Severity::WARNING_HI, "TcpBackend",
+                    "send_to_slot %u failed", slot);
+    }
+    // send_frame returns true on success; invert for "failed" convention
+    return !ok;
 }

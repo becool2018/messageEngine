@@ -28,9 +28,10 @@
  *
  * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4,
  *             REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6,
+ *             REQ-6.1.8, REQ-6.1.9, REQ-6.1.10,
  *             REQ-6.3.4, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #include "platform/TlsTcpBackend.hpp"
 #include "platform/ISocketOps.hpp"
@@ -113,7 +114,8 @@ TlsTcpBackend::TlsTcpBackend()
       m_sock_ops(&SocketOpsImpl::instance()),
       m_client_count(0U), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false), m_tls_enabled(false),
-      m_connections_opened(0U), m_connections_closed(0U)
+      m_connections_opened(0U), m_connections_closed(0U),
+      m_client_node_ids{}, m_local_node_id(NODE_ID_INVALID)
 {
     NEVER_COMPILED_OUT_ASSERT(MAX_TCP_CONNECTIONS > 0U);
     mbedtls_ssl_config_init(&m_ssl_conf);
@@ -135,7 +137,8 @@ TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops)
       m_sock_ops(&sock_ops),
       m_client_count(0U), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false), m_tls_enabled(false),
-      m_connections_opened(0U), m_connections_closed(0U)
+      m_connections_opened(0U), m_connections_closed(0U),
+      m_client_node_ids{}, m_local_node_id(NODE_ID_INVALID)
 {
     NEVER_COMPILED_OUT_ASSERT(MAX_TCP_CONNECTIONS > 0U);
     mbedtls_ssl_config_init(&m_ssl_conf);
@@ -556,8 +559,9 @@ void TlsTcpBackend::remove_client(uint32_t idx)
 
     // Compact: shift remaining slots left
     for (uint32_t j = idx; j < m_client_count - 1U; ++j) {
-        m_client_net[j] = m_client_net[j + 1U];
-        m_ssl[j]        = m_ssl[j + 1U];
+        m_client_net[j]      = m_client_net[j + 1U];
+        m_ssl[j]             = m_ssl[j + 1U];
+        m_client_node_ids[j] = m_client_node_ids[j + 1U];  // REQ-6.1.9: compact routing table
         // Security fix F3: after struct-copying ssl[j+1] into ssl[j], the SSL
         // context in slot j has an internal BIO pointer that still refers to
         // &m_client_net[j+1].  Re-associate the BIO to &m_client_net[j] before
@@ -567,13 +571,124 @@ void TlsTcpBackend::remove_client(uint32_t idx)
             mbedtls_ssl_set_bio(&m_ssl[j], &m_client_net[j],
                                 mbedtls_net_send, mbedtls_net_recv, nullptr);
         }
-        // Re-initialise the slot we just moved away from
+        // Re-initialise the slots we just moved away from
         mbedtls_net_init(&m_client_net[j + 1U]);
         mbedtls_ssl_init(&m_ssl[j + 1U]);
+        m_client_node_ids[j + 1U] = NODE_ID_INVALID;
     }
     --m_client_count;
     ++m_connections_closed;  // REQ-7.2.4: client connection removed
     NEVER_COMPILED_OUT_ASSERT(m_client_count < MAX_TCP_CONNECTIONS);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// register_local_id() — REQ-6.1.10
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result TlsTcpBackend::register_local_id(NodeId id)
+{
+    NEVER_COMPILED_OUT_ASSERT(id != NODE_ID_INVALID);
+    NEVER_COMPILED_OUT_ASSERT(m_open);
+
+    m_local_node_id = id;
+    if (!m_is_server) {
+        // REQ-6.1.8: client announces its identity to the server immediately.
+        return send_hello_frame();
+    }
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// send_hello_frame() — REQ-6.1.8
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result TlsTcpBackend::send_hello_frame()
+{
+    NEVER_COMPILED_OUT_ASSERT(m_local_node_id != NODE_ID_INVALID);
+    NEVER_COMPILED_OUT_ASSERT(!m_is_server);
+
+    MessageEnvelope hello;
+    envelope_init(hello);
+    hello.message_type   = MessageType::HELLO;
+    hello.source_id      = m_local_node_id;
+    hello.destination_id = NODE_ID_INVALID;
+    hello.payload_length = 0U;
+
+    uint32_t wire_len = 0U;
+    Result ser_r = Serializer::serialize(hello, m_wire_buf,
+                                         static_cast<uint32_t>(sizeof(m_wire_buf)),
+                                         wire_len);
+    if (!result_ok(ser_r)) {
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "send_hello_frame: serialize failed %u",
+                    static_cast<uint8_t>(ser_r));
+        return ser_r;
+    }
+
+    uint32_t timeout_ms = (m_cfg.num_channels > 0U)
+                          ? m_cfg.channels[0U].send_timeout_ms
+                          : 1000U;
+    bool failed = tls_send_frame(0U, m_wire_buf, wire_len, timeout_ms);
+    if (failed) {
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "send_hello_frame: tls_send_frame failed");
+        return Result::ERR_IO;
+    }
+    Logger::log(Severity::INFO, "TlsTcpBackend",
+                "HELLO sent: local_id=%u", m_local_node_id);
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// handle_hello_frame() — REQ-6.1.9
+// ─────────────────────────────────────────────────────────────────────────────
+
+void TlsTcpBackend::handle_hello_frame(uint32_t idx, NodeId src_id)
+{
+    NEVER_COMPILED_OUT_ASSERT(idx < m_client_count);
+    NEVER_COMPILED_OUT_ASSERT(src_id != NODE_ID_INVALID);
+
+    m_client_node_ids[idx] = src_id;
+    Logger::log(Severity::INFO, "TlsTcpBackend",
+                "HELLO from client slot %u node_id=%u", idx, src_id);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// find_client_slot() — REQ-6.1.9
+// ─────────────────────────────────────────────────────────────────────────────
+
+uint32_t TlsTcpBackend::find_client_slot(NodeId dst) const
+{
+    NEVER_COMPILED_OUT_ASSERT(dst != NODE_ID_INVALID);
+    NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);
+
+    // Power of 10 Rule 2: bounded loop — at most MAX_TCP_CONNECTIONS iterations
+    for (uint32_t i = 0U; i < m_client_count; ++i) {
+        if (m_client_node_ids[i] == dst) {
+            return i;
+        }
+    }
+    return MAX_TCP_CONNECTIONS;  // sentinel: not found
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// send_to_slot() — REQ-6.1.9
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool TlsTcpBackend::send_to_slot(uint32_t slot, const uint8_t* buf, uint32_t len)
+{
+    NEVER_COMPILED_OUT_ASSERT(slot < m_client_count);
+    NEVER_COMPILED_OUT_ASSERT(buf != nullptr);
+
+    uint32_t timeout_ms = (m_cfg.num_channels > 0U)
+                          ? m_cfg.channels[0U].send_timeout_ms
+                          : 1000U;
+    bool failed = tls_send_frame(slot, buf, len, timeout_ms);
+    if (failed) {
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "send_to_slot %u failed", slot);
+    }
+    return failed;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -820,6 +935,16 @@ Result TlsTcpBackend::recv_from_client(uint32_t idx, uint32_t timeout_ms)
         return res;
     }
 
+    // REQ-6.1.8/6.1.9: intercept HELLO frames before impairment engine.
+    // Server records the client's NodeId for unicast routing; HELLO is not
+    // delivered to upper layers (return ERR_AGAIN = "not an error; keep going").
+    if (env.message_type == MessageType::HELLO) {
+        if (m_is_server) {
+            handle_hello_frame(idx, env.source_id);
+        }
+        return Result::ERR_AGAIN;
+    }
+
     // REQ-5.1.5, REQ-5.1.6: route through impairment before queuing.
     // Partition drops and reorder buffering apply on the inbound path.
     uint64_t now_us = timestamp_now_us();
@@ -856,6 +981,68 @@ bool TlsTcpBackend::send_to_all_clients(const uint8_t* buf, uint32_t len)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// unicast_serialized() — CC-reduction helper for route_one_delayed
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result TlsTcpBackend::unicast_serialized(NodeId dst, const uint8_t* buf, uint32_t len)
+{
+    NEVER_COMPILED_OUT_ASSERT(dst != NODE_ID_INVALID);
+    NEVER_COMPILED_OUT_ASSERT(buf != nullptr);
+
+    uint32_t slot = find_client_slot(dst);
+    if (slot >= MAX_TCP_CONNECTIONS) {
+        // REQ-6.1.9: no routing entry for dst (client has not yet sent HELLO).
+        // Fall back to broadcast so existing code paths are not disrupted before
+        // HELLO registration completes; log at INFO for visibility.
+        Logger::log(Severity::INFO, "TlsTcpBackend",
+                    "unicast_serialized: no slot for dst=%u — broadcast fallback", dst);
+        bool failed = send_to_all_clients(buf, len);
+        return failed ? Result::ERR_IO : Result::OK;
+    }
+    bool failed = send_to_slot(slot, buf, len);
+    return failed ? Result::ERR_IO : Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// route_one_delayed() — CC-reduction helper for flush_delayed_to_clients
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result TlsTcpBackend::route_one_delayed(const MessageEnvelope& env, bool is_current)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_open);
+    NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);
+
+    uint32_t delayed_len = 0U;
+    Result ser_r = Serializer::serialize(env, m_wire_buf,
+                                         static_cast<uint32_t>(sizeof(m_wire_buf)),
+                                         delayed_len);
+    if (!result_ok(ser_r)) {
+        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
+                    "flush_delayed: serialize failed");
+        // Non-current failures are swallowed; only propagate for the current msg.
+        if (!is_current) { return Result::OK; }
+        return Result::ERR_IO;
+    }
+
+    // REQ-6.1.9: unicast to specific client if dst is known; broadcast otherwise.
+    Result send_r = Result::OK;
+    if (!m_is_server || (env.destination_id == NODE_ID_INVALID)) {
+        // Client mode or unaddressed broadcast — send to all.
+        bool failed = send_to_all_clients(m_wire_buf, delayed_len);
+        if (failed) { send_r = Result::ERR_IO; }
+    } else {
+        send_r = unicast_serialized(env.destination_id, m_wire_buf, delayed_len);
+    }
+
+    if (!result_ok(send_r) && !is_current) {
+        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
+                    "flush_delayed: send failed for non-current msg");
+        return Result::OK;
+    }
+    return send_r;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // flush_delayed_to_clients()
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -871,24 +1058,14 @@ Result TlsTcpBackend::flush_delayed_to_clients(const MessageEnvelope& current_en
 
     Result final_result = Result::OK;
 
+    // Power of 10 Rule 2: bounded loop — at most IMPAIR_DELAY_BUF_SIZE iterations
     for (uint32_t i = 0U; i < count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        uint32_t delayed_len = 0U;
-        Result res = Serializer::serialize(delayed[i], m_wire_buf,
-                                           SOCKET_RECV_BUF_BYTES, delayed_len);
-        if (!result_ok(res)) {
-            continue;
-        }
         bool is_current = (delayed[i].source_id  == current_env.source_id) &&
                           (delayed[i].message_id  == current_env.message_id);
-        bool failed = send_to_all_clients(m_wire_buf, delayed_len);
-        if (failed) {
-            if (is_current) {
-                final_result = Result::ERR_IO;
-            } else {
-                Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                            "flush: send failed for non-current envelope");
-            }
+        Result r = route_one_delayed(delayed[i], is_current);
+        if (!result_ok(r) && is_current) {
+            final_result = r;
         }
     }
     return final_result;
@@ -935,6 +1112,12 @@ Result TlsTcpBackend::init(const TransportConfig& config)
     m_cfg          = config;
     m_is_server    = config.is_server;
     m_tls_enabled  = config.tls.tls_enabled;
+
+    // REQ-6.1.9/10: reset routing state on each init() (Power of 10 Rule 3: bounded loop)
+    m_local_node_id = NODE_ID_INVALID;
+    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
+        m_client_node_ids[i] = NODE_ID_INVALID;
+    }
 
     m_recv_queue.init();
 

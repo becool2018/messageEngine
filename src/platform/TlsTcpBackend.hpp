@@ -53,9 +53,10 @@
  *
  * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4,
  *             REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6,
+ *             REQ-6.1.8, REQ-6.1.9, REQ-6.1.10,
  *             REQ-6.3.4, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #ifndef PLATFORM_TLS_TCP_BACKEND_HPP
 #define PLATFORM_TLS_TCP_BACKEND_HPP
@@ -104,6 +105,8 @@ public:
     bool   is_open() const override;
     /// REQ-7.2.4 / REQ-7.2.2 — NSC observability accessor.
     void   get_transport_stats(TransportStats& out) const override;
+    /// REQ-6.1.10: store our node ID; client mode sends HELLO frame to server.
+    Result register_local_id(NodeId id) override;
 
 private:
     // ── mbedTLS contexts (fixed static allocation — Power of 10 Rule 3) ─────
@@ -137,6 +140,8 @@ private:
     bool              m_tls_enabled;              ///< From config.tls.tls_enabled
     uint32_t          m_connections_opened;       ///< REQ-7.2.4: successful connect/accept events
     uint32_t          m_connections_closed;       ///< REQ-7.2.4: disconnect events
+    NodeId            m_client_node_ids[MAX_TCP_CONNECTIONS];  ///< NodeId per client slot (NODE_ID_INVALID = unknown) — REQ-6.1.9
+    NodeId            m_local_node_id;            ///< Our own node identity (set by register_local_id) — REQ-6.1.10
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
@@ -187,6 +192,45 @@ private:
 
     /// Close and remove client at array index @p idx; compact the table.
     void remove_client(uint32_t idx);
+
+    /// Build and send a HELLO envelope to the server (client mode, slot 0).
+    /// REQ-6.1.8: client announces its NodeId immediately after connection.
+    Result send_hello_frame();
+
+    /// Record the NodeId of a connecting client in the routing table.
+    /// REQ-6.1.9: server stores client NodeId for unicast routing.
+    /// @param[in] idx     Slot index that sent the HELLO.
+    /// @param[in] src_id  NodeId extracted from the HELLO envelope.
+    void handle_hello_frame(uint32_t idx, NodeId src_id);
+
+    /// Find the client array slot for a given destination NodeId.
+    /// REQ-6.1.9: unicast routing lookup.
+    /// @return slot index in [0, m_client_count) or MAX_TCP_CONNECTIONS if not found.
+    uint32_t find_client_slot(NodeId dst) const;
+
+    /// Send serialized data to a single client slot via tls_send_frame.
+    /// @param[in] slot  Client array index.
+    /// @param[in] buf   Serialized frame data.
+    /// @param[in] len   Frame length in bytes.
+    /// @return true if tls_send_frame() fails, false on success.
+    bool send_to_slot(uint32_t slot, const uint8_t* buf, uint32_t len);
+
+    /// Route one delayed envelope: serialize, select unicast or broadcast, send.
+    /// Extracted from flush_delayed_to_clients() to keep its CC ≤ 10.
+    /// @param[in] env       Envelope to send.
+    /// @param[in] is_current  True when env matches the in-flight send envelope.
+    /// @return OK on success; ERR_IO on send failure; ERR_INVALID if unicast
+    ///         destination is not found.
+    Result route_one_delayed(const MessageEnvelope& env, bool is_current);
+
+    /// Send pre-serialized bytes to the unicast slot for @p dst, or return
+    /// ERR_INVALID if no slot is found.  Extracted from route_one_delayed()
+    /// to keep its CC ≤ 10.
+    /// @param[in] dst     Destination NodeId; must not be NODE_ID_INVALID.
+    /// @param[in] buf     Serialized frame data.
+    /// @param[in] len     Frame length in bytes.
+    /// @return OK on success; ERR_INVALID if no slot found; ERR_IO on send failure.
+    Result unicast_serialized(NodeId dst, const uint8_t* buf, uint32_t len);
 
     /// Flush impairment-delayed messages out to connected clients.
     /// Failure attribution: if the send fails for the current envelope
