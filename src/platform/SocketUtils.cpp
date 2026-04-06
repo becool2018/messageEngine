@@ -95,6 +95,35 @@ static bool fill_addr(const char* ip, uint16_t port,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// log_socket_create_error() — file-local CC-reduction helper (F-10)
+// Logs socket() failure at WARNING_HI for resource/permission errors (EMFILE,
+// ENFILE, EACCES, EPERM) and WARNING_LO for all other errors.  Extracted from
+// socket_create_tcp/udp to keep their cognitive complexity within Rule 4.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void log_socket_create_error(const char* proto, const char* family_str, int err)
+{
+    NEVER_COMPILED_OUT_ASSERT(proto      != nullptr);  // pre-condition: non-null proto string
+    NEVER_COMPILED_OUT_ASSERT(family_str != nullptr);  // pre-condition: non-null family string
+
+    // F-10: EMFILE/ENFILE (fd exhaustion) and EACCES/EPERM (permission denied)
+    // are system-wide; escalate to WARNING_HI.  All other errors stay WARNING_LO.
+    bool is_resource_err = (err == EMFILE) || (err == ENFILE) ||
+                           (err == EACCES) || (err == EPERM);
+    Severity sev = is_resource_err ? Severity::WARNING_HI : Severity::WARNING_LO;
+    if (is_resource_err) {
+        Logger::log(sev, "SocketUtils",
+                    "socket(%s, %s) failed (system resource/permission): %d",
+                    proto, family_str, err);
+    } else {
+        Logger::log(sev, "SocketUtils",
+                    "socket(%s, %s) failed: %d",
+                    proto, family_str, err);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // socket_create_tcp()
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -106,14 +135,13 @@ int socket_create_tcp(bool ipv6)
     // Power of 10: check return value
     int fd = socket(family, SOCK_STREAM, IPPROTO_TCP);
     if (fd < 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "socket(%s, SOCK_STREAM) failed: %d",
-                   ipv6 ? "AF_INET6" : "AF_INET", errno);
+        log_socket_create_error("SOCK_STREAM", ipv6 ? "AF_INET6" : "AF_INET", errno);
         return -1;
     }
 
+    // F-18: fd 0, 1, 2 are stdin/stdout/stderr; a new socket must be > 2.
     // Power of 10: postcondition assertion
-    NEVER_COMPILED_OUT_ASSERT(fd >= 0);
+    NEVER_COMPILED_OUT_ASSERT(fd > 2);
     return fd;
 }
 
@@ -129,14 +157,13 @@ int socket_create_udp(bool ipv6)
     // Power of 10: check return value
     int fd = socket(family, SOCK_DGRAM, IPPROTO_UDP);
     if (fd < 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "socket(%s, SOCK_DGRAM) failed: %d",
-                   ipv6 ? "AF_INET6" : "AF_INET", errno);
+        log_socket_create_error("SOCK_DGRAM", ipv6 ? "AF_INET6" : "AF_INET", errno);
         return -1;
     }
 
+    // F-18: fd 0, 1, 2 are stdin/stdout/stderr; a new socket must be > 2.
     // Power of 10: postcondition assertion
-    NEVER_COMPILED_OUT_ASSERT(fd >= 0);
+    NEVER_COMPILED_OUT_ASSERT(fd > 2);
     return fd;
 }
 
@@ -540,10 +567,14 @@ bool tcp_recv_frame(int fd, uint8_t* buf, uint32_t buf_cap,
 
     // Validate frame length
     uint32_t max_frame_size = Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES;
-    if (frame_len > max_frame_size || frame_len > buf_cap) {
+    // F-4: a valid framed message must be at least WIRE_HEADER_SIZE bytes;
+    // zero-length or truncated frames cannot contain a valid envelope header.
+    if (frame_len < Serializer::WIRE_HEADER_SIZE ||
+        frame_len > max_frame_size || frame_len > buf_cap) {
         Logger::log(Severity::WARNING_HI, "SocketUtils",
-                   "tcp_recv_frame: frame size %u exceeds limit %u",
-                   frame_len, max_frame_size);
+                   "tcp_recv_frame: invalid frame size %u (min=%u, max=%u)",
+                   frame_len, static_cast<unsigned>(Serializer::WIRE_HEADER_SIZE),
+                   max_frame_size);
         return false;
     }
 

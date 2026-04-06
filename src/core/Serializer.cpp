@@ -383,6 +383,13 @@ Result Serializer::deserialize(const uint8_t*  buf,
         return Result::ERR_INVALID;
     }
 
+    // F-3 defense-in-depth overflow guard (CERT INT30-C): although the preceding check
+    // makes this overflow mathematically impossible (4096+52 << UINT32_MAX), we add an
+    // explicit guard for consistency with serialize() and to satisfy static analysis.
+    if (env.payload_length > (UINT32_MAX - WIRE_HEADER_SIZE)) {
+        return Result::ERR_INVALID;
+    }
+
     // Check that total message fits in buffer
     uint32_t total_size = WIRE_HEADER_SIZE + env.payload_length;
     if (buf_len < total_size) {

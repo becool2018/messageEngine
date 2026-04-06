@@ -211,6 +211,7 @@ struct TcpCliArg2 {
     uint32_t connect_delay_us;
     uint32_t close_delay_us;
     Result   result;
+    NodeId   node_id;  // F-13: each client must have a unique node_id
 };
 
 // Server thread for garbage-frame test: one receive attempt, then closes.
@@ -289,11 +290,12 @@ static void* two_cli_param_thread(void* raw)
     if (a->result != Result::OK) { return nullptr; }
 
     // Fix 3/4: must register before sending data frames.
-    // source_id 2U matches make_test_envelope() so validate_source_id passes.
-    (void)client.register_local_id(2U);
+    // F-13: use the per-client node_id so the server rejects duplicate source_ids.
+    (void)client.register_local_id(a->node_id);
 
     MessageEnvelope env;
     make_test_envelope(env, a->send_msg_id);
+    env.source_id = a->node_id;  // F-13: match envelope source_id to registered node_id
     (void)client.send_message(env);
 
     usleep(a->close_delay_us);
@@ -695,6 +697,7 @@ static void test_two_clients_compact()
     cli1_arg.connect_delay_us = 80000U;
     cli1_arg.close_delay_us   = 200000U;
     cli1_arg.result           = Result::ERR_IO;
+    cli1_arg.node_id          = 2U;  // F-13: unique node_id per client
 
     // Client 2 connects second (150 ms delay), closes after 300 ms.
     TcpCliArg2 cli2_arg;
@@ -703,6 +706,7 @@ static void test_two_clients_compact()
     cli2_arg.connect_delay_us = 150000U;
     cli2_arg.close_delay_us   = 300000U;
     cli2_arg.result           = Result::ERR_IO;
+    cli2_arg.node_id          = 3U;  // F-13: unique node_id per client
 
     pthread_attr_t attr;
     (void)pthread_attr_init(&attr);
@@ -1046,6 +1050,7 @@ static void test_remove_client_fd_false_at_index0()
     cli1_arg.connect_delay_us = 80000U;
     cli1_arg.close_delay_us   = 500000U;   // close after 500 ms
     cli1_arg.result           = Result::ERR_IO;
+    cli1_arg.node_id          = 2U;  // F-13: unique node_id per client
 
     // Client 2 connects SECOND (160 ms delay) and closes EARLY (150 ms after
     // connecting), so it lives at m_client_fds[1] and disconnects first.
@@ -1055,6 +1060,7 @@ static void test_remove_client_fd_false_at_index0()
     cli2_arg.connect_delay_us = 160000U;
     cli2_arg.close_delay_us   = 150000U;   // close after only 150 ms
     cli2_arg.result           = Result::ERR_IO;
+    cli2_arg.node_id          = 3U;  // F-13: unique node_id per client
 
     pthread_attr_t attr;
     (void)pthread_attr_init(&attr);

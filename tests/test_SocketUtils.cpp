@@ -353,11 +353,14 @@ static void test_tcp_frame_round_trip()
     int acc_fd = socket_accept(srv_fd);
     assert(acc_fd >= 0);
 
-    // Send a 6-byte payload from client to server
-    static const uint8_t PAYLOAD[6U] = {0x01U, 0x02U, 0x03U, 0x04U, 0x05U, 0x06U};
-    static const uint32_t PAYLOAD_LEN = 6U;
+    // F-4: tcp_recv_frame() now rejects frames smaller than WIRE_HEADER_SIZE (52 bytes).
+    // Use exactly WIRE_HEADER_SIZE bytes to satisfy the minimum-size guard while
+    // still testing the round-trip framing mechanics.
+    static const uint32_t PAYLOAD_LEN = Serializer::WIRE_HEADER_SIZE;
+    uint8_t payload_buf[Serializer::WIRE_HEADER_SIZE];
+    (void)memset(payload_buf, 0xABU, sizeof(payload_buf));  // fill with test pattern
 
-    bool sent = tcp_send_frame(cli_fd, PAYLOAD, PAYLOAD_LEN, TIMEOUT_MS);
+    bool sent = tcp_send_frame(cli_fd, payload_buf, PAYLOAD_LEN, TIMEOUT_MS);
     assert(sent);
 
     // Receive on server side
@@ -373,7 +376,7 @@ static void test_tcp_frame_round_trip()
                                    TIMEOUT_MS, &recv_len);
     assert(received);
     assert(recv_len == PAYLOAD_LEN);
-    assert(memcmp(recv_buf, PAYLOAD, PAYLOAD_LEN) == 0);
+    assert(memcmp(recv_buf, payload_buf, PAYLOAD_LEN) == 0);
 
     socket_close(acc_fd);
     socket_close(cli_fd);
@@ -649,7 +652,8 @@ static void test_tcp_frame_zero_payload()
     bool sent = tcp_send_frame(cli_fd, DUMMY, 0U, TIMEOUT_MS);
     assert(sent);
 
-    // Receive: out_len must be 0
+    // F-4: tcp_recv_frame() now rejects frames < WIRE_HEADER_SIZE.  A zero-length
+    // frame (0 < 52) must be rejected — received must be false.
     static const uint32_t BUF_CAP =
         Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES;
     uint8_t  recv_buf[BUF_CAP];
@@ -659,8 +663,7 @@ static void test_tcp_frame_zero_payload()
 
     bool received = tcp_recv_frame(acc_fd, recv_buf, BUF_CAP,
                                    TIMEOUT_MS, &recv_len);
-    assert(received);
-    assert(recv_len == 0U);
+    assert(!received);  // F-4: zero-length frame must be rejected by tcp_recv_frame()
 
     socket_close(acc_fd);
     socket_close(cli_fd);

@@ -856,6 +856,20 @@ void TcpBackend::handle_hello_frame(int client_fd, NodeId src_id)
     NEVER_COMPILED_OUT_ASSERT(client_fd >= 0);             // Pre-condition: valid fd
     NEVER_COMPILED_OUT_ASSERT(src_id != NODE_ID_INVALID);  // Pre-condition: valid NodeId
 
+    // F-13 (SECfix-13): reject HELLO if src_id is already registered to a different
+    // slot.  Without this check a malicious client can impersonate an already-connected
+    // peer by sending a HELLO with that peer's node_id, allowing it to receive traffic
+    // addressed to the legitimate peer (HAZ-009 source-id spoofing).
+    // Power of 10 rule 2: fixed loop bound (m_client_count ≤ MAX_TCP_CONNECTIONS)
+    for (uint32_t j = 0U; j < m_client_count; ++j) {
+        if ((m_client_node_ids[j] == src_id) && (m_client_fds[j] != client_fd)) {
+            Logger::log(Severity::WARNING_HI, "TcpBackend",
+                        "HELLO rejected: node_id=%u already registered on slot %u (HAZ-009)",
+                        static_cast<unsigned>(src_id), j);
+            return;
+        }
+    }
+
     // Power of 10 rule 2: fixed loop bound (m_client_count ≤ MAX_TCP_CONNECTIONS)
     for (uint32_t i = 0U; i < m_client_count; ++i) {
         if (m_client_fds[i] == client_fd) {

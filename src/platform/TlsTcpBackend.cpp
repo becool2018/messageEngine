@@ -50,6 +50,7 @@
 #include <mbedtls/error.h>
 #include <mbedtls/psa_util.h>
 #include <psa/crypto.h>
+#include <sys/stat.h>     // lstat() — F-2 symlink validation
 #include <cstdio>
 #include <cstring>
 
@@ -101,6 +102,32 @@ static void log_mbedtls_err(const char* tag, const char* func, int ret)
     mbedtls_strerror(ret, err_buf, sizeof(err_buf) - 1U);
     Logger::log(Severity::WARNING_HI, tag, "%s failed: -0x%04X (%s)",
                 func, static_cast<unsigned int>(-ret), err_buf);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// File-local helper — F-2 symlink TOCTOU guard
+// Same rationale as DtlsUdpBackend: reject symlink-swapped cert/key paths.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Returns true if path is a regular file (not a symlink or other special file).
+static bool tls_path_is_regular_file(const char* path, const char* tag)
+{
+    NEVER_COMPILED_OUT_ASSERT(path != nullptr);  // pre-condition: non-null path
+    NEVER_COMPILED_OUT_ASSERT(tag  != nullptr);  // pre-condition: non-null tag
+
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        Logger::log(Severity::WARNING_HI, tag,
+                    "tls_path_is_regular_file: lstat('%s') failed: %d", path, errno);
+        return false;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        Logger::log(Severity::WARNING_HI, tag,
+                    "tls_path_is_regular_file: '%s' is not a regular file (mode=0%o)",
+                    path, static_cast<unsigned>(st.st_mode));
+        return false;
+    }
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -201,6 +228,10 @@ Result TlsTcpBackend::load_ca_and_crl(const TlsConfig& tls_cfg)
     NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.ca_file));
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.ca_file[0] != '\0');
 
+    // F-2: reject symlink attacks immediately before parse_file() to narrow TOCTOU window.
+    if (!tls_path_is_regular_file(tls_cfg.ca_file, "TlsTcpBackend")) {
+        return Result::ERR_IO;
+    }
     int ret = mbedtls_x509_crt_parse_file(&m_ca_cert, tls_cfg.ca_file);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "x509_crt_parse_file (CA)", ret);
@@ -238,6 +269,10 @@ Result TlsTcpBackend::load_crl_if_configured(const TlsConfig& tls_cfg)
         return Result::OK;
     }
 
+    // F-2: reject symlink attacks immediately before crl_parse_file() to narrow TOCTOU window.
+    if (!tls_path_is_regular_file(tls_cfg.crl_file, "TlsTcpBackend")) {
+        return Result::ERR_IO;
+    }
     int crl_ret = mbedtls_x509_crl_parse_file(&m_crl, tls_cfg.crl_file);
     if (crl_ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "x509_crl_parse_file", crl_ret);
@@ -294,12 +329,20 @@ Result TlsTcpBackend::load_tls_certs(const TlsConfig& tls_cfg)
         if (!result_ok(ca_res)) { return ca_res; }
     }
 
+    // F-2: reject symlink attacks immediately before parse_file() to narrow TOCTOU window.
+    if (!tls_path_is_regular_file(tls_cfg.cert_file, "TlsTcpBackend")) {
+        return Result::ERR_IO;
+    }
     int ret = mbedtls_x509_crt_parse_file(&m_cert, tls_cfg.cert_file);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "x509_crt_parse_file (cert)", ret);
         return Result::ERR_IO;
     }
 
+    // F-2: reject symlink attacks immediately before pk_parse_keyfile() to narrow TOCTOU window.
+    if (!tls_path_is_regular_file(tls_cfg.key_file, "TlsTcpBackend")) {
+        return Result::ERR_IO;
+    }
     ret = mbedtls_pk_parse_keyfile(&m_pkey, tls_cfg.key_file, nullptr);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "pk_parse_keyfile", ret);

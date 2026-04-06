@@ -220,6 +220,15 @@ Result UdpBackend::send_message(const MessageEnvelope& envelope)
         return res;
     }
 
+    // F-9: enforce UDP datagram MTU to prevent IP fragmentation (REQ-6.2.3).
+    // DtlsUdpBackend enforces this at line 1114; plaintext UdpBackend must match.
+    if (wire_len > DTLS_MAX_DATAGRAM_BYTES) {
+        Logger::log(Severity::WARNING_HI, "UdpBackend",
+                    "send_message: serialized len %u exceeds UDP MTU %u; rejected",
+                    wire_len, DTLS_MAX_DATAGRAM_BYTES);
+        return Result::ERR_INVALID;
+    }
+
     // Apply impairment: process_outbound queues the message into the delay buffer.
     // ERR_IO   — intentional loss-impairment drop; return OK (expected behavior).
     // ERR_FULL — delay buffer full; message not queued; propagate to caller.
