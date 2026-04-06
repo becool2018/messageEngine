@@ -32,6 +32,7 @@
 
 #include <ctime>
 #include <cstdint>
+#include <climits>
 #include "Assert.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -51,8 +52,16 @@ inline uint64_t timestamp_now_us()
     NEVER_COMPILED_OUT_ASSERT(ts.tv_sec >= 0);  // Assert: time must be non-negative
 
     // Power of 10 rule 9: single level of indirection (none here)
-    // Convert seconds and nanoseconds to microseconds
-    uint64_t sec_us  = static_cast<uint64_t>(ts.tv_sec) * 1000000ULL;
+    // SEC-009: CERT INT30-C — guard against unsigned multiplication overflow
+    // before computing sec_us = tv_sec * 1000000. If tv_sec > UINT64_MAX/1000000,
+    // the multiplication wraps silently. Clamp to UINT64_MAX instead; a saturated
+    // timestamp is still safe (expiry checks will treat it as far-future).
+    const uint64_t k_sec_max = UINT64_MAX / 1000000ULL;
+    const uint64_t tv_sec_u  = static_cast<uint64_t>(ts.tv_sec);
+    if (tv_sec_u > k_sec_max) {
+        return UINT64_MAX;  // SEC-009: saturate on overflow
+    }
+    uint64_t sec_us  = tv_sec_u * 1000000ULL;
     uint64_t nsec_us = static_cast<uint64_t>(ts.tv_nsec) / 1000ULL;
 
     return sec_us + nsec_us;

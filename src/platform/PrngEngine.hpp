@@ -188,7 +188,9 @@ public:
 
 private:
     // Power of 10 rule 6: minimal scope, single private state
-    uint64_t m_state;
+    // SEC-010: CLAUDE.md §7b — initialized at declaration; 0 is the uninitialized
+    // sentinel caught by next()'s assertion.
+    uint64_t m_state = 0ULL;
 };
 
 #endif // PLATFORM_PRNG_ENGINE_HPP

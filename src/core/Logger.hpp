@@ -25,6 +25,11 @@
  *   - MISRA Dir 4.9: prefer inline functions over macros.
  *
  * Implements: REQ-7.1.1, REQ-7.1.2, REQ-7.1.3, REQ-7.1.4
+ *
+ * SEC-019: rate limiting deferred — tracked for future implementation.
+ * Requires a fixed-size ring buffer, per-tag counters, and monotonic timestamps
+ * to suppress burst log floods without dynamic allocation. Deferred because it
+ * requires significant new infrastructure that is out of scope for this series.
  */
 
 #ifndef CORE_LOGGER_HPP

@@ -261,6 +261,16 @@ bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
     // Power of 10: precondition assertions
     NEVER_COMPILED_OUT_ASSERT(fd >= 0);
     NEVER_COMPILED_OUT_ASSERT(ip != nullptr);
+    // SEC-022: a zero timeout makes poll() return immediately (POSIX: poll with
+    // timeout=0 is a non-blocking check), which causes connect() to appear to
+    // time out on every call. Reject it early with a defensive guard.
+    NEVER_COMPILED_OUT_ASSERT(timeout_ms > 0U);  // SEC-022: must have positive timeout
+    if (timeout_ms == 0U) {
+        Logger::log(Severity::WARNING_HI, "SocketUtils",
+                    "SEC-022: socket_connect_with_timeout called with timeout_ms=0; "
+                    "rejecting (would always fail)");
+        return false;
+    }
 
     // Set socket to non-blocking before connecting
     if (!socket_set_nonblocking(fd)) {

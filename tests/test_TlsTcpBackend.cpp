@@ -736,6 +736,9 @@ struct MultiMsgClientArg {
     uint16_t port;
     bool     tls_on;
     Result   result;
+    // SEC-012: each client must use a unique NodeId; NODE_ID_INVALID → default 2U.
+    // §7b: initialized at declaration to satisfy variable initialization policy.
+    NodeId   local_node_id = static_cast<NodeId>(NODE_ID_INVALID);
 };
 
 static void* multi_msg_client_func(void* raw_arg)
@@ -749,11 +752,14 @@ static void* multi_msg_client_func(void* raw_arg)
     TlsTcpBackend client;
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, a->tls_on);
+    // SEC-012: use per-client NodeId (must be unique; default 2 for single-client tests).
+    const NodeId node_id = (a->local_node_id != NODE_ID_INVALID) ? a->local_node_id : 2U;
+    cfg.local_node_id = node_id;
     a->result = client.init(cfg);
     if (a->result != Result::OK) { return nullptr; }
 
     // REQ-6.1.8: send HELLO before DATA so server registers this NodeId (F-3 fix).
-    Result hello_r = client.register_local_id(2U);
+    Result hello_r = client.register_local_id(node_id);
     if (hello_r != Result::OK) {
         a->result = hello_r;
         client.close();
@@ -766,7 +772,7 @@ static void* multi_msg_client_func(void* raw_arg)
         envelope_init(env);
         env.message_type      = MessageType::DATA;
         env.message_id        = 0x3000ULL + static_cast<uint64_t>(m);
-        env.source_id         = 2U;
+        env.source_id         = node_id;
         env.destination_id    = 1U;
         env.reliability_class = ReliabilityClass::BEST_EFFORT;
         (void)client.send_message(env);
@@ -1158,21 +1164,24 @@ static void test_two_client_queue_prefill()
 
     // Thread1 sends 2 msgs; Thread2 sends 1 msg.  Each send_message places
     // exactly 1 copy on the wire (HAZ-003 double-send fix).
+    // SEC-012: assign unique NodeIds to prevent duplicate-NodeId eviction.
     MultiMsgClientArg arg1;
-    arg1.port          = PORT;
-    arg1.tls_on        = false;
-    arg1.delay_us      = 0U;       // connect as soon as the thread is scheduled
-    arg1.num_msgs      = 2U;       // 2 msgs → 2 copies on wire (1 per send)
-    arg1.stay_alive_us = 500000U;  // stay alive 500 ms
-    arg1.result        = Result::ERR_IO;
+    arg1.port           = PORT;
+    arg1.tls_on         = false;
+    arg1.delay_us       = 0U;       // connect as soon as the thread is scheduled
+    arg1.num_msgs       = 2U;       // 2 msgs → 2 copies on wire (1 per send)
+    arg1.stay_alive_us  = 500000U;  // stay alive 500 ms
+    arg1.result         = Result::ERR_IO;
+    arg1.local_node_id  = 2U;
 
     MultiMsgClientArg arg2;
-    arg2.port          = PORT;
-    arg2.tls_on        = false;
-    arg2.delay_us      = 0U;       // connect immediately
-    arg2.num_msgs      = 1U;
-    arg2.stay_alive_us = 500000U;
-    arg2.result        = Result::ERR_IO;
+    arg2.port           = PORT;
+    arg2.tls_on         = false;
+    arg2.delay_us       = 0U;       // connect immediately
+    arg2.num_msgs       = 1U;
+    arg2.stay_alive_us  = 500000U;
+    arg2.result         = Result::ERR_IO;
+    arg2.local_node_id  = 3U;       // SEC-012: unique NodeId (not 2U)
 
     pthread_t t1 = create_thread_4mb(multi_msg_client_func, &arg1);
     pthread_t t2 = create_thread_4mb(multi_msg_client_func, &arg2);
@@ -1246,22 +1255,27 @@ static void test_two_client_compact_loop()
     assert(init_res == Result::OK);
 
     // Thread1: connect at 5 ms, send 1 msg, close immediately.
+    // SEC-012: unique NodeIds required; Thread1 closes before Thread2 connects
+    // so reuse of NodeId=2 is safe here (slot cleared on remove), but assign
+    // distinct IDs for clarity and robustness.
     MultiMsgClientArg arg1;
-    arg1.port          = PORT;
-    arg1.tls_on        = false;
-    arg1.delay_us      = 5000U;   // 5 ms: ensure Thread1 is accepted before Thread2
-    arg1.num_msgs      = 1U;
-    arg1.stay_alive_us = 0U;      // close immediately after sending
-    arg1.result        = Result::ERR_IO;
+    arg1.port           = PORT;
+    arg1.tls_on         = false;
+    arg1.delay_us       = 5000U;   // 5 ms: ensure Thread1 is accepted before Thread2
+    arg1.num_msgs       = 1U;
+    arg1.stay_alive_us  = 0U;      // close immediately after sending
+    arg1.result         = Result::ERR_IO;
+    arg1.local_node_id  = 2U;
 
     // Thread2: connect at 50 ms, send 2 msgs, stay alive 1 s.
     MultiMsgClientArg arg2;
-    arg2.port          = PORT;
-    arg2.tls_on        = false;
-    arg2.delay_us      = 50000U;  // 50 ms: connect after Thread1 is in slot 0
-    arg2.num_msgs      = 2U;      // 2 msgs; each places 1 copy on the wire
-    arg2.stay_alive_us = 1000000U;
-    arg2.result        = Result::ERR_IO;
+    arg2.port           = PORT;
+    arg2.tls_on         = false;
+    arg2.delay_us       = 50000U;  // 50 ms: connect after Thread1 is in slot 0
+    arg2.num_msgs       = 2U;      // 2 msgs; each places 1 copy on the wire
+    arg2.stay_alive_us  = 1000000U;
+    arg2.result         = Result::ERR_IO;
+    arg2.local_node_id  = 3U;      // distinct NodeId to avoid any timing collision
 
     pthread_t t1 = create_thread_4mb(multi_msg_client_func, &arg1);
     pthread_t t2 = create_thread_4mb(multi_msg_client_func, &arg2);
@@ -1459,13 +1473,16 @@ static void test_max_connections_exceeded()
     pthread_t         tids[N_CLIENTS];
 
     // Launch all 9 clients concurrently; each sends 4 msgs (8 wire copies).
+    // SEC-012: assign unique NodeIds (k+2) to prevent duplicate-NodeId eviction.
+    // NodeId 0 = NODE_ID_INVALID; NodeId 1 = server; so clients use 2..10.
     for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
-        args[k].port          = PORT;
-        args[k].tls_on        = false;
-        args[k].delay_us      = 0U;
-        args[k].num_msgs      = 4U;       // 4 msgs × 2 copies (double-send) = 8 frames
-        args[k].stay_alive_us = 500000U;  // 500 ms: stay alive while server polls
-        args[k].result        = Result::ERR_IO;
+        args[k].port           = PORT;
+        args[k].tls_on         = false;
+        args[k].delay_us       = 0U;
+        args[k].num_msgs       = 4U;       // 4 msgs × 2 copies (double-send) = 8 frames
+        args[k].stay_alive_us  = 500000U;  // 500 ms: stay alive while server polls
+        args[k].result         = Result::ERR_IO;
+        args[k].local_node_id  = static_cast<NodeId>(k + 2U);  // SEC-012: unique
         tids[k] = create_thread_4mb(multi_msg_client_func, &args[k]);
     }
 
@@ -2404,10 +2421,13 @@ static void* f3_raw_client_thread(void* raw_arg)
     uint8_t hdr[4U];
 
     // REQ-6.1.8: send HELLO frame before any DATA frame (F-3 fix).
+    // SEC-012: each raw client uses a unique NodeId to prevent eviction.
+    // client1 → NodeId=2; client2 → NodeId=3.
+    const NodeId raw_node_id = a->is_client1 ? 2U : 3U;
     MessageEnvelope hello_env;
     envelope_init(hello_env);
     hello_env.message_type   = MessageType::HELLO;
-    hello_env.source_id      = 2U;
+    hello_env.source_id      = raw_node_id;
     hello_env.destination_id = NODE_ID_INVALID;
     hello_env.payload_length = 0U;
     uint32_t hello_len = 0U;
@@ -2427,7 +2447,7 @@ static void* f3_raw_client_thread(void* raw_arg)
     envelope_init(env);
     env.message_type      = MessageType::DATA;
     env.message_id        = a->is_client1 ? 0xF301ULL : 0xF302ULL;
-    env.source_id         = 2U;
+    env.source_id         = raw_node_id;  // SEC-012: consistent with HELLO NodeId
     env.destination_id    = 1U;
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
 

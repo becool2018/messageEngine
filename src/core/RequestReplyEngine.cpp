@@ -323,6 +323,10 @@ void RequestReplyEngine::handle_inbound_request(NodeId         src,
         return;
     }
     uint32_t slot = (m_stash_head + m_stash_count) % MAX_STASH_SIZE;
+    // SEC-015: verify no aliasing — computed write slot must not hold an active
+    // entry. An active slot at the write index indicates a FIFO accounting bug
+    // (m_stash_count not decremented on consume) or a capacity overflow above.
+    NEVER_COMPILED_OUT_ASSERT(!m_request_stash[slot].active);  // SEC-015: no alias
 
     uint32_t copy_len = app_len;
     if (copy_len > APP_PAYLOAD_CAP) {
@@ -442,6 +446,9 @@ void RequestReplyEngine::stash_non_rr_data(const MessageEnvelope& env)
     }
 
     uint32_t idx = (m_non_rr_head + m_non_rr_count) % MAX_STASH_SIZE;
+    // SEC-015 (non-RR path): the MessageEnvelope type has no active flag;
+    // the overflow guard (m_non_rr_count < MAX_STASH_SIZE) above is the
+    // authoritative aliasing protection. No additional FIFO-slot assert here.
     envelope_copy(m_non_rr_stash[idx], env);
     ++m_non_rr_count;
 
@@ -526,6 +533,16 @@ Result RequestReplyEngine::send_request(NodeId           destination,
         return Result::ERR_FULL;
     }
 
+    // SEC-014: CERT INT30-C — saturate expiry addition to prevent unsigned wrap.
+    // If timeout_us > UINT64_MAX - now_us, the sum would wrap silently.
+    // Saturate to UINT64_MAX; callers treat this as "never expires" (safe).
+    uint64_t expiry_us = 0U;
+    if (timeout_us > 0U) {
+        expiry_us = (timeout_us > (UINT64_MAX - now_us))
+                    ? UINT64_MAX
+                    : (now_us + timeout_us);
+    }
+
     // Construct envelope.
     MessageEnvelope env;
     envelope_init(env);
@@ -533,7 +550,7 @@ Result RequestReplyEngine::send_request(NodeId           destination,
     env.destination_id    = destination;
     env.priority          = 0U;
     env.reliability_class = ReliabilityClass::RELIABLE_RETRY; // REQ-3.3.3
-    env.expiry_time_us    = (timeout_us > 0U) ? (now_us + timeout_us) : 0U;
+    env.expiry_time_us    = expiry_us;
     env.payload_length    = wire_len;
     (void)memcpy(env.payload, wire_buf, static_cast<size_t>(wire_len));
 
@@ -548,7 +565,7 @@ Result RequestReplyEngine::send_request(NodeId           destination,
 
     // Record pending slot.
     m_pending[slot].correlation_id = cid;
-    m_pending[slot].expires_us     = (timeout_us > 0U) ? (now_us + timeout_us) : 0U;
+    m_pending[slot].expires_us     = expiry_us;
     m_pending[slot].active         = true;
     m_pending[slot].stash_len      = 0U;
     m_pending[slot].stash_ready    = false;
@@ -654,8 +671,12 @@ Result RequestReplyEngine::send_response(NodeId         destination,
     env.destination_id    = destination;
     env.priority          = 0U;
     // REQ-3.3.2: BEST_EFFORT — requester times out if response lost.
+    // SEC-014: CERT INT30-C — saturate 5-second constant addition to prevent wrap.
+    static const uint64_t k_resp_expiry_us = 5000000ULL;
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
-    env.expiry_time_us    = now_us + 5000000ULL; // 5-second default expiry
+    env.expiry_time_us    = (k_resp_expiry_us > (UINT64_MAX - now_us))
+                            ? UINT64_MAX
+                            : (now_us + k_resp_expiry_us);
     env.payload_length    = wire_len;
     (void)memcpy(env.payload, wire_buf, static_cast<size_t>(wire_len));
 
