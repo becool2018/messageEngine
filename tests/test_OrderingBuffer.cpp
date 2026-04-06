@@ -483,7 +483,6 @@ static bool test_advance_sequence_no_wraparound_normal()
 //   3. A subsequent seq=3 (now in-order after advance) is delivered immediately.
 //   4. A null out_freed pointer and zero cap are handled safely.
 // ─────────────────────────────────────────────────────────────────────────────
-// Verifies: REQ-3.3.5
 static bool test_sweep_expired_holds_advances_gate()
 {
     OrderingBuffer buf;
@@ -534,7 +533,6 @@ static bool test_sweep_expired_holds_advances_gate()
 // Ensures sweep_expired_holds() handles a null out_freed buffer without
 // crashing — the caller may pass nullptr when it does not need freed envelopes.
 // ─────────────────────────────────────────────────────────────────────────────
-// Verifies: REQ-3.3.5
 static bool test_sweep_expired_holds_null_out()
 {
     OrderingBuffer buf;
@@ -564,7 +562,6 @@ static bool test_sweep_expired_holds_null_out()
 // Test 13: sweep_expired_holds() leaves non-expired slots untouched
 // Verifies: REQ-3.3.5
 // ─────────────────────────────────────────────────────────────────────────────
-// Verifies: REQ-3.3.5
 static bool test_sweep_expired_holds_no_expiry()
 {
     OrderingBuffer buf;

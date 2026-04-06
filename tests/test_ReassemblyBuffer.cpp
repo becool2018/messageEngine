@@ -609,7 +609,6 @@ static bool test_sweep_stale_prevents_slot_exhaustion()
 //   4. After sweeping, a new fragment for the freed slot's message_id opens
 //      a fresh slot (slot becomes reusable).
 // ─────────────────────────────────────────────────────────────────────────────
-// Verifies: REQ-3.2.3, REQ-3.3.3
 static bool test_sweep_expired_frees_expired_slot()
 {
     ReassemblyBuffer buf;
@@ -663,7 +662,6 @@ static bool test_sweep_expired_frees_expired_slot()
 // Test 14: sweep_expired() — expiry_us == 0 means never-expires (not freed)
 // Verifies: REQ-3.2.3
 // ─────────────────────────────────────────────────────────────────────────────
-// Verifies: REQ-3.2.3
 static bool test_sweep_expired_zero_expiry_never_freed()
 {
     ReassemblyBuffer buf;
