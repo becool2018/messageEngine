@@ -67,6 +67,7 @@
 #endif
 #include <mbedtls/error.h>
 #include <mbedtls/psa_util.h>
+#include <mbedtls/platform_util.h>  // SEC-006: mbedtls_platform_zeroize() (CLAUDE.md §7c)
 #include <psa/crypto.h>
 
 #include <sys/socket.h>   // connect(), recvfrom(), MSG_PEEK
@@ -204,6 +205,9 @@ DtlsUdpBackend::~DtlsUdpBackend()
     mbedtls_x509_crt_free(&m_ca_cert);
     mbedtls_x509_crl_free(&m_crl);  // REQ-6.3.4: release CRL memory
     mbedtls_pk_free(&m_pkey);
+    // SEC-006: CLAUDE.md §7c — zeroize private key material after free to prevent
+    // residual key bytes in memory (CWE-14; mbedtls_platform_zeroize is compiler-barrier-safe).
+    mbedtls_platform_zeroize(static_cast<void*>(&m_pkey), sizeof(m_pkey));
     mbedtls_ssl_cookie_free(&m_cookie_ctx);
     // mbedtls_ssl_free() already called inside close()
     mbedtls_psa_crypto_free();
@@ -311,6 +315,14 @@ Result DtlsUdpBackend::load_crl_if_configured(const TlsConfig& tls_cfg)
             return Result::ERR_IO;
         }
         m_crl_loaded = true;
+    } else {
+        // SEC-003: verify_peer=true but no CRL file configured — certificate
+        // revocation checking is disabled. This may be intentional (e.g., OCSP
+        // is used instead) but is logged at WARNING_HI so deployments that
+        // require CRL checking can detect misconfiguration (REQ-6.3.4, SECURITY §3).
+        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
+                    "verify_peer=true but crl_file is empty — CRL revocation "
+                    "checking disabled (SEC-003, REQ-6.3.4)");
     }
 
     // Bind CA cert + CRL (or nullptr if not loaded) to ssl_conf.
@@ -608,6 +620,19 @@ Result DtlsUdpBackend::client_connect_and_handshake()
     NEVER_COMPILED_OUT_ASSERT(!m_is_server);
     NEVER_COMPILED_OUT_ASSERT(m_sock_fd >= 0);
 
+    // SEC-001: REQ-6.4.6 enforcement — verify_peer=true with an empty
+    // peer_hostname disables CN/SAN certificate hostname verification while
+    // still appearing to validate the peer. An attacker with any cert from
+    // the same trusted CA can impersonate the server (CWE-297). Reject
+    // this configuration at connection time rather than silently degrading.
+    if (m_cfg.tls.verify_peer && (m_cfg.tls.peer_hostname[0] == '\0')) {
+        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
+                    "client_connect_and_handshake: verify_peer=true but "
+                    "peer_hostname is empty — hostname verification would be "
+                    "skipped; refusing connection (SEC-001, REQ-6.4.6)");
+        return Result::ERR_INVALID;
+    }
+
     // Build peer sockaddr; connect() on UDP sets default destination and filters
     // incoming datagrams to the peer address only.
     struct sockaddr_in peer;
@@ -713,8 +738,11 @@ bool DtlsUdpBackend::validate_source(const char* src_ip, uint16_t src_port) cons
     bool port_match = m_is_server ? true : (src_port == m_cfg.peer_port);
 
     if (!ip_match || !port_match) {
-        Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
-                    "Dropped datagram from unexpected source %s:%u (expected %s:%u)",
+        // SEC-005: REQ-6.2.4 / REQ-6.3.2 — source mismatch is a security event;
+        // WARNING_HI matches UdpBackend behaviour and satisfies the severity table.
+        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
+                    "Dropped datagram from unexpected source %s:%u (expected %s:%u) "
+                    "(SEC-005, REQ-6.2.4)",
                     src_ip, static_cast<unsigned int>(src_port),
                     m_cfg.peer_ip, static_cast<unsigned int>(m_cfg.peer_port));
         return false;

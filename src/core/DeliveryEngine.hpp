@@ -197,6 +197,10 @@ private:
     DuplicateFilter     m_dedup;
     MessageIdGen        m_id_gen;
     bool                m_initialized;
+    // SEC-007: monotonic timestamp guard. Updated at entry of every now_us-accepting
+    // public method; non-monotonic calls are rejected with WARNING_HI + ERR_INVALID.
+    // Zero before first call (0 is the sentinel "not yet seen" value; valid now_us > 0).
+    uint64_t            m_last_now_us = 0U;
 
     // Power of 10 Rule 3: pre-allocated output buffers for pump_retries() and
     // sweep_ack_timeouts(). Zero-initialized in init(). Single-threaded access
