@@ -706,3 +706,50 @@ All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
 
 Moderator: Don Jessup — 2026-04-06. All five defects (DEF-013-1 through DEF-013-5) resolved in commits 4c714bd, ca961de, 0057d56. All entry and exit criteria satisfied. Inspection INSP-013 closed PASS.
 
+---
+
+### INSP-014 — Security hardening: integer safety and input validation (S1–S5) (2026-04-06)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-06 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | CLOSED — 5 security/robustness defects found and fixed (commit 77c7106) |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `src/platform/ImpairmentEngine.cpp` | S1: CERT INT30-C overflow guard on jitter hi_ms; clamp to UINT32_MAX-1 to prevent PrngEngine range=0 wrap |
+| `src/core/DeliveryEngine.cpp` | S2: XOR local_id with timestamp_now_us() seed so MessageIdGen sequence is not trivially predictable |
+| `src/platform/LocalSimHarness.cpp` | S3: add envelope_valid() check at top of inject(); brings inject() to same validation level as send_message() and deliver_from_peer() |
+| `src/core/Serializer.cpp` | S4: add direct CERT INT30-C overflow guard in serialize() for WIRE_HEADER_SIZE + payload_length, independent of envelope_valid() |
+| `src/core/ChannelConfig.hpp`, `src/platform/TcpBackend.cpp`, `src/platform/TlsTcpBackend.cpp`, `src/platform/UdpBackend.cpp`, `src/platform/DtlsUdpBackend.cpp` | S5: add transport_config_valid() inline function; call at start of every backend init() before any channels[] access |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations | PASS |
+| `make run_tests` all tests green | PASS |
+| All modified `src/` files carry `// Implements: REQ-x.x` tags | PASS |
+| No raw `assert()` in `src/` | PASS |
+| No dynamic allocation on critical paths after init | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Defects found
+
+| ID | File | Description | Severity | Disposition |
+|----|------|-------------|----------|-------------|
+| DEF-014-1 | `src/platform/ImpairmentEngine.cpp` | CERT INT30-C: jitter hi_ms = mean + variance computed with no overflow guard; if sum wraps to a small number, the jitter range collapses or inverts and the downstream assertion no longer catches it. | HIGH | Fixed: overflow guard added; hi_ms clamped to UINT32_MAX-1 on overflow to also prevent PrngEngine range=0 division. |
+| DEF-014-2 | `src/core/DeliveryEngine.cpp` | MessageIdGen seeded from local_id only (a small uint32_t); the entire message ID sequence is trivially predictable, enabling forged ACKs that silently clear AckTracker/RetryManager slots (HAZ-010). | HIGH | Fixed: seed XORs local_id<<32 with timestamp_now_us() to add runtime entropy. |
+| DEF-014-3 | `src/platform/LocalSimHarness.cpp` | inject() pushed envelopes into the receive queue with no envelope_valid() check, allowing malformed envelopes (INVALID message_type, payload_length > MSG_MAX_PAYLOAD_BYTES, source_id == NODE_ID_INVALID) to reach DeliveryEngine::receive(). | MEDIUM | Fixed: envelope_valid() guard added at top of inject(). |
+| DEF-014-4 | `src/core/Serializer.cpp` | required_len = WIRE_HEADER_SIZE + payload_length relied on envelope_valid() having been called first; a direct call or future constant change could silently wrap the uint32_t and cause memcpy to write past the buffer. | MEDIUM | Fixed: direct CERT INT30-C overflow guard added in serialize() before the addition. |
+| DEF-014-5 | `src/core/ChannelConfig.hpp` + 4 backends | TransportConfig::num_channels never validated against MAX_CHANNELS before channels[] array iteration; a misconfigured config silently causes out-of-bounds stack reads. | MEDIUM | Fixed: transport_config_valid() added to ChannelConfig.hpp; called in all four backend init() functions. |
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-06. All five defects (DEF-014-1 through DEF-014-5) resolved in commit 77c7106. All entry and exit criteria satisfied. Inspection INSP-014 closed PASS.

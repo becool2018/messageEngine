@@ -51,6 +51,8 @@ a monotonic counter; remote peers are assumed to provide the same guarantee.
 collision causes legitimate messages to be silently dropped as duplicates on
 `RELIABLE_RETRY` paths.
 
+**Seed entropy (S2 hardening):** Prior to commit 77c7106, `MessageIdGen` was initialized with `local_id` as the sole seed, making the first message ID of each session predictable to any party that knows the node ID. As of commit 77c7106, `DeliveryEngine::init()` XORs `local_id << 32` with `timestamp_now_us()` to add runtime entropy. This reduces the attack surface to an attacker who has both the node ID and sub-microsecond knowledge of the process start time. For higher assurance, embed the seed in a `getrandom()`-sourced value (see §7 for the PRNG seed policy).
+
 ---
 
 ## 3. Constant peer node IDs per session
