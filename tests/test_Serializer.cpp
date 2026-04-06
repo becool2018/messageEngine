@@ -712,6 +712,77 @@ static bool test_deserialize_accepts_boundary_message_types()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 22: Boundary test — serialize succeeds for payload of exactly
+//          MSG_MAX_PAYLOAD_BYTES bytes (exercises the True branch of the
+//          payload copy and validates both H-1 and H-2 assert invariants
+//          on the maximum-length legitimate path).
+//
+// Note: The H-1 assert (payload_length <= 0xFFFF before uint32->uint16 cast)
+// and the H-2 assert (offset + payload_length <= buf_len before memcpy) are
+// NEVER_COMPILED_OUT_ASSERT guards -- they abort the process if violated and
+// therefore cannot be unit-tested by observing a return value.  Instead this
+// test verifies the invariants hold on the boundary value: if either assert
+// fired here the test binary would abort, which would itself be a test failure.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_serialize_asserts_payload_fits_wire_field()
+{
+    // Build a large static buffer sized for the maximum possible wire frame.
+    // Power of 10 rule 3: no dynamic allocation -- static buffer for test setup.
+    static uint8_t max_buf[Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES];
+
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type   = MessageType::DATA;
+    env.source_id      = 200U;
+    env.payload_length = MSG_MAX_PAYLOAD_BYTES;
+
+    // Fill payload with known pattern (Power of 10 rule 2: bounded loop)
+    for (uint32_t i = 0U; i < MSG_MAX_PAYLOAD_BYTES; ++i) {
+        env.payload[i] = static_cast<uint8_t>(i & 0xFFU);
+    }
+
+    uint32_t out_len = 0U;
+    // serialize() must return OK: both H-1 and H-2 asserts must NOT fire.
+    Result r = Serializer::serialize(env, max_buf, sizeof(max_buf), out_len);
+    assert(r == Result::OK);
+    assert(out_len == Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 23: Boundary test -- serialize with payload_length exactly equal to
+//          MSG_MAX_PAYLOAD_BYTES returns Result::OK (dedicated boundary check
+//          for H-2: offset + payload_length == buf_len at the boundary).
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_serialize_payload_length_at_boundary()
+{
+    // Buffer sized exactly to hold header + max payload (tight fit -- exercises
+    // the boundary of the H-2 assert: offset + payload_length == buf_len).
+    static uint8_t tight_buf[Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES];
+
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type   = MessageType::DATA;
+    env.source_id      = 201U;
+    env.payload_length = MSG_MAX_PAYLOAD_BYTES;
+
+    // Power of 10 rule 2: bounded loop
+    for (uint32_t i = 0U; i < MSG_MAX_PAYLOAD_BYTES; ++i) {
+        env.payload[i] = static_cast<uint8_t>(0xCDU);
+    }
+
+    uint32_t out_len = 0U;
+    Result r = Serializer::serialize(env, tight_buf, sizeof(tight_buf), out_len);
+    assert(r == Result::OK);
+    assert(out_len == Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -863,6 +934,20 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_deserialize_accepts_boundary_message_types\n");
+    }
+
+    if (!test_serialize_asserts_payload_fits_wire_field()) {
+        printf("FAIL: test_serialize_asserts_payload_fits_wire_field\n");
+        ++failed;
+    } else {
+        printf("PASS: test_serialize_asserts_payload_fits_wire_field\n");
+    }
+
+    if (!test_serialize_payload_length_at_boundary()) {
+        printf("FAIL: test_serialize_payload_length_at_boundary\n");
+        ++failed;
+    } else {
+        printf("PASS: test_serialize_payload_length_at_boundary\n");
     }
 
     return (failed > 0) ? 1 : 0;

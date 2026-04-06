@@ -195,6 +195,11 @@ Result Serializer::serialize(const MessageEnvelope& env,
     // total_payload_length (2B). REQ-3.3.5.
     // fragment_count == 0 is invalid on the wire; treat as 1 (unfragmented).
     uint8_t wire_frag_count = (env.fragment_count == 0U) ? 1U : env.fragment_count;
+    // Security finding H-1: assert payload_length fits in uint16 before cast to wire field.
+    // MSG_MAX_PAYLOAD_BYTES (4096) is well within 0xFFFF; this assert is an always-on
+    // invariant that detects any future constant change that would break the wire format.
+    // Power of 10 Rule 5: mandatory assertion for uint32->uint16 narrowing (H-1).
+    NEVER_COMPILED_OUT_ASSERT(env.payload_length <= 0xFFFFU);  // Assert: payload fits wire uint16 field (H-1)
     // total_payload_length == 0 for unfragmented: use payload_length as default.
     uint16_t wire_total_pl = (env.total_payload_length == 0U)
                                  ? static_cast<uint16_t>(env.payload_length)
@@ -209,6 +214,10 @@ Result Serializer::serialize(const MessageEnvelope& env,
 
     // Copy payload bytes directly (no byte-order conversion for opaque data)
     // Power of 10 rule 3: bounded copy (envelope.payload_length already validated)
+    // Security finding H-2: re-check that offset + payload_length is still within buf_len
+    // before memcpy, even though the earlier required_len check should guarantee this.
+    // The assert makes the invariant explicit and always-on (Power of 10 Rule 5, H-2).
+    NEVER_COMPILED_OUT_ASSERT(offset + env.payload_length <= buf_len);  // Assert: payload fits buffer (H-2)
     if (env.payload_length > 0U) {
         (void)memcpy(&buf[offset], env.payload, env.payload_length);
     }
