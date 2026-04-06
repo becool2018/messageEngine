@@ -518,3 +518,56 @@ All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
 
 Moderator: Don Jessup — 2026-04-05. No CRITICAL or MAJOR defects. All entry and exit criteria satisfied. Inspection INSP-009 closed PASS.
 
+---
+
+### INSP-010 — TlsTcpBackend poll-loop fixes: readiness check, non-blocking restoration, timeout enforcement (B-2a, B-2b, B-2c)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-05 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | CLOSED — 3 MAJOR defects found and fixed in commit 326d7be |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `src/platform/TlsTcpBackend.cpp` | Three poll-loop bug fixes (B-2a, B-2b, B-2c); two new private helpers added to reduce cyclomatic complexity (`do_tls_server_handshake()`, `read_tls_header()`) |
+| `src/platform/TlsTcpBackend.hpp` | Declarations for `do_tls_server_handshake(uint32_t slot)` and `read_tls_header(uint32_t idx, uint8_t* hdr, uint32_t timeout_ms)` |
+
+#### Defects found
+
+| ID | File : function | Description | Severity | Disposition | Resolution |
+|----|----------------|-------------|----------|-------------|------------|
+| B-2a | `src/platform/TlsTcpBackend.cpp` : `poll_clients_once()` | **Socket readability not checked before recv.** `poll_clients_once()` called `recv_from_client()` for every connected slot without first checking socket readability, causing spurious wake-ups and undefined behavior on idle connections. Affected REQ-6.1.7 (multi-connection support). | MAJOR | FIX | Built a `pollfd` array and called `poll()` once with `timeout_ms`; gated `recv_from_client()` on `POLLIN` or TLS internal-bytes flag per slot. |
+| B-2b | `src/platform/TlsTcpBackend.cpp` : `accept_and_handshake()` | **Non-blocking mode not restored after TLS handshake.** `accept_and_handshake()` called `mbedtls_net_set_block()` before the TLS handshake but never called `mbedtls_net_set_nonblock()` afterward, leaving all accepted TLS client sockets permanently blocking. Affected REQ-6.1.3 (disconnect handling) and REQ-6.1.7 (multi-connection). | MAJOR | FIX | Extracted new helper `do_tls_server_handshake(uint32_t slot)` which calls `mbedtls_net_set_nonblock()` after handshake completion. |
+| B-2c | `src/platform/TlsTcpBackend.cpp` : `tls_recv_frame()` / `tls_read_payload()` | **Timeout not enforced on TLS read path.** `tls_recv_frame()` and `tls_read_payload()` passed `timeout_ms` on the plaintext path but silently ignored it on the TLS path — `MBEDTLS_ERR_SSL_WANT_READ` triggered a bare `continue`, causing indefinite blocking. Affected REQ-6.1.6 (partial read/write handling) and REQ-6.1.3 (disconnect handling). | MAJOR | FIX | Added new helper `read_tls_header(uint32_t idx, uint8_t* hdr, uint32_t timeout_ms)` and updated `tls_read_payload()` to call `mbedtls_net_poll()` on `WANT_READ` with the caller-supplied `timeout_ms`; returns `ERR_TIMEOUT` if the deadline is exceeded. |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations (CC ≤ 10 enforced) | PASS |
+| `make run_tests` all tests green | PASS |
+| All new/modified `src/` files carry `// Implements: REQ-x.x` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Checklist reference
+
+All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
+- SC classification of `receive_message()` (HAZ-004, HAZ-005) and `send_message()` (HAZ-005, HAZ-006) unchanged; B-2a/B-2b/B-2c are correctness fixes on the receive/accept path, not classification changes. ✓
+- `do_tls_server_handshake()` and `read_tls_header()`: classified NSC — init/framing helpers; no message-delivery policy encoded. ✓
+- Power of 10 Rule 2: `pollfd` loop bounded at `MAX_TLS_CONNECTIONS`. ✓
+- Power of 10 Rule 3: no dynamic allocation; `pollfd` array is stack-local with bounded size. ✓
+- HAZARD_ANALYSIS.md §2 TlsTcpBackend FMEA: mitigation entries updated for HAZ-004/HAZ-005 to reference B-2a, B-2b, B-2c fixes. ✓
+- TRACEABILITY_MATRIX.md: REQ-6.1.3, REQ-6.1.6, REQ-6.1.7 rows updated to include `src/platform/TlsTcpBackend.cpp`. ✓
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-05. All three defects (B-2a, B-2b, B-2c) resolved in commit 326d7be. All entry and exit criteria satisfied. Inspection INSP-010 closed PASS.
+
