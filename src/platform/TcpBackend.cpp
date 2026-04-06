@@ -542,14 +542,20 @@ uint32_t TcpBackend::build_poll_fds(struct pollfd* pfds, uint32_t cap,
 // drain_readable_clients() — CC-reduction helper for poll_clients_once
 // ─────────────────────────────────────────────────────────────────────────────
 
-void TcpBackend::drain_readable_clients(uint32_t timeout_ms)
+void TcpBackend::drain_readable_clients(const struct pollfd* pfds, uint32_t nfds,
+                                         uint32_t timeout_ms, bool has_listen)
 {
-    NEVER_COMPILED_OUT_ASSERT(m_open);
-    NEVER_COMPILED_OUT_ASSERT(timeout_ms <= 60000U);
+    NEVER_COMPILED_OUT_ASSERT(pfds != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(nfds <= MAX_TCP_CONNECTIONS + 1U);
 
-    // Power of 10 Rule 2: fixed loop bound (MAX_TCP_CONNECTIONS)
-    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
-        if (m_client_fds[i] >= 0) {
+    const uint32_t base = has_listen ? 1U : 0U;
+    // Power of 10 Rule 2: bounded by m_client_count ≤ MAX_TCP_CONNECTIONS
+    for (uint32_t i = 0U; i < m_client_count; ++i) {
+        const uint32_t pfd_idx = base + i;
+        if (pfd_idx >= nfds) {
+            break;
+        }
+        if ((pfds[pfd_idx].revents & POLLIN) != 0) {
             (void)recv_from_client(m_client_fds[i], timeout_ms);
         }
     }
@@ -589,7 +595,7 @@ void TcpBackend::poll_clients_once(uint32_t timeout_ms)
         (void)accept_clients();
     }
 
-    drain_readable_clients(timeout_ms);
+    drain_readable_clients(pfds, nfds, timeout_ms, has_listen);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

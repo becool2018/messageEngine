@@ -159,9 +159,13 @@ private:
     uint32_t build_poll_fds(struct pollfd* pfds, uint32_t cap,
                              bool* has_listen_out) const;
 
-    /// Iterate all active client fds and call recv_from_client() on each.
-    /// Extracted from poll_clients_once() to reduce its CC.
-    void drain_readable_clients(uint32_t timeout_ms);
+    /// Iterate active clients; call recv_from_client() only on fds with POLLIN set.
+    /// @param[in] pfds       pollfd array snapshot from build_poll_fds().
+    /// @param[in] nfds       Number of entries in pfds.
+    /// @param[in] timeout_ms Per-client receive timeout passed to recv_from_client().
+    /// @param[in] has_listen True if pfds[0] is the listen fd (client fds start at index 1).
+    void drain_readable_clients(const struct pollfd* pfds, uint32_t nfds,
+                                 uint32_t timeout_ms, bool has_listen);
 
     /// Route a deserialized inbound envelope through the ImpairmentEngine.
     /// Checks partition state (inbound drop) then calls process_inbound()
