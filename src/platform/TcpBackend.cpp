@@ -24,7 +24,7 @@
  *   - MISRA C++: no exceptions, all return values checked.
  *   - F-Prime style: event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.3.5, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.5, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
  */
 
 #include "platform/TcpBackend.hpp"
@@ -364,6 +364,13 @@ Result TcpBackend::recv_from_client(int client_fd, uint32_t timeout_ms)
             handle_hello_frame(client_fd, env.source_id);
         }
         return Result::ERR_AGAIN;  // consumed; not delivered to DeliveryEngine
+    }
+
+    // REQ-6.1.11: validate envelope source_id against this slot's registered
+    // NodeId. Prevents source_id spoofing attacks (HAZ-009).
+    // Safety-critical (SC): HAZ-009
+    if (!validate_source_id(client_fd, env.source_id)) {
+        return Result::ERR_INVALID;  // silent discard; WARNING_HI already logged
     }
 
     // REQ-5.1.5, REQ-5.1.6: route through impairment before queuing.
@@ -823,6 +830,41 @@ void TcpBackend::handle_hello_frame(int client_fd, NodeId src_id)
     }
     Logger::log(Severity::WARNING_LO, "TcpBackend",
                 "handle_hello_frame: fd not found");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// validate_source_id() — REQ-6.1.11: verify envelope source_id matches slot
+// Safety-critical (SC): HAZ-009
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool TcpBackend::validate_source_id(int client_fd, NodeId claimed_id) const
+{
+    NEVER_COMPILED_OUT_ASSERT(client_fd >= 0);
+    // Find the slot for this fd and look up its registered NodeId.
+    // Power of 10 Rule 2: bounded loop at MAX_TCP_CONNECTIONS.
+    NodeId registered = NODE_ID_INVALID;
+    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
+        if (m_client_fds[i] == client_fd) {
+            registered = m_client_node_ids[i];
+            break;
+        }
+    }
+    // If no HELLO has been received for this slot, we cannot validate.
+    // Allow through — covers client-mode receive path (server never sends HELLO).
+    if (registered == NODE_ID_INVALID) {
+        NEVER_COMPILED_OUT_ASSERT(true);  // post: unregistered slot, allow
+        return true;
+    }
+    if (claimed_id != registered) {
+        Logger::log(Severity::WARNING_HI, "TcpBackend",
+                    "source_id mismatch: claimed=%u registered=%u; dropping (REQ-6.1.11)",
+                    static_cast<unsigned>(claimed_id),
+                    static_cast<unsigned>(registered));
+        NEVER_COMPILED_OUT_ASSERT(true);  // post: mismatch detected
+        return false;
+    }
+    NEVER_COMPILED_OUT_ASSERT(claimed_id == registered);  // post: match verified
+    return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

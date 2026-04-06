@@ -42,9 +42,9 @@
  * Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4,
  *           REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4,
  *           REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9,
- *           REQ-6.1.10, REQ-6.3.5, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
+ *           REQ-6.1.10, REQ-6.1.11, REQ-6.3.5, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.3.5, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
+// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.5, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
 // Verification: M1 + M2 + M4 + M5 (fault injection via ISocketOps)
 
 #include <cstdio>
@@ -2034,6 +2034,176 @@ static void test_readable_client_still_serviced_after_fix()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Source address validation tests (REQ-6.1.11)
+//
+// Ports 19752–19753 are reserved for these tests.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Thread arg: client that sends HELLO with local_id, then sends a DATA frame
+// with a caller-chosen source_id (which may differ from local_id to test spoofing).
+struct SrcValidCliArg {
+    uint16_t port;
+    NodeId   hello_id;   ///< NodeId sent in HELLO (registers identity)
+    NodeId   data_src;   ///< source_id placed in the DATA envelope
+    Result   result;
+};
+
+static void* src_valid_client_thread(void* raw)
+{
+    SrcValidCliArg* a = static_cast<SrcValidCliArg*>(raw);
+    assert(a != nullptr);
+
+    usleep(80000U);  // 80 ms: give server time to bind and listen
+
+    TcpBackend client;
+    TransportConfig cfg;
+    make_tcp_client_cfg(cfg, a->port);
+    a->result = client.init(cfg);
+    if (a->result != Result::OK) { return nullptr; }
+
+    // Send HELLO to register identity with the server.
+    a->result = client.register_local_id(a->hello_id);
+    if (a->result != Result::OK) { client.close(); return nullptr; }
+
+    usleep(100000U);  // 100 ms: let server process the HELLO
+
+    // Send a DATA frame with source_id set to data_src (may mismatch hello_id).
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.message_id        = 0xABCD1234ULL;
+    env.source_id         = a->data_src;
+    env.destination_id    = 0U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    (void)client.send_message(env);
+
+    usleep(200000U);  // 200 ms: let server attempt to receive; then close
+    client.close();
+    return nullptr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// test_source_id_mismatch_dropped
+//
+// Client sends HELLO with NodeId(1) (registering identity), then sends a DATA
+// frame with source_id=NodeId(2).  The server's validate_source_id() detects
+// the mismatch (registered=1, claimed=2) and silently discards the frame
+// (REQ-6.1.11).  receive_message() must not return OK — it must time out
+// (ERR_TIMEOUT) because no valid frame was queued.
+//
+// Verifies: REQ-6.1.11
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.11
+static void test_source_id_mismatch_dropped()
+{
+    static const uint16_t PORT = 19752U;
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+    assert(server.is_open());
+
+    SrcValidCliArg cli_arg;
+    cli_arg.port     = PORT;
+    cli_arg.hello_id = 1U;   // registered identity
+    cli_arg.data_src = 2U;   // spoofed: differs from hello_id
+    cli_arg.result   = Result::ERR_IO;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t cli_tid;
+    (void)pthread_create(&cli_tid, &attr, src_valid_client_thread, &cli_arg);
+
+    // Drain: server accepts client, processes HELLO, then attempts to receive the
+    // DATA frame.  The mismatched source_id triggers validate_source_id() → false
+    // → frame discarded → no message pushed to recv_queue.
+    // Power of 10: fixed loop bound (15 iters × 100 ms = 1.5 s max).
+    Result recv_r = Result::OK;
+    for (uint32_t i = 0U; i < 15U; ++i) {
+        MessageEnvelope env;
+        recv_r = server.receive_message(env, 100U);
+        if (recv_r == Result::OK) { break; }  // should not happen
+    }
+
+    (void)pthread_join(cli_tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+    server.close();
+
+    // The spoofed frame must have been discarded: receive must NOT have returned OK.
+    assert(recv_r != Result::OK);
+    assert(cli_arg.result == Result::OK);
+    printf("PASS: test_source_id_mismatch_dropped\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// test_source_id_match_accepted
+//
+// Client sends HELLO with NodeId(1) (registering identity), then sends a DATA
+// frame with source_id=NodeId(1) (matches registration).  The server's
+// validate_source_id() allows the frame through (REQ-6.1.11).
+// receive_message() must return OK and the received envelope's source_id must
+// equal NodeId(1).
+//
+// Verifies: REQ-6.1.11
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.11
+static void test_source_id_match_accepted()
+{
+    static const uint16_t PORT       = 19753U;
+    static const NodeId   CLIENT_ID  = 1U;
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+    assert(server.is_open());
+
+    SrcValidCliArg cli_arg;
+    cli_arg.port     = PORT;
+    cli_arg.hello_id = CLIENT_ID;  // registered identity
+    cli_arg.data_src = CLIENT_ID;  // matches: same as hello_id
+    cli_arg.result   = Result::ERR_IO;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t cli_tid;
+    (void)pthread_create(&cli_tid, &attr, src_valid_client_thread, &cli_arg);
+
+    // Drain: server accepts client, processes HELLO, then receives the DATA frame.
+    // The matching source_id passes validate_source_id() → frame queued → OK.
+    // Power of 10: fixed loop bound (15 iters × 100 ms = 1.5 s max).
+    Result recv_r = Result::ERR_TIMEOUT;
+    MessageEnvelope recv_env;
+    envelope_init(recv_env);
+    for (uint32_t i = 0U; i < 15U; ++i) {
+        MessageEnvelope env;
+        Result poll_r = server.receive_message(env, 100U);
+        if (poll_r == Result::OK) {
+            recv_r   = Result::OK;
+            recv_env = env;
+            break;
+        }
+    }
+
+    (void)pthread_join(cli_tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+    server.close();
+
+    // The matching frame must have been accepted and delivered to the application.
+    assert(recv_r == Result::OK);
+    assert(recv_env.source_id == CLIENT_ID);
+    assert(cli_arg.result == Result::OK);
+    printf("PASS: test_source_id_match_accepted\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2089,6 +2259,10 @@ int main()
     // B-1 regression: drain_readable_clients gated on POLLIN revents
     test_idle_client_not_closed_during_poll();
     test_readable_client_still_serviced_after_fix();
+
+    // Source address validation tests (REQ-6.1.11)
+    test_source_id_mismatch_dropped();
+    test_source_id_match_accepted();
 
     printf("=== ALL PASSED ===\n");
     return 0;

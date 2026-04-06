@@ -80,6 +80,8 @@ Each backend must silently discard any envelope whose wire-level source does not
 match the claimed source_id and log a WARNING_HI before the envelope reaches
 `DeliveryEngine::receive()`.
 
+REQ-6.1.11 is now enforced: `validate_source_id()` in `TcpBackend` and `TlsTcpBackend` checks the inbound envelope's `source_id` against the NodeId registered via HELLO for that connection slot before passing any frame to `DeliveryEngine`. A mismatch results in silent discard and WARNING_HI.
+
 **Risk if violated:** A peer that spoofs another peer's `source_id` can inject
 messages that are processed as if from the legitimate peer, potentially
 corrupting ordering state or triggering spurious ACK/duplicate handling.

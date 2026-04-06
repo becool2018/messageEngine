@@ -31,7 +31,7 @@
  *             REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10,
  *             REQ-6.3.4, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #include "platform/TlsTcpBackend.hpp"
 #include "platform/ISocketOps.hpp"
@@ -678,6 +678,31 @@ void TlsTcpBackend::handle_hello_frame(uint32_t idx, NodeId src_id)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// validate_source_id() — REQ-6.1.11
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool TlsTcpBackend::validate_source_id(uint32_t slot, NodeId claimed_id) const
+{
+    NEVER_COMPILED_OUT_ASSERT(slot < MAX_TCP_CONNECTIONS);
+    const NodeId registered = m_client_node_ids[slot];
+    if (registered == NODE_ID_INVALID) {
+        NEVER_COMPILED_OUT_ASSERT(true);  // post: unregistered slot, allow
+        return true;
+    }
+    if (claimed_id != registered) {
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "source_id mismatch: slot=%u claimed=%u registered=%u; dropping (REQ-6.1.11)",
+                    static_cast<unsigned>(slot),
+                    static_cast<unsigned>(claimed_id),
+                    static_cast<unsigned>(registered));
+        NEVER_COMPILED_OUT_ASSERT(true);  // post: mismatch detected
+        return false;
+    }
+    NEVER_COMPILED_OUT_ASSERT(claimed_id == registered);  // post: match verified
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // find_client_slot() — REQ-6.1.9
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1000,6 +1025,13 @@ Result TlsTcpBackend::recv_from_client(uint32_t idx, uint32_t timeout_ms)
             handle_hello_frame(idx, env.source_id);
         }
         return Result::ERR_AGAIN;
+    }
+
+    // REQ-6.1.11: validate envelope source_id against this slot's registered
+    // NodeId. Prevents source_id spoofing attacks (HAZ-009).
+    // Safety-critical (SC): HAZ-009
+    if (!validate_source_id(idx, env.source_id)) {
+        return Result::ERR_INVALID;  // silent discard; WARNING_HI already logged
     }
 
     // REQ-5.1.5, REQ-5.1.6: route through impairment before queuing.

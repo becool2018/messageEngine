@@ -215,6 +215,12 @@ private:
     /// @param[in] src_id  NodeId extracted from the HELLO envelope.
     void handle_hello_frame(uint32_t idx, NodeId src_id);
 
+    /// REQ-6.1.11 / HAZ-009: verify envelope source_id matches the NodeId
+    /// registered via HELLO for slot idx. Returns false + WARNING_HI on mismatch.
+    /// Returns true if slot is unregistered (NODE_ID_INVALID).
+    /// Safety-critical (SC): HAZ-009
+    bool validate_source_id(uint32_t slot, NodeId claimed_id) const;
+
     /// Find the client array slot for a given destination NodeId.
     /// REQ-6.1.9: unicast routing lookup.
     /// @return slot index in [0, m_client_count) or MAX_TCP_CONNECTIONS if not found.

@@ -629,3 +629,21 @@ All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
 
 Moderator: Don Jessup — 2026-04-05. DEF-011-1 resolved. All entry and exit criteria satisfied. Inspection INSP-011 closed PASS.
 
+---
+
+### INSP-012 — REQ-6.1.11 TCP/TLS source_id validation (2026-04-05)
+
+**Scope**: TcpBackend.cpp, TlsTcpBackend.cpp, TcpBackend.hpp, TlsTcpBackend.hpp, tests/test_TcpBackend.cpp, tests/test_TlsTcpBackend.cpp
+
+**Author**: Don Jessup
+**Moderator**: Claude (AI assistant)
+**Reviewer**: Don Jessup
+
+**Defects found**:
+
+| ID | Severity | Location | Description | Disposition |
+|----|----------|----------|-------------|-------------|
+| DEF-012-1 | MAJOR | TcpBackend.cpp, TlsTcpBackend.cpp | REQ-6.1.11 not implemented: TCP/TLS backends did not validate envelope source_id against the connection slot's registered NodeId before passing frames to DeliveryEngine, allowing source_id spoofing (HAZ-009). | Fixed: added validate_source_id() to both backends; called after HELLO intercept in recv_from_client(). |
+
+**Exit**: All defects dispositioned. make lint and make run_tests pass. Traceability complete.
+

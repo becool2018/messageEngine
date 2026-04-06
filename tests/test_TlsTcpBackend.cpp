@@ -36,7 +36,7 @@
  *   - STL exempted in tests/ for test fixture setup only.
  *
  * Verifies: REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10,
- *           REQ-6.3.4, REQ-5.1.6
+ *           REQ-6.1.11, REQ-6.3.4, REQ-5.1.6
  */
 
 #include <cstdio>
@@ -2873,6 +2873,219 @@ static void test_tls_broadcast_when_destination_id_zero()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Thread helper: plaintext raw socket client that sends a HELLO with
+// hello_source_id, then a DATA frame with data_source_id.
+// Used by the two REQ-6.1.11 source validation tests.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct SrcValidationClientArg {
+    uint16_t port;
+    NodeId   hello_source_id;  // source_id in the HELLO frame (registers identity)
+    NodeId   data_source_id;   // source_id in the DATA frame (may mismatch)
+    Result   result;
+};
+
+// Helper: write all `len` bytes of `buf` to a plain POSIX fd.
+// Returns true on success, false on error.
+// Power of 10 Rule 2: bounded by len iterations (each sends >=1 byte).
+static bool src_val_write_all(int fd, const uint8_t* buf, uint32_t len)
+{
+    assert(fd >= 0);
+    assert(buf != nullptr);
+    assert(len > 0U);
+
+    uint32_t sent = 0U;
+    for (uint32_t iter = 0U; iter < len && sent < len; ++iter) {
+        ssize_t n = ::write(fd, buf + sent, static_cast<size_t>(len - sent));
+        if (n > 0) {
+            sent += static_cast<uint32_t>(n);
+        } else {
+            return false;
+        }
+    }
+    return (sent == len);
+}
+
+// Helper: serialize `env` and write it to `fd` as a 4-byte-length-prefixed frame.
+// Returns true on success.
+static bool src_val_send_frame(int fd, const MessageEnvelope& env)
+{
+    assert(fd >= 0);
+
+    static uint8_t wire[SOCKET_RECV_BUF_BYTES];
+    uint32_t wire_len = 0U;
+    Result ser_res = Serializer::serialize(env, wire, SOCKET_RECV_BUF_BYTES, wire_len);
+    if (!result_ok(ser_res) || wire_len == 0U) {
+        return false;
+    }
+
+    uint8_t hdr[4U];
+    hdr[0U] = static_cast<uint8_t>((wire_len >> 24U) & 0xFFU);
+    hdr[1U] = static_cast<uint8_t>((wire_len >> 16U) & 0xFFU);
+    hdr[2U] = static_cast<uint8_t>((wire_len >>  8U) & 0xFFU);
+    hdr[3U] = static_cast<uint8_t>( wire_len         & 0xFFU);
+
+    if (!src_val_write_all(fd, hdr, 4U)) {
+        return false;
+    }
+    return src_val_write_all(fd, wire, wire_len);
+}
+
+static void* src_validation_client_func(void* raw_arg)
+{
+    SrcValidationClientArg* a = static_cast<SrcValidationClientArg*>(raw_arg);
+    assert(a != nullptr);
+
+    usleep(80000U);  // 80 ms: wait for server to bind and listen
+
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { a->result = Result::ERR_IO; return nullptr; }
+
+    struct sockaddr_in addr;
+    (void)memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(a->port);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    int ret = ::connect(fd,
+                        reinterpret_cast<struct sockaddr*>(&addr),
+                        static_cast<socklen_t>(sizeof(addr)));
+    if (ret < 0) {
+        (void)::close(fd);
+        a->result = Result::ERR_IO;
+        return nullptr;
+    }
+
+    // Send HELLO frame: registers hello_source_id with the server.
+    MessageEnvelope hello_env;
+    envelope_init(hello_env);
+    hello_env.message_type   = MessageType::HELLO;
+    hello_env.message_id     = 0xAA01ULL;
+    hello_env.source_id      = a->hello_source_id;
+    hello_env.destination_id = NODE_ID_INVALID;
+    hello_env.payload_length = 0U;
+
+    bool ok = src_val_send_frame(fd, hello_env);
+    if (!ok) {
+        (void)::close(fd);
+        a->result = Result::ERR_IO;
+        return nullptr;
+    }
+
+    usleep(50000U);  // 50 ms: let server process the HELLO
+
+    // Send DATA frame with data_source_id (may differ from hello_source_id).
+    MessageEnvelope data_env;
+    envelope_init(data_env);
+    data_env.message_type      = MessageType::DATA;
+    data_env.message_id        = 0xAA02ULL;
+    data_env.source_id         = a->data_source_id;
+    data_env.destination_id    = 1U;
+    data_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    data_env.timestamp_us      = 1U;
+    data_env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+
+    ok = src_val_send_frame(fd, data_env);
+
+    usleep(200000U);  // 200 ms: let server attempt to receive
+    (void)::close(fd);
+
+    a->result = ok ? Result::OK : Result::ERR_IO;
+    return nullptr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test tls_: source_id mismatch is silently dropped (REQ-6.1.11)
+//
+// Client registers with HELLO source_id=1, then sends DATA with source_id=2.
+// The server's validate_source_id() detects the mismatch and discards the
+// frame (logs WARNING_HI).  receive_message() must NOT return OK; the spoofed
+// frame must never reach the delivery engine.
+//
+// Verifies: REQ-6.1.11
+// Verification: M1 + M2 + M4 (loopback path; mismatch discard exercised)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.11
+static void test_tls_source_id_mismatch_dropped()
+{
+    static const uint16_t PORT = 19907U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    SrcValidationClientArg args;
+    args.port            = PORT;
+    args.hello_source_id = 1U;   // registers as NodeId 1
+    args.data_source_id  = 2U;   // spoofed: different from registered NodeId
+    args.result          = Result::ERR_IO;
+
+    pthread_t tid = create_thread_4mb(src_validation_client_func, &args);
+
+    // Server: the DATA frame source_id==2 mismatches registered id==1.
+    // validate_source_id() returns false → recv_from_client returns ERR_INVALID.
+    // receive_message() discards and continues polling until timeout.
+    MessageEnvelope env;
+    Result recv_res = server.receive_message(env, 1000U);
+    assert(recv_res != Result::OK);  // spoofed frame must NOT be delivered
+
+    (void)pthread_join(tid, nullptr);
+    server.close();
+
+    assert(args.result == Result::OK);  // client sent successfully
+    printf("PASS: test_tls_source_id_mismatch_dropped\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test tls_: source_id match is accepted and delivered (REQ-6.1.11)
+//
+// Client registers with HELLO source_id=1, then sends DATA with source_id=1.
+// The server's validate_source_id() confirms the match and allows the frame
+// through.  receive_message() must return OK with source_id==1.
+//
+// Verifies: REQ-6.1.11
+// Verification: M1 + M2 + M4 (loopback path; match acceptance exercised)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.11
+static void test_tls_source_id_match_accepted()
+{
+    static const uint16_t PORT = 19908U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    SrcValidationClientArg args;
+    args.port            = PORT;
+    args.hello_source_id = 1U;  // registers as NodeId 1
+    args.data_source_id  = 1U;  // matches registered NodeId → should be delivered
+    args.result          = Result::ERR_IO;
+
+    pthread_t tid = create_thread_4mb(src_validation_client_func, &args);
+
+    // Server: the DATA frame source_id==1 matches registered id==1.
+    // validate_source_id() returns true → frame is delivered to receive_message().
+    MessageEnvelope env;
+    Result recv_res = server.receive_message(env, 1000U);
+    assert(recv_res == Result::OK);
+    assert(env.source_id == 1U);  // correct source_id delivered
+
+    (void)pthread_join(tid, nullptr);
+    server.close();
+
+    assert(args.result == Result::OK);
+    printf("PASS: test_tls_source_id_match_accepted\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2931,6 +3144,10 @@ int main()
     test_tls_hello_frame_not_delivered_to_delivery_engine();
     test_tls_unicast_routes_to_registered_slot();
     test_tls_broadcast_when_destination_id_zero();
+
+    // Source address validation tests (REQ-6.1.11)
+    test_tls_source_id_mismatch_dropped();
+    test_tls_source_id_match_accepted();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);

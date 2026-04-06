@@ -19,6 +19,7 @@
 | HAZ-006 | **Resource exhaustion** — a queue, retry table, or ACK tracker becomes full and silently drops messages without notifying the caller | Cat II | High send rate with slow ACK; capacity constants too small; `ERR_FULL` return ignored by caller | `ERR_FULL` returned from `RingBuffer::push()`, `AckTracker::track()`, `RetryManager::schedule()`; `WARNING_HI` logged on full | All capacity limits are compile-time constants; `ERR_FULL` returned and logged at `WARNING_HI`; callers required by Power of 10 Rule 7 to check all return values |
 | HAZ-007 | **Partition masking** — ImpairmentEngine hides real connectivity loss, giving upper layers false confidence in link availability | Cat III | Impairment engine enabled without partition configuration; `is_partition_active()` not called; `ERR_IO` from `process_outbound()` ignored | `is_partition_active()` called first in every `process_outbound()` invocation; `ERR_IO` returned (not `OK`) for dropped messages | `process_outbound()` checks partition state on every outbound message; `ERR_IO` return forces caller acknowledgement; partition state logged at `WARNING_LO` |
 | HAZ-008 | **Untrusted peer impersonation via incomplete certificate validation** — DTLS handshake succeeds for a peer whose certificate does not match the expected server identity because `mbedtls_ssl_set_hostname()` was never called. CA-chain validation passes but hostname is unbound. | Cat I | `client_connect_and_handshake()` omits `ssl_set_hostname()` call; `verify_peer=true` but no CN/SAN binding enforced | `mbedtls_ssl_set_hostname()` called after `ssl_setup` in client path; non-zero return treated as fatal (`ERR_IO`); verified by `test_mock_client_ssl_set_hostname_fail` and `test_mock_client_ssl_set_hostname_called` | `client_connect_and_handshake()` calls `m_ops->ssl_set_hostname()` after `ssl_setup`; returns `ERR_IO` on failure (REQ-6.4.6); any certificate from the trusted CA that does not match `peer_hostname` is rejected at handshake |
+| HAZ-009 | Source_id spoofing via TCP/TLS connection — a connected TCP/TLS client sends an envelope claiming another node's source_id; DeliveryEngine trusts that field for ACK cancellation and retry suppression, corrupting delivery state. | Cat I | TcpBackend/TlsTcpBackend passed unvalidated envelopes to DeliveryEngine | validate_source_id() checks inbound source_id against m_client_node_ids[slot]; WARNING_HI + discard on mismatch (REQ-6.1.11) |
 
 ---
 
@@ -78,6 +79,7 @@
 | Partial TCP frame accepted as complete message | Corrupt fields delivered | Cat I HAZ-005 | `tcp_recv_frame` uses `socket_recv_exact` | `socket_recv_exact` loops until all bytes received or error |
 | `send_message()` called with no connected client | Message silently discarded | Cat III HAZ-006 | `m_client_count == 0` check; `WARNING_LO` logged | Logged; upper layer should verify connectivity before sending |
 | `receive_message()` returns `ERR_TIMEOUT` spuriously | Upper layer delays message processing | Cat IV | Bounded `poll_count` loop | Caller retries; `RECV_TIMEOUT_MS` tunable per channel |
+| validate_source_id() fails (allows spoofed frame through) | Source_id mismatch not caught | DeliveryEngine processes forged frame | HAZ-009 | validate_source_id() verifies m_client_node_ids[slot] before dispatch; WARNING_HI on mismatch | TcpBackend |
 
 ### TlsTcpBackend
 
@@ -90,6 +92,7 @@
 | **recv called on idle connection without readability check (B-2a — fixed)** — `poll_clients_once()` called `recv_from_client()` for every slot without checking socket readability, causing spurious wakes and undefined behavior on idle connections (HAZ-004, HAZ-005) | Spurious receive attempts on idle sockets; potential premature close of idle connections | Cat II HAZ-004, HAZ-005 | Absence of `POLLIN` guard; visible in socket-error returns from `recv_from_client()` | **Fixed (commit 326d7be, B-2a):** `poll_clients_once()` now builds a `pollfd` array and calls `poll()` once with `timeout_ms`; `recv_from_client()` gated on `POLLIN` or TLS internal-bytes flag per slot. Prevents spurious close of idle connections. |
 | **Accepted TLS socket left permanently blocking after handshake (B-2b — fixed)** — `accept_and_handshake()` called `mbedtls_net_set_block()` before handshake but never restored non-blocking mode afterward; all accepted client sockets were permanently blocking, blocking the receive loop (HAZ-004) | `receive_message()` blocks indefinitely on any client socket that has no data pending; violates multi-connection and timeout contract (REQ-6.1.3, REQ-6.1.7) | Cat II HAZ-004 | Indefinite block in `poll_clients_once()` on a connected-but-idle client socket | **Fixed (commit 326d7be, B-2b):** New helper `do_tls_server_handshake(uint32_t slot)` calls `mbedtls_net_set_nonblock()` immediately after handshake completion before returning to the accept loop. All accepted sockets are now non-blocking. |
 | **Timeout ignored on TLS WANT_READ path (B-2c — fixed)** — `tls_read_payload()` honored `timeout_ms` on the plaintext path but looped indefinitely on `MBEDTLS_ERR_SSL_WANT_READ` on the TLS path, violating the caller's timeout contract (HAZ-004) | `receive_message()` never times out on a connected TLS socket that stops sending mid-frame; upper layer permanently stalled | Cat II HAZ-004 | No timeout return from `tls_recv_frame()` on TLS path; caller's `timeout_ms` silently ignored | **Fixed (commit 326d7be, B-2c):** New helper `read_tls_header()` and updated `tls_read_payload()` call `mbedtls_net_poll()` on `WANT_READ` with the caller-supplied `timeout_ms`; return `ERR_TIMEOUT` if the deadline is exceeded. `receive_message()` now always honors its `timeout_ms` contract. |
+| validate_source_id() fails (allows spoofed frame through) | Source_id mismatch not caught | DeliveryEngine processes forged frame | HAZ-009 | validate_source_id() verifies m_client_node_ids[slot] before dispatch; WARNING_HI on mismatch | TlsTcpBackend |
 
 ### DtlsUdpBackend
 
@@ -323,6 +326,7 @@ All `SocketUtils` functions are **NSC** — raw POSIX I/O primitives with no mes
 | `find_client_slot()` | `TcpBackend` | NSC | — |
 | `handle_hello_frame()` | `TcpBackend` | NSC | — |
 | `send_to_slot()` | `TcpBackend` | NSC | — |
+| `validate_source_id()` | `TcpBackend` | SC | HAZ-009 |
 | `close()` | `TcpBackend` | NSC | — |
 | `is_open()` | `TcpBackend` | NSC | — |
 | `get_transport_stats()` | `TcpBackend` | NSC | — |
@@ -387,6 +391,7 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `find_client_slot()` | `TlsTcpBackend` | NSC | — |
 | `handle_hello_frame()` | `TlsTcpBackend` | NSC | — |
 | `send_to_slot()` | `TlsTcpBackend` | NSC | — |
+| `validate_source_id()` | `TlsTcpBackend` | SC | HAZ-009 |
 | `close()` | `TlsTcpBackend` | NSC | — |
 | `is_open()` | `TlsTcpBackend` | NSC | — |
 | `get_transport_stats()` | `TlsTcpBackend` | NSC | — |
