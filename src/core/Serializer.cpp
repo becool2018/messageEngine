@@ -203,6 +203,14 @@ Result Serializer::serialize(const MessageEnvelope& env,
     // Security finding H-1: assert payload_length fits in uint16 before cast to wire field.
     // MSG_MAX_PAYLOAD_BYTES (4096) is well within 0xFFFF; this assert is an always-on
     // invariant that detects any future constant change that would break the wire format.
+    // SEC-004: CERT INT31-C — explicit ERR_INVALID before uint32→uint16 narrowing cast.
+    // This is the primary error return; the assert below is defense-in-depth only.
+    // envelope_valid() caps payload_length at MSG_MAX_PAYLOAD_BYTES (4096 < 0xFFFF),
+    // so this path is currently unreachable — but must remain in case the constant
+    // changes or this function is called outside the normal validation path (§7a).
+    if (env.payload_length > 0xFFFFU) {
+        return Result::ERR_INVALID;
+    }
     // Power of 10 Rule 5: mandatory assertion for uint32->uint16 narrowing (H-1).
     NEVER_COMPILED_OUT_ASSERT(env.payload_length <= 0xFFFFU);  // Assert: payload fits wire uint16 field (H-1)
     // total_payload_length == 0 for unfragmented: use payload_length as default.

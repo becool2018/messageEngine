@@ -49,6 +49,7 @@
 #endif
 #include <mbedtls/error.h>
 #include <mbedtls/psa_util.h>
+#include <mbedtls/platform_util.h>  // SEC-002: mbedtls_platform_zeroize() (CLAUDE.md §7c)
 #include <psa/crypto.h>
 #include <sys/stat.h>     // lstat() — F-2 symlink validation
 #include <cstdio>
@@ -202,6 +203,9 @@ TlsTcpBackend::~TlsTcpBackend()
     mbedtls_x509_crt_free(&m_ca_cert);
     mbedtls_x509_crl_free(&m_crl);            // REQ-6.3.4: CRL context free
     mbedtls_pk_free(&m_pkey);
+    // SEC-006: CLAUDE.md §7c — zeroize private key material after free to prevent
+    // residual key bytes in memory (CWE-14; mbedtls_platform_zeroize is compiler-barrier-safe).
+    mbedtls_platform_zeroize(static_cast<void*>(&m_pkey), sizeof(m_pkey));
     mbedtls_net_free(&m_listen_net);
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         mbedtls_ssl_free(&m_ssl[i]);
@@ -265,7 +269,13 @@ Result TlsTcpBackend::load_crl_if_configured(const TlsConfig& tls_cfg)
     NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.crl_file));
 
     if (tls_cfg.crl_file[0] == '\0') {
-        // No CRL configured — skip; not an error.
+        // SEC-003: verify_peer=true but no CRL file configured — certificate
+        // revocation checking is disabled. This may be intentional (e.g., OCSP
+        // is used instead) but is logged at WARNING_HI so deployments that
+        // require CRL checking can detect misconfiguration (REQ-6.3.4, §SECURITY §3).
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "verify_peer=true but crl_file is empty — CRL revocation "
+                    "checking disabled (SEC-003, REQ-6.3.4)");
         return Result::OK;
     }
 
@@ -1699,8 +1709,12 @@ void TlsTcpBackend::close()
     }
     mbedtls_net_free(&m_listen_net);
     mbedtls_net_init(&m_listen_net);
-    // Fix 2: free and re-init ticket context so it is safe for re-use after close().
+    // Fix 2 + SEC-002: free, then zeroize ticket key context to prevent recovery
+    // of the ticket encryption key from memory (CLAUDE.md §7c, CWE-316).
+    // Order: free() first (needs valid internal pointers); zeroize after (clears
+    // key bytes remaining in the struct after free).
     mbedtls_ssl_ticket_free(&m_ticket_ctx);
+    mbedtls_platform_zeroize(static_cast<void*>(&m_ticket_ctx), sizeof(m_ticket_ctx));
     mbedtls_ssl_ticket_init(&m_ticket_ctx);
     // REQ-6.3.4: free and re-init CRL so the object can be safely re-used after close().
     mbedtls_x509_crl_free(&m_crl);
@@ -1710,8 +1724,14 @@ void TlsTcpBackend::close()
     m_connections_closed += m_client_count;
     m_client_count = 0U;
     m_open         = false;
-    // Reset session-saved flag on close so a stale session is not accidentally
-    // resumed after re-init() — the session is re-saved on the next handshake.
+    // SEC-002: Free then zeroize the saved TLS session to prevent master-secret
+    // recovery from memory forensics between uses (CLAUDE.md §7c, CWE-316).
+    // Order: session_free() first (frees internal ticket allocation if any);
+    // zeroize after (clears all key bytes still embedded in the struct);
+    // session_init() to reset to a known safe state.
+    mbedtls_ssl_session_free(&m_saved_session);
+    mbedtls_platform_zeroize(static_cast<void*>(&m_saved_session), sizeof(m_saved_session));
+    mbedtls_ssl_session_init(&m_saved_session);
     m_session_saved = false;
     Logger::log(Severity::INFO, "TlsTcpBackend",
                 "Transport closed (TLS=%s)", m_tls_enabled ? "ON" : "OFF");

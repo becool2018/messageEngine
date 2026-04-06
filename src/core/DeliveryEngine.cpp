@@ -28,6 +28,16 @@
 #include "DeliveryEngine.hpp"
 #include "Assert.hpp"
 #include "AssertState.hpp"
+#include "Serializer.hpp"  // SEC-008: WIRE_HEADER_SIZE for compile-time wire buffer invariant
+
+// SEC-008: Compile-time invariant — a single wire fragment (header + max payload) must
+// fit inside the socket receive buffer. Guards against silent truncation if capacity
+// constants are changed (e.g. FRAG_MAX_PAYLOAD_BYTES increased without raising
+// SOCKET_RECV_BUF_BYTES). Violation is a build error, not a runtime defect.
+// WIRE_HEADER_SIZE=52, FRAG_MAX_PAYLOAD_BYTES=1024, SOCKET_RECV_BUF_BYTES=8192 → 1076 ≤ 8192.
+static_assert(Serializer::WIRE_HEADER_SIZE + FRAG_MAX_PAYLOAD_BYTES <= SOCKET_RECV_BUF_BYTES,
+              "SEC-008: one wire fragment (header+payload) exceeds socket recv buffer — "
+              "raise SOCKET_RECV_BUF_BYTES or lower FRAG_MAX_PAYLOAD_BYTES");
 
 // REQ-5.2.4: OS entropy for message ID seed (prevents ID-prediction attacks).
 // arc4random_buf is available on macOS/BSD without a separate header;
@@ -312,6 +322,9 @@ void DeliveryEngine::init(TransportInterface* transport,
     // REQ-3.3.5: zero the held-pending ordering slot (Issue 1 fix)
     envelope_init(m_held_pending);
     m_held_pending_valid = false;
+
+    // SEC-007: reset monotonic timestamp guard so first call is unconditionally accepted.
+    m_last_now_us = 0U;
 
     m_initialized = true;
 
@@ -688,6 +701,16 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
         return Result::ERR_INVALID;
     }
 
+    // SEC-007: reject non-monotonic timestamps to prevent time-inversion exploits
+    // (e.g. retry suppression via backward time, expiry bypass via stale timestamps).
+    if ((m_last_now_us > 0ULL) && (now_us < m_last_now_us)) {
+        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                    "send: non-monotonic now_us=%llu < last=%llu — rejecting (SEC-007)",
+                    (unsigned long long)now_us, (unsigned long long)m_last_now_us);
+        return Result::ERR_INVALID;
+    }
+    m_last_now_us = now_us;
+
     // Step 1: assign envelope identity fields.  These must be set before any
     // bookkeeping call because track() and schedule() read env.source_id,
     // env.message_id, and env.timestamp_us from the envelope.
@@ -833,6 +856,15 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
         return Result::ERR_INVALID;
     }
 
+    // SEC-007: reject non-monotonic timestamps (same rationale as send()).
+    if ((m_last_now_us > 0ULL) && (now_us < m_last_now_us)) {
+        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                    "receive: non-monotonic now_us=%llu < last=%llu — rejecting (SEC-007)",
+                    (unsigned long long)now_us, (unsigned long long)m_last_now_us);
+        return Result::ERR_INVALID;
+    }
+    m_last_now_us = now_us;
+
     // REQ-3.3.5: drain any previously-held ordering message before blocking on the
     // transport. If a prior in-order delivery left a contiguous message staged in
     // m_held_pending, return it immediately so the backlog drains without waiting
@@ -971,6 +1003,15 @@ uint32_t DeliveryEngine::pump_retries(uint64_t now_us)
     NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: engine initialized
     NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);  // Assert: valid timestamp
 
+    // SEC-007: reject non-monotonic timestamps (same rationale as send()).
+    if ((m_last_now_us > 0ULL) && (now_us < m_last_now_us)) {
+        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                    "pump_retries: non-monotonic now_us=%llu < last=%llu — skipping (SEC-007)",
+                    (unsigned long long)now_us, (unsigned long long)m_last_now_us);
+        return 0U;
+    }
+    m_last_now_us = now_us;
+
     // Power of 10 Rule 3: use pre-allocated member buffer m_retry_buf (initialized
     // in init()). collect_due() overwrites only the first 'collected' slots;
     // stale data beyond that index is never read.
@@ -1017,6 +1058,15 @@ uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
 {
     NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: engine initialized
     NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);  // Assert: valid timestamp
+
+    // SEC-007: reject non-monotonic timestamps (same rationale as send()).
+    if ((m_last_now_us > 0ULL) && (now_us < m_last_now_us)) {
+        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
+                    "sweep_ack_timeouts: non-monotonic now_us=%llu < last=%llu — skipping (SEC-007)",
+                    (unsigned long long)now_us, (unsigned long long)m_last_now_us);
+        return 0U;
+    }
+    m_last_now_us = now_us;
 
     // Power of 10 Rule 3: use pre-allocated member buffer m_timeout_buf (initialized
     // in init()). sweep_expired() overwrites only the first 'collected' slots;
