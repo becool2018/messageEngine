@@ -82,6 +82,37 @@ bool DuplicateFilter::is_duplicate(NodeId src, uint64_t msg_id) const
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// find_evict_idx() — G-4: CC-reduction helper for record()
+// Selects the slot index to overwrite when the window is full.
+// Prefers an invalid (unused) slot; if all are valid, returns the one with the
+// smallest recorded_us (oldest entry).
+// Uses DEDUP_WINDOW_SIZE as the "not yet found" sentinel to avoid silently
+// defaulting to slot 0 before any slot has been evaluated.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+uint32_t DuplicateFilter::find_evict_idx() const
+{
+    NEVER_COMPILED_OUT_ASSERT(m_count >= DEDUP_WINDOW_SIZE);  // Assert: called only when window is full
+
+    uint32_t oldest_idx = DEDUP_WINDOW_SIZE;  // sentinel: not yet found
+    // Power of 10 Rule 2: bounded loop (DEDUP_WINDOW_SIZE = 128)
+    for (uint32_t i = 0U; i < DEDUP_WINDOW_SIZE; ++i) {
+        if (!m_window[i].valid) {
+            NEVER_COMPILED_OUT_ASSERT(i < DEDUP_WINDOW_SIZE);  // Assert: valid index
+            return i;  // Prefer an invalid slot — no eviction of valid data needed.
+        }
+        if (oldest_idx == DEDUP_WINDOW_SIZE ||
+            m_window[i].recorded_us < m_window[oldest_idx].recorded_us) {
+            oldest_idx = i;
+        }
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(oldest_idx < DEDUP_WINDOW_SIZE);  // Assert: valid eviction slot found
+    return oldest_idx;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Record a message in the window
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -95,18 +126,10 @@ void DuplicateFilter::record(NodeId src, uint64_t msg_id, uint64_t now_us)
     // SECfix-3: When the window is full, evict the oldest-by-time entry instead
     // of the ring-buffer position.  This prevents an attacker from flushing the
     // window by flooding 128 unique pairs to rotate a predictable eviction pointer.
+    // G-4: CC-reduction — eviction slot search delegated to find_evict_idx().
     uint32_t write_idx = m_next;
     if (m_count >= DEDUP_WINDOW_SIZE) {
-        // Find the entry with the smallest recorded_us (oldest).
-        // Power of 10 Rule 2: bounded loop (DEDUP_WINDOW_SIZE = 128)
-        uint32_t oldest_idx = 0U;
-        for (uint32_t i = 1U; i < DEDUP_WINDOW_SIZE; ++i) {
-            NEVER_COMPILED_OUT_ASSERT(i < DEDUP_WINDOW_SIZE);  // Assert: loop bound
-            if (m_window[i].recorded_us < m_window[oldest_idx].recorded_us) {
-                oldest_idx = i;
-            }
-        }
-        write_idx = oldest_idx;
+        write_idx = find_evict_idx();
     }
 
     // Write entry at selected position

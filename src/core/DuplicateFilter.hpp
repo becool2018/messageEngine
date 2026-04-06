@@ -82,6 +82,11 @@ private:
     Entry    m_window[DEDUP_WINDOW_SIZE] = {};  ///< circular buffer of entries
     uint32_t m_next  = 0U;                      ///< next write position (used on not-full path only)
     uint32_t m_count = 0U;                      ///< number of valid entries in window
+
+    // G-4: CC-reduction helper — encapsulates the eviction-slot search so that
+    // record() stays within CC ≤ 10. Returns the index of the best slot to
+    // overwrite: an invalid (free) slot if one exists, otherwise the oldest entry.
+    uint32_t find_evict_idx() const;
 };
 
 #endif // CORE_DUPLICATE_FILTER_HPP

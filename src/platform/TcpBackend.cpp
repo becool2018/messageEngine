@@ -834,6 +834,17 @@ Result TcpBackend::send_hello_frame()
         return ser_r;
     }
 
+    // G-8: guard against calling send_frame with an invalid fd (-1).
+    // m_client_fds[0] is set by connect_to_server(); if the connection was never
+    // established or was closed, this would pass -1 to send_frame, causing silent
+    // failure or UB in the underlying send() system call.
+    if (m_client_fds[0U] < 0) {
+        Logger::log(Severity::WARNING_HI, "TcpBackend",
+                    "send_hello_frame: no active connection (fd=%d); aborting HELLO",
+                    m_client_fds[0U]);
+        return Result::ERR_IO;
+    }
+
     // send_frame returns true on success, false on failure.
     bool sent_ok = m_sock_ops->send_frame(m_client_fds[0U], m_wire_buf, wire_len,
                                           m_cfg.channels[0U].send_timeout_ms);
@@ -845,6 +856,28 @@ Result TcpBackend::send_hello_frame()
     Logger::log(Severity::INFO, "TcpBackend",
                 "HELLO sent: local_id=%u", m_local_node_id);
     return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// close_and_evict_slot() — G-3: close a rejected connection and free its slot.
+// Calls remove_client_fd(), which closes the socket via m_sock_ops->do_close()
+// and compacts the m_client_fds / m_client_node_ids / m_client_hello_received
+// arrays.  CALLERS MUST RETURN IMMEDIATELY after this call — all slot indices
+// are invalidated by the array compaction.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void TcpBackend::close_and_evict_slot(int client_fd)
+{
+    NEVER_COMPILED_OUT_ASSERT(client_fd >= 0);                         // Pre-condition: valid fd
+    NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);  // Invariant: count in range
+
+    Logger::log(Severity::WARNING_HI, "TcpBackend",
+                "close_and_evict_slot: closing rejected fd=%d", client_fd);
+    remove_client_fd(client_fd);
+
+    // Post-condition: count is still in range after compaction.
+    NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -860,13 +893,16 @@ void TcpBackend::handle_hello_frame(int client_fd, NodeId src_id)
     // slot.  Without this check a malicious client can impersonate an already-connected
     // peer by sending a HELLO with that peer's node_id, allowing it to receive traffic
     // addressed to the legitimate peer (HAZ-009 source-id spoofing).
+    // G-3: close and evict the impostor's connection so it cannot retry or consume a slot.
+    // close_and_evict_slot() compacts the slot arrays; return immediately after.
     // Power of 10 rule 2: fixed loop bound (m_client_count ≤ MAX_TCP_CONNECTIONS)
     for (uint32_t j = 0U; j < m_client_count; ++j) {
         if ((m_client_node_ids[j] == src_id) && (m_client_fds[j] != client_fd)) {
             Logger::log(Severity::WARNING_HI, "TcpBackend",
-                        "HELLO rejected: node_id=%u already registered on slot %u (HAZ-009)",
+                        "HELLO rejected: node_id=%u already registered on slot %u (HAZ-009); evicting",
                         static_cast<unsigned>(src_id), j);
-            return;
+            close_and_evict_slot(client_fd);
+            return;  // Slot indices invalidated by compaction; must not continue.
         }
     }
 
@@ -941,12 +977,15 @@ Result TcpBackend::process_hello_frame(int client_fd, NodeId src_id)
     }
 
     // REQ-6.1.8 / Fix 4: reject duplicate HELLO from an already-registered slot.
+    // G-3: close and evict to prevent resource hold and retry flooding.
+    // close_and_evict_slot() compacts the slot arrays; return immediately after.
     if (m_client_hello_received[slot_idx]) {
         Logger::log(Severity::WARNING_HI, "TcpBackend",
-                    "duplicate HELLO from slot %u fd=%d node_id=%u: dropping (REQ-6.1.8)",
+                    "duplicate HELLO from slot %u fd=%d node_id=%u: evicting (REQ-6.1.8)",
                     static_cast<unsigned>(slot_idx), client_fd,
                     static_cast<unsigned>(src_id));
-        return Result::ERR_INVALID;
+        close_and_evict_slot(client_fd);
+        return Result::ERR_INVALID;  // Slot indices invalidated; must not continue.
     }
 
     // First HELLO: register NodeId and mark slot as registered.
