@@ -2293,6 +2293,83 @@ static void test_duplicate_hello_rejected()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SEC-023: after first datagram is accepted the server locks the source port.
+// A second client from the same IP but a different ephemeral port must be
+// silently dropped; server receive_message() returns ERR_TIMEOUT.
+// Verifies: REQ-6.2.4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.2.4
+static void test_plaintext_server_wrong_port_after_learn_dropped()
+{
+    // Verifies: REQ-6.2.4
+    // Strategy (SEC-023 port-locking):
+    //   1. server init() (plaintext, port 14704).
+    //   2. client1 sends HELLO → server learns client1's ephemeral port and locks it.
+    //   3. client2 (different DtlsUdpBackend, different ephemeral port) sends DATA.
+    //   4. server must silently drop the DATA (port mismatch) → ERR_TIMEOUT.
+    static const uint16_t PORT = 14704U;
+
+    DtlsUdpBackend server;
+    TransportConfig srv_cfg;
+    make_dtls_config(srv_cfg, true, PORT, false);
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    // client1: sends HELLO, establishing the locked source port.
+    DtlsUdpBackend client1;
+    TransportConfig cli1_cfg;
+    make_dtls_config(cli1_cfg, false, PORT, false);
+    Result cli1_init = client1.init(cli1_cfg);
+    assert(cli1_init == Result::OK);
+
+    MessageEnvelope hello;
+    envelope_init(hello);
+    hello.message_type      = MessageType::HELLO;
+    hello.message_id        = 0xD001ULL;
+    hello.source_id         = 5U;
+    hello.destination_id    = 1U;
+    hello.reliability_class = ReliabilityClass::BEST_EFFORT;
+    hello.payload_length    = 0U;
+
+    assert(client1.send_message(hello) == Result::OK);
+
+    // Drain the HELLO: consumed internally; port is now locked to client1's port.
+    MessageEnvelope dummy;
+    Result rh = server.receive_message(dummy, 500U);
+    assert(rh == Result::ERR_TIMEOUT);  // HELLO consumed, not delivered
+
+    // client2: OS assigns a different ephemeral source port.
+    DtlsUdpBackend client2;
+    TransportConfig cli2_cfg;
+    make_dtls_config(cli2_cfg, false, PORT, false);
+    Result cli2_init = client2.init(cli2_cfg);
+    assert(cli2_init == Result::OK);
+
+    MessageEnvelope data;
+    envelope_init(data);
+    data.message_type      = MessageType::DATA;
+    data.message_id        = 0xD002ULL;
+    data.source_id         = 5U;  // valid source_id but wrong port
+    data.destination_id    = 1U;
+    data.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    assert(client2.send_message(data) == Result::OK);
+
+    // Server must drop the datagram (source port ≠ locked port) → ERR_TIMEOUT.
+    MessageEnvelope rcv;
+    Result r = server.receive_message(rcv, 500U);
+    assert(r == Result::ERR_TIMEOUT);  // SEC-023: rogue-port datagram dropped
+
+    client1.close();
+    client2.close();
+    server.close();
+
+    printf("PASS: test_plaintext_server_wrong_port_after_learn_dropped\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2354,6 +2431,9 @@ int main()
     test_hello_registers_peer_and_data_passes();
     test_source_id_spoof_after_hello_dropped();
     test_duplicate_hello_rejected();
+
+    // SEC-023: plaintext server port-locking test (REQ-6.2.4)
+    test_plaintext_server_wrong_port_after_learn_dropped();
 
     printf("=== test_DtlsUdpBackend: ALL TESTS PASSED ===\n");
     return 0;

@@ -139,7 +139,8 @@ DtlsUdpBackend::DtlsUdpBackend()
       m_crl_loaded(false),
       m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
       m_connections_opened(0U), m_connections_closed(0U),
-      m_local_node_id(NODE_ID_INVALID)  // SEC-018: initialized at declaration
+      m_local_node_id(NODE_ID_INVALID),  // SEC-018: initialized at declaration
+      m_peer_src_port(0U)                // SEC-023: not yet learned
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
     NEVER_COMPILED_OUT_ASSERT(DTLS_MAX_DATAGRAM_BYTES > 0U);
@@ -163,7 +164,8 @@ DtlsUdpBackend::DtlsUdpBackend(IMbedtlsOps& ops)
       m_crl_loaded(false),
       m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
       m_connections_opened(0U), m_connections_closed(0U),
-      m_local_node_id(NODE_ID_INVALID)  // SEC-018: initialized at declaration
+      m_local_node_id(NODE_ID_INVALID),  // SEC-018: initialized at declaration
+      m_peer_src_port(0U)                // SEC-023: not yet learned
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
     NEVER_COMPILED_OUT_ASSERT(DTLS_MAX_DATAGRAM_BYTES > 0U);
@@ -187,7 +189,8 @@ DtlsUdpBackend::DtlsUdpBackend(ISocketOps& sock_ops, IMbedtlsOps& tls_ops)
       m_crl_loaded(false),
       m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
       m_connections_opened(0U), m_connections_closed(0U),
-      m_local_node_id(NODE_ID_INVALID)  // SEC-018: initialized at declaration
+      m_local_node_id(NODE_ID_INVALID),  // SEC-018: initialized at declaration
+      m_peer_src_port(0U)                // SEC-023: not yet learned
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
     NEVER_COMPILED_OUT_ASSERT(DTLS_MAX_DATAGRAM_BYTES > 0U);
@@ -725,7 +728,7 @@ Result DtlsUdpBackend::client_connect_and_handshake()
 //                 filter non-peer datagrams at the kernel and TLS record layers.
 // ─────────────────────────────────────────────────────────────────────────────
 
-bool DtlsUdpBackend::validate_source(const char* src_ip, uint16_t src_port) const
+bool DtlsUdpBackend::validate_source(const char* src_ip, uint16_t src_port)
 {
     NEVER_COMPILED_OUT_ASSERT(src_ip != nullptr);           // Pre-condition
     NEVER_COMPILED_OUT_ASSERT(m_cfg.peer_ip[0] != '\0');  // Pre-condition
@@ -743,17 +746,30 @@ bool DtlsUdpBackend::validate_source(const char* src_ip, uint16_t src_port) cons
     // strncmp reads up to N bytes past each string's NUL, reaching uninitialised memory.
     bool ip_match = (strcmp(src_ip, m_cfg.peer_ip) == 0);
 
-    // Port validation: in client mode the server responds from its configured port;
-    // in server mode the client sends from an ephemeral bind port that differs from
-    // m_cfg.peer_port, so port validation is skipped for the server role.
-    bool port_match = m_is_server ? true : (src_port == m_cfg.peer_port);
+    // Port validation:
+    // - Client mode: server always responds from m_cfg.peer_port; enforce it.
+    // - Server mode: SEC-023 port-locking — the client sends from an ephemeral port
+    //   that is unknown ahead of time.  Learn it from the first accepted datagram
+    //   (m_peer_src_port == 0 → learning phase) and enforce equality thereafter.
+    //   This prevents any other process on the same trusted host IP from injecting
+    //   datagrams or claiming the peer slot with a forged HELLO once the real peer
+    //   has established its ephemeral port.
+    bool port_match = false;
+    if (m_is_server) {
+        if (m_peer_src_port == 0U) {
+            m_peer_src_port = src_port;  // SEC-023: learn on first accepted datagram
+        }
+        port_match = (src_port == m_peer_src_port);
+    } else {
+        port_match = (src_port == m_cfg.peer_port);
+    }
 
     if (!ip_match || !port_match) {
-        // SEC-005: REQ-6.2.4 / REQ-6.3.2 — source mismatch is a security event;
-        // WARNING_HI matches UdpBackend behaviour and satisfies the severity table.
+        // SEC-005 / SEC-023: REQ-6.2.4 / REQ-6.3.2 — source mismatch is a security
+        // event; WARNING_HI matches UdpBackend behaviour and satisfies severity table.
         Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
                     "Dropped datagram from unexpected source %s:%u (expected %s:%u) "
-                    "(SEC-005, REQ-6.2.4)",
+                    "(SEC-005, SEC-023, REQ-6.2.4)",
                     src_ip, static_cast<unsigned int>(src_port),
                     m_cfg.peer_ip, static_cast<unsigned int>(m_cfg.peer_port));
         return false;
@@ -837,7 +853,9 @@ bool DtlsUdpBackend::recv_one_dtls_datagram(uint32_t timeout_ms)
                                    timeout_ms, &out_len, src_ip, &src_port)) {
             return false;
         }
-        // REQ-6.2.4: validate source before deserialization (drop spoofed datagrams)
+        // REQ-6.2.4 / SEC-023: validate source before deserialization.
+        // validate_source() also learns and locks the peer's ephemeral source port
+        // on the first accepted plaintext datagram (server mode).
         if (!validate_source(src_ip, src_port)) {
             return false;
         }
@@ -1083,9 +1101,10 @@ Result DtlsUdpBackend::init(const TransportConfig& config)
         }
     }
 
-    // REQ-6.2.4: reset peer registration state for a fresh init()
-    m_peer_node_id       = static_cast<NodeId>(NODE_ID_INVALID);
+    // REQ-6.2.4 / SEC-023: reset peer registration state for a fresh init()
+    m_peer_node_id        = static_cast<NodeId>(NODE_ID_INVALID);
     m_peer_hello_received = false;
+    m_peer_src_port       = 0U;   // SEC-023: clear locked port for new session
     m_crl_loaded          = false;
 
     m_recv_queue.init();
@@ -1316,9 +1335,10 @@ void DtlsUdpBackend::close()
         ++m_connections_closed;  // REQ-7.2.4: socket close event
     }
 
-    // REQ-6.2.4: reset peer registration so a subsequent init() starts fresh
-    m_peer_node_id       = static_cast<NodeId>(NODE_ID_INVALID);
+    // REQ-6.2.4 / SEC-023: reset peer registration so a subsequent init() starts fresh
+    m_peer_node_id        = static_cast<NodeId>(NODE_ID_INVALID);
     m_peer_hello_received = false;
+    m_peer_src_port       = 0U;   // SEC-023: clear locked port for new session
 
     m_open = false;
     Logger::log(Severity::INFO, "DtlsUdpBackend",

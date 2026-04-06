@@ -44,7 +44,9 @@
 UdpBackend::UdpBackend()
     : m_sock_ops(&SocketOpsImpl::instance()),
       m_fd(-1), m_wire_buf{}, m_cfg{}, m_open(false),
-      m_connections_opened(0U), m_connections_closed(0U)
+      m_connections_opened(0U), m_connections_closed(0U),
+      m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
+      m_local_node_id(NODE_ID_INVALID)
 {
     // Power of 10 rule 3: initialize to safe state
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);  // Invariant
@@ -53,7 +55,9 @@ UdpBackend::UdpBackend()
 UdpBackend::UdpBackend(ISocketOps& ops)
     : m_sock_ops(&ops),
       m_fd(-1), m_wire_buf{}, m_cfg{}, m_open(false),
-      m_connections_opened(0U), m_connections_closed(0U)
+      m_connections_opened(0U), m_connections_closed(0U),
+      m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
+      m_local_node_id(NODE_ID_INVALID)
 {
     // Power of 10 rule 3: initialize to safe state
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);  // Invariant
@@ -140,8 +144,9 @@ Result UdpBackend::init(const TransportConfig& config)
 Result UdpBackend::register_local_id(NodeId id)
 {
     NEVER_COMPILED_OUT_ASSERT(id != NODE_ID_INVALID);  // pre-condition: valid NodeId
-    (void)id;  // REQ-6.1.10: UDP has no connection-oriented registration
     NEVER_COMPILED_OUT_ASSERT(m_open);  // pre-condition: transport must be initialised
+    // REQ-6.1.10: store local NodeId for reference (parallel to TCP/TLS server role).
+    m_local_node_id = id;
     return Result::OK;
 }
 
@@ -294,6 +299,72 @@ bool UdpBackend::validate_source(const char* src_ip, uint16_t src_port) const
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// process_hello_or_validate() — private helper (REQ-6.1.8, REQ-6.2.4)
+//
+// Enforces HELLO-before-data and source_id binding for the plaintext UDP path,
+// mirroring DtlsUdpBackend::process_hello_or_validate() exactly.
+//
+// HELLO frame rules (REQ-6.1.8):
+//   - First HELLO from peer: store source_id in m_peer_node_id, set flag.
+//   - Duplicate HELLO: log WARNING_HI, drop.
+//
+// Data frame rules (REQ-6.2.4):
+//   - No HELLO received yet: log WARNING_HI, drop (no backward-compat bypass).
+//   - HELLO received: if source_id != m_peer_node_id, log WARNING_HI, drop.
+// ─────────────────────────────────────────────────────────────────────────────
+
+bool UdpBackend::process_hello_or_validate(const MessageEnvelope& env,
+                                            bool& consumed)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_open);      // pre: transport must be open
+    NEVER_COMPILED_OUT_ASSERT(m_fd >= 0);   // pre: socket valid
+
+    consumed = false;
+
+    if (env.message_type == MessageType::HELLO) {
+        if (m_peer_hello_received) {
+            // REQ-6.1.8: only one HELLO per connection allowed
+            Logger::log(Severity::WARNING_HI, "UdpBackend",
+                        "process_hello_or_validate: duplicate HELLO from NodeId=%u; dropping",
+                        static_cast<unsigned int>(env.source_id));
+            return false;
+        }
+        // First HELLO: register the peer NodeId
+        m_peer_node_id       = env.source_id;
+        m_peer_hello_received = true;
+        Logger::log(Severity::INFO, "UdpBackend",
+                    "UDP: HELLO received, peer NodeId %u registered",
+                    static_cast<unsigned int>(m_peer_node_id));
+        consumed = true;  // HELLO consumed; must not reach DeliveryEngine
+        return true;
+    }
+
+    // REQ-6.2.4 / REQ-6.1.8: HELLO is mandatory before any data frame.
+    // No backward-compat bypass: a peer that never sends HELLO could inject
+    // arbitrary source_id values, corrupting ordering state and exhausting the
+    // dedup window.
+    if (!m_peer_hello_received) {
+        Logger::log(Severity::WARNING_HI, "UdpBackend",
+                    "process_hello_or_validate: data frame before HELLO; "
+                    "dropping (source_id=%u)",
+                    static_cast<unsigned int>(env.source_id));
+        return false;
+    }
+
+    // source_id must match the NodeId registered in the HELLO.
+    if (env.source_id != m_peer_node_id) {
+        Logger::log(Severity::WARNING_HI, "UdpBackend",
+                    "process_hello_or_validate: source_id %u != registered %u; "
+                    "spoofing attempt \xe2\x80\x94 dropping (REQ-6.2.4)",
+                    static_cast<unsigned int>(env.source_id),
+                    static_cast<unsigned int>(m_peer_node_id));
+        return false;
+    }
+
+    return true;  // source_id matches registered peer NodeId
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // recv_one_datagram() — private helper
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -322,6 +393,15 @@ bool UdpBackend::recv_one_datagram(uint32_t timeout_ms)
         Logger::log(Severity::WARNING_LO, "UdpBackend",
                    "Deserialize failed: %u", static_cast<uint8_t>(res));
         return false;
+    }
+
+    // REQ-6.1.8 / REQ-6.2.4: enforce HELLO-before-data and source_id binding.
+    bool consumed = false;
+    if (!process_hello_or_validate(env, consumed)) {
+        return false;  // frame dropped (data-before-HELLO or source_id mismatch)
+    }
+    if (consumed) {
+        return false;  // HELLO consumed; must not reach DeliveryEngine
     }
 
     // REQ-5.1.5, REQ-5.1.6: apply inbound impairment (partition drop / reorder)
@@ -436,6 +516,10 @@ void UdpBackend::close()
         m_fd = -1;
         ++m_connections_closed;  // REQ-7.2.4: socket close event
     }
+
+    // Reset peer registration so a subsequent init() + HELLO starts clean.
+    m_peer_node_id        = NODE_ID_INVALID;
+    m_peer_hello_received = false;
 
     m_open = false;
     Logger::log(Severity::INFO, "UdpBackend", "Transport closed");

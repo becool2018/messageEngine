@@ -25,6 +25,7 @@
 | HAZ-012 | Private key recovery from freed heap — mbedTLS pk_free() releases internal key memory without guaranteed zeroing; key material readable in freed pages via core dump, swap file, or heap-spray read. Complete TLS/DTLS session compromise. | Cat I | mbedtls_pk_free() called without prior mbedtls_platform_zeroize() in TlsTcpBackend and DtlsUdpBackend destructors | mbedtls_platform_zeroize(&m_pkey, sizeof(m_pkey)) added after mbedtls_pk_free() in both destructors (DEF-016-2/3, §7c / CWE-14). |
 | HAZ-013 | PRNG divide-by-zero UB crashes process — PrngEngine::next_range(0, UINT32_MAX) computed range as uint32_t, wrapping to 0; raw % 0 is undefined behavior and typically a CPU trap. Denial of service. | Cat II | next_range() computed hi - lo + 1U as uint32_t; hi=UINT32_MAX wraps result to 0 | range computed as uint64_t (range64 = (uint64_t)hi - (uint64_t)lo + 1ULL), always ≥1; CERT INT33-C guard asserted (DEF-016-1). |
 | HAZ-014 | Ordering gate permanent stall via UINT32_MAX sequence number — sweep_expired_holds() computed sequence_num + 1U as uint32_t; UINT32_MAX+1 wraps to 0 (the UNORDERED sentinel), advance_sequence() no-ops, and the gate never unblocks. | Cat II | Unsigned overflow in sweep_expired_holds() on sequence_num == UINT32_MAX | seq_next_guarded() helper wraps to 1 (not 0) on UINT32_MAX overflow, consistent with advance_next_expected(); CERT INT30-C (DEF-016-5). |
+| HAZ-015 | **Source_id rotation via plaintext UDP — capacity exhaustion** — a peer at the correct IP:port sends envelopes with arbitrary `source_id` values; each novel `source_id` opens a fresh `DuplicateFilter` slot and `OrderingBuffer` peer table entry, exhausting both fixed-capacity tables and causing `ERR_FULL` drops for legitimate traffic. Prior to this fix, `UdpBackend::validate_source()` checked IP:port only and never enforced HELLO-before-data or source_id binding (same class as HAZ-011 but on the plaintext UDP path — no DTLS MAC to bound the attacker). | Cat I | `UdpBackend::recv_one_datagram()` passed envelopes with arbitrary `source_id` to `DeliveryEngine`; no HELLO registration step on the plaintext path | `UdpBackend::process_hello_or_validate()` added (mirrors `DtlsUdpBackend::process_hello_or_validate()`): first HELLO locks `m_peer_node_id`; data frames before HELLO are discarded with WARNING_HI; data frames whose `source_id` != `m_peer_node_id` are discarded with WARNING_HI. Duplicate HELLO frames are also rejected. `m_peer_node_id` and `m_peer_hello_received` reset on `close()`. Verified by `test_udp_data_before_hello_dropped`, `test_udp_source_id_rotation_rejected`, `test_udp_duplicate_hello_dropped`, `test_udp_hello_registration` (REQ-6.2.4 / REQ-6.1.8). |
 
 ---
 
@@ -370,11 +371,13 @@ Classification: NSC. `flush_delayed_to_clients()` as a whole remains SC (HAZ-005
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
 | `init()` | `UdpBackend` | NSC | — |
+| `register_local_id()` | `UdpBackend` | NSC | — |
 | `send_message()` | `UdpBackend` | SC | HAZ-005, HAZ-006 |
 | `receive_message()` | `UdpBackend` | SC | HAZ-004, HAZ-005 |
 | `close()` | `UdpBackend` | NSC | — |
 | `is_open()` | `UdpBackend` | NSC | — |
 | `get_transport_stats()` | `UdpBackend` | NSC | — |
+| `process_hello_or_validate()` | `UdpBackend` | SC | HAZ-015 |
 
 ### src/platform/LocalSimHarness.hpp
 
