@@ -32,6 +32,7 @@
 #include "core/Assert.hpp"
 #include "core/Logger.hpp"
 #include <cerrno>
+#include <cmath>    // std::isnan, std::isinf — L-4: NaN/Inf guard after strtod()
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -89,6 +90,10 @@ static bool parse_prob(const char* val, double* out)
     char* end = nullptr;
     double v = strtod(val, &end);
     if (end == val || *end != '\0') { return false; }
+    // L-4: Guard against NaN and Inf which strtod() can return without setting
+    // ERANGE (e.g., "nan" or "inf" inputs).  std::isnan / std::isinf from <cmath>
+    // are used here; they introduce no dynamic allocation and are MISRA-safe.
+    if (std::isnan(v) || std::isinf(v)) { return false; }
     // Clamp to [0.0, 1.0] (Power of 10: explicit bounds check)
     if (v < 0.0) { v = 0.0; }
     if (v > 1.0) { v = 1.0; }

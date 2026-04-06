@@ -336,9 +336,16 @@ void UdpBackend::flush_delayed_to_wire(uint64_t now_us)
 
     // Power of 10 rule 2: fixed loop bound
     // Send delayed outbound envelopes to the wire via send_one_envelope().
+    // L-5: Power of 10 Rule 7 — store return value; log on failure.
+    //      send_one_envelope() already logs WARNING_LO internally for non-current
+    //      failures, but we must not discard the return value (Rule 7).
     for (uint32_t i = 0U; i < count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        (void)send_one_envelope(delayed[i], false);
+        const bool send_failed = send_one_envelope(delayed[i], false);
+        if (send_failed) {
+            Logger::log(Severity::WARNING_HI, "UdpBackend",
+                        "flush_delayed_to_wire: send_one_envelope failed for slot %u", i);
+        }
     }
 }
 

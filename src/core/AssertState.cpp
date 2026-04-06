@@ -34,17 +34,23 @@ std::atomic<bool> g_fatal_fired{false};
 std::atomic<uint32_t> g_fatal_count{0U};
 
 // Power of 10 Rule 3: static storage, pointer to caller-owned object; no heap.
+// std::atomic permitted per project carve-out (CLAUDE.md §3, §4 std::atomic exception).
+// M-3: s_handler written by set_reset_handler() from any thread; atomic eliminates the
+//      data race.  Release/acquire ordering gives the loading thread a happens-before
+//      edge across the store, matching the pattern already used for g_fatal_fired.
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
-static IResetHandler* s_handler = nullptr;
+static std::atomic<IResetHandler*> s_handler{nullptr};
 
 void set_reset_handler(IResetHandler& handler) noexcept
 {
-    s_handler = &handler;
+    // std::atomic permitted per project carve-out (CLAUDE.md §3, §4 std::atomic exception).
+    s_handler.store(&handler, std::memory_order_release);
 }
 
 IResetHandler* get_reset_handler() noexcept
 {
-    return s_handler;
+    // std::atomic permitted per project carve-out (CLAUDE.md §3, §4 std::atomic exception).
+    return s_handler.load(std::memory_order_acquire);
 }
 
 bool check_and_clear() noexcept
@@ -63,8 +69,10 @@ void trigger_handler_for_test(const char* cond,
                                const char* file,
                                int         line) noexcept
 {
-    if (s_handler != nullptr) {
-        s_handler->on_fatal_assert(cond, file, line);
+    // std::atomic permitted per project carve-out (CLAUDE.md §3, §4 std::atomic exception).
+    IResetHandler* h = s_handler.load(std::memory_order_acquire);
+    if (h != nullptr) {
+        h->on_fatal_assert(cond, file, line);
     } else {
         ::abort();
     }
