@@ -113,9 +113,13 @@ static Result send_echo_reply(DeliveryEngine& engine,
     MessageEnvelope reply;
     envelope_init(reply);
 
-    // Build echo reply: swap source and destination
+    // Build echo reply: swap source and destination.
+    // G-5: use LOCAL_SERVER_NODE_ID directly rather than received.destination_id;
+    // received.destination_id is an attacker-controlled field. A crafted message
+    // whose destination_id is spoofed would cause the reply to impersonate a
+    // different node, potentially fooling the client about the true reply origin.
     reply.message_type       = MessageType::DATA;
-    reply.source_id          = received.destination_id;
+    reply.source_id          = static_cast<NodeId>(LOCAL_SERVER_NODE_ID);
     reply.destination_id     = received.source_id;
     reply.priority           = received.priority;
     reply.reliability_class  = received.reliability_class;

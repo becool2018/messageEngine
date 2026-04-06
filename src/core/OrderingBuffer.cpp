@@ -138,12 +138,19 @@ uint32_t OrderingBuffer::find_lru_peer_idx() const
     NEVER_COMPILED_OUT_ASSERT(m_initialized);             // Assert: initialized
     NEVER_COMPILED_OUT_ASSERT(ORDERING_PEER_COUNT > 0U);  // Assert: valid capacity
 
-    uint32_t lru_idx = 0U;
-    for (uint32_t i = 1U; i < ORDERING_PEER_COUNT; ++i) {
-        if (m_peers[i].lru_stamp < m_peers[lru_idx].lru_stamp) {
+    // G-7: use ORDERING_PEER_COUNT as a sentinel for "not yet found" and skip
+    // inactive slots.  The prior code started from index 0 unconditionally,
+    // silently picking an inactive peer as the LRU candidate, causing
+    // free_holds_for_peer() to operate on the wrong source_id.
+    uint32_t lru_idx = ORDERING_PEER_COUNT;  // sentinel: not yet found
+    for (uint32_t i = 0U; i < ORDERING_PEER_COUNT; ++i) {
+        if (!m_peers[i].active) { continue; }
+        if (lru_idx == ORDERING_PEER_COUNT ||
+            m_peers[i].lru_stamp < m_peers[lru_idx].lru_stamp) {
             lru_idx = i;
         }
     }
+    NEVER_COMPILED_OUT_ASSERT(lru_idx < ORDERING_PEER_COUNT);  // Assert: valid LRU slot found
     return lru_idx;
 }
 

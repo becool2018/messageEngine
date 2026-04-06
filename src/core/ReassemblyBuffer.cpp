@@ -174,32 +174,56 @@ Result ReassemblyBuffer::validate_fragment(uint32_t idx, const MessageEnvelope& 
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ReassemblyBuffer::record_fragment (private)
+// G-2: changed from void to Result; assert-on-bounds replaced with defensive
+// return ERR_INVALID so that a malformed fragment (e.g. crafted payload_length
+// that passes validate_metadata but overruns the accumulation buffer via
+// arithmetic) does not trigger abort() in a running server.
+// Slot is NOT freed here; ingest_multifrag() frees it on ERR_INVALID.
 // ─────────────────────────────────────────────────────────────────────────────
-void ReassemblyBuffer::record_fragment(uint32_t idx, const MessageEnvelope& frag)
+Result ReassemblyBuffer::record_fragment(uint32_t idx, const MessageEnvelope& frag)
 {
-    NEVER_COMPILED_OUT_ASSERT(idx < REASSEMBLY_SLOT_COUNT);          // Assert: valid index
-    NEVER_COMPILED_OUT_ASSERT(frag.fragment_index < FRAG_MAX_COUNT); // Assert: index in range
+    NEVER_COMPILED_OUT_ASSERT(idx < REASSEMBLY_SLOT_COUNT);          // Assert: valid index (programmer error)
+    NEVER_COMPILED_OUT_ASSERT(frag.fragment_index < FRAG_MAX_COUNT); // Assert: validated by caller
 
     // Compute byte offset for this fragment's slice
     // Power of 10 Rule 2: constant; FRAG_MAX_PAYLOAD_BYTES is compile-time constant
     uint32_t byte_offset = static_cast<uint32_t>(frag.fragment_index) * FRAG_MAX_PAYLOAD_BYTES;
-    NEVER_COMPILED_OUT_ASSERT(byte_offset <= MSG_MAX_PAYLOAD_BYTES);  // Assert: fragment offset in range
+
+    // G-2: defensive bounds check — replaced NEVER_COMPILED_OUT_ASSERT to avoid
+    // abort on a malformed fragment that reaches this path.
+    if (byte_offset > MSG_MAX_PAYLOAD_BYTES) {
+        Logger::log(Severity::WARNING_HI, "ReassemblyBuffer",
+                    "record_fragment: byte_offset %u exceeds MSG_MAX_PAYLOAD_BYTES; dropping",
+                    byte_offset);
+        return Result::ERR_INVALID;
+    }
 
     // Place payload into the accumulation buffer
     if (frag.payload_length > 0U) {
-        NEVER_COMPILED_OUT_ASSERT(byte_offset + frag.payload_length <= MSG_MAX_PAYLOAD_BYTES);  // Assert: no overrun
+        // G-2: defensive overrun check — replaced assert with return.
+        if (frag.payload_length > MSG_MAX_PAYLOAD_BYTES - byte_offset) {
+            Logger::log(Severity::WARNING_HI, "ReassemblyBuffer",
+                        "record_fragment: fragment overruns buffer "
+                        "(offset=%u len=%u max=%u); dropping",
+                        byte_offset, frag.payload_length, MSG_MAX_PAYLOAD_BYTES);
+            return Result::ERR_INVALID;
+        }
         (void)memcpy(&m_slots[idx].buf[byte_offset], frag.payload, frag.payload_length);
     }
 
     // F-6: accumulate received byte count for integrity check at assembly.
-    // CERT INT30-C: unsigned wrap guard (byte_offset + payload_length already
-    // bounded by the assert above; received_bytes is similarly bounded).
-    NEVER_COMPILED_OUT_ASSERT(m_slots[idx].received_bytes <=
-                              MSG_MAX_PAYLOAD_BYTES - frag.payload_length);  // Assert: no wrap
+    // G-2: CERT INT30-C overflow guard — replaced assert with defensive return.
+    if (frag.payload_length > MSG_MAX_PAYLOAD_BYTES - m_slots[idx].received_bytes) {
+        Logger::log(Severity::WARNING_HI, "ReassemblyBuffer",
+                    "record_fragment: received_bytes overflow for slot %u; dropping", idx);
+        return Result::ERR_INVALID;
+    }
     m_slots[idx].received_bytes += frag.payload_length;
 
     // Record this fragment in the bitmask
     m_slots[idx].received_mask |= (1U << frag.fragment_index);
+
+    return Result::OK;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -395,7 +419,16 @@ Result ReassemblyBuffer::ingest_multifrag(const MessageEnvelope& frag,
     }
 
     // Record the fragment payload and update bitmask.
-    record_fragment(idx, frag);
+    // G-2: check return value; on ERR_INVALID free the slot and propagate.
+    Result rec_r = record_fragment(idx, frag);
+    if (rec_r != Result::OK) {
+        m_slots[idx].active         = false;
+        m_slots[idx].received_mask  = 0U;
+        m_slots[idx].expected_count = 0U;
+        m_slots[idx].received_bytes = 0U;
+        NEVER_COMPILED_OUT_ASSERT(!m_slots[idx].active);  // Assert: slot freed on error
+        return rec_r;
+    }
 
     // Check if all fragments have arrived.
     if (!is_complete(idx)) {

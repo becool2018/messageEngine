@@ -29,6 +29,7 @@
 
 #include "AckTracker.hpp"
 #include "Assert.hpp"
+#include "Logger.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Initialization
@@ -209,9 +210,19 @@ uint32_t AckTracker::sweep_expired(uint64_t         now_us,
     NEVER_COMPILED_OUT_ASSERT(expired_buf != nullptr);               // Assert: output buffer is valid
     NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);      // Assert: count is consistent
 
-    // Monotonic-time contract: callers must supply non-decreasing now_us (CLOCK_MONOTONIC).
-    // Backward timestamps prevent entries from expiring, permanently leaking slots.
-    NEVER_COMPILED_OUT_ASSERT(now_us >= m_last_sweep_us);  // Assert: monotonic time contract
+    // G-1: monotonic-time contract — now_us must be non-decreasing (CLOCK_MONOTONIC).
+    // A backward timestamp causes entries to never expire, permanently leaking slots.
+    // Replaced NEVER_COMPILED_OUT_ASSERT with a defensive clamp + WARNING_HI so that
+    // a clock glitch (NTP step, test harness, wrap) degrades gracefully rather than
+    // triggering an abort/reset in a server process.
+    NEVER_COMPILED_OUT_ASSERT(now_us != 0ULL);  // Assert: zero timestamp is always invalid
+    if (now_us < m_last_sweep_us) {
+        Logger::log(Severity::WARNING_HI, "AckTracker",
+                    "sweep_expired: non-monotonic timestamp (now=%llu < last=%llu); clamping",
+                    static_cast<unsigned long long>(now_us),
+                    static_cast<unsigned long long>(m_last_sweep_us));
+        now_us = m_last_sweep_us;
+    }
     m_last_sweep_us = now_us;
 
     uint32_t expired_count = 0U;

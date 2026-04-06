@@ -280,8 +280,17 @@ uint32_t RetryManager::collect_due(uint64_t         now_us,
     NEVER_COMPILED_OUT_ASSERT(out_buf != nullptr);  // Assert: output buffer provided
     NEVER_COMPILED_OUT_ASSERT(buf_cap <= MSG_RING_CAPACITY);  // Assert: reasonable capacity
 
-    // Monotonic-time contract: callers must supply non-decreasing now_us (CLOCK_MONOTONIC).
-    NEVER_COMPILED_OUT_ASSERT(now_us >= m_last_collect_us);  // Assert: monotonic time contract
+    // G-1: monotonic-time contract — now_us must be non-decreasing (CLOCK_MONOTONIC).
+    // Replaced NEVER_COMPILED_OUT_ASSERT with a defensive clamp + WARNING_HI so that
+    // a clock glitch degrades gracefully rather than triggering abort/reset.
+    NEVER_COMPILED_OUT_ASSERT(now_us != 0ULL);  // Assert: zero timestamp is always invalid
+    if (now_us < m_last_collect_us) {
+        Logger::log(Severity::WARNING_HI, "RetryManager",
+                    "collect_due: non-monotonic timestamp (now=%llu < last=%llu); clamping",
+                    static_cast<unsigned long long>(now_us),
+                    static_cast<unsigned long long>(m_last_collect_us));
+        now_us = m_last_collect_us;
+    }
     m_last_collect_us = now_us;
 
     uint32_t collected = 0U;

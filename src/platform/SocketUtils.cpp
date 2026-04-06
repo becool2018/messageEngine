@@ -362,8 +362,9 @@ int socket_accept(int fd)
         return -1;
     }
 
+    // G-6: a successfully accepted fd is a new socket — it must be > 2 (not stdin/stdout/stderr).
     // Power of 10: postcondition assertion
-    NEVER_COMPILED_OUT_ASSERT(client_fd >= 0);
+    NEVER_COMPILED_OUT_ASSERT(client_fd > 2);
     return client_fd;
 }
 

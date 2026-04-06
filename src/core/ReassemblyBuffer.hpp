@@ -123,7 +123,10 @@ private:
     Result validate_fragment(uint32_t idx, const MessageEnvelope& frag) const;
 
     // Place this fragment's payload into the slot buffer and record it in received_mask.
-    void record_fragment(uint32_t idx, const MessageEnvelope& frag);
+    // G-2: changed from void to Result; returns ERR_INVALID if any computed offset
+    // or accumulated byte count would exceed MSG_MAX_PAYLOAD_BYTES. The slot is NOT
+    // freed here — ingest_multifrag() frees it on ERR_INVALID.
+    Result record_fragment(uint32_t idx, const MessageEnvelope& frag);
 
     // Check if all fragments have been received.
     bool is_complete(uint32_t idx) const;

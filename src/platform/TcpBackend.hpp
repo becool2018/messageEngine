@@ -203,6 +203,13 @@ private:
     /// @param[in] src_id     NodeId extracted from the HELLO envelope.
     void handle_hello_frame(int client_fd, NodeId src_id);
 
+    /// G-3: Close and evict a client slot whose HELLO was rejected.
+    /// Calls remove_client_fd() which closes the socket and compacts the slot
+    /// arrays; callers MUST return immediately after this call because all
+    /// slot indices are invalidated by the compaction.
+    /// @param[in] client_fd  File descriptor to close and evict.
+    void close_and_evict_slot(int client_fd);
+
     /// REQ-6.1.11 / HAZ-009: verify envelope source_id matches the NodeId
     /// registered in the HELLO from this fd's slot. Returns false (and logs
     /// WARNING_HI) if the slot has a registered identity that does not match.
