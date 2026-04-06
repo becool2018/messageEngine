@@ -75,6 +75,7 @@ static bool parse_bool(const char* val, bool* out)
     NEVER_COMPILED_OUT_ASSERT(val != nullptr);
     NEVER_COMPILED_OUT_ASSERT(out != nullptr);
     char* end = nullptr;
+    errno = 0;
     unsigned long v = strtoul(val, &end, 10);
     if (end == val || *end != '\0') { return false; }
     *out = (v != 0UL);
