@@ -33,6 +33,7 @@
 #include "SocketUtils.hpp"
 #include "core/Serializer.hpp"
 #include <cerrno>
+#include <climits>
 #include "core/Assert.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
