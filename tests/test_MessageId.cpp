@@ -107,6 +107,61 @@ static bool test_min_valid_seed()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 5: Multiple independent generators do not share state
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.1
+static bool test_independent_generators()
+{
+    MessageIdGen gen_a;
+    MessageIdGen gen_b;
+    gen_a.init(1000ULL);
+    gen_b.init(2000ULL);
+
+    // Each generator produces its own independent sequence
+    uint64_t a1 = gen_a.next();
+    uint64_t b1 = gen_b.next();
+
+    assert(a1 == 1000ULL);   // gen_a starts at its seed
+    assert(b1 == 2000ULL);   // gen_b starts at its seed
+    assert(a1 != b1);        // independent generators have different values
+
+    // Interleave calls: neither should affect the other
+    uint64_t a2 = gen_a.next();
+    uint64_t b2 = gen_b.next();
+
+    assert(a2 == 1001ULL);   // gen_a increments independently
+    assert(b2 == 2001ULL);   // gen_b increments independently
+    assert(a2 != b2);        // values remain distinct
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 6: Re-initializing a generator resets its sequence
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.1
+static bool test_reinit_resets_sequence()
+{
+    MessageIdGen gen;
+    gen.init(500ULL);
+
+    uint64_t id1 = gen.next();
+    assert(id1 == 500ULL);    // first ID is the seed
+
+    // Advance the generator a few steps
+    (void)gen.next();  // 501
+    (void)gen.next();  // 502
+
+    // Re-initialize with the same seed: sequence resets
+    gen.init(500ULL);
+    uint64_t id_reset = gen.next();
+    assert(id_reset == 500ULL);  // Assert: restart from seed after re-init
+    assert(id_reset == id1);     // Assert: same as first call before re-init
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main()
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -123,6 +178,8 @@ int main()
         { "test_monotonic_increment",  test_monotonic_increment  },
         { "test_wraparound_recovery",  test_wraparound_recovery  },
         { "test_min_valid_seed",       test_min_valid_seed       },
+        { "test_independent_generators", test_independent_generators },
+        { "test_reinit_resets_sequence", test_reinit_resets_sequence },
     };
     static const uint32_t NUM_TESTS =
         static_cast<uint32_t>(sizeof(tests) / sizeof(tests[0]));

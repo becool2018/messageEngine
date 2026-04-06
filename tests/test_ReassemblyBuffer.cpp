@@ -599,6 +599,102 @@ static bool test_sweep_stale_prevents_slot_exhaustion()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 13: sweep_expired() frees slots whose expiry_us has passed
+// Verifies: REQ-3.2.3, REQ-3.3.3
+//
+// Scenario:
+//   1. Open two multi-fragment slots with different expiry times.
+//   2. Call sweep_expired() at a time between the two expiries.
+//   3. The earlier-expiring slot is freed; the later-expiring slot is kept.
+//   4. After sweeping, a new fragment for the freed slot's message_id opens
+//      a fresh slot (slot becomes reusable).
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_sweep_expired_frees_expired_slot()
+{
+    ReassemblyBuffer buf;
+    buf.init();
+
+    static const uint8_t p4[4U] = { 0x11U, 0x22U, 0x33U, 0x44U };
+
+    // Fragment A (message_id=20000): expiry at 1 000 000 us
+    MessageEnvelope fA0;
+    make_fragment(fA0, 20000ULL, 50U, 0U, 2U, 8U, p4, 4U);
+    fA0.expiry_time_us = 1000000ULL;
+
+    // Fragment B (message_id=20001): expiry at 3 000 000 us
+    MessageEnvelope fB0;
+    make_fragment(fB0, 20001ULL, 51U, 0U, 2U, 8U, p4, 4U);
+    fB0.expiry_time_us = 3000000ULL;
+
+    MessageEnvelope out;
+    envelope_init(out);
+
+    // Ingest first fragments of both messages (both slots open)
+    Result rA = buf.ingest(fA0, out, 500000ULL);
+    assert(rA == Result::ERR_AGAIN);  // Assert: slot A opened, waiting for frag 1
+
+    Result rB = buf.ingest(fB0, out, 500000ULL);
+    assert(rB == Result::ERR_AGAIN);  // Assert: slot B opened, waiting for frag 1
+
+    // Sweep at 2 000 000 us: slot A (expiry=1 000 000) must be freed;
+    // slot B (expiry=3 000 000) must survive.
+    buf.sweep_expired(2000000ULL);
+
+    // Slot A was freed: re-injecting fA0 must open a new slot (ERR_AGAIN, not ERR_FULL)
+    MessageEnvelope fA0_retry;
+    make_fragment(fA0_retry, 20000ULL, 50U, 0U, 2U, 8U, p4, 4U);
+    fA0_retry.expiry_time_us = 9000000ULL;  // fresh expiry
+    Result rA_retry = buf.ingest(fA0_retry, out, 2000001ULL);
+    assert(rA_retry == Result::ERR_AGAIN);  // Assert: new slot allocated for A
+
+    // Slot B still active: its second fragment should complete reassembly
+    MessageEnvelope fB1;
+    make_fragment(fB1, 20001ULL, 51U, 1U, 2U, 8U, p4, 4U);
+    fB1.expiry_time_us = 3000000ULL;
+    Result rB1 = buf.ingest(fB1, out, 2000001ULL);
+    assert(rB1 == Result::OK);  // Assert: slot B completed (was not swept)
+    assert(out.source_id == 51U);  // Assert: reassembled from correct source
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 14: sweep_expired() — expiry_us == 0 means never-expires (not freed)
+// Verifies: REQ-3.2.3
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_sweep_expired_zero_expiry_never_freed()
+{
+    ReassemblyBuffer buf;
+    buf.init();
+
+    static const uint8_t p4[4U] = { 0xAAU, 0xBBU, 0xCCU, 0xDDU };
+
+    // Fragment with expiry_us == 0 (never expires)
+    MessageEnvelope f0;
+    make_fragment(f0, 30000ULL, 60U, 0U, 2U, 8U, p4, 4U);
+    f0.expiry_time_us = 0ULL;  // 0 = never expires
+
+    MessageEnvelope out;
+    envelope_init(out);
+
+    Result r0 = buf.ingest(f0, out, 1000000ULL);
+    assert(r0 == Result::ERR_AGAIN);  // Assert: slot opened
+
+    // Sweep at a very large time — should NOT free the slot (expiry == 0)
+    buf.sweep_expired(0xFFFFFFFFFFFFFFFFULL);
+
+    // The slot must still be alive: second fragment should complete reassembly
+    MessageEnvelope f1;
+    make_fragment(f1, 30000ULL, 60U, 1U, 2U, 8U, p4, 4U);
+    f1.expiry_time_us = 0ULL;
+    Result r1 = buf.ingest(f1, out, 2000000ULL);
+    assert(r1 == Result::OK);      // Assert: reassembly completed (slot survived sweep)
+    assert(out.source_id == 60U);  // Assert: correct source
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -652,6 +748,14 @@ int main()
     if (!test_sweep_stale_prevents_slot_exhaustion()) {
         printf("FAIL: test_sweep_stale_prevents_slot_exhaustion\n"); ++failed;
     } else { printf("PASS: test_sweep_stale_prevents_slot_exhaustion\n"); }
+
+    if (!test_sweep_expired_frees_expired_slot()) {
+        printf("FAIL: test_sweep_expired_frees_expired_slot\n"); ++failed;
+    } else { printf("PASS: test_sweep_expired_frees_expired_slot\n"); }
+
+    if (!test_sweep_expired_zero_expiry_never_freed()) {
+        printf("FAIL: test_sweep_expired_zero_expiry_never_freed\n"); ++failed;
+    } else { printf("PASS: test_sweep_expired_zero_expiry_never_freed\n"); }
 
     return (failed > 0) ? 1 : 0;
 }
