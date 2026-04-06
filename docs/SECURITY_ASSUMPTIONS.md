@@ -27,11 +27,33 @@ Affected functions:
 - `ReassemblyBuffer::ingest(frag, out, now_us)`
 - `ReassemblyBuffer::sweep_stale(now_us, threshold)`
 
-**Enforcement:** `AckTracker` and `RetryManager` assert monotonicity via
-`NEVER_COMPILED_OUT_ASSERT` and will trigger a FATAL reset on violation.
-Other components log `WARNING_HI` or exhibit degraded behaviour (e.g.,
-stale reassembly slots not freed on the sweep cycle that receives a
-backward timestamp).
+**Enforcement (updated G-1 / SEC-007):**
+
+- `AckTracker::sweep_expired()` and `RetryManager::collect_due()` previously asserted
+  `NEVER_COMPILED_OUT_ASSERT(now_us >= m_last_sweep_us)`, which triggered `abort()` on
+  any backward timestamp. As of commit d7584dd (G-1), this assert was replaced with a
+  **WARNING_HI + clamp**: `now_us` is silently clamped to `m_last_sweep_us` and
+  processing continues. The process degrades gracefully (slots may expire one sweep
+  late) rather than crashing. The `now_us != 0ULL` precondition assert is retained.
+
+- `DeliveryEngine` now enforces the monotonic contract at its own public API boundary
+  (SEC-007, commit 3d58a1c). `send()`, `receive()`, `pump_retries()`, and
+  `sweep_ack_timeouts()` each check `now_us >= m_last_now_us` on entry; a backward
+  timestamp logs WARNING_HI and returns `ERR_INVALID` immediately. This catches
+  violations before they propagate to inner components.
+
+- `ReassemblyBuffer` and `OrderingBuffer` log `WARNING_HI` on backward timestamps and
+  may fail to sweep stale slots on the affected cycle.
+
+**Summary by component:**
+
+| Component | Backward-timestamp behavior |
+|---|---|
+| `AckTracker::sweep_expired()` | WARNING_HI + clamp; degraded (slot expiry deferred by one sweep) |
+| `RetryManager::collect_due()` | WARNING_HI + clamp; degraded (retry deferred by one sweep) |
+| `DeliveryEngine` (public API) | WARNING_HI + ERR_INVALID; call rejected at API boundary |
+| `ReassemblyBuffer::sweep_stale()` | WARNING_HI; stale slot not reclaimed until next valid timestamp |
+| `OrderingBuffer` | WARNING_HI; held message not advanced on that sweep |
 
 **Risk if violated:** Pending ACK and retry slots will not expire, permanently
 exhausting fixed-capacity tables (`ACK_TRACKER_CAPACITY` = 32 slots,
@@ -82,7 +104,19 @@ Each backend must silently discard any envelope whose wire-level source does not
 match the claimed source_id and log a WARNING_HI before the envelope reaches
 `DeliveryEngine::receive()`.
 
-REQ-6.1.11 is now enforced: `validate_source_id()` in `TcpBackend` and `TlsTcpBackend` checks the inbound envelope's `source_id` against the NodeId registered via HELLO for that connection slot before passing any frame to `DeliveryEngine`. A mismatch results in silent discard and WARNING_HI.
+REQ-6.1.11 is now enforced:
+
+- **Server mode (TcpBackend / TlsTcpBackend):** `validate_source_id()` checks the inbound
+  envelope's `source_id` against the NodeId registered via HELLO for that connection slot
+  before passing any frame to `DeliveryEngine`. A mismatch results in silent discard and
+  WARNING_HI. Cross-slot duplicate NodeId is also rejected: `handle_hello_frame()` scans
+  all active slots and evicts the newcomer if the NodeId is already registered (SEC-012 /
+  DEF-018-4 for TlsTcpBackend; G-3 + F-13 for TcpBackend).
+
+- **Client mode (TlsTcpBackend):** After the TLS handshake, the first non-invalid
+  `source_id` received from the server is locked in (SEC-011 / DEF-018-3). Subsequent
+  frames from the server with a different `source_id` are logged at WARNING_HI and dropped.
+  This prevents mid-session source_id substitution on the client side.
 
 **Risk if violated:** A peer that spoofs another peer's `source_id` can inject
 messages that are processed as if from the legitimate peer, potentially
@@ -159,6 +193,26 @@ CA-chain validation alone does not prevent impersonation by any certificate from
 the same trusted CA (CWE-297 / MitM). The `DtlsUdpBackend` client path is required
 to call `ssl_set_hostname` after `ssl_setup` and treat any non-zero return as fatal
 (returns `ERR_IO`). See HAZ-008 in docs/HAZARD_ANALYSIS.md.
+
+---
+
+## §11 TLS TCP peer certificate hostname validation (SEC-021 — mirrors §8 for TCP)
+
+When `TlsConfig::verify_peer` is true and `TlsConfig::peer_hostname` is non-empty,
+the TLS TCP client validates that the server certificate's CN or SAN matches
+`peer_hostname` via `mbedtls_ssl_set_hostname()`. Without this binding, CA-chain
+validation alone does not prevent impersonation by any certificate from the same
+trusted CA (CWE-297 / MitM).
+
+**Enforcement (SEC-021, commit 4cda101):**
+`tls_connect_handshake()` in `TlsTcpBackend` rejects `verify_peer=true` with an empty
+`peer_hostname` before the handshake begins: logs WARNING_HI and returns `ERR_INVALID`.
+This mirrors the DtlsUdpBackend SEC-001 fix documented in §8 above and closes the
+same CWE-297 gap for the TLS TCP transport. See HAZ-008 in docs/HAZARD_ANALYSIS.md.
+
+**Invariant:** Both TLS-capable backends (TlsTcpBackend and DtlsUdpBackend) now enforce
+the rule: `verify_peer=true` with an empty `peer_hostname` is a configuration error
+that must be rejected before the handshake is attempted.
 
 ---
 
