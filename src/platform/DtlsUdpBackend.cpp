@@ -288,6 +288,23 @@ Result DtlsUdpBackend::setup_dtls_config(const TlsConfig& tls_cfg)
     res = setup_cookie_if_server(tls_cfg);
     if (!result_ok(res)) { return res; }
 
+    // Security fix: restrict to AEAD-only cipher suites; prohibit CBC, NULL, and RSA-kx.
+    // Power of 10 Rule 3: static const array — no dynamic allocation.
+    static const int k_allowed_ciphersuites[] = {
+        MBEDTLS_TLS1_3_AES_128_GCM_SHA256,
+        MBEDTLS_TLS1_3_AES_256_GCM_SHA384,
+        MBEDTLS_TLS1_3_CHACHA20_POLY1305_SHA256,
+        MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+        MBEDTLS_TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        MBEDTLS_TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        0  // terminator
+    };
+    mbedtls_ssl_conf_ciphersuites(&m_ssl_conf, k_allowed_ciphersuites);
+
+    // Enforce minimum DTLS 1.2; prohibit DTLS 1.0.
+    (void)mbedtls_ssl_conf_min_tls_version(&m_ssl_conf, MBEDTLS_SSL_VERSION_TLS1_2);
+
     Logger::log(Severity::INFO, "DtlsUdpBackend",
                 "DTLS config ready: role=%s verify_peer=%d cert=%s",
                 (tls_cfg.role == TlsRole::SERVER) ? "SERVER" : "CLIENT",
