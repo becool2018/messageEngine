@@ -75,6 +75,22 @@ TcpBackend::send_to_all_clients(buf, len)      [TcpBackend.cpp]
 
 ---
 
+## 6a. Unicast Routing (REQ-6.1.9) — added with HELLO registration fix
+
+`TcpBackend::send_message()` routes outbound frames based on `destination_id`:
+
+| destination_id | Routing action |
+|---|---|
+| 0 (NODE_ID_INVALID) | Broadcast: `flush_delayed_to_clients()` calls `send_to_all_clients()` for all connected slots |
+| > 0 | Unicast: `flush_delayed_to_clients()` calls `find_client_slot(destination_id)` then `send_to_slot(slot, buf, len)` for the single matched slot |
+| > 0, no slot found | `ERR_INVALID` returned; WARNING_HI logged; no bytes sent |
+
+The routing decision is made inside `flush_delayed_to_clients()` per-message, so
+delayed/reordered messages are routed correctly even if they were queued before
+the slot registration was observed.
+
+---
+
 ## 7. Concurrency / Threading Behavior
 
 - Synchronous in the backend's calling thread.

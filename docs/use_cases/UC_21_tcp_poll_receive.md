@@ -79,6 +79,26 @@ TcpBackend::receive_message()              [TcpBackend.cpp]
 
 ---
 
+## 6a. HELLO Frame Interception (REQ-6.1.8) — added with HELLO registration fix
+
+Inside `recv_from_client()`, after `Serializer::deserialize()` succeeds, the
+message_type is checked before the impairment engine is consulted:
+
+```
+if (env.message_type == MessageType::HELLO):
+    handle_hello_frame(client_fd, env.source_id)
+        → scan m_client_fds[] to find slot for client_fd
+        → m_client_node_ids[slot] = env.source_id
+        → log INFO "Registered client NodeId N at slot S"
+    return ERR_AGAIN   ← frame consumed; not a user message; not impaired
+```
+
+HELLO frames are never pushed to `m_recv_queue` and never reach DeliveryEngine.
+The `ERR_AGAIN` return is silently discarded by `drain_readable_clients()` (the
+caller casts the return to void), so the poll loop continues normally.
+
+---
+
 ## 7. Concurrency / Threading Behavior
 
 - Synchronous in the application's thread.

@@ -52,7 +52,7 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 ---
 
 ## HL-7: Start a Server Endpoint
-> User initialises a transport in server mode; System binds to the configured IP/port and begins accepting connections.
+> User initialises a transport in server mode; System binds to the configured IP/port and begins accepting connections. After init, the server stores its local NodeId so inbound HELLO frames can be matched against the per-client routing table (HL-30).
 
 - UC_19 — TCP server bind, listen, and non-blocking accept loop
 - UC_35 — (See HL-8) Client connects; server accept fd becomes a client slot
@@ -60,7 +60,7 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 ---
 
 ## HL-8: Start a Client Endpoint
-> User initialises a transport in client mode; System connects to the configured peer IP/port within the configured timeout.
+> User initialises a transport in client mode; System connects to the configured peer IP/port within the configured timeout. After the connection succeeds, DeliveryEngine calls `transport->register_local_id(local_id)` which causes the client to send a HELLO frame to the server (HL-30).
 
 - UC_35 — TCP client connect with configurable timeout
 
@@ -235,6 +235,29 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 
 ---
 
+## HL-30: TCP/TLS Client NodeId Registration on Connect
+> When a TCP or TLS client endpoint initialises, the system automatically sends a
+> HELLO frame carrying the client's local NodeId to the server, enabling the server
+> to build its per-client routing table.
+
+- UC_62 — TCP client sends HELLO frame on connect
+- UC_63 — TLS client sends HELLO frame on connect (via TLS session)
+- UC_64 — TCP server receives HELLO and registers client NodeId
+- UC_65 — TLS server receives HELLO and registers client NodeId
+
+---
+
+## HL-31: TCP/TLS Server Unicast Message Routing
+> When a message is sent on a server endpoint with a specific destination_id, the
+> server routes it only to the client whose registered NodeId matches. Broadcast
+> (destination_id == 0) fans out to all clients as before.
+
+- UC_66 — TCP server routes unicast frame to matched client slot
+- UC_67 — TLS server routes unicast frame to matched TLS session
+- UC_68 — Unicast send to unregistered NodeId returns ERR_INVALID
+
+---
+
 ## Application Workflow (above system boundary)
 
 These use cases document patterns that combine multiple system calls and sit at
@@ -265,3 +288,10 @@ at the User → System boundary.
 - UC_56 — AssertState / IResetHandler / AbortResetHandler — assertion-failure flag and handler dispatch; infrastructure for NEVER_COMPILED_OUT_ASSERT; not called from application code
 - UC_57 — ISocketOps / SocketOpsImpl — injectable POSIX socket adapter used by TcpBackend, UdpBackend, TlsTcpBackend, DtlsUdpBackend for fault injection in tests; production code uses the singleton SocketOpsImpl; never called by the user
 - UC_58 — IMbedtlsOps / MbedtlsOpsImpl — injectable mbedTLS adapter used by DtlsUdpBackend for fault injection in tests; production code uses the singleton MbedtlsOpsImpl; never called by the user
+- UC_62 — TCP client sends HELLO frame on connect — `TcpBackend::register_local_id()` / `send_hello_frame()` called internally by DeliveryEngine after init; never by the user
+- UC_63 — TLS client sends HELLO frame on connect — `TlsTcpBackend::register_local_id()` / `send_hello_frame()` called internally by DeliveryEngine after init; never by the user
+- UC_64 — TCP server receives HELLO and registers client NodeId — `TcpBackend::handle_hello_frame()` called internally by `recv_from_client()` when `message_type == HELLO`; never by the user
+- UC_65 — TLS server receives HELLO and registers client NodeId — `TlsTcpBackend::handle_hello_frame()` called internally by `tls_recv_client_frame()` when `message_type == HELLO`; never by the user
+- UC_66 — TCP server routes unicast frame to matched client slot — `flush_delayed_to_clients()` / `find_client_slot()` / `send_to_slot()` called internally by `TcpBackend::send_message()`; never by the user
+- UC_67 — TLS server routes unicast frame to matched TLS session — `flush_delayed_to_clients()` / `find_client_slot()` / `tls_send_frame()` called internally by `TlsTcpBackend::send_message()`; never by the user
+- UC_68 — Unicast send to unregistered NodeId — `find_client_slot()` returns `MAX_TCP_CONNECTIONS`; WARNING_HI logged; `ERR_INVALID` returned to caller
