@@ -31,6 +31,11 @@
 #include "Logger.hpp"
 #include "Timestamp.hpp"
 
+// SECfix-7: per-peer maximum hold slots.  A single source may occupy at most
+// half the total hold capacity so it cannot starve all other ordered peers.
+// With ORDERING_HOLD_COUNT = 8 this gives 4 slots per peer.
+static const uint32_t k_hold_per_peer_max = ORDERING_HOLD_COUNT / 2U;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // OrderingBuffer::init
 // ─────────────────────────────────────────────────────────────────────────────
@@ -46,10 +51,12 @@ void OrderingBuffer::init(NodeId local_node)
     }
 
     for (uint32_t i = 0U; i < ORDERING_PEER_COUNT; ++i) {
-        m_peers[i].active           = false;
-        m_peers[i].src              = 0U;
+        m_peers[i].active            = false;
+        m_peers[i].src               = 0U;
         m_peers[i].next_expected_seq = 1U;  // sequences start at 1
+        m_peers[i].lru_stamp         = 0U;
     }
+    m_lru_counter = 0U;
 
     m_initialized = true;
     m_local_node  = local_node;
@@ -76,6 +83,120 @@ uint32_t OrderingBuffer::find_peer(NodeId src) const
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// OrderingBuffer::count_holds_for_peer (private)
+// ─────────────────────────────────────────────────────────────────────────────
+uint32_t OrderingBuffer::count_holds_for_peer(NodeId src) const
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: initialized
+    NEVER_COMPILED_OUT_ASSERT(src != 0U);       // Assert: valid source
+
+    uint32_t count = 0U;
+    // Power of 10 Rule 2: bounded loop
+    for (uint32_t i = 0U; i < ORDERING_HOLD_COUNT; ++i) {
+        if (m_hold[i].active && m_hold[i].env.source_id == src) {
+            ++count;
+        }
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(count <= ORDERING_HOLD_COUNT);  // Assert: count bounded
+    return count;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OrderingBuffer::evict_peer_no_holds (private)
+// Phase-1 eviction: scan active peers for one with no hold slots.
+// Evicts immediately if found and returns the freed index.
+// Returns ORDERING_PEER_COUNT if every peer has at least one hold.
+// Power of 10 Rule 5: 2 assertions. CC <= 10.
+// ─────────────────────────────────────────────────────────────────────────────
+uint32_t OrderingBuffer::evict_peer_no_holds()
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);             // Assert: initialized
+    NEVER_COMPILED_OUT_ASSERT(ORDERING_PEER_COUNT > 0U);  // Assert: valid capacity
+
+    for (uint32_t i = 0U; i < ORDERING_PEER_COUNT; ++i) {
+        if (!m_peers[i].active) { continue; }
+        if (count_holds_for_peer(m_peers[i].src) == 0U) {
+            Logger::log(Severity::WARNING_HI, "OrderingBuffer",
+                        "peer table full: evicting peer src=%u (no holds; SECfix-2)",
+                        static_cast<unsigned>(m_peers[i].src));
+            m_peers[i].active = false;
+            return i;
+        }
+    }
+    return ORDERING_PEER_COUNT;  // all peers have holds
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OrderingBuffer::find_lru_peer_idx (private)
+// Scan active peers and return the index with the smallest lru_stamp.
+// Called only when the peer table is full, so at least one entry is active.
+// Power of 10 Rule 5: 2 assertions. CC <= 10.
+// ─────────────────────────────────────────────────────────────────────────────
+uint32_t OrderingBuffer::find_lru_peer_idx() const
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);             // Assert: initialized
+    NEVER_COMPILED_OUT_ASSERT(ORDERING_PEER_COUNT > 0U);  // Assert: valid capacity
+
+    uint32_t lru_idx = 0U;
+    for (uint32_t i = 1U; i < ORDERING_PEER_COUNT; ++i) {
+        if (m_peers[i].lru_stamp < m_peers[lru_idx].lru_stamp) {
+            lru_idx = i;
+        }
+    }
+    return lru_idx;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OrderingBuffer::free_holds_for_peer (private)
+// Release all hold slots whose source_id matches the peer at peer_idx.
+// Power of 10 Rule 5: 2 assertions. CC <= 10.
+// ─────────────────────────────────────────────────────────────────────────────
+void OrderingBuffer::free_holds_for_peer(uint32_t peer_idx)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);                   // Assert: initialized
+    NEVER_COMPILED_OUT_ASSERT(peer_idx < ORDERING_PEER_COUNT);  // Assert: valid index
+
+    for (uint32_t j = 0U; j < ORDERING_HOLD_COUNT; ++j) {
+        if (m_hold[j].active &&
+            m_hold[j].env.source_id == m_peers[peer_idx].src) {
+            m_hold[j].active = false;
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OrderingBuffer::evict_lru_peer (private)
+// Selects the LRU peer slot: first looks for a peer with zero active hold slots
+// (evicting such a peer loses no buffered state); if all have holds, picks the
+// one with the smallest lru_stamp.  Frees all hold slots belonging to the chosen
+// peer and logs WARNING_HI.
+// SECfix-2: prevents 16 spoofed senders permanently exhausting the peer table.
+// Power of 10 Rule 5: 2 assertions. CC <= 10.
+// ─────────────────────────────────────────────────────────────────────────────
+uint32_t OrderingBuffer::evict_lru_peer()
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: initialized
+
+    // Phase 1: prefer a peer with no active hold slots (no buffered state).
+    uint32_t no_holds_idx = evict_peer_no_holds();
+    if (no_holds_idx != ORDERING_PEER_COUNT) {
+        return no_holds_idx;
+    }
+
+    // Phase 2: all peers have holds — evict the one with the smallest lru_stamp.
+    uint32_t lru_idx = find_lru_peer_idx();
+    free_holds_for_peer(lru_idx);
+    Logger::log(Severity::WARNING_HI, "OrderingBuffer",
+                "peer table full: evicting LRU peer src=%u (SECfix-2)",
+                static_cast<unsigned>(m_peers[lru_idx].src));
+    m_peers[lru_idx].active = false;
+
+    NEVER_COMPILED_OUT_ASSERT(lru_idx < ORDERING_PEER_COUNT);  // Assert: valid index
+    return lru_idx;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // OrderingBuffer::get_or_create_peer (private)
 // ─────────────────────────────────────────────────────────────────────────────
 uint32_t OrderingBuffer::get_or_create_peer(NodeId src)
@@ -85,6 +206,9 @@ uint32_t OrderingBuffer::get_or_create_peer(NodeId src)
 
     uint32_t idx = find_peer(src);
     if (idx != ORDERING_PEER_COUNT) {
+        // Update LRU stamp on access (SECfix-2)
+        ++m_lru_counter;
+        m_peers[idx].lru_stamp = m_lru_counter;
         return idx;  // already tracked
     }
 
@@ -95,11 +219,23 @@ uint32_t OrderingBuffer::get_or_create_peer(NodeId src)
             m_peers[i].active            = true;
             m_peers[i].src               = src;
             m_peers[i].next_expected_seq = 1U;
+            ++m_lru_counter;
+            m_peers[i].lru_stamp         = m_lru_counter;
             return i;
         }
     }
 
-    return ORDERING_PEER_COUNT;  // no free peer slot
+    // All peer slots full: evict the LRU peer to make room.
+    // SECfix-2: prevents 16 spoofed senders permanently exhausting the peer table.
+    uint32_t evicted = evict_lru_peer();
+    m_peers[evicted].active            = true;
+    m_peers[evicted].src               = src;
+    m_peers[evicted].next_expected_seq = 1U;
+    ++m_lru_counter;
+    m_peers[evicted].lru_stamp         = m_lru_counter;
+
+    NEVER_COMPILED_OUT_ASSERT(evicted < ORDERING_PEER_COUNT);  // Assert: valid slot returned
+    return evicted;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -226,6 +362,14 @@ Result OrderingBuffer::ingest(const MessageEnvelope& msg,
         // Already held: silently discard the duplicate (same behaviour as the
         // already-delivered duplicate path above).
         return Result::ERR_AGAIN;
+    }
+
+    // SECfix-7: enforce per-peer hold cap to prevent single source exhausting all hold slots.
+    if (count_holds_for_peer(msg.source_id) >= k_hold_per_peer_max) {
+        Logger::log(Severity::WARNING_HI, "OrderingBuffer",
+                    "per-peer hold cap reached for src=%u; dropping out-of-order msg seq=%u",
+                    msg.source_id, msg.sequence_num);
+        return Result::ERR_FULL;
     }
 
     uint32_t hold_idx = find_free_hold();

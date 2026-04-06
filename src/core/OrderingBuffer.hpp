@@ -118,6 +118,7 @@ private:
         NodeId   src;
         uint32_t next_expected_seq;
         bool     active;
+        uint32_t lru_stamp;  ///< LRU counter — higher = more recently accessed. SECfix-2.
     };
 
     HoldSlot  m_hold[ORDERING_HOLD_COUNT] = {};
@@ -126,6 +127,7 @@ private:
     PeerState m_peers[ORDERING_PEER_COUNT] = {};
     bool      m_initialized = false;
     NodeId    m_local_node  = 0U;
+    uint32_t  m_lru_counter = 0U;  ///< Monotonically-increasing LRU stamp counter. SECfix-2.
 
     // Private helpers — extracted to keep ingest() CC ≤ 10
 
@@ -141,6 +143,26 @@ private:
 
     // Find a held message for (src, seq). Returns ORDERING_HOLD_COUNT if not found.
     uint32_t find_held(NodeId src, uint32_t seq) const;
+
+    /// Evict the LRU peer slot: preferably one with no active hold slots.
+    /// Frees all hold slots belonging to the evicted peer.
+    /// Returns the freed slot index.
+    uint32_t evict_lru_peer();
+
+    /// Phase-1 of LRU eviction: find a peer with no active hold slots.
+    /// Returns index of such peer (after evicting it) if found, else ORDERING_PEER_COUNT.
+    uint32_t evict_peer_no_holds();
+
+    /// Find the peer index with the smallest lru_stamp among active peers.
+    /// Returns the index (always valid since table is full when called).
+    uint32_t find_lru_peer_idx() const;
+
+    /// Free all hold slots belonging to the peer at peer_idx.
+    void free_holds_for_peer(uint32_t peer_idx);
+
+    /// Count the number of active hold slots for src (O(ORDERING_HOLD_COUNT)).
+    /// Used to enforce per-peer hold cap (SECfix-7).
+    uint32_t count_holds_for_peer(NodeId src) const;
 
     /// Advance next_expected_seq for peer at peer_idx by one, guarding against u32 wraparound.
     /// On wraparound (0xFFFFFFFF -> 0), logs WARNING_HI and resets to 1U.

@@ -780,7 +780,7 @@ Result DeliveryEngine::handle_data_dedup(const MessageEnvelope& env, uint64_t no
     }
 
     // Power of 10 rule 7: check return value
-    Result dedup_res = m_dedup.check_and_record(env.source_id, env.message_id);
+    Result dedup_res = m_dedup.check_and_record(env.source_id, env.message_id, now_us);
     if (dedup_res != Result::ERR_DUPLICATE) {
         NEVER_COMPILED_OUT_ASSERT(dedup_res == Result::OK);  // Assert: no other error expected
         return Result::OK;

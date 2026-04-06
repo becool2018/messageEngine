@@ -33,6 +33,7 @@
 #include "core/Logger.hpp"
 #include <cstring>
 #include <ctime>
+#include <fcntl.h>
 #include <unistd.h>
 #if !defined(__APPLE__)
 #include <sys/random.h>
@@ -96,18 +97,27 @@ void ImpairmentEngine::init(const ImpairmentConfig& cfg)
         // POSIX API signature; no safer cast exists for this OS call.
         // CERT INT32-C: getrandom() returns ssize_t; compare against cast sizeof to avoid
         // signed/unsigned mismatch warning (-Wsign-compare).
+        // Tier 1: getrandom() — preferred; direct kernel CSPRNG.
         {
             ssize_t got = getrandom(
                 static_cast<void*>(&entropy),       // MISRA 5.2.4: void* required by POSIX API
                 sizeof(entropy), 0U);
             if (got != static_cast<ssize_t>(sizeof(entropy))) {
-                // Degraded-mode fallback: entropy source unavailable (e.g., early boot).
-                // This is NOT production-safe alone; log WARNING_HI so the operator is aware.
+                // Tier 2: /dev/urandom — available even early-boot when getrandom() blocks.
+                // SECfix-4: adds /dev/urandom tier missing from prior two-tier chain.
                 Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
-                            "getrandom() failed (got=%ld); falling back to clock()-based seed "
-                            "— not cryptographically secure",
+                            "getrandom() failed (got=%ld); trying /dev/urandom",
                             static_cast<long>(got));
-                entropy = static_cast<uint64_t>(clock());
+                int urfd = open("/dev/urandom", O_RDONLY);
+                if (urfd >= 0) {
+                    ssize_t r = read(urfd, static_cast<void*>(&entropy), sizeof(entropy));
+                    (void)close(urfd);
+                    if (r != static_cast<ssize_t>(sizeof(entropy))) {
+                        entropy = 0ULL;  // Mark as failed; tier 3 will handle it.
+                    }
+                } else {
+                    entropy = 0ULL;  // Mark as failed; tier 3 will handle it.
+                }
             }
         }
 #endif
@@ -264,6 +274,47 @@ uint64_t ImpairmentEngine::compute_jitter_us()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// compute_release_us() — private helper
+// ─────────────────────────────────────────────────────────────────────────────
+
+uint64_t ImpairmentEngine::compute_release_us(uint64_t now_us,
+                                               uint64_t base_delay_us,
+                                               uint64_t jitter_us)
+{
+    // Power of 10 rule 5: precondition assertions
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Power of 10: initialized
+    NEVER_COMPILED_OUT_ASSERT(base_delay_us <= UINT64_MAX / 2ULL);  // Power of 10: sane delay
+
+    // CERT INT30-C: guard three-term uint64_t addition against overflow.
+    // Cap each intermediate sum at UINT64_MAX/2 to prevent silent wrap-around.
+    // (SECfix-6: three-term addition overflow extracted from process_outbound)
+    static const uint64_t k_release_cap_us = UINT64_MAX / 2ULL;
+    uint64_t delay_total_us = 0ULL;
+    if (base_delay_us > k_release_cap_us - jitter_us) {
+        Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
+                    "delay overflow: base=%llu jitter=%llu; clamping to cap",
+                    static_cast<unsigned long long>(base_delay_us),
+                    static_cast<unsigned long long>(jitter_us));
+        delay_total_us = k_release_cap_us;
+    } else {
+        delay_total_us = base_delay_us + jitter_us;
+    }
+    uint64_t release_us = 0ULL;
+    if (now_us > UINT64_MAX - delay_total_us) {
+        Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
+                    "release_us overflow: now=%llu delay=%llu; clamping to UINT64_MAX",
+                    static_cast<unsigned long long>(now_us),
+                    static_cast<unsigned long long>(delay_total_us));
+        release_us = UINT64_MAX;
+    } else {
+        release_us = now_us + delay_total_us;
+    }
+    // Power of 10 rule 5: postcondition assertion
+    NEVER_COMPILED_OUT_ASSERT(release_us >= now_us || release_us == UINT64_MAX);
+    return release_us;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // check_delay_buf_watermark() — private helper
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -329,9 +380,10 @@ Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env,
     }
 
     // Calculate release time: fixed latency + jitter (REQ-5.1.1, REQ-5.1.2)
+    // CERT INT30-C overflow guards are inside compute_release_us() (SECfix-6).
     uint64_t base_delay_us = static_cast<uint64_t>(m_cfg.fixed_latency_ms) * 1000ULL;
     uint64_t jitter_us = compute_jitter_us();
-    uint64_t release_us = now_us + base_delay_us + jitter_us;
+    uint64_t release_us = compute_release_us(now_us, base_delay_us, jitter_us);
 
     // Queue the message in the delay buffer
     if (m_delay_count >= IMPAIR_DELAY_BUF_SIZE) {

@@ -181,10 +181,15 @@ DtlsUdpBackend::~DtlsUdpBackend()
 
 Result DtlsUdpBackend::load_certs_and_key(const TlsConfig& tls_cfg)
 {
+    // SECfix-5: verify NUL termination within TLS_PATH_MAX before passing to fopen()
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.cert_file));
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.key_file));
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.cert_file[0] != '\0');
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.key_file[0] != '\0');
 
     if (tls_cfg.verify_peer && tls_cfg.ca_file[0] != '\0') {
+        // SECfix-5: verify NUL termination within TLS_PATH_MAX before passing to fopen()
+        NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.ca_file));
         int ret = m_ops->x509_crt_parse_file(&m_ca_cert, tls_cfg.ca_file);
         if (ret != 0) {
             log_mbedtls_err("DtlsUdpBackend", "x509_crt_parse_file (CA)", ret);
@@ -228,7 +233,10 @@ Result DtlsUdpBackend::load_certs_and_key(const TlsConfig& tls_cfg)
 Result DtlsUdpBackend::load_crl_if_configured(const TlsConfig& tls_cfg)
 {
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.verify_peer);  // pre: only called when verify_peer
+    // SECfix-5: verify NUL termination within TLS_PATH_MAX before any fopen()
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.ca_file));
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.ca_file[0] != '\0');  // pre: CA cert was loaded
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.crl_file));
 
     if (tls_cfg.crl_file[0] != '\0') {
         int crl_ret = mbedtls_x509_crl_parse_file(&m_crl, tls_cfg.crl_file);
@@ -280,6 +288,8 @@ Result DtlsUdpBackend::setup_cookie_if_server(const TlsConfig& tls_cfg)
 Result DtlsUdpBackend::setup_dtls_config(const TlsConfig& tls_cfg)
 {
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.tls_enabled);
+    // SECfix-5: verify NUL termination within TLS_PATH_MAX before passing to fopen()
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.cert_file));
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.cert_file[0] != '\0');
 
     // Init PSA Crypto (mbedTLS 4.0 PSA backend replaces CTR-DRBG/entropy).

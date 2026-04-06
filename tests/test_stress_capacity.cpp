@@ -753,6 +753,12 @@ static void test_dedup_filter_window_wraparound()
     // Offset by cycle so IDs never repeat across cycles.
     static const uint64_t IDS_PER_CYCLE = static_cast<uint64_t>(DEDUP_WINDOW_SIZE) * 2ULL;
 
+    // Monotonically increasing timestamp counter.  SECfix-3: age-based eviction
+    // requires batch A entries (recorded first) to have strictly smaller timestamps
+    // than batch B entries so that batch A is chosen as "oldest" and evicted.
+    // Power of 10 Rule 3: stack-allocated counter, no dynamic allocation.
+    uint64_t now_us = 1ULL;
+
     // Power of 10 Rule 2: bounded outer loop
     for (uint32_t cycle = 0U; cycle < DEDUP_WRAP_CYCLES; ++cycle) {
 
@@ -761,7 +767,8 @@ static void test_dedup_filter_window_wraparound()
         // ── Step 1: Record batch A (DEDUP_WINDOW_SIZE entries) ────────────
         for (uint32_t i = 0U; i < DEDUP_WINDOW_SIZE; ++i) {
             const uint64_t msg_id = base + static_cast<uint64_t>(i);
-            Result r = filter.check_and_record(1U, msg_id);
+            Result r = filter.check_and_record(1U, msg_id, now_us);
+            ++now_us;
             // First time seen — must be recorded, not a duplicate.
             assert(r == Result::OK);
         }
@@ -774,10 +781,13 @@ static void test_dedup_filter_window_wraparound()
         }
 
         // ── Step 3: Record batch B — displaces batch A from the window ────
+        // now_us is strictly greater than all batch A timestamps, so batch B
+        // entries are newer; batch A entries are evicted as oldest (SECfix-3).
         const uint64_t batch_b_base = base + static_cast<uint64_t>(DEDUP_WINDOW_SIZE);
         for (uint32_t i = 0U; i < DEDUP_WINDOW_SIZE; ++i) {
             const uint64_t msg_id = batch_b_base + static_cast<uint64_t>(i);
-            Result r = filter.check_and_record(1U, msg_id);
+            Result r = filter.check_and_record(1U, msg_id, now_us);
+            ++now_us;
             assert(r == Result::OK);  // first time seen; must not be a false duplicate
         }
 

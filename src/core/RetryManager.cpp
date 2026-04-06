@@ -47,8 +47,12 @@ static uint32_t advance_backoff(uint32_t current_ms)
     // Cap before multiply: structurally prevents overflow even if
     // the precondition is weakened on a future embedded port.
     const uint32_t capped = (current_ms > 30000U) ? 30000U : current_ms;
-    const uint32_t result  = capped * 2U;
-    NEVER_COMPILED_OUT_ASSERT(result <= 60000U);  // Power of 10: post-condition
+    const uint32_t doubled = capped * 2U;
+    // CERT INT30-C: enforce 1 ms minimum backoff — prevents zero-delay retry storm
+    // when schedule() is called with backoff_ms=0 (sec eng review finding #8).
+    const uint32_t result  = (doubled == 0U) ? 1U : doubled;
+    NEVER_COMPILED_OUT_ASSERT(result <= 60000U);   // Power of 10: post-condition
+    NEVER_COMPILED_OUT_ASSERT(result > 0U);        // Assert: minimum 1 ms enforced
     return result;
 }
 
@@ -159,6 +163,7 @@ Result RetryManager::on_ack(NodeId src, uint64_t msg_id)
 
             // Cancel this retry entry
             m_slots[i].active = false;
+            NEVER_COMPILED_OUT_ASSERT(m_count > 0U);  // CERT INT30-C: guard against uint32_t underflow
             --m_count;
             ++m_stats.acks_received;  // REQ-7.2.3: record ACK-cancelled retry
 
@@ -201,6 +206,7 @@ Result RetryManager::cancel(NodeId src, uint64_t msg_id)
 
             // Deactivate the slot without recording an ACK stat
             m_slots[i].active = false;
+            NEVER_COMPILED_OUT_ASSERT(m_count > 0U);  // CERT INT30-C: guard against uint32_t underflow
             --m_count;
 
             // Power of 10 rule 5: post-condition assertion
@@ -240,6 +246,7 @@ void RetryManager::reap_terminated_slots(uint64_t now_us)
         }
         if (slot_has_expired(m_slots[i].expiry_us, now_us)) {
             m_slots[i].active = false;
+            NEVER_COMPILED_OUT_ASSERT(m_count > 0U);  // CERT INT30-C: guard against uint32_t underflow
             --m_count;
             ++m_stats.slots_expired;  // REQ-7.2.3: record expiry event
             Logger::log(Severity::WARNING_LO, "RetryManager",
@@ -249,6 +256,7 @@ void RetryManager::reap_terminated_slots(uint64_t now_us)
         }
         if (m_slots[i].retry_count >= m_slots[i].max_retries) {
             m_slots[i].active = false;
+            NEVER_COMPILED_OUT_ASSERT(m_count > 0U);  // CERT INT30-C: guard against uint32_t underflow
             --m_count;
             ++m_stats.slots_exhausted;  // REQ-7.2.3: record exhaustion event
             Logger::log(Severity::WARNING_HI, "RetryManager",

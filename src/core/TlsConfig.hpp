@@ -136,4 +136,31 @@ inline void tls_config_default(TlsConfig& cfg)
     cfg.session_ticket_lifetime_s  = 86400U; // 24 h default ticket lifetime
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// tls_path_valid — NUL-termination check for TlsConfig path fields
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Return true if @p path contains at least one NUL byte within [0, TLS_PATH_MAX).
+/// Prevents non-NUL-terminated strings from being passed to fopen() via mbedTLS,
+/// which would cause a stack overread (CWE-120).  SECfix-5.
+///
+/// Callers in TlsTcpBackend and DtlsUdpBackend wrap this in
+/// NEVER_COMPILED_OUT_ASSERT(tls_path_valid(...)) so the production assert macro
+/// is applied at the point of use where Assert.hpp is already available.
+///
+/// Power of 10 Rule 2: bounded loop (TLS_PATH_MAX compile-time constant).
+/// Power of 10 Rule 3: no dynamic allocation.
+inline bool tls_path_valid(const char* const path)
+{
+    if (path == nullptr) { return false; }
+
+    // Power of 10 Rule 2: bounded loop — compile-time constant upper bound.
+    for (uint32_t i = 0U; i < TLS_PATH_MAX; ++i) {
+        if (path[i] == '\0') {
+            return true;
+        }
+    }
+    return false;  // No NUL found within TLS_PATH_MAX bytes — invalid (CWE-120)
+}
+
 #endif // CORE_TLS_CONFIG_HPP

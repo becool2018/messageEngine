@@ -22,7 +22,10 @@
  * Rules applied:
  *   - Power of 10: fixed loop bounds (DEDUP_WINDOW_SIZE), ≥2 assertions per method.
  *   - MISRA C++: no dynamic allocation, no exceptions.
- *   - F-Prime style: simple ring-buffer state, deterministic eviction.
+ *   - F-Prime style: simple ring-buffer state, age-based eviction.
+ *   - SECfix-3: eviction changed from round-robin to oldest-first (by recorded_us) to
+ *     prevent replay-after-flooding (attacker floods 128 unique pairs to rotate the
+ *     dedup window and re-enable a previously-recorded entry).
  *
  * Implements: REQ-3.2.6, REQ-3.3.3
  */
@@ -77,18 +80,37 @@ bool DuplicateFilter::is_duplicate(NodeId src, uint64_t msg_id) const
 // Record a message in the window
 // ─────────────────────────────────────────────────────────────────────────────
 
-void DuplicateFilter::record(NodeId src, uint64_t msg_id)
+void DuplicateFilter::record(NodeId src, uint64_t msg_id, uint64_t now_us)
 {
     // Power of 10 rule 5: pre-condition assertions
-    NEVER_COMPILED_OUT_ASSERT(m_next < DEDUP_WINDOW_SIZE);  // Assert: write pointer in bounds
+    NEVER_COMPILED_OUT_ASSERT(m_next < DEDUP_WINDOW_SIZE);   // Assert: write pointer in bounds
     NEVER_COMPILED_OUT_ASSERT(m_count <= DEDUP_WINDOW_SIZE); // Assert: count is valid
+    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);                // Assert: valid timestamp
 
-    // Write entry at current position
-    m_window[m_next].src = src;
-    m_window[m_next].msg_id = msg_id;
-    m_window[m_next].valid = true;
+    // SECfix-3: When the window is full, evict the oldest-by-time entry instead
+    // of the ring-buffer position.  This prevents an attacker from flushing the
+    // window by flooding 128 unique pairs to rotate a predictable eviction pointer.
+    uint32_t write_idx = m_next;
+    if (m_count >= DEDUP_WINDOW_SIZE) {
+        // Find the entry with the smallest recorded_us (oldest).
+        // Power of 10 Rule 2: bounded loop (DEDUP_WINDOW_SIZE = 128)
+        uint32_t oldest_idx = 0U;
+        for (uint32_t i = 1U; i < DEDUP_WINDOW_SIZE; ++i) {
+            NEVER_COMPILED_OUT_ASSERT(i < DEDUP_WINDOW_SIZE);  // Assert: loop bound
+            if (m_window[i].recorded_us < m_window[oldest_idx].recorded_us) {
+                oldest_idx = i;
+            }
+        }
+        write_idx = oldest_idx;
+    }
 
-    // Advance write pointer (round-robin)
+    // Write entry at selected position
+    m_window[write_idx].src         = src;
+    m_window[write_idx].msg_id      = msg_id;
+    m_window[write_idx].recorded_us = now_us;
+    m_window[write_idx].valid       = true;
+
+    // Advance ring-buffer write pointer for the not-full path
     // Power of 10 rule 2: simple modular arithmetic
     m_next = (m_next + 1U) % DEDUP_WINDOW_SIZE;
 
@@ -107,10 +129,11 @@ void DuplicateFilter::record(NodeId src, uint64_t msg_id)
 // Check and record (combined operation)
 // ─────────────────────────────────────────────────────────────────────────────
 
-Result DuplicateFilter::check_and_record(NodeId src, uint64_t msg_id)
+Result DuplicateFilter::check_and_record(NodeId src, uint64_t msg_id, uint64_t now_us)
 {
-    // Power of 10 rule 5: pre-condition assertion
+    // Power of 10 rule 5: pre-condition assertions
     NEVER_COMPILED_OUT_ASSERT(m_count <= DEDUP_WINDOW_SIZE);  // Assert: count is consistent
+    NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);                 // Assert: valid timestamp
 
     // Check for duplicate
     if (is_duplicate(src, msg_id)) {
@@ -118,7 +141,7 @@ Result DuplicateFilter::check_and_record(NodeId src, uint64_t msg_id)
     }
 
     // Record the new message
-    record(src, msg_id);
+    record(src, msg_id, now_us);
 
     // Power of 10 rule 5: post-condition assertion
     NEVER_COMPILED_OUT_ASSERT(m_count <= DEDUP_WINDOW_SIZE);  // Assert: count still valid after record

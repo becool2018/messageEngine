@@ -23,7 +23,10 @@
  *   - Power of 10: fixed window (DEDUP_WINDOW_SIZE), no dynamic allocation,
  *     ≥2 assertions per method, loop bounds provable.
  *   - MISRA C++: no STL, no exceptions, ≤1 ptr indirection.
- *   - F-Prime style: simple ring-buffer state, deterministic eviction.
+ *   - F-Prime style: simple ring-buffer state, age-based eviction.
+ *   - SECfix-3: eviction policy changed from round-robin to oldest-first to prevent
+ *     replay-after-flooding attacks (attacker floods 128 unique pairs to rotate the
+ *     dedup window and re-enable a previously-recorded entry).
  *
  * Implements: REQ-3.2.6, REQ-3.3.3
  */
@@ -53,27 +56,31 @@ public:
 
     // Safety-critical (SC): HAZ-003 — verified to M5
     /// Record a message in the dedup window.
-    /// If window is full (m_count == DEDUP_WINDOW_SIZE), evicts the oldest entry.
-    void record(NodeId src, uint64_t msg_id);
+    /// If window is full (m_count == DEDUP_WINDOW_SIZE), evicts the oldest-by-time entry.
+    /// @param now_us  Current time in microseconds (must be > 0); used for age-based eviction.
+    /// SECfix-3: now_us enables oldest-first eviction to resist replay-after-flooding.
+    void record(NodeId src, uint64_t msg_id, uint64_t now_us);
 
     /// Combined check-and-record in one call.
     /// Returns ERR_DUPLICATE if message is already known, OK otherwise.
     /// On OK, also records the message.
+    /// @param now_us  Current time in microseconds (must be > 0); forwarded to record().
     // Safety-critical (SC): HAZ-003
-    Result check_and_record(NodeId src, uint64_t msg_id);
+    Result check_and_record(NodeId src, uint64_t msg_id, uint64_t now_us);
 
 private:
     // Power of 10 rule 9: ≤1 pointer indirection; using fixed array, not pointers
     /// Entry in the dedup window
     struct Entry {
-        NodeId    src;     // source node ID
-        uint64_t  msg_id;  // message ID from that source
-        bool      valid;   // true if this slot is occupied
+        NodeId    src;          // source node ID
+        uint64_t  msg_id;       // message ID from that source
+        uint64_t  recorded_us;  // timestamp when entry was recorded (SECfix-3: age-based eviction)
+        bool      valid;        // true if this slot is occupied
     };
 
     // Power of 10 rule 3: fixed-size allocation at static scope
     Entry    m_window[DEDUP_WINDOW_SIZE] = {};  ///< circular buffer of entries
-    uint32_t m_next  = 0U;                      ///< next write position (round-robin)
+    uint32_t m_next  = 0U;                      ///< next write position (used on not-full path only)
     uint32_t m_count = 0U;                      ///< number of valid entries in window
 };
 

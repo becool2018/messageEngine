@@ -46,14 +46,14 @@ static bool test_basic_dedup()
     filter.init();
 
     // Record a message (source=1, id=100)
-    filter.record(1U, 100ULL);
+    filter.record(1U, 100ULL, 1000ULL);
 
     // Check if the same message is detected as duplicate
     bool is_dup = filter.is_duplicate(1U, 100ULL);
     assert(is_dup == true);
 
     // Combined check_and_record should return ERR_DUPLICATE
-    Result r = filter.check_and_record(1U, 100ULL);
+    Result r = filter.check_and_record(1U, 100ULL, 1000ULL);
     assert(r == Result::ERR_DUPLICATE);
 
     return true;
@@ -69,14 +69,14 @@ static bool test_different_src()
     filter.init();
 
     // Record from source 1
-    filter.record(1U, 100ULL);
+    filter.record(1U, 100ULL, 1000ULL);
 
     // Same message_id but different source should NOT be duplicate
     bool is_dup = filter.is_duplicate(2U, 100ULL);
     assert(is_dup == false);
 
     // check_and_record should succeed
-    Result r = filter.check_and_record(2U, 100ULL);
+    Result r = filter.check_and_record(2U, 100ULL, 2000ULL);
     assert(r == Result::OK);
 
     return true;
@@ -92,14 +92,14 @@ static bool test_different_id()
     filter.init();
 
     // Record message 100 from source 1
-    filter.record(1U, 100ULL);
+    filter.record(1U, 100ULL, 1000ULL);
 
     // Message 101 from same source should NOT be duplicate
     bool is_dup = filter.is_duplicate(1U, 101ULL);
     assert(is_dup == false);
 
     // check_and_record should succeed
-    Result r = filter.check_and_record(1U, 101ULL);
+    Result r = filter.check_and_record(1U, 101ULL, 2000ULL);
     assert(r == Result::OK);
 
     return true;
@@ -119,7 +119,7 @@ static bool test_not_seen()
     assert(is_dup == false);
 
     // check_and_record should succeed for unseen message
-    Result r = filter.check_and_record(1U, 999ULL);
+    Result r = filter.check_and_record(1U, 999ULL, 1000ULL);
     assert(r == Result::OK);
 
     // Now it should be seen
@@ -138,11 +138,12 @@ static bool test_window_wraparound()
     DuplicateFilter filter;
     filter.init();
 
-    // Fill the window with DEDUP_WINDOW_SIZE distinct entries from source 1
-    // Power of 10: bounded loop with explicit upper bound
+    // Fill the window with DEDUP_WINDOW_SIZE distinct entries from source 1.
+    // Each entry gets a strictly increasing timestamp so that age-based eviction
+    // (SECfix-3) evicts the oldest-by-time entry first.
     for (uint32_t i = 0U; i < DEDUP_WINDOW_SIZE; ++i) {
         uint64_t msg_id = static_cast<uint64_t>(i);
-        filter.record(1U, msg_id);
+        filter.record(1U, msg_id, 1000ULL + static_cast<uint64_t>(i));
     }
 
     // Verify all are seen
@@ -151,10 +152,12 @@ static bool test_window_wraparound()
         assert(filter.is_duplicate(1U, msg_id) == true);
     }
 
-    // Add 5 more messages; oldest should be evicted
+    // Add 5 more messages; oldest (i=0..4) should be evicted because they have
+    // the smallest recorded_us values (1000..1004) in the window.
     for (uint32_t i = 0U; i < 5U; ++i) {
         uint64_t msg_id = static_cast<uint64_t>(DEDUP_WINDOW_SIZE) + static_cast<uint64_t>(i);
-        filter.record(1U, msg_id);
+        filter.record(1U, msg_id,
+                      1000ULL + static_cast<uint64_t>(DEDUP_WINDOW_SIZE) + static_cast<uint64_t>(i));
     }
 
     // Verify the oldest entries (0-4) are no longer in the window
@@ -188,8 +191,8 @@ static bool test_multiple_sources_interleaved()
     // Power of 10 Rule 2: bounded loop
     for (uint32_t i = 0U; i < 10U; ++i) {
         uint64_t msg_id = static_cast<uint64_t>(i) + 1ULL;
-        filter.record(1U, msg_id);
-        filter.record(2U, msg_id);
+        filter.record(1U, msg_id, 1000ULL + static_cast<uint64_t>(i) * 2ULL);
+        filter.record(2U, msg_id, 1000ULL + static_cast<uint64_t>(i) * 2ULL + 1ULL);
     }
 
     // All recorded entries from both sources must be recognized as duplicates
@@ -214,17 +217,19 @@ static bool test_single_entry_eviction()
     DuplicateFilter filter;
     filter.init();
 
-    // Fill the window exactly (DEDUP_WINDOW_SIZE entries, all from source 10)
-    // Power of 10 Rule 2: bounded by DEDUP_WINDOW_SIZE constant
+    // Fill the window exactly (DEDUP_WINDOW_SIZE entries, all from source 10).
+    // Strictly increasing timestamps ensure entry 0 (ts=1000) is the oldest
+    // and will be evicted first when the window overflows (SECfix-3).
     for (uint32_t i = 0U; i < DEDUP_WINDOW_SIZE; ++i) {
-        filter.record(10U, static_cast<uint64_t>(i));
+        filter.record(10U, static_cast<uint64_t>(i), 1000ULL + static_cast<uint64_t>(i));
     }
 
     // Entry 0 must still be present (window exactly full, no eviction yet)
     assert(filter.is_duplicate(10U, 0ULL) == true);   // Assert: oldest still visible
 
-    // Add one more: entry 0 is now evicted (oldest entry in FIFO ring)
-    filter.record(10U, static_cast<uint64_t>(DEDUP_WINDOW_SIZE));
+    // Add one more: entry 0 (ts=1000, the oldest) is evicted by age-based eviction.
+    filter.record(10U, static_cast<uint64_t>(DEDUP_WINDOW_SIZE),
+                  1000ULL + static_cast<uint64_t>(DEDUP_WINDOW_SIZE));
 
     assert(filter.is_duplicate(10U, 0ULL) == false);  // Assert: entry 0 evicted
     assert(filter.is_duplicate(10U, static_cast<uint64_t>(DEDUP_WINDOW_SIZE)) == true);  // newest present
@@ -242,15 +247,15 @@ static bool test_check_and_record_idempotent()
     filter.init();
 
     // First call: message not seen → OK and records it
-    Result r1 = filter.check_and_record(5U, 77ULL);
+    Result r1 = filter.check_and_record(5U, 77ULL, 1000ULL);
     assert(r1 == Result::OK);  // Assert: first call succeeds
 
     // Second call: same message → ERR_DUPLICATE
-    Result r2 = filter.check_and_record(5U, 77ULL);
+    Result r2 = filter.check_and_record(5U, 77ULL, 2000ULL);
     assert(r2 == Result::ERR_DUPLICATE);  // Assert: duplicate detected
 
     // Third call: still ERR_DUPLICATE (idempotent duplicate detection)
-    Result r3 = filter.check_and_record(5U, 77ULL);
+    Result r3 = filter.check_and_record(5U, 77ULL, 3000ULL);
     assert(r3 == Result::ERR_DUPLICATE);  // Assert: still a duplicate
 
     return true;

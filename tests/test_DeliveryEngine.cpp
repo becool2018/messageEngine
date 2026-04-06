@@ -2513,65 +2513,96 @@ static void test_de_idle_ordered_gap_expiry_sweep()
 static void test_de_ordering_full_stat()
 {
     // Verifies: REQ-3.3.5, REQ-7.2.3
+    //
+    // SECfix-7: per-peer hold cap is ORDERING_HOLD_COUNT/2 = 4.
+    // A single peer can no longer fill all 8 slots; two peers are needed.
+    // Strategy: SRC=1 holds 4 slots (seq=2..5), SRC=3 holds 4 slots (seq=2..5),
+    // then a third source (SRC=5) triggers ERR_FULL (global buffer exhausted).
     LocalSimHarness ha, hb;
     DeliveryEngine  engine_a, engine_b;
     setup_two_ordered_engines(ha, hb, engine_a, engine_b);
 
-    static const NodeId   SRC          = 1U;
     static const NodeId   DST          = 2U;
     static const uint64_t FAR_EXPIRY   = NOW_US + 5000000ULL;
+    // Per-peer hold cap is ORDERING_HOLD_COUNT / 2.
+    static const uint32_t PER_PEER_MAX = ORDERING_HOLD_COUNT / 2U;
 
-    // Inject ORDERING_HOLD_COUNT out-of-order frames (seq=2..9).
+    // Fill PER_PEER_MAX hold slots from SRC=1 (seq=2..PER_PEER_MAX+1).
     // seq=1 is never sent; all are held by the ordering gate.
-    // Power of 10 Rule 2: bounded loop (ORDERING_HOLD_COUNT iterations).
-    for (uint32_t i = 0U; i < ORDERING_HOLD_COUNT; ++i) {
+    // Power of 10 Rule 2: bounded loop.
+    for (uint32_t i = 0U; i < PER_PEER_MAX; ++i) {
         MessageEnvelope e;
         envelope_init(e);
         e.message_type      = MessageType::DATA;
-        e.message_id        = 2000ULL + static_cast<uint64_t>(i) + 2ULL;
-        e.source_id         = SRC;
+        e.message_id        = 2000ULL + static_cast<uint64_t>(i);
+        e.source_id         = 1U;
         e.destination_id    = DST;
         e.timestamp_us      = NOW_US;
         e.expiry_time_us    = FAR_EXPIRY;
         e.priority          = 0U;
         e.reliability_class = ReliabilityClass::BEST_EFFORT;
-        e.sequence_num      = static_cast<uint32_t>(i + 2U);  // seq=2,3,...,9
+        e.sequence_num      = static_cast<uint32_t>(i + 2U);  // seq=2,3,4,5
         e.payload_length    = 1U;
         e.payload[0]        = static_cast<uint8_t>(i & 0xFFU);
         Result inj = hb.inject(e);
         assert(inj == Result::OK);
-
         MessageEnvelope out;
         Result r = engine_b.receive(out, 0U, NOW_US + static_cast<uint64_t>(i) + 1ULL);
-        assert(r == Result::ERR_AGAIN);  // Assert: out-of-order frame held
+        assert(r == Result::ERR_AGAIN);  // Assert: held by ordering gate
     }
 
-    // Capture stats before triggering the full condition.
-    DeliveryStats stats_before;
-    engine_b.get_stats(stats_before);
-
-    // Inject the (ORDERING_HOLD_COUNT + 1)th out-of-order frame (seq=10).
-    // All 8 hold slots are occupied; ingest must return ERR_FULL.
-    {
+    // Fill the remaining PER_PEER_MAX hold slots from SRC=3 (seq=2..PER_PEER_MAX+1).
+    // SRC=3 is a fresh peer; next_expected starts at 1 so seq=2..5 are all out-of-order.
+    // Power of 10 Rule 2: bounded loop.
+    for (uint32_t i = 0U; i < PER_PEER_MAX; ++i) {
         MessageEnvelope e;
         envelope_init(e);
         e.message_type      = MessageType::DATA;
-        e.message_id        = 2010ULL;
-        e.source_id         = SRC;
+        e.message_id        = 3000ULL + static_cast<uint64_t>(i);
+        e.source_id         = 3U;
         e.destination_id    = DST;
         e.timestamp_us      = NOW_US;
         e.expiry_time_us    = FAR_EXPIRY;
         e.priority          = 0U;
         e.reliability_class = ReliabilityClass::BEST_EFFORT;
-        e.sequence_num      = ORDERING_HOLD_COUNT + 2U;  // = 10U
+        e.sequence_num      = static_cast<uint32_t>(i + 2U);  // seq=2,3,4,5
+        e.payload_length    = 1U;
+        e.payload[0]        = static_cast<uint8_t>(i & 0xFFU);
+        Result inj = hb.inject(e);
+        assert(inj == Result::OK);
+        MessageEnvelope out;
+        Result r = engine_b.receive(out, 0U, NOW_US + static_cast<uint64_t>(PER_PEER_MAX + i) + 1ULL);
+        assert(r == Result::ERR_AGAIN);  // Assert: held by ordering gate
+    }
+
+    // All ORDERING_HOLD_COUNT slots are now occupied.
+    // Capture stats before triggering the full condition.
+    DeliveryStats stats_before;
+    engine_b.get_stats(stats_before);
+
+    // Inject one more out-of-order frame from SRC=5.
+    // Global hold buffer is exhausted; ingest must return ERR_FULL.
+    {
+        MessageEnvelope e;
+        envelope_init(e);
+        e.message_type      = MessageType::DATA;
+        e.message_id        = 5000ULL;
+        e.source_id         = 5U;
+        e.destination_id    = DST;
+        e.timestamp_us      = NOW_US;
+        e.expiry_time_us    = FAR_EXPIRY;
+        e.priority          = 0U;
+        e.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e.sequence_num      = 2U;  // out-of-order (seq=1 never sent for SRC=5)
         e.payload_length    = 1U;
         e.payload[0]        = 0xFFU;
         Result inj = hb.inject(e);
         assert(inj == Result::OK);
     }
-    MessageEnvelope out10;
-    Result r10 = engine_b.receive(out10, 0U, NOW_US + static_cast<uint64_t>(ORDERING_HOLD_COUNT) + 1ULL);
-    assert(r10 == Result::ERR_FULL);  // Assert: hold buffer exhausted
+    MessageEnvelope out_full;
+    Result r_full = engine_b.receive(out_full, 0U,
+                                     NOW_US + static_cast<uint64_t>(ORDERING_HOLD_COUNT) + 1ULL);
+    assert(r_full == Result::ERR_FULL);  // Assert: hold buffer globally exhausted
 
     DeliveryStats stats_after;
     engine_b.get_stats(stats_after);

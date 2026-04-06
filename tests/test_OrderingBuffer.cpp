@@ -216,9 +216,14 @@ static bool test_ordering_control_bypass()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 5: Hold buffer exhaustion → ERR_FULL
+// Test 5: Hold buffer exhaustion → ERR_FULL (SECfix-7: per-peer hold cap)
 // ─────────────────────────────────────────────────────────────────────────────
 // Verifies: REQ-3.3.5
+// SECfix-7 limits a single peer to ORDERING_HOLD_COUNT/2 hold slots so one
+// source cannot starve all others.  This test verifies:
+//   (a) a single peer is capped at k_hold_per_peer_max (= ORDERING_HOLD_COUNT/2)
+//   (b) the global hold buffer is exhausted when two peers together fill it,
+//       and a further attempt returns ERR_FULL.
 static bool test_ordering_hold_full()
 {
     OrderingBuffer buf;
@@ -227,20 +232,37 @@ static bool test_ordering_hold_full()
     MessageEnvelope out;
     envelope_init(out);
 
-    // Fill the hold buffer with out-of-order messages (seq 2..ORDERING_HOLD_COUNT+1)
-    // seq=1 never arrives, so all higher seqs will be held.
+    // SECfix-7: per-peer cap is ORDERING_HOLD_COUNT / 2.
+    const uint32_t per_peer_max = ORDERING_HOLD_COUNT / 2U;
+
+    // (a) Fill per-peer cap for src=50.  seq=1 never arrives; seqs 2..per_peer_max+1 are held.
     // Power of 10 Rule 2: bounded loop
-    for (uint32_t i = 0U; i < ORDERING_HOLD_COUNT; ++i) {
+    for (uint32_t i = 0U; i < per_peer_max; ++i) {
         MessageEnvelope m;
         make_ordered(m, 50U, i + 2U, static_cast<uint8_t>(i));
         Result r = buf.ingest(m, out, 1000000ULL + static_cast<uint64_t>(i));
         assert(r == Result::ERR_AGAIN);
     }
 
-    // One more out-of-order message should return ERR_FULL
-    MessageEnvelope m_extra;
-    make_ordered(m_extra, 50U, ORDERING_HOLD_COUNT + 2U, 0xFFU);
-    Result r_full = buf.ingest(m_extra, out, 2000000ULL);
+    // One more from src=50 must return ERR_FULL (per-peer cap, SECfix-7).
+    MessageEnvelope m_cap;
+    make_ordered(m_cap, 50U, per_peer_max + 2U, 0xEEU);
+    Result r_cap = buf.ingest(m_cap, out, 1500000ULL);
+    assert(r_cap == Result::ERR_FULL);
+
+    // (b) Fill the remaining hold slots with a second peer (src=51).
+    // Power of 10 Rule 2: bounded loop
+    for (uint32_t i = 0U; i < per_peer_max; ++i) {
+        MessageEnvelope m;
+        make_ordered(m, 51U, i + 2U, static_cast<uint8_t>(i));
+        Result r = buf.ingest(m, out, 1600000ULL + static_cast<uint64_t>(i));
+        assert(r == Result::ERR_AGAIN);
+    }
+
+    // Global hold buffer is now full: any new peer also gets ERR_FULL.
+    MessageEnvelope m_global;
+    make_ordered(m_global, 52U, 2U, 0xFFU);
+    Result r_full = buf.ingest(m_global, out, 2000000ULL);
     assert(r_full == Result::ERR_FULL);
 
     return true;
@@ -309,12 +331,15 @@ static bool test_ordering_sixteen_peers()
         assert(out.sequence_num == 1U);  // Assert: delivered message is seq=1
     }
 
-    // Seventeenth peer: peer table exhausted — ordering contract cannot be upheld.
-    // ingest() must return ERR_FULL (Issue 5 fix: explicit rejection, not silent drop).
+    // Seventeenth peer: SECfix-2 — LRU eviction makes room instead of returning ERR_FULL.
+    // The LRU peer (src=100, oldest access) is evicted and src=200 gets the freed slot.
+    // seq=1 is in-order for a new peer so it is delivered immediately (OK).
     MessageEnvelope m17;
     make_ordered(m17, 200U, 1U, 0xFFU);
     Result r17 = buf.ingest(m17, out, 1000001ULL);
-    assert(r17 == Result::ERR_FULL);  // Assert: seventeenth peer rejected
+    assert(r17 == Result::OK);              // Assert: eviction made room; seq=1 delivered
+    assert(out.sequence_num == 1U);         // Assert: delivered message is seq=1
+    assert(out.source_id == 200U);          // Assert: delivered from the new peer
 
     return true;
 }

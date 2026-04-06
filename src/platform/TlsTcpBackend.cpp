@@ -197,6 +197,8 @@ TlsTcpBackend::~TlsTcpBackend()
 Result TlsTcpBackend::load_ca_and_crl(const TlsConfig& tls_cfg)
 {
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.verify_peer);
+    // SECfix-5: verify NUL termination within TLS_PATH_MAX before passing to fopen()
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.ca_file));
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.ca_file[0] != '\0');
 
     int ret = mbedtls_x509_crt_parse_file(&m_ca_cert, tls_cfg.ca_file);
@@ -228,6 +230,8 @@ Result TlsTcpBackend::load_crl_if_configured(const TlsConfig& tls_cfg)
 {
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.verify_peer);
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.ca_file[0] != '\0');
+    // SECfix-5: verify crl_file NUL termination within TLS_PATH_MAX before any fopen()
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.crl_file));
 
     if (tls_cfg.crl_file[0] == '\0') {
         // No CRL configured — skip; not an error.
@@ -278,6 +282,9 @@ int TlsTcpBackend::run_tls_handshake_loop(mbedtls_ssl_context* ssl)
 /// Extracted from setup_tls_config() to reduce its CC.
 Result TlsTcpBackend::load_tls_certs(const TlsConfig& tls_cfg)
 {
+    // SECfix-5: verify NUL termination within TLS_PATH_MAX before passing to fopen()
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.cert_file));
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.key_file));
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.cert_file[0] != '\0');
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.key_file[0] != '\0');
 
@@ -341,6 +348,8 @@ void TlsTcpBackend::apply_cipher_policy()
 Result TlsTcpBackend::setup_tls_config(const TlsConfig& tls_cfg)
 {
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.tls_enabled);
+    // SECfix-5: verify NUL termination within TLS_PATH_MAX before passing to fopen()
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.cert_file));
     NEVER_COMPILED_OUT_ASSERT(tls_cfg.cert_file[0] != '\0');
 
     // Init PSA Crypto (mbedTLS 4.0: replaces CTR-DRBG / entropy setup).

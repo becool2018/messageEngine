@@ -177,6 +177,18 @@ private:
     /// @return Jitter offset in microseconds in [lo_ms, hi_ms]*1000.
     uint64_t compute_jitter_us();
 
+    /// Compute the release timestamp (now_us + base_delay_us + jitter_us) with
+    /// CERT INT30-C overflow guards on both intermediate sums.
+    /// Extracted from process_outbound() to keep its cyclomatic complexity ≤ 10
+    /// (Power of 10 Rule 4). Logs WARNING_HI and clamps on overflow.
+    /// @param[in] now_us       Current time in microseconds.
+    /// @param[in] base_delay_us Fixed latency in microseconds.
+    /// @param[in] jitter_us     Jitter offset in microseconds.
+    /// @return Clamped release timestamp in microseconds.
+    uint64_t compute_release_us(uint64_t now_us,
+                                uint64_t base_delay_us,
+                                uint64_t jitter_us);
+
     /// Log a WARNING_LO if the delay buffer exceeds the 80% high-watermark threshold.
     /// Extracted to keep process_outbound() CC ≤ 10 (Power of 10 rule 4).
     /// Threshold: (IMPAIR_DELAY_BUF_SIZE * 80U) / 100U slots.
