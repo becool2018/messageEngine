@@ -71,12 +71,14 @@ potentially exhausting them.
 
 **Assumption:** The library does not validate the wire-level network source
 address against the `source_id` field in the message envelope. Transport
-backends (`TcpBackend`, `UdpBackend`, `TlsTcpBackend`, `DtlsUdpBackend`)
-are responsible for source address validation per REQ-6.2.4.
+backends are responsible for this validation per the requirements below:
 
-The library assumes the transport layer has already verified that the sender's
-network address is consistent with its claimed `source_id` before the envelope
-is passed to `DeliveryEngine::receive()`.
+- TCP/TLS backends: REQ-6.1.11 — validate socket slot vs. envelope source_id.
+- UDP/DTLS backends: REQ-6.2.4 — validate datagram source address vs. envelope source_id.
+
+Each backend must silently discard any envelope whose wire-level source does not
+match the claimed source_id and log a WARNING_HI before the envelope reaches
+`DeliveryEngine::receive()`.
 
 **Risk if violated:** A peer that spoofs another peer's `source_id` can inject
 messages that are processed as if from the legitimate peer, potentially
@@ -135,9 +137,12 @@ produce identical impairment decisions. This is intentional for deterministic
 testing but means that an attacker who knows the seed and the message sequence
 can predict exactly which messages will be dropped or delayed.
 
-**Risk in production:** Do not use a fixed or guessable seed when impairments
-are active in a production environment. Use a seed derived from a
-cryptographically random source.
+**Normative requirement (REQ-5.2.4):** In production builds the PRNG seed must
+be derived from a cryptographically unpredictable source (e.g., `getrandom()`,
+`/dev/urandom`, or a hardware RNG). A fixed literal or time-only seed is
+prohibited in production deployments. The seed source must be documented in
+deployment configuration. Do not use a fixed or guessable seed when impairments
+are active in a production environment.
 
 ---
 

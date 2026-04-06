@@ -225,6 +225,11 @@ The impairment engine must be able to apply, per channel or globally:
   - [REQ-5.2.3] Configure parameters per channel or per peer where sensible.
 - Provide:
   - [REQ-5.2.4] A deterministic mode controlled by a seedable PRNG.
+    In production builds the seed must be derived from a cryptographically unpredictable
+    source (e.g., getrandom(), /dev/urandom, or a hardware RNG). A fixed literal or
+    time-only seed is prohibited in production. The seed source must be documented in
+    deployment configuration. Rationale: a known seed combined with a known message
+    sequence allows prediction of all impairment decisions (see SECURITY_ASSUMPTIONS.md §7).
   - [REQ-5.2.5] A way to snapshot or log impairment decisions for debugging tests.
 
 5.3 Determinism and testability
@@ -271,6 +276,13 @@ The impairment engine must be able to apply, per channel or globally:
     default no-op.
     DeliveryEngine::init() calls register_local_id(local_id) immediately after
     transport->init() returns OK; any failure is logged at WARNING_HI.
+  - [REQ-6.1.11] TCP/TLS source address validation:
+    Before passing any deserialized envelope to DeliveryEngine::receive(), the TCP and
+    TLS backends must verify that the wire-level source address (socket slot) is consistent
+    with the source_id field in the envelope. A mismatch must result in silent discard
+    and a WARNING_HI log entry; the mismatched envelope must never reach the DeliveryEngine.
+    Rationale: prevents source_id spoofing attacks that could corrupt ordering state,
+    trigger spurious ACKs, or exhaust dedup window slots (see SECURITY_ASSUMPTIONS.md §4).
 
 6.2 UDP (connectionless) backend
 - Reliability:
@@ -284,6 +296,10 @@ The impairment engine must be able to apply, per channel or globally:
   - If needed, implement fragmentation/reassembly at the message layer.
 - Spoofing and validation:
   - [REQ-6.2.4] Validate source address and basic sanity of incoming datagrams.
+    The UDP and DTLS backends must verify that the wire-level source address of each
+    received datagram is consistent with the source_id field in the deserialized envelope
+    before passing it to DeliveryEngine::receive(). A mismatch must result in silent
+    discard and a WARNING_HI log entry. This is the UDP equivalent of REQ-6.1.11.
 
 6.3 Common socket requirements (TCP and UDP)
 - Addressing:

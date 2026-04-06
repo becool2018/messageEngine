@@ -100,6 +100,14 @@ Apply these rules in every file:
 - Exceptions:
   - Exceptions are disabled (compile with -fno-exceptions).
   - No throwing or catching exceptions.
+- Const correctness:
+  - Apply `const` to every variable, parameter, and member that is not modified after
+    initialization. This is a required rule, not a style preference.
+  - Member functions that do not modify object state must be declared `const`.
+  - Rationale: enforced `const` prevents accidental mutation of security-sensitive state
+    (routing tables, dedup windows, capacity constants) and makes data flow auditable.
+  - Enforced by `readability-non-const-parameter` and `readability-const-return-type`
+    in `src/.clang-tidy`.
 - Templates and STL:
   - No C++ templates in production code, except as explicitly listed below.
   - Do not use the C++ Standard Template Library (STL) in production code, except as explicitly listed below.
@@ -167,6 +175,75 @@ Apply these rules in every file:
   - Log enough for debugging and safety analysis.
   - Avoid logging sensitive payload contents by default; prefer metadata and identifiers.
 
+7a. SEI CERT C++ integer safety rules (Required)
+These rules apply to all externally-supplied values (network data, configuration, user input)
+before any arithmetic or conversion is performed on them. They complement MISRA C++:2023 but
+address exploitation-relevant overflow and truncation classes that MISRA covers only partially.
+
+- CERT INT30-C — Unsigned integer wrap:
+  Validate that unsigned arithmetic will not silently wrap before performing the operation.
+  Example: if (b > 0U && a > UINT32_MAX - b) { /* overflow */ } before computing a + b.
+
+- CERT INT31-C — Narrowing conversion loss:
+  Before any conversion that reduces the value range (e.g., uint32_t → uint16_t, int32_t → uint8_t),
+  explicitly check that the value fits in the destination type. A failed check must log WARNING_HI
+  and return an error; silent truncation is prohibited.
+
+- CERT INT32-C — Signed integer overflow:
+  Signed overflow is undefined behaviour under C++ and must not occur. Validate operands before
+  signed addition, subtraction, and multiplication on externally-supplied data.
+
+- CERT INT33-C — Division and remainder by zero:
+  Guard every divisor with an explicit non-zero check before division or modulo. A zero divisor
+  must log WARNING_HI and return an error; it must never reach the division operator.
+
+- Enforcement: `-Wdivision-by-zero` and `-Wconversion`/`-Wsign-conversion` catch many instances
+  at compile time. Code review is the primary enforcement for runtime-value cases.
+
+7b. Variable initialization policy (Required)
+Every variable must be initialized at the point of declaration. Declaring a variable without
+an initializer — even when assignment before first read is guaranteed by the control flow —
+is prohibited. This eliminates the CWE-457 (Use of Uninitialized Variable) class of defect.
+
+  Prohibited:   uint32_t len;          // no initializer
+  Required:     uint32_t len = 0U;     // initialized at declaration
+
+Compiler enforcement: `-Wuninitialized` (active); static analysis will also flag this class.
+
+7c. Secure zeroing of cryptographic material (Required)
+Any buffer that has held a TLS/DTLS private key, session secret, authentication token, or DTLS
+cookie secret must be explicitly zeroed before the buffer goes out of scope or is reused.
+
+  - Use `mbedtls_platform_zeroize(buf, len)` for any buffer associated with mbedTLS operations.
+  - Do not use `memset()` for this purpose; optimizing compilers are permitted to elide memset()
+    calls to dead storage, leaving key material in memory (CWE-14).
+  - Applies to: all key-loading paths in TlsTcpBackend and DtlsUdpBackend, and any future
+    code that handles credentials or session tokens.
+
+7d. Timing-safe comparisons for security-sensitive equality (Required)
+Equality comparisons that guard authentication, authorization, or integrity decisions must use
+a constant-time comparison function.
+
+  - Use `mbedtls_ct_memcmp(a, b, n)` wherever the result determines whether a peer is trusted
+    (e.g., DTLS cookie verification, future MAC or HMAC validation).
+  - Standard `memcmp()` short-circuits on the first differing byte and leaks information about
+    the compared values via execution time — a timing oracle (CWE-208).
+  - Currently relevant to: DTLS cookie exchange path in DtlsUdpBackend (REQ-6.4.2).
+
+7e. Compiler hardening flags (Required for production builds)
+The following flags must be enabled in production (non-debug) build profiles. They do not change
+correctness but reduce exploitability of any residual memory-safety bug:
+
+  -fstack-protector-strong   Stack canaries on functions with local buffers ≥ 8 bytes.
+                             Supported on GCC and Clang (macOS and Linux). ACTIVE in Makefile.
+  -D_FORTIFY_SOURCE=2        Buffer overflow detection for glibc/libc wrappers (snprintf, etc.).
+                             Requires -O1 or higher; enable in release/production build profiles.
+                             NOT active in the default debug build (no -O flag).
+  -fPIE / -pie               Position-independent executable; enables ASLR for binaries.
+                             Applied to server/client executables; not applicable to object files.
+  -Wl,-z,relro -Wl,-z,now    GOT/PLT hardening (Linux only); makes relocation tables read-only
+                             after program startup. Not applicable on macOS.
+
 8. NASA-style software engineering and assurance mindset
 - Code must be analyzable, reviewable, and testable.
 - Assume formal inspections and structured reviews for important artifacts.
@@ -213,6 +290,12 @@ When editing or generating C/C++ code, I must:
 - Preserve clear layering, testability, and portability in designs and APIs.
 - Explicitly comment any unavoidable deviation and keep it as small as possible.
 - Traceability: follow the project traceability policy. Run any traceability check script after changes that add or remove requirements or implementations.
+- Apply §7a–7e security rules whenever writing or reviewing code that handles:
+  - Arithmetic on externally-supplied values (§7a — CERT integer safety)
+  - Variable declarations (§7b — initialize at declaration)
+  - TLS/DTLS key or credential buffers (§7c — secure zeroing)
+  - Security-sensitive equality checks (§7d — timing-safe comparison)
+  - Build configuration for production targets (§7e — hardening flags)
 </global_c_cplusplus_standard>
 ```
 

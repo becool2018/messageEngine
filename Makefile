@@ -56,7 +56,13 @@ CXXFLAGS  := -std=c++17 -fno-exceptions -fno-rtti \
              -Wshadow -Wconversion -Wsign-conversion \
              -Wcast-align -Wformat=2 -Wnull-dereference \
              -Wdouble-promotion -Wno-unknown-pragmas \
+             -fstack-protector-strong \
 			 -Isrc $(MBEDTLS_CFLAGS) -g
+# Security hardening (.claude/CLAUDE.md §7e):
+#   -fstack-protector-strong  ACTIVE: stack canaries on functions with buffers >= 8 bytes.
+#   -D_FORTIFY_SOURCE=2       PENDING: requires -O1+; enable in a dedicated release profile.
+#   -fPIE / -pie              Apply to server/client link rules only (executables, not objects).
+#   -Wl,-z,relro -Wl,-z,now   Linux-only; not applicable on macOS/Darwin.
 
 # mbedTLS linking (portable default). Users can override.
 # On Ubuntu with libmbedtls-dev installed, these libs are on the default linker path.
