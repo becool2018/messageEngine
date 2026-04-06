@@ -117,6 +117,9 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 |----------|----------------------|-------|-------|
 | `TcpBackend::send_message()` | serialize (O(P)) + process_outbound + collect_deliverable (O(I)) + send to C clients (O(P × C)) | O(P × C + I × P) = O(4096 × 8 + 32 × 4096) = O(163840) | Wire write to each client; when all I delay-buffer slots are simultaneously due, collect_deliverable flushes them all — each requiring a separate wire write of O(P) |
 | `TcpBackend::receive_message()` | poll_count × (accept + C recv + deserialize) | O(poll_count × C × P) | poll_count ≤ 50; bound = O(50 × 8 × 4096) |
+| `TcpBackend::register_local_id()` | 1 NodeId store + send_hello_frame() (serialize O(P) + 1 send syscall) | O(P) = O(4096) | O(1) bookkeeping + one HELLO wire write. Called once at init time; not on any runtime send/receive path. NSC. |
+| `TcpBackend::find_client_slot()` | Linear scan of m_client_node_ids[] | O(C) = O(8) | Called by flush_delayed_to_clients() for unicast routing; adds O(C) per delayed message on top of existing O(I) outer loop. NSC. |
+| `TcpBackend::flush_delayed_to_clients()` (updated) | collect_deliverable (O(I)) + per-delayed-msg: serialize O(P) + find_client_slot O(C) + send O(P) | O(I × (P + C)) = O(32 × (4096 + 8)) = O(131 328) | Previously O(I × P); unicast routing adds find_client_slot() O(C)=O(8) per delayed message. Bound unchanged at O(I × P) asymptotically; constant factor increase is negligible. SC path via send_message() (HAZ-005, HAZ-006). |
 | `UdpBackend::send_message()` | serialize + process_outbound + 1 sendto | O(P) = O(4096) | Single datagram |
 | `UdpBackend::receive_message()` | poll_count × (recv + deserialize) | O(poll_count × P) = O(50 × 4096) | |
 
@@ -141,6 +144,9 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 |----------|----------------------|-------|-------|
 | `send_message()` | serialize (O(P)) + process_outbound + collect_deliverable (O(I)) + TLS write to C clients (O(P × C)) | O(P × C + I × P) = O(163 840) | Identical bound to `TcpBackend::send_message()`; TLS record framing is O(P) per frame (mbedTLS adds ≤ 29-byte overhead per record). TLS handshake cost is init-phase only and not included here. |
 | `receive_message()` | poll_count × (net_poll + accept + C TLS recv + deserialize) | O(poll_count × C × P) = O(1 638 400) | poll_count ≤ 50; `mbedtls_net_poll()` is O(1) (select on 1 fd). TLS decryption is O(P) per record. Bound equals `TcpBackend::receive_message()`. |
+| `register_local_id()` | 1 NodeId store + send_hello_frame() (serialize O(P) + 1 TLS write O(P)) | O(P) = O(4096) | O(1) bookkeeping + one HELLO TLS record write. Called once at init time; not on any runtime path. NSC. |
+| `find_client_slot()` | Linear scan of m_client_node_ids[] | O(C) = O(8) | Called by flush_delayed_to_clients() for unicast routing; adds O(C) per delayed message on top of existing O(I) outer loop. NSC. |
+| `flush_delayed_to_clients()` (updated) | collect_deliverable (O(I)) + per-delayed-msg: serialize O(P) + find_client_slot O(C) + TLS write O(P) | O(I × (P + C)) = O(32 × (4096 + 8)) = O(131 328) | Unicast routing adds find_client_slot() O(C)=O(8) per delayed message. Asymptotic bound unchanged at O(I × P). SC path via send_message() (HAZ-005, HAZ-006). |
 
 ### src/platform/DtlsUdpBackend.hpp
 

@@ -11,7 +11,7 @@
 
 | ID | Hazard | Severity | Triggering Condition | Detection Mechanism | Mitigation |
 |----|--------|----------|----------------------|---------------------|------------|
-| HAZ-001 | **Wrong-node delivery** — a message is delivered to a node other than the intended destination | Cat II | `destination_id` corrupted in envelope; routing logic bug; Serializer endian error on destination field | `envelope_valid()` pre-check on every send and receive; `destination_id` validated by Serializer field-range check; `check_routing()` in `DeliveryEngine::receive()` drops misrouted messages | `envelope_valid()` enforced before any `send()`; Serializer validates and round-trips `destination_id`; `DeliveryEngine::receive()` calls `envelope_addressed_to()` via `check_routing()` and returns `ERR_INVALID` for messages whose `destination_id` does not match the local node (broadcast `destination_id == 0` is always accepted); TCP/TLS server maintains `NodeId → slot` map from HELLO registration frames; `send_message()` with `destination_id > 0` routes only to the matching slot, preventing unicast frames from being delivered to unintended clients (REQ-6.1.9). |
+| HAZ-001 | **Wrong-node delivery** — a message is delivered to a node other than the intended destination | Cat II | `destination_id` corrupted in envelope; routing logic bug; Serializer endian error on destination field | `envelope_valid()` pre-check on every send and receive; `destination_id` validated by Serializer field-range check; `check_routing()` in `DeliveryEngine::receive()` drops misrouted messages | `envelope_valid()` enforced before any `send()`; Serializer validates and round-trips `destination_id`; `DeliveryEngine::receive()` calls `envelope_addressed_to()` via `check_routing()` and returns `ERR_INVALID` for messages whose `destination_id` does not match the local node (broadcast `destination_id == 0` is always accepted) |
 | HAZ-002 | **Retry storm / link saturation** — uncontrolled retransmission floods the link, degrading or disabling communication | Cat II | ACK never received; exponential backoff not applied; `max_retries` not enforced; `sweep_ack_timeouts()` not called | `RetryManager::collect_due()` enforces `max_retries` and applies backoff; `AckTracker::sweep_expired()` caps outstanding slots; backoff capped at 60 s | `max_retries` enforced per message; exponential backoff applied and capped; `ACK_TRACKER_CAPACITY` hard-limits outstanding messages; `sweep_ack_timeouts()` called every iteration |
 | HAZ-003 | **Duplicate command execution** — the same message is delivered and acted on more than once | Cat II | `DuplicateFilter` fails to record or detect a previously seen `(source_id, message_id)` pair; window size too small for retry count | `DuplicateFilter::check_and_record()` on every received message before delivery | `check_and_record()` called before `DeliveryEngine::receive()` returns a message; `DEDUP_WINDOW_SIZE` sized to cover maximum retry window; `MessageIdGen::next()` guarantees uniqueness per sender |
 | HAZ-004 | **Stale message delivery** — a message past its `expiry_time` is delivered and acted on | Cat II | `timestamp_expired()` not called in receive path; `expiry_time_us` not set by sender; monotonic clock anomaly | `timestamp_expired()` called in `DeliveryEngine::receive()` before returning message | All envelopes require `expiry_time_us`; expired messages dropped and logged before delivery; `timestamp_now_us()` uses `CLOCK_MONOTONIC` to avoid wall-clock jumps |
@@ -77,13 +77,6 @@
 | Partial TCP frame accepted as complete message | Corrupt fields delivered | Cat I HAZ-005 | `tcp_recv_frame` uses `socket_recv_exact` | `socket_recv_exact` loops until all bytes received or error |
 | `send_message()` called with no connected client | Message silently discarded | Cat III HAZ-006 | `m_client_count == 0` check; `WARNING_LO` logged | Logged; upper layer should verify connectivity before sending |
 | `receive_message()` returns `ERR_TIMEOUT` spuriously | Upper layer delays message processing | Cat IV | Bounded `poll_count` loop | Caller retries; `RECV_TIMEOUT_MS` tunable per channel |
-
-### TcpBackend / TlsTcpBackend (unicast routing)
-
-| Component | Failure Mode | System Effect | Severity | Detection | Mitigation |
-|---|---|---|---|---|---|
-| TcpBackend / TlsTcpBackend (server) | Client connects but HELLO frame never received (network failure, old client) | Server NodeId→slot table has no entry for that client; subsequent unicast sends to that NodeId return `ERR_INVALID` | Cat II (HAZ-001 — wrong-node delivery prevented, but delivery fails) | `send_message()` logs `WARNING_HI` and returns `ERR_INVALID` when slot not found | Caller must handle `ERR_INVALID`; re-connection + HELLO re-registration recovers state. Broadcast (`destination_id=0`) is unaffected. |
-| TcpBackend / TlsTcpBackend (server) | Two clients register the same NodeId (misconfiguration) | Second registration overwrites first; unicast to that NodeId routes to second client only | Cat III (operational error; no safety hazard if NodeIds are correctly assigned) | Server logs `WARNING_HI` "duplicate NodeId registration" when overwrite occurs | NodeId uniqueness is an operator configuration responsibility; log provides audit trail |
 
 ### TlsTcpBackend
 
@@ -248,9 +241,12 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `init()` | `TransportInterface` | NSC | — |
 | `send_message()` | `TransportInterface` | SC | HAZ-001, HAZ-005, HAZ-006 |
 | `receive_message()` | `TransportInterface` | SC | HAZ-001, HAZ-004, HAZ-005 |
+| `register_local_id()` | `TransportInterface` | NSC | — |
 | `close()` | `TransportInterface` | NSC | — |
 | `is_open()` | `TransportInterface` | NSC | — |
 | `get_transport_stats()` | `TransportInterface` | NSC | — |
+
+`register_local_id()` is a non-pure virtual with a default no-op implementation in `TransportInterface`. It is called by `DeliveryEngine::init()` after transport init to propagate the local `NodeId` to backends that implement unicast routing (currently `TcpBackend` and `TlsTcpBackend`). Classification: NSC — it carries no message-delivery policy itself; the SC behavior is encoded in the concrete backend implementations.
 
 ### src/core/Types.hpp
 
@@ -315,13 +311,33 @@ All `SocketUtils` functions are **NSC** — raw POSIX I/O primitives with no mes
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
 | `init()` | `TcpBackend` | NSC | — |
-| `send_message()` | `TcpBackend` | SC | HAZ-001, HAZ-005, HAZ-006 |
+| `send_message()` | `TcpBackend` | SC | HAZ-005, HAZ-006 |
 | `receive_message()` | `TcpBackend` | SC | HAZ-004, HAZ-005 |
+| `register_local_id()` | `TcpBackend` | NSC | — |
+| `send_hello_frame()` | `TcpBackend` | NSC | — |
+| `find_client_slot()` | `TcpBackend` | NSC | — |
+| `handle_hello_frame()` | `TcpBackend` | NSC | — |
+| `send_to_slot()` | `TcpBackend` | NSC | — |
 | `close()` | `TcpBackend` | NSC | — |
 | `is_open()` | `TcpBackend` | NSC | — |
 | `get_transport_stats()` | `TcpBackend` | NSC | — |
 
-HAZ-001 added: `send_message()` now enforces unicast routing via NodeId→slot lookup, directly mitigating wrong-node delivery (REQ-6.1.9).
+Rationale for new NSC functions: `register_local_id()` and `send_hello_frame()` are called
+once during init to advertise the local NodeId to the server. A failure here (HELLO frame
+not sent) means the server cannot build a routing table for this client, which could result
+in broadcast-only delivery rather than unicast delivery. This is a connectivity concern
+(similar in severity to HAZ-006 resource-exhaustion) but does not directly trigger silent
+data corruption (HAZ-005) or wrong-node delivery (HAZ-001) — the server falls back to
+broadcast (destination_id == NODE_ID_INVALID behavior). Classification: NSC. If future
+analysis determines that failed HELLO causes HAZ-001 (misroute/no-delivery), reclassify
+`register_local_id()` and `send_hello_frame()` as SC: HAZ-001, HAZ-006 and add a HAZ
+entry for "HELLO failure causes misroute or no-delivery."
+
+`find_client_slot()`, `handle_hello_frame()`, and `send_to_slot()` are routing-table
+maintenance helpers. `find_client_slot()` is called within `flush_delayed_to_clients()`
+(already SC); however, its own function body performs only an O(C) linear scan of a fixed
+array — it does not itself encode any message-delivery policy beyond slot index lookup.
+Classification: NSC. `flush_delayed_to_clients()` as a whole remains SC (HAZ-005, HAZ-006).
 
 ### src/platform/UdpBackend.hpp
 
@@ -359,13 +375,18 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
 | `init()` | `TlsTcpBackend` | NSC | — |
-| `send_message()` | `TlsTcpBackend` | SC | HAZ-001, HAZ-005, HAZ-006 |
+| `send_message()` | `TlsTcpBackend` | SC | HAZ-005, HAZ-006 |
 | `receive_message()` | `TlsTcpBackend` | SC | HAZ-004, HAZ-005 |
+| `register_local_id()` | `TlsTcpBackend` | NSC | — |
+| `send_hello_frame()` | `TlsTcpBackend` | NSC | — |
+| `find_client_slot()` | `TlsTcpBackend` | NSC | — |
+| `handle_hello_frame()` | `TlsTcpBackend` | NSC | — |
+| `send_to_slot()` | `TlsTcpBackend` | NSC | — |
 | `close()` | `TlsTcpBackend` | NSC | — |
 | `is_open()` | `TlsTcpBackend` | NSC | — |
 | `get_transport_stats()` | `TlsTcpBackend` | NSC | — |
 
-`TlsTcpBackend` is a drop-in replacement for `TcpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `TcpBackend`. The TLS layer (when enabled) is an init-phase concern (cert/key loading, handshake) and does not alter the SC classification of the send/receive path. HAZ-001 added: `send_message()` now enforces unicast routing via NodeId→slot lookup, directly mitigating wrong-node delivery (REQ-6.1.9).
+`TlsTcpBackend` is a drop-in replacement for `TcpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `TcpBackend`. The TLS layer (when enabled) is an init-phase concern (cert/key loading, handshake) and does not alter the SC classification of the send/receive path. The five new functions (`register_local_id()`, `send_hello_frame()`, `find_client_slot()`, `handle_hello_frame()`, `send_to_slot()`) are classified NSC for the same reasons as the equivalent `TcpBackend` functions — see the TcpBackend rationale note above.
 
 ### src/platform/DtlsUdpBackend.hpp
 

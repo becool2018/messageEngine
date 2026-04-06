@@ -46,6 +46,9 @@ Policy: CLAUDE.md §11 / .claude/CLAUDE.md §10
 | REQ-6.1.5 | TCP length-prefix message framing                  | src/platform/SocketUtils.cpp, src/platform/TcpBackend.cpp   | — (no dedicated unit test)                           |
 | REQ-6.1.6 | TCP partial read / write handling                  | src/platform/SocketUtils.cpp, src/platform/TcpBackend.cpp   | — (no dedicated unit test)                           |
 | REQ-6.1.7 | TCP multi-connection support                       | src/platform/TcpBackend.cpp                                 | — (no dedicated unit test)                           |
+| REQ-6.1.8 | Client HELLO advertisement on TCP connect          | src/platform/TcpBackend.cpp, src/platform/TlsTcpBackend.cpp | tests/test_TcpBackend.cpp, tests/test_TlsTcpBackend.cpp |
+| REQ-6.1.9 | Server unicast routing by destination NodeId       | src/platform/TcpBackend.cpp, src/platform/TlsTcpBackend.cpp | tests/test_TcpBackend.cpp, tests/test_TlsTcpBackend.cpp |
+| REQ-6.1.10 | register_local_id() stores local NodeId; client sends HELLO | src/core/TransportInterface.hpp, src/core/DeliveryEngine.cpp, src/platform/TcpBackend.cpp, src/platform/TlsTcpBackend.cpp | tests/test_TcpBackend.cpp, tests/test_TlsTcpBackend.cpp |
 | REQ-6.2.1 | UDP optional ACK/NAK + retry                       | src/platform/UdpBackend.cpp                                 | — (no dedicated unit test)                           |
 | REQ-6.2.2 | UDP sequence numbers and duplicate detection       | src/platform/UdpBackend.cpp                                 | — (no dedicated unit test)                           |
 | REQ-6.2.3 | UDP message size limits                            | src/platform/UdpBackend.cpp                                 | — (no dedicated unit test)                           |
@@ -81,6 +84,10 @@ REQ-5.2.5,
 REQ-6.1.1 through REQ-6.1.7, REQ-6.2.1 through REQ-6.2.4,
 REQ-6.3.1, REQ-6.3.2, REQ-6.3.5,
 REQ-7.1.1 through REQ-7.1.4
+
+Note: REQ-6.1.8, REQ-6.1.9, REQ-6.1.10 are listed as verified by test_TcpBackend.cpp and
+test_TlsTcpBackend.cpp; no dedicated standalone unit tests isolated to the HELLO/unicast
+routing path exist yet — coverage is provided by the existing backend test suites.
 
 Resolved since last generation (tests added):
 - REQ-3.2.4 — now covered by test_AckTracker.cpp (10 tests)
@@ -120,3 +127,4 @@ Resolved since last generation (tests added):
 - REQ-3.2.3 — protocol-v2 / ordering-fragmentation: Fragmentation.hpp/.cpp, ReassemblyBuffer.hpp/.cpp added as Implements; test_Fragmentation.cpp (6 tests), test_ReassemblyBuffer.cpp (7 tests), 3 DE integration tests added to Verifies; wire format extended to v2 (WIRE_HEADER_SIZE 44→52, PROTO_VERSION 1→2)
 - REQ-3.3.5 — protocol-v2 / ordering-fragmentation: fully implemented; OrderingBuffer.hpp/.cpp, per-destination SeqState table in DeliveryEngine, sequence_num/fragment_* fields in MessageEnvelope; test_OrderingBuffer.cpp (6 tests), 2 DE integration tests added to Verifies; REQ-4.2.1 updated accordingly
 - REQ-3.2.4 / REQ-3.3.5 / REQ-7.2.3 / REQ-7.2.5 — round-4 fixes: (1) sweep_expired_holds() now collects freed envelopes so callers can increment msgs_dropped_expired and emit EXPIRY_DROP events (issue 3); (2) parse_rr_header() rejects non-zero reserved pad bytes (issue 4); (3) targeted tests added: test_rre_zero_cid_rejected, test_rre_nonzero_pad_rejected, test_rre_big_endian_cid_encoding (all in test_RequestReplyEngine.cpp), test_de_idle_ordered_gap_expiry_sweep (test_DeliveryEngine.cpp); TRACEABILITY_MATRIX updated to reflect 13 test_RequestReplyEngine tests
+- REQ-6.1.8, REQ-6.1.9, REQ-6.1.10 — Wave 2 HELLO unicast routing: TcpBackend + TlsTcpBackend send HELLO frame on register_local_id(); server maintains NodeId→slot routing table (m_client_node_ids[]); flush_delayed_to_clients() routes unicast by destination_id (broadcast when NODE_ID_INVALID); TransportInterface::register_local_id() added as non-pure virtual; DeliveryEngine::init() calls register_local_id(local_id) after transport init

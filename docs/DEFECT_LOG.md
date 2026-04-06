@@ -461,3 +461,60 @@ only the `src/` directory and cannot see callers in `tests/`.
 
 Moderator: Don Jessup — 2026-04-05. All three findings are cppcheck false positives caused by test callers residing outside the analysed `src/` tree. No code logic changed. Inspection INSP-008 closed PASS.
 
+---
+
+### INSP-009 — Wave 2: HELLO registration and unicast routing (REQ-6.1.8, REQ-6.1.9, REQ-6.1.10)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-05 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | PASS — no new defects found; all Power of 10 and MISRA checks pass; lint+tests pass |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `src/platform/TcpBackend.hpp` | Added `register_local_id()`, `send_hello_frame()`, `find_client_slot()`, `send_to_slot()`, `handle_hello_frame()` declarations; added `m_client_node_ids[]` and `m_local_node_id` member fields |
+| `src/platform/TcpBackend.cpp` | Implemented HELLO frame send on `register_local_id()`; server intercepts HELLO frames in `recv_from_client()` and records `NodeId → slot` in `m_client_node_ids[]`; `flush_delayed_to_clients()` routes by `destination_id` (unicast for non-zero, broadcast for NODE_ID_INVALID) |
+| `src/platform/TlsTcpBackend.hpp` | Equivalent declarations for TLS-wrapped TCP path |
+| `src/platform/TlsTcpBackend.cpp` | Equivalent implementation for TLS-wrapped TCP path |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations (CC ≤ 10 enforced) | PASS |
+| `make run_tests` all tests green | PASS |
+| All new/modified `src/` files carry `// Implements: REQ-x.x` tags | PASS |
+| All new/modified `tests/` files carry `// Verifies: REQ-x.x` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Defects found
+
+| ID | File : line | Description | Severity | Disposition | Resolution |
+|----|-------------|-------------|----------|-------------|------------|
+| — | — | No defects found during inspection | — | — | — |
+
+#### Checklist reference
+
+All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
+- `register_local_id()`, `send_hello_frame()`: NSC — called once at init time; no runtime message-delivery policy encoded. ✓
+- `find_client_slot()`, `handle_hello_frame()`, `send_to_slot()`: NSC — routing table bookkeeping; do not directly affect message content or delivery semantics beyond destination selection. ✓
+- `flush_delayed_to_clients()`: already SC (HAZ-005, HAZ-006); unicast routing addition does not change SC classification. ✓
+- Power of 10 Rule 2: `find_client_slot()` loop bounded at O(MAX_TCP_CONNECTIONS=8). ✓
+- Power of 10 Rule 3: no dynamic allocation; `m_client_node_ids[]` is a fixed-size member array, init-phase allocated. ✓
+- Stack analysis: new Chain 7 (HELLO registration) is 5–6 frames, well below 10-frame worst case. ✓
+- WCET: `find_client_slot()` adds O(C)=O(8) per delayed message in `flush_delayed_to_clients()`; asymptotic bound unchanged. ✓
+- Traceability: REQ-6.1.8, REQ-6.1.9, REQ-6.1.10 added to TRACEABILITY_MATRIX.md; `Implements` tags added to source files. ✓
+- HAZARD_ANALYSIS.md §3: new functions classified; SC/NSC decisions recorded in this document. ✓
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-05. No CRITICAL or MAJOR defects. All entry and exit criteria satisfied. Inspection INSP-009 closed PASS.
+

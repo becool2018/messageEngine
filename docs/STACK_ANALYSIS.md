@@ -126,6 +126,31 @@ and does not change the worst-case runtime stack depth.
 
 ---
 
+### Chain 7 — HELLO registration (TcpBackend / TlsTcpBackend)
+
+```
+DeliveryEngine::init()  [~64 B]
+  └─ TransportInterface::register_local_id()  [~32 B]  ← virtual dispatch
+       └─ TcpBackend::register_local_id()  [~48 B]
+            └─ send_hello_frame()  [~80 B]  ← m_wire_buf is pre-allocated member array
+                 └─ Serializer::serialize()  [~32 B]
+```
+
+**Depth:** 5 frames
+**Estimated peak stack:** ~256 B
+
+This chain is called once during `init()`, not at runtime. `send_hello_frame()` uses the
+pre-allocated `m_wire_buf` member array; no large stack allocation is introduced. The chain
+is 5 frames deep, well below the 10-frame worst case of Chains 3 and 5. It does **not**
+represent a new worst-case path.
+
+`TlsTcpBackend::register_local_id()` and `TlsTcpBackend::send_hello_frame()` have an
+identical chain structure; the only difference is that the final send call goes through
+`mbedtls_ssl_write()` rather than a plain socket write, adding at most 1 extra frame
+(the mbedTLS internal call). Maximum depth: 6 frames. Still not a new worst case.
+
+---
+
 ### Chain 6 — DTLS inbound receive
 
 ```
@@ -154,6 +179,7 @@ main()  [~64 B]
 | 4 — ACK timeout sweep | 6 | ~352 B |
 | 5 — DTLS outbound send | **10** | ~764 B |
 | 6 — DTLS inbound receive | 8 | ~504 B |
+| 7 — HELLO registration (init-phase only) | 5–6 | ~256 B |
 | **Worst case** | **10 (Chains 3 and 5)** | **~764 B (Chain 5, dominated by payload_buf[256])** |
 
 The worst-case **frame depth** is **10 frames** (Chains 3 and 5). The worst-case **stack
