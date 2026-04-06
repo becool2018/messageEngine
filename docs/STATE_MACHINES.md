@@ -169,6 +169,8 @@ Effect on `process_outbound()`:
 
 > **Known edge case:** If `partition_gap_ms == 0`, the first call to `is_partition_active()` sets `m_next_partition_event_us = now_us`. On the very next call (same or greater `now_us`), the `!m_partition_active && now_us >= m_next_partition_event_us` guard fires, activating a partition immediately and permanently (the gap phase has zero duration). This causes a permanent partition — all messages are dropped.
 
+> **Unicast routing note:** Partition drops apply to both broadcast (`destination_id == 0`) and unicast (`destination_id > 0`) paths equally. The unicast slot lookup (§6 below) occurs before the partition check in the send path in the calling TcpBackend/TlsTcpBackend, but the partition causes the send to be dropped regardless of routing result — a routable unicast slot is no protection against a simulated link outage.
+
 ### Delay Buffer Sub-State
 
 | Sub-state | Condition | Meaning |
@@ -311,3 +313,48 @@ as the lightweight formal specification required for Class C review.
 - Control messages and UNORDERED messages (sequence_num == 0) are never held.
 - next_expected_seq is monotonically non-decreasing for each peer.
 - A held message is released at most once (HoldSlot freed immediately on release).
+
+---
+
+## §6 TCP/TLS Server Client Registration State Machine
+
+**Component:** TcpBackend (server mode) / TlsTcpBackend (server mode)
+**Hazards mitigated:** HAZ-001 (wrong-node delivery)
+**Requirements:** REQ-6.1.8, REQ-6.1.9
+
+### States
+
+| State | Description |
+|---|---|
+| UNREGISTERED | Client socket connected; no HELLO received; NodeId unknown. Unicast sends to this client will fail with ERR_INVALID. |
+| REGISTERED | HELLO received; NodeId recorded in slot table. Unicast sends to this NodeId route to this slot. |
+
+### Transitions
+
+| From State | Event | Guard | To State | Action |
+|---|---|---|---|---|
+| UNREGISTERED | HELLO frame received | source_id != NODE_ID_INVALID | REGISTERED | Store source_id → slot in m_client_node_ids[]; log INFO "Registered client NodeId N at slot S" |
+| REGISTERED | HELLO frame received (re-registration) | source_id == existing entry | REGISTERED | Idempotent; no change. Log INFO. |
+| REGISTERED | HELLO frame received (new NodeId) | source_id != existing entry | REGISTERED | Overwrite slot entry; log WARNING_HI "duplicate NodeId registration — overwriting slot S" |
+| REGISTERED | Client disconnects | — | (slot freed) | Clear m_client_node_ids[slot] = NODE_ID_INVALID; compact table |
+| UNREGISTERED | Client disconnects | — | (slot freed) | Clear slot; compact table |
+
+### Invariants
+
+1. `m_client_node_ids[i] == NODE_ID_INVALID` for all slots `i >= m_client_count`.
+2. No two active slots hold the same non-zero NodeId after any single HELLO is processed (the second registration overwrites, so at most one slot holds a given NodeId at any time).
+3. HELLO frames never reach DeliveryEngine::receive(); they are consumed at the transport layer and return ERR_AGAIN to the poll loop.
+
+### Guard on outbound unicast (REQ-6.1.9)
+
+```
+send_message(env):
+  if env.destination_id == NODE_ID_INVALID:
+      → broadcast: send to all slots with m_client_fds[i] >= 0
+  else:
+      slot = find_client_slot(env.destination_id)
+      if slot == MAX_TCP_CONNECTIONS:
+          → ERR_INVALID + WARNING_HI (no registered client for that NodeId)
+      else:
+          → send to m_client_fds[slot] only
+```
