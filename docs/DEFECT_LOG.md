@@ -708,6 +708,56 @@ Moderator: Don Jessup — 2026-04-06. All five defects (DEF-013-1 through DEF-01
 
 ---
 
+### INSP-015 — Security hardening: OS entropy seeding, DTLS source_id validation, CRL revocation, TLS handshake retry (2026-04-06)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-06 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | CLOSED — 5 security defects found and fixed (commits f6da26c, 2236623) |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `src/platform/ImpairmentEngine.cpp`, `src/core/ImpairmentConfig.hpp` | DEF-015-1: Replace literal PRNG seeds (42/1) with OS entropy via arc4random_buf/getrandom; default seed=0 triggers entropy path; non-zero seed preserved as explicit test-mode path. |
+| `src/core/DeliveryEngine.cpp`, `src/core/MessageId.hpp` | DEF-015-2: MessageIdGen seeded with OS entropy (arc4random_buf/getrandom) XORed with local_id; removes predictable (local_id<<32)^timestamp seed. |
+| `src/platform/DtlsUdpBackend.cpp`, `src/platform/DtlsUdpBackend.hpp` | DEF-015-3: Add HELLO-based peer NodeId registration; validate envelope source_id against registered peer; reject data frames from unregistered peers and duplicate HELLOs (REQ-6.2.4). |
+| `src/platform/DtlsUdpBackend.cpp`, `src/platform/DtlsUdpBackend.hpp`, `src/core/TlsConfig.hpp` | DEF-015-4: CRL support — load crl_file when verify_peer=true and crl_file non-empty; pass to mbedtls_ssl_conf_ca_chain() (REQ-6.3.4). |
+| `src/platform/TlsTcpBackend.cpp`, `src/platform/TlsTcpBackend.hpp`, `src/core/TlsConfig.hpp` | DEF-015-4 (TLS side): Same CRL support for TlsTcpBackend via load_ca_and_crl() and load_crl_if_configured() helpers. |
+| `src/platform/TlsTcpBackend.cpp`, `src/platform/TlsTcpBackend.hpp` | DEF-015-5: Wrap mbedtls_ssl_handshake() in bounded retry loop (max 32) for WANT_READ/WANT_WRITE in both do_tls_server_handshake() and tls_connect_handshake(); shared via run_tls_handshake_loop() helper (REQ-6.3.3). |
+| `tests/test_DtlsUdpBackend.cpp` | Three new tests for DTLS source validation: peer-registration, spoof-drop, duplicate-HELLO-rejection. |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations | PASS |
+| `make run_tests` all tests green | PASS |
+| All modified `src/` files carry `// Implements: REQ-x.x` tags | PASS |
+| No raw `assert()` in `src/` | PASS |
+| No dynamic allocation on critical paths after init | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Defects found
+
+| ID | File | Description | Severity | Disposition |
+|----|------|-------------|----------|-------------|
+| DEF-015-1 | `src/platform/ImpairmentEngine.cpp` | ImpairmentEngine::init() seeded PRNG with literal 42; constructor used literal 1. A fixed seed combined with known message sequence predicts all impairment decisions (REQ-5.2.4 violation). | CRITICAL | Fixed: init() now calls arc4random_buf()/getrandom() for entropy; impairment_config_default() sets prng_seed=0 (entropy mode). |
+| DEF-015-2 | `src/core/DeliveryEngine.cpp` | MessageIdGen seeded from (local_id<<32)^timestamp only — still predictable given node ID and approximate start time. Forged ACKs can silently clear retry slots (HAZ-010). | CRITICAL | Fixed: seed derived from OS entropy (arc4random_buf/getrandom) XORed with local_id; removes timestamp predictability. |
+| DEF-015-3 | `src/platform/DtlsUdpBackend.cpp` | validate_source() returned true immediately for DTLS mode. An authorized DTLS peer could claim any source_id in the envelope payload, bypassing REQ-6.2.4 source identity binding. | CRITICAL | Fixed: process_hello_or_validate() added; peer NodeId registered from HELLO; data frames validated against registered NodeId; spoofs and duplicate HELLOs rejected. |
+| DEF-015-4 | `src/platform/TlsTcpBackend.cpp`, `src/platform/DtlsUdpBackend.cpp` | No CRL support. Revoked certificates accepted at handshake without error; compromised private keys remain usable indefinitely. | MAJOR | Fixed: crl_file field added to TlsConfig; both backends load CRL when configured and pass to mbedtls_ssl_conf_ca_chain(). |
+| DEF-015-5 | `src/platform/TlsTcpBackend.cpp` | mbedtls_ssl_handshake() called once in both server and client handshake paths; WANT_READ/WANT_WRITE (possible on EINTR with blocking sockets) treated as fatal, causing spurious connection failures. | MAJOR | Fixed: run_tls_handshake_loop() retries up to 32 times on WANT_READ/WANT_WRITE; used in both do_tls_server_handshake() and tls_connect_handshake(). |
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-06. All five defects (DEF-015-1 through DEF-015-5) resolved in commits f6da26c and 2236623. All entry and exit criteria satisfied. Inspection INSP-015 closed PASS.
+
+---
+
 ### INSP-014 — Security hardening: integer safety and input validation (S1–S5) (2026-04-06)
 
 | Field       | Value |
