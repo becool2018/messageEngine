@@ -400,6 +400,19 @@ Result TcpBackend::recv_from_client(int client_fd, uint32_t timeout_ms)
         return Result::ERR_INVALID;  // silent discard; WARNING_HI already logged
     }
 
+    // SEC-025 (client mode): lock in the server's NodeId from the first accepted
+    // inbound frame. validate_source_id() allowed it (slot was NODE_ID_INVALID);
+    // record it now so all subsequent frames are validated against this NodeId.
+    // Uses m_client_node_ids[0] — the only slot in client mode
+    // (m_client_count == 1, set by connect_to_server()). Mirrors TlsTcpBackend SEC-011.
+    if (!m_is_server && (m_client_node_ids[0U] == NODE_ID_INVALID) &&
+        (env.source_id != NODE_ID_INVALID)) {
+        m_client_node_ids[0U] = env.source_id;
+        Logger::log(Severity::INFO, "TcpBackend",
+                    "SEC-025: server NodeId locked in as %u (REQ-6.1.11)",
+                    static_cast<unsigned int>(env.source_id));
+    }
+
     // REQ-5.1.5, REQ-5.1.6: route through impairment before queuing.
     // Partition drops and reorder buffering apply on the inbound path.
     uint64_t now_us = timestamp_now_us();

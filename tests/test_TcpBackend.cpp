@@ -2218,6 +2218,142 @@ static void test_source_id_match_accepted()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// test_tcp_client_server_nodeid_rotation_rejected
+//
+// SEC-025 regression: TcpBackend client mode must lock the server's NodeId from
+// the first accepted inbound frame.  A subsequent frame from the same server fd
+// with a different source_id must be silently discarded (REQ-6.1.11) — mirrors
+// the protection that TlsTcpBackend SEC-011 provides on the TLS client path.
+//
+// Setup:
+//   srv_rotate_thread: bind, accept the client, poll to process the HELLO, then
+//   send DATA(source_id=SERVER_A) followed after 200 ms by DATA(source_id=SERVER_B).
+//   Client (main thread): connect, register_local_id, receive two frames.
+//
+// Expected:
+//   - First receive: OK, envelope.source_id == SERVER_A, slot locked to SERVER_A.
+//   - Second receive: NOT OK (frame dropped — validate_source_id sees SERVER_B ≠ SERVER_A).
+//
+// Verifies: REQ-6.1.11
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct SrvRotateArg {
+    uint16_t port;
+    NodeId   first_src;
+    NodeId   second_src;
+    Result   init_result;
+};
+
+static void* srv_rotate_thread(void* raw)
+{
+    SrvRotateArg* a = static_cast<SrvRotateArg*>(raw);
+    assert(a != nullptr);
+
+    TcpBackend server;
+    TransportConfig cfg;
+    make_tcp_server_cfg(cfg, a->port);
+    a->init_result = server.init(cfg);
+    if (a->init_result != Result::OK) { return nullptr; }
+
+    // Poll to accept the client connection and process any HELLO frame.
+    // Power of 10: fixed loop bound (5 iterations × 100 ms = 500 ms max).
+    for (uint32_t i = 0U; i < 5U; ++i) {
+        MessageEnvelope dummy;
+        (void)server.receive_message(dummy, 100U);
+    }
+
+    // Send first DATA frame with first_src; client slot will be locked to this id.
+    MessageEnvelope e1;
+    envelope_init(e1);
+    e1.message_type      = MessageType::DATA;
+    e1.message_id        = 1U;
+    e1.source_id         = a->first_src;
+    e1.destination_id    = NODE_ID_INVALID;  // broadcast to all connected clients
+    e1.reliability_class = ReliabilityClass::BEST_EFFORT;
+    (void)server.send_message(e1);
+
+    usleep(200000U);  // 200 ms: let client receive and lock on frame 1
+
+    // Send second DATA frame with second_src; client must drop this (SEC-025).
+    MessageEnvelope e2;
+    envelope_init(e2);
+    e2.message_type      = MessageType::DATA;
+    e2.message_id        = 2U;
+    e2.source_id         = a->second_src;
+    e2.destination_id    = NODE_ID_INVALID;  // broadcast
+    e2.reliability_class = ReliabilityClass::BEST_EFFORT;
+    (void)server.send_message(e2);
+
+    usleep(400000U);  // 400 ms: let client attempt to receive frame 2 (and drop it)
+    server.close();
+    return nullptr;
+}
+
+// Verifies: REQ-6.1.11
+static void test_tcp_client_server_nodeid_rotation_rejected()
+{
+    static const uint16_t PORT      = 19754U;
+    static const NodeId   SERVER_A  = 10U;  // first source_id — gets locked in
+    static const NodeId   SERVER_B  = 11U;  // rotated source_id — must be rejected
+    static const NodeId   CLIENT_ID = 1U;
+
+    SrvRotateArg srv_arg;
+    srv_arg.port        = PORT;
+    srv_arg.first_src   = SERVER_A;
+    srv_arg.second_src  = SERVER_B;
+    srv_arg.init_result = Result::ERR_IO;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t srv_tid;
+    (void)pthread_create(&srv_tid, &attr, srv_rotate_thread, &srv_arg);
+
+    usleep(50000U);  // 50 ms: give server time to bind and listen
+
+    TcpBackend client;
+    TransportConfig cli_cfg;
+    make_tcp_client_cfg(cli_cfg, PORT);
+    Result init_r = client.init(cli_cfg);
+    assert(init_r == Result::OK);
+
+    // Send HELLO to register our identity with the server (ensures the server's
+    // routing table is populated before it sends the two test frames).
+    (void)client.register_local_id(CLIENT_ID);
+
+    // Receive first frame: validate_source_id allows it (slot = NODE_ID_INVALID);
+    // SEC-025 then locks m_client_node_ids[0] = SERVER_A.
+    // Power of 10: fixed loop bound (15 iterations × 100 ms = 1.5 s).
+    Result r1 = Result::ERR_TIMEOUT;
+    MessageEnvelope env1;
+    envelope_init(env1);
+    for (uint32_t i = 0U; i < 15U; ++i) {
+        r1 = client.receive_message(env1, 100U);
+        if (r1 == Result::OK) { break; }
+    }
+
+    // Receive second frame: validate_source_id now sees SERVER_B ≠ SERVER_A → drop.
+    // Power of 10: fixed loop bound (8 iterations × 100 ms = 800 ms).
+    Result r2 = Result::ERR_TIMEOUT;
+    MessageEnvelope env2;
+    envelope_init(env2);
+    for (uint32_t i = 0U; i < 8U; ++i) {
+        r2 = client.receive_message(env2, 100U);
+        if (r2 == Result::OK) { break; }  // should not happen
+    }
+
+    (void)pthread_join(srv_tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+    client.close();
+
+    assert(r1 == Result::OK);               // first frame accepted
+    assert(env1.source_id == SERVER_A);     // slot locked to SERVER_A
+    assert(r2 != Result::OK);               // second frame (rotated NodeId) dropped
+    assert(srv_arg.init_result == Result::OK);
+    printf("PASS: test_tcp_client_server_nodeid_rotation_rejected\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2277,6 +2413,9 @@ int main()
     // Source address validation tests (REQ-6.1.11)
     test_source_id_mismatch_dropped();
     test_source_id_match_accepted();
+
+    // SEC-025: client-mode NodeId rotation rejected (REQ-6.1.11)
+    test_tcp_client_server_nodeid_rotation_rejected();
 
     printf("=== ALL PASSED ===\n");
     return 0;
