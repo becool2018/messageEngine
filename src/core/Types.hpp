@@ -98,6 +98,7 @@ enum class MessageType : uint8_t {
     ACK        = 1U,
     NAK        = 2U,
     HEARTBEAT  = 3U,
+    HELLO      = 4U,  ///< Transport-layer registration frame (REQ-6.1.8); intercepted at transport, never delivered to DeliveryEngine.
     INVALID    = 255U
 };
 

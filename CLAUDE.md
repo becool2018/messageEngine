@@ -250,6 +250,27 @@ The impairment engine must be able to apply, per channel or globally:
 - Concurrency:
   - [REQ-6.1.7] Support multiple simultaneous connections.
   - Use a well-defined model (thread-per-connection, thread pool, or event loop) consistent with the global rules.
+  - [REQ-6.1.8] Client-side HELLO registration:
+    When a TCP or TLS client establishes a connection it must send a HELLO frame
+    (MessageType::HELLO = 4, source_id = local NodeId, payload_length = 0) before
+    transmitting any DATA frame. The HELLO identifies the client to the server so
+    the server can build a NodeId → socket-slot routing table.
+  - [REQ-6.1.9] Server-side unicast routing:
+    The TCP and TLS server must maintain a NodeId → socket-slot table populated from
+    received HELLO frames. For outbound frames with destination_id != NODE_ID_INVALID,
+    the server routes to the single slot whose registered NodeId matches destination_id.
+    If no matching slot exists the send must fail with ERR_INVALID and log WARNING_HI.
+    For broadcast frames (destination_id == NODE_ID_INVALID = 0) the existing fan-out
+    to all connected clients is retained unchanged.
+  - [REQ-6.1.10] TransportInterface::register_local_id():
+    TransportInterface exposes a non-pure virtual method
+    `virtual Result register_local_id(NodeId id)` with a default body returning OK.
+    TCP/TLS backends (client mode) override this to send the HELLO frame on-wire.
+    TCP/TLS backends (server mode) override this to store the local NodeId for
+    reference. All other transports (UDP, DTLS-UDP, LocalSimHarness) inherit the
+    default no-op.
+    DeliveryEngine::init() calls register_local_id(local_id) immediately after
+    transport->init() returns OK; any failure is logged at WARNING_HI.
 
 6.2 UDP (connectionless) backend
 - Reliability:

@@ -70,4 +70,10 @@ static const uint8_t  PROTO_VERSION = 2U;
 /// Provides a fast sanity check against misaligned reads or wrong-port data.
 static const uint16_t PROTO_MAGIC   = 0x4D45U;
 
+// NOTE: MessageType::HELLO (= 4U) was added in the transport-layer unicast routing
+// fix (REQ-6.1.8). HELLO occupies the existing message_type byte at its existing
+// wire offset. No wire field layout changed; PROTO_VERSION is NOT bumped for HELLO.
+// Old deserializers that do not recognize value 4U will reject HELLO frames, which
+// is correct: pre-registration senders should not be receiving DATA from the server.
+
 #endif // CORE_PROTOCOL_VERSION_HPP

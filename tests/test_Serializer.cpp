@@ -628,8 +628,9 @@ static bool test_deserialize_rejects_invalid_message_type()
     assert(sr == Result::OK);
     assert(out_len >= Serializer::WIRE_HEADER_SIZE);
 
-    // Overwrite message_type byte (offset 0) with an undefined value (4)
-    wire_buf[0U] = 4U;
+    // Overwrite message_type byte (offset 0) with an undefined value (5).
+    // Note: 4U (HELLO) is now a defined MessageType (REQ-6.1.8); first undefined value is 5U.
+    wire_buf[0U] = 5U;
 
     MessageEnvelope env;
     envelope_init(env);
@@ -671,21 +672,22 @@ static bool test_deserialize_rejects_invalid_reliability_class()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 21: Deserialize accepts in-range message_type boundary values
-//          (0=DATA, 1=ACK, 2=NAK, 3=HEARTBEAT)
+//          (0=DATA, 1=ACK, 2=NAK, 3=HEARTBEAT, 4=HELLO)
 //
 // Note: value 255 (INVALID) is a defined enum value that passes the range check
 // but is caught by the post-condition NEVER_COMPILED_OUT_ASSERT(envelope_valid(env))
 // inside deserialize() — it cannot be tested via a return-value check.  Values
-// 0–3 are the exercisable accepted boundary values.
+// 0–4 are the exercisable accepted boundary values.
+// REQ-6.1.8: HELLO (4U) is now a defined transport-layer registration frame type.
 // ─────────────────────────────────────────────────────────────────────────────
-// Verifies: REQ-3.2.3
+// Verifies: REQ-3.2.3, REQ-6.1.8
 static bool test_deserialize_accepts_boundary_message_types()
 {
-    // Test that message_type values 0, 1, 2, 3 are accepted (pass the range guard)
+    // Test that message_type values 0, 1, 2, 3, 4 are accepted (pass the range guard)
     // and that deserialize() returns OK for each.
-    static const uint8_t valid_types[4U] = { 0U, 1U, 2U, 3U };
+    static const uint8_t valid_types[5U] = { 0U, 1U, 2U, 3U, 4U };
 
-    for (uint32_t i = 0U; i < 4U; ++i) {
+    for (uint32_t i = 0U; i < 5U; ++i) {
         MessageEnvelope original;
         envelope_init(original);
         original.message_type   = MessageType::ACK;   // any defined non-INVALID type for serialize
