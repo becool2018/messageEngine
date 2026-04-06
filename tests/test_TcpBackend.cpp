@@ -168,6 +168,10 @@ static void* tcp_client_thread(void* raw)
     a->result = client.init(cfg);
     if (a->result != Result::OK) { return nullptr; }
 
+    // Fix 3/4: server now requires HELLO before accepting data frames.
+    // source_id 2U matches what make_test_envelope() sets so validate_source_id passes.
+    (void)client.register_local_id(2U);
+
     MessageEnvelope env;
     make_test_envelope(env, a->send_msg_id);
     (void)client.send_message(env);
@@ -283,6 +287,10 @@ static void* two_cli_param_thread(void* raw)
 
     a->result = client.init(cfg);
     if (a->result != Result::OK) { return nullptr; }
+
+    // Fix 3/4: must register before sending data frames.
+    // source_id 2U matches make_test_envelope() so validate_source_id passes.
+    (void)client.register_local_id(2U);
 
     MessageEnvelope env;
     make_test_envelope(env, a->send_msg_id);
