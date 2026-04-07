@@ -18,26 +18,34 @@ branch. This mechanism is identical across all files and is not re-explained bel
 
 ---
 
-## Thresholds (current run: 2026-04-02)
+## Thresholds (current run: 2026-04-06)
+
+**Methodology note (2026-04-06 re-baseline):** LLVM source-based coverage now
+counts each branch outcome (True and False) as a separate branch entry, doubling
+the raw branch count relative to the prior decision-level counts. All thresholds
+below are recalibrated against the current LLVM output. The per-file ceiling
+justifications describe the same permanently-missed paths; only the raw counts
+changed. MC/DC tests 60–64 (added 2026-04-06) closed 10 previously-missed
+branches in `core/DeliveryEngine.cpp`.
 
 | File | Branches | Missed | Coverage | Threshold | Source |
 |------|----------|--------|----------|-----------|--------|
-| core/Serializer.cpp | 78 | 20 | 74.36% | ≥74% | SC |
-| core/DuplicateFilter.cpp | 42 | 10 | 76.19% | ≥75% | SC |
-| core/AckTracker.cpp | 73 | 17 | 76.71% | ≥75% | SC |
-| core/RetryManager.cpp | 91 | 19 | 79.12% | ≥75% | SC |
-| core/DeliveryEngine.cpp | 113 | 28 | 75.22% | ≥75% | SC |
+| core/Serializer.cpp | 145 | 38 | 73.79% | ≥73% | SC |
+| core/DuplicateFilter.cpp | 67 | 18 | 73.13% | ≥73% | SC |
+| core/AckTracker.cpp | 152 | 54 | 64.47% | ≥64% | SC |
+| core/RetryManager.cpp | 157 | 42 | 73.25% | ≥73% | SC |
+| core/DeliveryEngine.cpp | 459 | 130 | 71.68% | ≥71% | SC |
 | core/AssertState.cpp | 2 | 1 | 50.00% | ≥50% | NSC-infra |
-| platform/ImpairmentEngine.cpp | 186 | 46 | 75.27% | ≥74% | SC |
-| platform/ImpairmentConfigLoader.cpp | 160 | 28 | 82.50% | ≥82% | SC |
-| platform/SocketUtils.cpp | 231 | 82 | 64.50% | ≥64% | NSC |
-| platform/TcpBackend.cpp | 238 | 53 | 77.73% | ≥77% | SC |
-| platform/TlsTcpBackend.cpp | 307 | 71 | 76.87% | ≥76% | SC |
-| platform/UdpBackend.cpp | 98 | 24 | 75.51% | ≥75% | SC |
-| platform/DtlsUdpBackend.cpp | 296 | 54 | 81.76% | ≥81% | SC |
-| platform/LocalSimHarness.cpp | 69 | 19 | 72.46% | ≥72% | SC |
-| platform/MbedtlsOpsImpl.cpp | 86 | 26 | 69.77% | ≥69% | SC |
-| platform/SocketOpsImpl.cpp | 70 | 22 | 68.57% | ≥64% (NSC) | NSC |
+| platform/ImpairmentEngine.cpp | 256 | 72 | 71.88% | ≥71% | SC |
+| platform/ImpairmentConfigLoader.cpp | 174 | 34 | 80.46% | ≥80% | SC |
+| platform/SocketUtils.cpp | 306 | 118 | 61.44% | ≥61% | NSC |
+| platform/TcpBackend.cpp | 435 | 135 | 68.97% | ≥68% | SC |
+| platform/TlsTcpBackend.cpp | 697 | 209 | 70.01% | ≥70% | SC |
+| platform/UdpBackend.cpp | 194 | 58 | 70.10% | ≥70% | SC |
+| platform/DtlsUdpBackend.cpp | 487 | 119 | 75.56% | ≥75% | SC |
+| platform/LocalSimHarness.cpp | 122 | 36 | 70.49% | ≥70% | SC |
+| platform/MbedtlsOpsImpl.cpp | 91 | 27 | 70.33% | ≥70% | SC |
+| platform/SocketOpsImpl.cpp | 72 | 24 | 66.67% | ≥66% (NSC) | NSC |
 
 ---
 
@@ -81,12 +89,31 @@ Threshold: **75%** (maximum achievable rounds to 79%).
 
 ---
 
-### core/DeliveryEngine.cpp — ceiling 75.22% (85/113)
+### core/DeliveryEngine.cpp — ceiling 71.68% (329/459)
 
-28 permanently-missed branches from `NEVER_COMPILED_OUT_ASSERT` calls across the
-6 functions. All 85 reachable decision-level branches are 100% covered.
+**Updated 2026-04-06:** MC/DC tests 60–64 closed 10 previously-missed branches
+(backward-timestamp True cases in `send()` and `receive()`, sequence-assignment
+False branches for A=F and B=F, and the held_pending-delivered-OK True case at
+L876). Prior result: 71.68% (140 missed → 130 missed after MC/DC tests).
 
-Threshold: **75%** (maximum achievable).
+Two independent sources of permanently-missed branches:
+
+**(a)** Permanently-missed `NEVER_COMPILED_OUT_ASSERT` True paths — one (or more,
+for compound assertions) per `NEVER_COMPILED_OUT_ASSERT` call across all functions.
+Under the current LLVM counting each NCA contributes 2 missed branch outcomes (the
+True path of the outer `if (!(cond))` and one sub-condition outcome for compound
+conditions). These are `[[noreturn]]` abort paths; exercising them would terminate
+the test process.
+
+**(b)** Architecturally-impossible paths that cannot be reached through the public
+API in a correctly-configured harness (e.g., `m_initialized` False paths after
+`init()` succeeds, transport-queue-full paths that require exceeding
+`MSG_RING_CAPACITY` through normal `send()` calls).
+
+All branches that can be exercised by tests at the public API boundary are 100%
+covered after the MC/DC additions.
+
+Threshold: **71%** (maximum achievable).
 
 ---
 
