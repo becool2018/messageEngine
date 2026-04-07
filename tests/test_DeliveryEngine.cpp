@@ -2818,6 +2818,270 @@ static void test_mock_fragmented_partial_send_keeps_bookkeeping()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MC/DC Test 60: send() backward-timestamp rejection
+//
+// Exercises the compound decision at L706:
+//   (m_last_now_us > 0ULL) && (now_us < m_last_now_us)
+//
+// Existing tests hit A=F (first send, m_last_now_us==0) and A=T,B=F (normal
+// forward-time sends).  This test hits A=T,B=T — a backward timestamp after
+// at least one prior send — completing MC/DC independence for both conditions.
+//
+// Verifies: REQ-3.2.3 (send contract), SEC-007 monotonic-clock enforcement.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mcdc_send_backward_timestamp()
+{
+    // Verifies: REQ-3.2.3
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine;
+    setup_engine(ha, hb, engine);
+
+    MessageEnvelope env1;
+    make_data_envelope(env1, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
+    // Forward send: A=F (m_last_now_us==0); establishes m_last_now_us = NOW_US.
+    Result r1 = engine.send(env1, NOW_US);
+    assert(r1 == Result::OK);  // Assert: normal send succeeds
+
+    // Backward send: A=T (m_last_now_us=NOW_US > 0), B=T (NOW_US/2 < NOW_US).
+    // MC/DC: this is the only test that makes both conditions independently True.
+    MessageEnvelope env2;
+    make_data_envelope(env2, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
+    Result r2 = engine.send(env2, NOW_US / 2ULL);
+    assert(r2 == Result::ERR_INVALID);  // Assert: backward timestamp rejected
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_mcdc_send_backward_timestamp\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MC/DC Test 61: receive() backward-timestamp rejection
+//
+// Mirrors MC/DC Test 60 for the identical compound decision in receive() L860.
+// Hits A=T,B=T — no existing test covers a backward timestamp in receive().
+//
+// Verifies: REQ-3.2.3, SEC-007 monotonic-clock enforcement.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mcdc_receive_backward_timestamp()
+{
+    // Verifies: REQ-3.2.3
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine;
+    setup_engine(ha, hb, engine);
+
+    MessageEnvelope out1;
+    // First receive with timeout=0: A=F (m_last_now_us==0); sets m_last_now_us=NOW_US.
+    // Returns ERR_TIMEOUT (empty transport) but still updates m_last_now_us.
+    Result r1 = engine.receive(out1, 0U, NOW_US);
+    assert(r1 == Result::ERR_TIMEOUT);  // Assert: nothing to receive yet
+
+    // Backward receive: A=T (m_last_now_us=NOW_US > 0), B=T (NOW_US/2 < NOW_US).
+    // MC/DC: both conditions independently true — rejected before transport poll.
+    MessageEnvelope out2;
+    Result r2 = engine.receive(out2, 0U, NOW_US / 2ULL);
+    assert(r2 == Result::ERR_INVALID);  // Assert: backward timestamp rejected
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_mcdc_receive_backward_timestamp\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MC/DC Test 62: send() skips sequence assignment for non-DATA envelopes
+//
+// Exercises the compound decision at L726-728:
+//   envelope_is_data(env) && env.sequence_num==0U && ordering==ORDERED
+//
+// Existing tests always send DATA messages, so branch (726:9) A=False is never
+// taken.  This test sends a HEARTBEAT through an ORDERED engine; envelope_is_data
+// returns false, the block is short-circuited, and sequence_num stays 0.
+//
+// Verifies: REQ-3.3.5 (ordered channel sequence assignment guard).
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mcdc_send_non_data_no_sequence()
+{
+    // Verifies: REQ-3.3.5
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_ordered_engines(ha, hb, engine_a, engine_b);
+
+    // Build a HEARTBEAT with BEST_EFFORT on the ORDERED channel.
+    // envelope_is_data(env) = false → sequence block skipped (MC/DC A=F case).
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::HEARTBEAT;
+    env.message_id        = 0ULL;
+    env.timestamp_us      = NOW_US;
+    env.source_id         = 1U;
+    env.destination_id    = 2U;
+    env.priority          = 0U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    env.expiry_time_us    = NOW_US + 5000000ULL;
+    env.sequence_num      = 0U;   // start at zero
+    env.payload_length    = 0U;
+
+    Result r = engine_a.send(env, NOW_US);
+    assert(r == Result::OK);  // Assert: HEARTBEAT BEST_EFFORT send succeeds
+
+    // MC/DC: envelope_is_data(env) was false; sequence_num must remain 0.
+    assert(env.sequence_num == 0U);  // Assert: sequence not assigned for non-DATA
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_mcdc_send_non_data_no_sequence\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MC/DC Test 63: send() preserves pre-set non-zero sequence_num
+//
+// Exercises branch (727:9) B=False in the compound L726-728:
+//   envelope_is_data(env) && env.sequence_num==0U && ordering==ORDERED
+//
+// Existing tests always leave sequence_num==0 before send(), so the B=False
+// branch is never taken.  This test pre-sets sequence_num=99 on a DATA
+// envelope in an ORDERED engine; the B=False path skips the assignment and
+// the preset value is preserved on the wire.
+//
+// Verifies: REQ-3.3.5 (ordered channel sequence assignment guard).
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mcdc_send_preset_sequence_preserved()
+{
+    // Verifies: REQ-3.3.5
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_ordered_engines(ha, hb, engine_a, engine_b);
+
+    // DATA on ORDERED channel with sequence_num pre-set to 99.
+    // A=T (DATA), B=F (sequence_num==99 != 0), so block is skipped.
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
+    env.sequence_num = 99U;  // pre-set non-zero value
+
+    Result r = engine_a.send(env, NOW_US);
+    assert(r == Result::OK);  // Assert: send succeeds
+
+    // MC/DC: B was false (99 != 0); sequence_num must NOT have been overwritten.
+    assert(env.sequence_num == 99U);  // Assert: preset sequence preserved
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_mcdc_send_preset_sequence_preserved\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MC/DC Test 64: receive() delivers held_pending message while still fresh
+//
+// Exercises branch (876:13) held_res==OK True path in receive():
+//   if (held_res == Result::OK) { return Result::OK; }
+//
+// Existing tests always let the held message expire before the next receive(),
+// so the True branch at L876 is never taken (held_res is always ERR_EXPIRED).
+// This test uses FAR_EXPIRY for all three messages and calls receive() while
+// the staged seq=3 message is still fresh.
+//
+// Setup mirrors test_de_held_pending_expiry_event:
+//   1. Inject and receive seq=1 (next_expected → 2).
+//   2. Inject seq=3 (held: gap at seq=2); receive() returns ERR_AGAIN.
+//   3. Inject and receive seq=2 → seq=3 staged in m_held_pending.
+//   4. receive() at NOW_US+4 (well before FAR_EXPIRY) → deliver_held_pending
+//      returns OK, held_res==OK True branch taken, returns OK.
+//
+// Verifies: REQ-3.3.5 (in-order delivery from held_pending staging path).
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mcdc_receive_held_pending_ok()
+{
+    // Verifies: REQ-3.3.5
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_ordered_engines(ha, hb, engine_a, engine_b);
+
+    static const NodeId   SRC        = 1U;
+    static const NodeId   DST        = 2U;
+    static const uint64_t FAR_EXPIRY = NOW_US + 5000000ULL;
+
+    // Step 1: inject seq=1 (far expiry) — delivers immediately.
+    {
+        MessageEnvelope e1;
+        envelope_init(e1);
+        e1.message_type      = MessageType::DATA;
+        e1.message_id        = 6001ULL;
+        e1.source_id         = SRC;
+        e1.destination_id    = DST;
+        e1.timestamp_us      = NOW_US;
+        e1.expiry_time_us    = FAR_EXPIRY;
+        e1.priority          = 0U;
+        e1.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e1.sequence_num      = 1U;
+        e1.payload_length    = 1U;
+        e1.payload[0]        = 0x01U;
+        Result inj = hb.inject(e1);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out1;
+    Result r1 = engine_b.receive(out1, 100U, NOW_US + 1ULL);
+    assert(r1 == Result::OK);
+    assert(out1.sequence_num == 1U);  // Assert: seq=1 delivered; next_expected→2
+
+    // Step 2: inject seq=3 (far expiry, gap at seq=2) — held out-of-order.
+    {
+        MessageEnvelope e3;
+        envelope_init(e3);
+        e3.message_type      = MessageType::DATA;
+        e3.message_id        = 6003ULL;
+        e3.source_id         = SRC;
+        e3.destination_id    = DST;
+        e3.timestamp_us      = NOW_US;
+        e3.expiry_time_us    = FAR_EXPIRY;
+        e3.priority          = 0U;
+        e3.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e3.sequence_num      = 3U;
+        e3.payload_length    = 1U;
+        e3.payload[0]        = 0x03U;
+        Result inj = hb.inject(e3);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out3;
+    Result r3 = engine_b.receive(out3, 0U, NOW_US + 2ULL);
+    assert(r3 == Result::ERR_AGAIN);  // Assert: seq=3 held (out of order)
+
+    // Step 3: inject seq=2 (far expiry) — fills gap; seq=3 staged in held_pending.
+    {
+        MessageEnvelope e2;
+        envelope_init(e2);
+        e2.message_type      = MessageType::DATA;
+        e2.message_id        = 6002ULL;
+        e2.source_id         = SRC;
+        e2.destination_id    = DST;
+        e2.timestamp_us      = NOW_US;
+        e2.expiry_time_us    = FAR_EXPIRY;
+        e2.priority          = 0U;
+        e2.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e2.sequence_num      = 2U;
+        e2.payload_length    = 1U;
+        e2.payload[0]        = 0x02U;
+        Result inj = hb.inject(e2);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out2;
+    Result r2 = engine_b.receive(out2, 0U, NOW_US + 3ULL);
+    assert(r2 == Result::OK);
+    assert(out2.sequence_num == 2U);  // Assert: seq=2 delivered; seq=3 now in held_pending
+
+    // Step 4: receive() at NOW_US+4 — well before FAR_EXPIRY (NOW_US+5000000).
+    // deliver_held_pending() finds seq=3 still fresh → returns OK.
+    // MC/DC: held_res==OK True branch (L876) taken — never hit by prior tests.
+    MessageEnvelope out4;
+    Result r4 = engine_b.receive(out4, 0U, NOW_US + 4ULL);
+    assert(r4 == Result::OK);             // Assert: held pending delivered immediately
+    assert(out4.sequence_num == 3U);      // Assert: seq=3 is the delivered message
+    assert(out4.message_id  == 6003ULL);  // Assert: correct message identity
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_mcdc_receive_held_pending_ok\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -2880,6 +3144,11 @@ int main()
     test_de_ordering_full_stat();
     test_de_held_pending_expiry_event();
     test_mock_fragmented_partial_send_keeps_bookkeeping();
+    test_mcdc_send_backward_timestamp();
+    test_mcdc_receive_backward_timestamp();
+    test_mcdc_send_non_data_no_sequence();
+    test_mcdc_send_preset_sequence_preserved();
+    test_mcdc_receive_held_pending_ok();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;

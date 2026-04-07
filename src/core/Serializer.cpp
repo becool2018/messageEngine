@@ -251,13 +251,17 @@ Result Serializer::serialize(const MessageEnvelope& env,
 // REQ-3.2.3
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Return true when the raw byte is a defined MessageType value.
-/// Valid: 0 (DATA), 1 (ACK), 2 (NAK), 3 (HEARTBEAT), 4 (HELLO), 255 (INVALID).
+/// Return true when the raw byte is a wire-legal MessageType value.
+/// Valid wire types: 0 (DATA), 1 (ACK), 2 (NAK), 3 (HEARTBEAT), 4 (HELLO).
+/// MessageType::INVALID (255) is an initialization sentinel — it must never
+/// appear on the wire.  A frame carrying 255 is rejected here so it cannot
+/// reach the postcondition NEVER_COMPILED_OUT_ASSERT(envelope_valid(env)),
+/// which checks message_type != INVALID and would fire abort()/reset-handler
+/// on a crafted packet (same class of remote DoS as SEC-027).
 static bool message_type_in_range(uint8_t raw)
 {
-    // DATA=0, ACK=1, NAK=2, HEARTBEAT=3, HELLO=4, INVALID=255
     NEVER_COMPILED_OUT_ASSERT(raw <= 255U);  // Assert: uint8_t invariant always holds
-    return (raw <= 4U) || (raw == 255U);
+    return (raw <= 4U);
 }
 
 /// Return true when the raw byte is a defined ReliabilityClass value.

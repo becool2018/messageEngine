@@ -828,6 +828,38 @@ static bool test_deserialize_rejects_source_id_zero()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SEC-027 follow-up: deserialize must reject MessageType::INVALID (0xFF) on wire
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+// Without the fix, message_type_in_range() returned true for raw==255U
+// (MessageType::INVALID) so the cast succeeded, and the frame reached the
+// postcondition NEVER_COMPILED_OUT_ASSERT(envelope_valid(env)), which
+// checks message_type != INVALID and would fire abort()/reset-handler —
+// same remote DoS class as SEC-027.
+static bool test_deserialize_rejects_message_type_invalid_sentinel()
+{
+    MessageEnvelope original;
+    envelope_init(original);
+    original.message_type   = MessageType::DATA;
+    original.source_id      = 53U;
+    original.payload_length = 0U;
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(original, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+
+    // Overwrite message_type byte (offset 0) with 0xFF == MessageType::INVALID
+    wire_buf[0U] = 0xFFU;
+
+    MessageEnvelope env;
+    envelope_init(env);
+    Result r = Serializer::deserialize(wire_buf, out_len, env);
+    assert(r == Result::ERR_INVALID);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -1000,6 +1032,13 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_deserialize_rejects_source_id_zero\n");
+    }
+
+    if (!test_deserialize_rejects_message_type_invalid_sentinel()) {
+        printf("FAIL: test_deserialize_rejects_message_type_invalid_sentinel\n");
+        ++failed;
+    } else {
+        printf("PASS: test_deserialize_rejects_message_type_invalid_sentinel\n");
     }
 
     return (failed > 0) ? 1 : 0;
