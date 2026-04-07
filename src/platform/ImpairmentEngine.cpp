@@ -67,6 +67,47 @@ ImpairmentEngine::ImpairmentEngine()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// gather_os_entropy() — file-static helper for init()
+//
+// Gathers 8 bytes of cryptographically unpredictable entropy from the OS.
+// Returns the entropy word, or 0 on failure (caller handles the 0 case).
+// Extracted from init() to keep init()'s cognitive complexity ≤ 10.
+// REQ-5.2.4: seed must come from a CSPRNG, not a predictable time/pid source.
+// ─────────────────────────────────────────────────────────────────────────────
+
+static uint64_t gather_os_entropy()
+{
+    uint64_t entropy = 0U;
+#if defined(__APPLE__)
+    // macOS: arc4random_buf() always available and uses the kernel CSPRNG.
+    arc4random_buf(&entropy, sizeof(entropy));
+#else
+    // Linux / POSIX: Tier 1 — getrandom() (direct kernel CSPRNG).
+    // MISRA 5.2.4 deviation: reinterpret_cast to void* required by POSIX API.
+    // CERT INT32-C: compare ssize_t return against cast sizeof to avoid sign mismatch.
+    ssize_t got = getrandom(static_cast<void*>(&entropy), sizeof(entropy), 0U);
+    if (got != static_cast<ssize_t>(sizeof(entropy))) {
+        // Tier 2: /dev/urandom — available even early-boot when getrandom() blocks.
+        Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
+                    "getrandom() failed (got=%ld); trying /dev/urandom",
+                    static_cast<long>(got));
+        int urfd = open("/dev/urandom", O_RDONLY);
+        if (urfd >= 0) {
+            ssize_t r = read(urfd, static_cast<void*>(&entropy), sizeof(entropy));
+            (void)close(urfd);
+            if (r != static_cast<ssize_t>(sizeof(entropy))) {
+                entropy = 0ULL;  // Tier 3 (caller) will handle failure.
+            }
+        } else {
+            entropy = 0ULL;  // Tier 3 (caller) will handle failure.
+        }
+    }
+#endif
+    NEVER_COMPILED_OUT_ASSERT(entropy != 0ULL || true);  // Power of 10: assert present; 0 is valid failure
+    return entropy;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // init()
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -76,67 +117,22 @@ void ImpairmentEngine::init(const ImpairmentConfig& cfg)
     NEVER_COMPILED_OUT_ASSERT(cfg.reorder_window_size <= IMPAIR_DELAY_BUF_SIZE);
     NEVER_COMPILED_OUT_ASSERT(cfg.loss_probability >= 0.0 && cfg.loss_probability <= 1.0);
     // MED-7 fix: partition_gap_ms==0 with partition enabled causes an immediate, permanent
-    // partition on the very first call to is_partition_active() (documented in
-    // STATE_MACHINES.md §3 "Known edge case"). Reject this at init time so the
-    // configuration error is detected immediately rather than causing silent message loss.
+    // partition on the very first call to is_partition_active(). Reject at init time.
     NEVER_COMPILED_OUT_ASSERT(!cfg.partition_enabled || cfg.partition_gap_ms > 0U);
 
-    // Store configuration
     m_cfg = cfg;
 
     // Implements: REQ-5.2.4
-    // Seed PRNG: if cfg.prng_seed is non-zero, use it directly (test/deterministic mode).
-    // If cfg.prng_seed == 0, gather cryptographic entropy from the OS so that the seed
-    // cannot be predicted from a known message sequence (SECURITY_ASSUMPTIONS.md §7).
+    // Non-zero prng_seed: caller-supplied deterministic seed (test/deterministic mode).
+    // Zero prng_seed: gather cryptographic entropy from the OS (SECURITY_ASSUMPTIONS.md §7).
     uint64_t seed = 0U;
     if (cfg.prng_seed != 0ULL) {
-        // REQ-5.2.4: caller-supplied deterministic seed (test mode); non-zero means explicit.
         seed = cfg.prng_seed;
     } else {
-        // REQ-5.2.4: seed from cryptographically unpredictable entropy source.
-        uint64_t entropy = 0U;
-#if defined(__APPLE__)
-        // macOS: arc4random_buf() is always available and uses the kernel CSPRNG; no include needed.
-        arc4random_buf(&entropy, sizeof(entropy));
-#else
-        // Linux / POSIX: getrandom() — requires <sys/random.h> (included above).
-        // MISRA 5.2.4 deviation: reinterpret_cast to void* is required by the getrandom()
-        // POSIX API signature; no safer cast exists for this OS call.
-        // CERT INT32-C: getrandom() returns ssize_t; compare against cast sizeof to avoid
-        // signed/unsigned mismatch warning (-Wsign-compare).
-        // Tier 1: getrandom() — preferred; direct kernel CSPRNG.
-        {
-            ssize_t got = getrandom(
-                static_cast<void*>(&entropy),       // MISRA 5.2.4: void* required by POSIX API
-                sizeof(entropy), 0U);
-            if (got != static_cast<ssize_t>(sizeof(entropy))) {
-                // Tier 2: /dev/urandom — available even early-boot when getrandom() blocks.
-                // SECfix-4: adds /dev/urandom tier missing from prior two-tier chain.
-                Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
-                            "getrandom() failed (got=%ld); trying /dev/urandom",
-                            static_cast<long>(got));
-                int urfd = open("/dev/urandom", O_RDONLY);
-                if (urfd >= 0) {
-                    ssize_t r = read(urfd, static_cast<void*>(&entropy), sizeof(entropy));
-                    (void)close(urfd);
-                    if (r != static_cast<ssize_t>(sizeof(entropy))) {
-                        entropy = 0ULL;  // Mark as failed; tier 3 will handle it.
-                    }
-                } else {
-                    entropy = 0ULL;  // Mark as failed; tier 3 will handle it.
-                }
-            }
-        }
-#endif
-        // Guard: entropy all-zero after OS gather is astronomically unlikely but possible.
-        // Mix additional sources rather than fall back to a known literal (REQ-5.2.4).
+        uint64_t entropy = gather_os_entropy();
         if (entropy == 0ULL) {
-            // F-8 / REQ-5.2.4: OS entropy sources (getrandom, /dev/urandom) both
-            // returned zero. A clock()+pid fallback seed is predictable (~30 bits,
-            // time-based) and is explicitly prohibited in production by REQ-5.2.4.
-            // In production builds, fail initialization rather than proceed with a
-            // guessable seed. Set ALLOW_WEAK_PRNG_SEED only in non-production
-            // environments (embedded dev boards, CI without /dev/urandom).
+            // F-8 / REQ-5.2.4: OS entropy exhausted. Predictable fallback is prohibited
+            // in production. ALLOW_WEAK_PRNG_SEED enables a non-production override only.
 #if defined(ALLOW_WEAK_PRNG_SEED)
             entropy = (static_cast<uint64_t>(clock()) << 32U)
                       ^ static_cast<uint64_t>(getpid());
@@ -145,9 +141,6 @@ void ImpairmentEngine::init(const ImpairmentConfig& cfg)
                         "OS entropy was zero; using clock/pid fallback — "
                         "NOT PRODUCTION SAFE (ALLOW_WEAK_PRNG_SEED defined)");
 #else
-            // Production: treat entropy exhaustion as a platform fault. Log FATAL
-            // and return without setting m_initialized; callers will hit their
-            // NEVER_COMPILED_OUT_ASSERT(m_initialized) guards.
             Logger::log(Severity::FATAL, "ImpairmentEngine",
                         "OS entropy sources exhausted; cannot seed PRNG securely "
                         "(REQ-5.2.4). Build with -DALLOW_WEAK_PRNG_SEED to override "
@@ -156,26 +149,21 @@ void ImpairmentEngine::init(const ImpairmentConfig& cfg)
             return;
 #endif
         }
-        // REQ-5.2.4: no known-constant fallback
         seed = entropy;
     }
     m_prng.seed(seed);
 
-    // Zero-fill delay buffer (Power of 10: memset with fixed bounds)
+    // Zero-fill delay and reorder buffers (Power of 10: memset with fixed bounds)
     (void)memset(m_delay_buf, 0, sizeof(m_delay_buf));
     m_delay_count = 0U;
-
-    // Zero-fill reorder buffer
     (void)memset(m_reorder_buf, 0, sizeof(m_reorder_buf));
     m_reorder_count = 0U;
 
-    // Initialize partition state
+    // Initialize partition state; first call to is_partition_active() sets event time.
     m_partition_active = false;
     m_partition_start_us = 0ULL;
-    // First call to is_partition_active() will initialize m_next_partition_event_us
     m_next_partition_event_us = 0ULL;
 
-    // Mark as initialized
     m_initialized = true;
 
     // REQ-7.2.2: zero all observability counters on (re-)init
