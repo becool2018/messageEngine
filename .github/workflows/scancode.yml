@@ -1,0 +1,26 @@
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  scancode:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          path: scancode-inputs
+
+      - name: Run ScanCode with compliance gate
+        uses: aboutcode-org/scancode-action@beta
+        with:
+          pipelines: "scan_codebase"
+          output-formats: "json spdx cyclonedx"
+          project-name: "messageEngine"
+          check-compliance: true
+          compliance-fail-level: "ERROR"
