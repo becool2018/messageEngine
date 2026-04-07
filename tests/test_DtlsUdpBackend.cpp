@@ -2293,6 +2293,90 @@ static void test_duplicate_hello_rejected()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SEC-026: server sends HELLO response when it receives the first client HELLO,
+// enabling the client's process_hello_or_validate() guard to pass.
+// Without the fix: server DATA sent to client is silently dropped because
+// m_peer_hello_received == false on the client side.
+// Verifies: REQ-6.1.8, REQ-6.1.10
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.8, REQ-6.1.10
+static void test_server_hello_response_enables_client_recv()
+{
+    // Strategy (SEC-026 bidirectional HELLO):
+    //   1. Server calls register_local_id() to record its NodeId.
+    //   2. Client sends HELLO(source_id=CLIENT_ID) to server.
+    //   3. Server drains HELLO (consumed → ERR_TIMEOUT); SEC-026 causes server
+    //      to send HELLO(source_id=SERVER_ID) back to client socket.
+    //   4. Client drains server HELLO (consumed → ERR_TIMEOUT); client now has
+    //      m_peer_hello_received=true and m_peer_node_id=SERVER_ID.
+    //   5. Server sends DATA(source_id=SERVER_ID); client must deliver it (OK).
+    static const uint16_t PORT       = 14771U;
+    static const NodeId   SERVER_ID  = 1U;
+    static const NodeId   CLIENT_ID  = 2U;
+
+    DtlsUdpBackend server;
+    TransportConfig srv_cfg;
+    make_dtls_config(srv_cfg, true, PORT, false);
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    // Register server NodeId so the HELLO response includes a valid source_id.
+    Result rli = server.register_local_id(SERVER_ID);
+    assert(rli == Result::OK);
+
+    DtlsUdpBackend client;
+    TransportConfig cli_cfg;
+    make_dtls_config(cli_cfg, false, PORT, false);
+    Result cli_init = client.init(cli_cfg);
+    assert(cli_init == Result::OK);
+
+    // Step 2: client sends HELLO to server.
+    MessageEnvelope hello;
+    envelope_init(hello);
+    hello.message_type      = MessageType::HELLO;
+    hello.message_id        = 0xD001ULL;
+    hello.source_id         = CLIENT_ID;
+    hello.destination_id    = SERVER_ID;
+    hello.reliability_class = ReliabilityClass::BEST_EFFORT;
+    hello.payload_length    = 0U;
+    assert(client.send_message(hello) == Result::OK);
+
+    // Step 3: server drains HELLO (consumed); SEC-026 fires HELLO response.
+    MessageEnvelope srv_drain;
+    Result r3 = server.receive_message(srv_drain, 500U);
+    assert(r3 == Result::ERR_TIMEOUT);  // HELLO consumed, not delivered
+
+    // Step 4: client drains the server's HELLO response (consumed).
+    MessageEnvelope cli_drain;
+    Result r4 = client.receive_message(cli_drain, 500U);
+    assert(r4 == Result::ERR_TIMEOUT);  // server HELLO consumed, not delivered
+
+    // Step 5: server sends DATA to client.
+    MessageEnvelope data;
+    envelope_init(data);
+    data.message_type      = MessageType::DATA;
+    data.message_id        = 0xD002ULL;
+    data.source_id         = SERVER_ID;
+    data.destination_id    = CLIENT_ID;
+    data.reliability_class = ReliabilityClass::BEST_EFFORT;
+    data.payload_length    = 0U;
+    assert(server.send_message(data) == Result::OK);
+
+    // Client must receive the DATA (m_peer_hello_received is now true).
+    MessageEnvelope rcv;
+    Result r5 = client.receive_message(rcv, 500U);
+    assert(r5 == Result::OK);
+    assert(rcv.source_id == SERVER_ID);
+
+    client.close();
+    server.close();
+
+    printf("PASS: test_server_hello_response_enables_client_recv\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SEC-023: after first datagram is accepted the server locks the source port.
 // A second client from the same IP but a different ephemeral port must be
 // silently dropped; server receive_message() returns ERR_TIMEOUT.
@@ -2434,6 +2518,9 @@ int main()
 
     // SEC-023: plaintext server port-locking test (REQ-6.2.4)
     test_plaintext_server_wrong_port_after_learn_dropped();
+
+    // SEC-026: server HELLO response enables bidirectional client receive (REQ-6.1.8)
+    test_server_hello_response_enables_client_recv();
 
     printf("=== test_DtlsUdpBackend: ALL TESTS PASSED ===\n");
     return 0;

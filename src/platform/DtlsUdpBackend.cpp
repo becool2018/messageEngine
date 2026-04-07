@@ -916,6 +916,15 @@ bool DtlsUdpBackend::process_hello_or_validate(const MessageEnvelope& env,
         Logger::log(Severity::INFO, "DtlsUdpBackend",
                     "DTLS: HELLO received, peer NodeId %u registered",
                     static_cast<unsigned int>(m_peer_node_id));
+        // SEC-026: server sends a HELLO response so the client can register
+        // the server's NodeId and pass its own HELLO-before-data guard.
+        // Only sent when m_local_node_id is already set (register_local_id()
+        // has been called); if not yet set, the response is deferred until
+        // register_local_id() is called (DeliveryEngine calls it immediately
+        // after init(), so the window is zero in normal operation).
+        if (m_is_server && (m_local_node_id != NODE_ID_INVALID)) {
+            (void)send_hello_datagram();
+        }
         consumed = true;  // HELLO consumed; must not reach DeliveryEngine
         return true;
     }
@@ -1145,10 +1154,11 @@ Result DtlsUdpBackend::register_local_id(NodeId id)
 {
     NEVER_COMPILED_OUT_ASSERT(id != NODE_ID_INVALID);  // pre-condition: valid NodeId
     NEVER_COMPILED_OUT_ASSERT(m_open);  // pre-condition: transport must be initialised
-    // REQ-6.1.8 / REQ-6.1.10: store NodeId, then send HELLO in client mode so the
-    // server registers this side before any DATA frame arrives.  Server mode skips
-    // HELLO here — the server has no connected client at registration time; HELLO is
-    // sent by the client, received in deserialize_and_dispatch(), and registered there.
+    // REQ-6.1.8 / REQ-6.1.10 / SEC-026: store NodeId, then send HELLO in client mode
+    // so the server registers this side before any DATA frame arrives.  Server mode
+    // skips HELLO here — no client peer address is known at registration time.  The
+    // server sends its HELLO response inside process_hello_or_validate() the moment
+    // the first client HELLO arrives (SEC-026: bidirectional NodeId registration).
     m_local_node_id = id;
     if (!m_is_server) {
         return send_hello_datagram();
@@ -1157,16 +1167,18 @@ Result DtlsUdpBackend::register_local_id(NodeId id)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// send_hello_datagram() — private helper (REQ-6.1.8, REQ-6.1.10)
+// send_hello_datagram() — private helper (REQ-6.1.8, REQ-6.1.10, SEC-026)
 //
 // Serializes a HELLO envelope and sends it via send_wire_bytes() (DTLS or
-// plaintext UDP), bypassing the impairment engine.  Client mode only.
+// plaintext UDP), bypassing the impairment engine.  Used by the client to
+// initiate registration and by the server to respond to the first client HELLO
+// (SEC-026: bidirectional NodeId registration).
 // ─────────────────────────────────────────────────────────────────────────────
 
 Result DtlsUdpBackend::send_hello_datagram()
 {
     NEVER_COMPILED_OUT_ASSERT(m_local_node_id != NODE_ID_INVALID);  // pre: NodeId set
-    NEVER_COMPILED_OUT_ASSERT(!m_is_server);                         // pre: client only
+    // SEC-026: server also calls this to respond to client HELLO; no is_server guard.
 
     MessageEnvelope hello;
     envelope_init(hello);
@@ -1212,11 +1224,16 @@ Result DtlsUdpBackend::send_wire_bytes(const uint8_t* buf, uint32_t len)
             return Result::ERR_IO;
         }
     } else {
+        // SEC-026 / SEC-023: server must reply to the client's ephemeral source
+        // port (m_peer_src_port, learned on first datagram), not m_cfg.peer_port
+        // which is the server's own listen port. Client always uses m_cfg.peer_port.
+        const uint16_t dest_port = (m_is_server && (m_peer_src_port != 0U))
+                                   ? m_peer_src_port : m_cfg.peer_port;
         if (!m_sock_ops->send_to(m_sock_fd, buf, len,
-                                 m_cfg.peer_ip, m_cfg.peer_port)) {
+                                 m_cfg.peer_ip, dest_port)) {
             Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
                         "send_message: socket_send_to failed to %s:%u",
-                        m_cfg.peer_ip, m_cfg.peer_port);
+                        m_cfg.peer_ip, dest_port);
             return Result::ERR_IO;
         }
     }

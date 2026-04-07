@@ -125,6 +125,15 @@ REQ-6.2.4 is now enforced:
   `source_id` does not match the registered NodeId are silently discarded with WARNING_HI.
   Duplicate HELLO frames are also rejected (HAZ-011 / DEF-015-3).
 
+  **SEC-026 (bidirectional HELLO):** When the server processes the first client HELLO,
+  `process_hello_or_validate()` immediately sends a HELLO response back to the client via
+  `send_hello_datagram()`. This allows the client's own `m_peer_hello_received` guard to
+  be set, enabling server→client DATA delivery. Without this response, the client dropped
+  all server-originated DATA because the server never sent HELLO on `register_local_id()`.
+  In plaintext mode the server uses `m_peer_src_port` (the client's learned ephemeral port)
+  as the destination port for its reply, since `m_cfg.peer_port` is the server's own listen
+  port (SEC-026 / SEC-023 port-learning fix in `send_wire_bytes()`).
+
 - **UdpBackend (plaintext UDP):** `process_hello_or_validate()` mirrors the DtlsUdpBackend
   logic. A peer at the correct IP:port must send a HELLO before any DATA frame; the HELLO
   locks `m_peer_node_id`; subsequent data frames with a mismatched `source_id` are silently
