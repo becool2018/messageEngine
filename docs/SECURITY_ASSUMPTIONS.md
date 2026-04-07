@@ -124,7 +124,7 @@ REQ-6.1.11 is now enforced:
   `validate_source_id()` with WARNING_HI and discarded. Mirrors TlsTcpBackend SEC-011.
   Prior to this fix, the client-mode slot remained `NODE_ID_INVALID` for the session
   lifetime, allowing an attacker with access to the TCP stream to exhaust `DuplicateFilter`
-  and `OrderingBuffer` capacity by rotating arbitrary `source_id` values (HAZ-016).
+  and `OrderingBuffer` capacity by rotating arbitrary `source_id` values (HAZ-009).
 
 REQ-6.2.4 is now enforced:
 
@@ -270,7 +270,7 @@ therefore correlates with whether and where a match exists in the window, creati
 a timing side-channel that could theoretically allow an observer to infer whether a
 given message was seen recently.
 
-**Risk assessment — LOW**: the window is at most `DEDUP_WINDOW_SIZE` (64) entries;
+**Risk assessment — LOW**: the window is at most `DEDUP_WINDOW_SIZE` (128) entries;
 the timing delta is on the order of tens of nanoseconds; and all production transports
 run over TLS/DTLS, whose record-layer padding and MAC computation dominate any
 variation the dedup scan adds. An attacker who can make precise sub-microsecond

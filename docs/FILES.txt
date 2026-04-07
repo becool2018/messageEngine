@@ -113,11 +113,11 @@ docs/use_cases/use_case_format.txt
   UC_*.md documents; defines the quality bar and output format requirements.
 
 docs/use_cases/HIGH_LEVEL_USE_CASES.md
-  Index of 29 high-level use cases (HL-1 through HL-29) with links to the 61
+  Index of 29 high-level use cases (HL-1 through HL-29) with links to the 68
   detailed Flow-of-Control documents.
 
-docs/use_cases/UC_01 … UC_61
-  61 Flow-of-Control documents, one per use case. Each document has 15
+docs/use_cases/UC_01 … UC_68
+  68 Flow-of-Control documents, one per use case. Each document has 15
   sections: overview, entry points, step-by-step control flow, call tree, key
   components, branching logic, concurrency, memory/ownership, error handling,
   external interactions, state changes, sequence diagram (ASCII), init vs
@@ -199,6 +199,84 @@ DeliveryEngine.hpp / DeliveryEngine.cpp
   together. Assigns message IDs, applies reliability semantics (BEST_EFFORT /
   RELIABLE_ACK / RELIABLE_RETRY), drives retries via pump_retries(), and
   sweeps ACK timeouts via sweep_ack_timeouts().
+
+DeliveryEvent.hpp
+  Enumeration (DeliveryEventKind: SEND_OK, SEND_FAIL, ACK_RECEIVED,
+  ACK_TIMEOUT, DUPLICATE_DROP, EXPIRY_DROP, RETRY_FIRED, MISROUTE_DROP)
+  and POD DeliveryEvent struct (kind, source_id, message_id, timestamp_us).
+  Used by DeliveryEngine for pull-style observability. Implements: REQ-7.2.5.
+
+DeliveryEventRing.hpp
+  Fixed-capacity (DELIVERY_EVENT_RING_CAPACITY) overwrite-on-full ring buffer
+  for DeliveryEvent records; poll_event / drain_events / pending_event_count;
+  std::atomic<uint32_t> head/tail for lock-free SPSC access. No dynamic
+  allocation. Implements: REQ-7.2.5.
+
+DeliveryStats.hpp
+  POD metrics structs: AckTrackerStats (slots_used, ack_count, timeout_count),
+  RetryManagerStats (active_count, retry_fired_count, exhausted_count), and
+  TransportStats (messages_sent, messages_received, send_errors, recv_errors,
+  connections_opened, connections_closed). Used for observability hooks
+  REQ-7.2.1–REQ-7.2.4.
+
+ProtocolVersion.hpp
+  Wire-format constants: PROTO_VERSION (current version byte, byte 3 of wire
+  header) and PROTO_MAGIC (2-byte magic 0x4D45 = 'ME', wire bytes 40–41).
+  Deserializer rejects frames with mismatched version or magic. Implements:
+  REQ-3.2.8.
+
+Fragmentation.hpp / Fragmentation.cpp
+  Stateless helper that splits a logical MessageEnvelope with payload >
+  MAX_FRAGMENT_PAYLOAD into N wire-fragment envelopes; stores fragment_index
+  and fragment_count in each envelope's header fields. Used by Serializer on
+  the send path when fragmentation is needed. Implements: REQ-3.2.3, REQ-3.3.5.
+
+ReassemblyBuffer.hpp / ReassemblyBuffer.cpp
+  Bounded (REASSEMBLY_SLOTS) reassembly table that collects incoming fragments
+  keyed on (source_id, message_id); releases the complete logical envelope when
+  all fragments arrive; reclaims slots open longer than recv_timeout_ms without
+  completing (REQ-3.2.9). Implements: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9.
+
+OrderingBuffer.hpp / OrderingBuffer.cpp
+  Per-peer in-order delivery gate for ORDERED DATA messages; holds out-of-order
+  fragments until the expected sequence_num arrives, then releases the run.
+  Implements: REQ-3.3.5.
+
+RequestReplyHeader.hpp
+  Packed 12-byte prefix embedded in MessageEnvelope::payload for
+  request/reply correlation (request_id, reply_to_id, message_kind enum).
+  Implements: REQ-3.2.4, REQ-3.3.2, REQ-3.3.3.
+
+RequestReplyEngine.hpp / RequestReplyEngine.cpp
+  Bounded request/response helper built on top of DeliveryEngine; manages
+  pending requests table, matches incoming replies by request_id, and invokes
+  registered callbacks (up to REQUEST_REPLY_CAPACITY simultaneous requests).
+  Implements: REQ-3.2.4, REQ-3.3.2, REQ-3.3.3.
+
+TlsConfig.hpp
+  POD configuration struct for TLS/DTLS parameters: tls_enabled, cert_path,
+  key_path, ca_cert_path, verify_peer, peer_hostname. Shared by TlsTcpBackend
+  and DtlsUdpBackend. Implements: REQ-6.3.4.
+
+Version.hpp
+  Compile-time project version constants: MESSAGE_ENGINE_VERSION_MAJOR,
+  MESSAGE_ENGINE_VERSION_MINOR, MESSAGE_ENGINE_VERSION_PATCH, and
+  MESSAGE_ENGINE_VERSION_STRING.
+
+IResetHandler.hpp
+  Pure-virtual interface for injectable assertion-failure reset handlers;
+  single method on_fatal_assert(). Implemented by AbortResetHandler for POSIX
+  builds. Registered via assert_state::set_reset_handler().
+
+AssertState.hpp / AssertState.cpp
+  Global assert-fired flag (g_fatal_fired) and IResetHandler registration
+  for NEVER_COMPILED_OUT_ASSERT. Provides set_reset_handler(),
+  get_reset_handler(), and trigger_handler_for_test(). Implements: REQ-7.2.4.
+
+AbortResetHandler.hpp
+  Concrete IResetHandler for POSIX-hosted builds: on_fatal_assert() calls
+  ::abort(). Singleton via AbortResetHandler::instance(). Register before
+  using any SC component in production.
 
 SOURCE — src/platform/   (OS/socket layer; adapters only, no app policy)
 -------------------------------------------------------------------------
