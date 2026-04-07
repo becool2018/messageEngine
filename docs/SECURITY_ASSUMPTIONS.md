@@ -133,6 +133,25 @@ REQ-6.2.4 is now enforced:
   `source_id` does not match the registered NodeId are silently discarded with WARNING_HI.
   Duplicate HELLO frames are also rejected (HAZ-011 / DEF-015-3).
 
+  **SEC-027 (two-phase port-locking):** Prior to this fix, `validate_source()` locked
+  `m_peer_src_port` on the *first raw datagram* from the trusted IP, before
+  deserialization or HELLO validation. A malformed packet, or a DATA-before-HELLO packet
+  from the right host, could poison the locked port and cause a legitimate client arriving
+  on a different ephemeral port to be permanently dropped. Fix: `validate_source()` now
+  only records a *candidate* port in `m_pending_src_port`; `commit_pending_src_port()` is
+  called from `process_hello_or_validate()` and moves the candidate to `m_peer_src_port`
+  only after a valid HELLO frame is confirmed. Garbage or pre-HELLO datagrams leave
+  `m_peer_src_port` at zero so the next datagram from any port can still produce a HELLO.
+
+  **SEC-026 (bidirectional HELLO):** When the server processes the first client HELLO,
+  `process_hello_or_validate()` immediately sends a HELLO response back to the client via
+  `send_hello_datagram()`. This allows the client's own `m_peer_hello_received` guard to
+  be set, enabling server→client DATA delivery. Without this response, the client dropped
+  all server-originated DATA because the server never sent HELLO on `register_local_id()`.
+  In plaintext mode the server uses `m_peer_src_port` (the client's learned ephemeral port)
+  as the destination port for its reply, since `m_cfg.peer_port` is the server's own listen
+  port (SEC-026 / SEC-023 port-learning fix in `send_wire_bytes()`).
+
 - **UdpBackend (plaintext UDP):** `process_hello_or_validate()` mirrors the DtlsUdpBackend
   logic. A peer at the correct IP:port must send a HELLO before any DATA frame; the HELLO
   locks `m_peer_node_id`; subsequent data frames with a mismatched `source_id` are silently

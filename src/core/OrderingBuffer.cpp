@@ -473,7 +473,7 @@ uint32_t OrderingBuffer::seq_next_guarded(uint32_t seq)
 {
     NEVER_COMPILED_OUT_ASSERT(seq != 0U);  // Assert: 0 is the UNORDERED sentinel; must not be held
 
-    uint32_t next = seq;
+    uint32_t next = 0U;  // §7b: initialized at declaration; both branches assign before use
     if (seq < UINT32_MAX) {
         next = seq + 1U;
     } else {

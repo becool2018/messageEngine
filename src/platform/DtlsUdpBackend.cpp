@@ -141,7 +141,8 @@ DtlsUdpBackend::DtlsUdpBackend()
       m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
       m_connections_opened(0U), m_connections_closed(0U),
       m_local_node_id(NODE_ID_INVALID),  // SEC-018: initialized at declaration
-      m_peer_src_port(0U)                // SEC-023: not yet learned
+      m_pending_src_port(0U),            // SEC-027: candidate port, not yet HELLO-validated
+      m_peer_src_port(0U)                // SEC-023: locked only after first valid HELLO
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
     NEVER_COMPILED_OUT_ASSERT(DTLS_MAX_DATAGRAM_BYTES > 0U);
@@ -166,7 +167,8 @@ DtlsUdpBackend::DtlsUdpBackend(IMbedtlsOps& ops)
       m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
       m_connections_opened(0U), m_connections_closed(0U),
       m_local_node_id(NODE_ID_INVALID),  // SEC-018: initialized at declaration
-      m_peer_src_port(0U)                // SEC-023: not yet learned
+      m_pending_src_port(0U),            // SEC-027: candidate port, not yet HELLO-validated
+      m_peer_src_port(0U)                // SEC-023: locked only after first valid HELLO
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
     NEVER_COMPILED_OUT_ASSERT(DTLS_MAX_DATAGRAM_BYTES > 0U);
@@ -191,7 +193,8 @@ DtlsUdpBackend::DtlsUdpBackend(ISocketOps& sock_ops, IMbedtlsOps& tls_ops)
       m_peer_node_id(NODE_ID_INVALID), m_peer_hello_received(false),
       m_connections_opened(0U), m_connections_closed(0U),
       m_local_node_id(NODE_ID_INVALID),  // SEC-018: initialized at declaration
-      m_peer_src_port(0U)                // SEC-023: not yet learned
+      m_pending_src_port(0U),            // SEC-027: candidate port, not yet HELLO-validated
+      m_peer_src_port(0U)                // SEC-023: locked only after first valid HELLO
 {
     NEVER_COMPILED_OUT_ASSERT(SOCKET_RECV_BUF_BYTES > 0U);
     NEVER_COMPILED_OUT_ASSERT(DTLS_MAX_DATAGRAM_BYTES > 0U);
@@ -759,18 +762,24 @@ bool DtlsUdpBackend::validate_source(const char* src_ip, uint16_t src_port)
 
     // Port validation:
     // - Client mode: server always responds from m_cfg.peer_port; enforce it.
-    // - Server mode: SEC-023 port-locking — the client sends from an ephemeral port
-    //   that is unknown ahead of time.  Learn it from the first accepted datagram
-    //   (m_peer_src_port == 0 → learning phase) and enforce equality thereafter.
-    //   This prevents any other process on the same trusted host IP from injecting
-    //   datagrams or claiming the peer slot with a forged HELLO once the real peer
-    //   has established its ephemeral port.
+    // - Server mode (SEC-023 / SEC-027 two-phase port-locking):
+    //     Phase 1 (pre-HELLO): m_peer_src_port == 0.  Accept any port from the
+    //       trusted IP; store src_port in m_pending_src_port for later commit.
+    //       Do NOT lock yet — a malformed packet or DATA-before-HELLO from the
+    //       right IP must not poison the locked port (P2 finding, SEC-027).
+    //     Phase 2 (post-HELLO): m_peer_src_port is non-zero (committed by
+    //       process_hello_or_validate() on the first valid HELLO).  Enforce
+    //       equality; reject any datagram from a different port.
     bool port_match = false;
     if (m_is_server) {
         if (m_peer_src_port == 0U) {
-            m_peer_src_port = src_port;  // SEC-023: learn on first accepted datagram
+            // SEC-027: record candidate port; commit to m_peer_src_port only
+            // after a valid HELLO is confirmed in process_hello_or_validate().
+            m_pending_src_port = src_port;
+            port_match = true;  // IP-only validation until port is locked
+        } else {
+            port_match = (src_port == m_peer_src_port);
         }
-        port_match = (src_port == m_peer_src_port);
     } else {
         port_match = (src_port == m_cfg.peer_port);
     }
@@ -911,11 +920,24 @@ bool DtlsUdpBackend::process_hello_or_validate(const MessageEnvelope& env,
             return false;
         }
         // First HELLO: register the peer NodeId
-        m_peer_node_id       = env.source_id;
+        m_peer_node_id        = env.source_id;
         m_peer_hello_received = true;
+        // SEC-027: commit the candidate port now that HELLO is validated.
+        // Extracted to commit_pending_src_port() to keep CC ≤ 10.
+        commit_pending_src_port();
         Logger::log(Severity::INFO, "DtlsUdpBackend",
-                    "DTLS: HELLO received, peer NodeId %u registered",
-                    static_cast<unsigned int>(m_peer_node_id));
+                    "DTLS: HELLO received, peer NodeId %u registered, port %u locked",
+                    static_cast<unsigned int>(m_peer_node_id),
+                    static_cast<unsigned int>(m_peer_src_port));
+        // SEC-026: server sends a HELLO response so the client can register
+        // the server's NodeId and pass its own HELLO-before-data guard.
+        // Only sent when m_local_node_id is already set (register_local_id()
+        // has been called); if not yet set, the response is deferred until
+        // register_local_id() is called (DeliveryEngine calls it immediately
+        // after init(), so the window is zero in normal operation).
+        if (m_is_server && (m_local_node_id != NODE_ID_INVALID)) {
+            (void)send_hello_datagram();
+        }
         consumed = true;  // HELLO consumed; must not reach DeliveryEngine
         return true;
     }
@@ -1112,9 +1134,10 @@ Result DtlsUdpBackend::init(const TransportConfig& config)
         }
     }
 
-    // REQ-6.2.4 / SEC-023: reset peer registration state for a fresh init()
+    // REQ-6.2.4 / SEC-023 / SEC-027: reset peer registration state for a fresh init()
     m_peer_node_id        = static_cast<NodeId>(NODE_ID_INVALID);
     m_peer_hello_received = false;
+    m_pending_src_port    = 0U;   // SEC-027: clear candidate port for new session
     m_peer_src_port       = 0U;   // SEC-023: clear locked port for new session
     m_crl_loaded          = false;
 
@@ -1145,10 +1168,11 @@ Result DtlsUdpBackend::register_local_id(NodeId id)
 {
     NEVER_COMPILED_OUT_ASSERT(id != NODE_ID_INVALID);  // pre-condition: valid NodeId
     NEVER_COMPILED_OUT_ASSERT(m_open);  // pre-condition: transport must be initialised
-    // REQ-6.1.8 / REQ-6.1.10: store NodeId, then send HELLO in client mode so the
-    // server registers this side before any DATA frame arrives.  Server mode skips
-    // HELLO here — the server has no connected client at registration time; HELLO is
-    // sent by the client, received in deserialize_and_dispatch(), and registered there.
+    // REQ-6.1.8 / REQ-6.1.10 / SEC-026: store NodeId, then send HELLO in client mode
+    // so the server registers this side before any DATA frame arrives.  Server mode
+    // skips HELLO here — no client peer address is known at registration time.  The
+    // server sends its HELLO response inside process_hello_or_validate() the moment
+    // the first client HELLO arrives (SEC-026: bidirectional NodeId registration).
     m_local_node_id = id;
     if (!m_is_server) {
         return send_hello_datagram();
@@ -1157,16 +1181,39 @@ Result DtlsUdpBackend::register_local_id(NodeId id)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// send_hello_datagram() — private helper (REQ-6.1.8, REQ-6.1.10)
+// commit_pending_src_port() — private helper (SEC-027)
+//
+// Moves m_pending_src_port into m_peer_src_port, completing the two-phase
+// port-locking protocol.  Called from process_hello_or_validate() on the
+// first valid HELLO so that only a peer sending a valid HELLO can lock the
+// port — not any raw datagram from the trusted IP.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void DtlsUdpBackend::commit_pending_src_port()
+{
+    NEVER_COMPILED_OUT_ASSERT(m_open);  // pre: transport must be open
+    // No-op in client mode (port is the configured m_cfg.peer_port) or when
+    // no pending port was recorded (DTLS path never sets m_pending_src_port).
+    if (m_is_server && (m_pending_src_port != 0U)) {
+        m_peer_src_port    = m_pending_src_port;
+        m_pending_src_port = 0U;
+        NEVER_COMPILED_OUT_ASSERT(m_peer_src_port != 0U);  // post: port now locked
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// send_hello_datagram() — private helper (REQ-6.1.8, REQ-6.1.10, SEC-026)
 //
 // Serializes a HELLO envelope and sends it via send_wire_bytes() (DTLS or
-// plaintext UDP), bypassing the impairment engine.  Client mode only.
+// plaintext UDP), bypassing the impairment engine.  Used by the client to
+// initiate registration and by the server to respond to the first client HELLO
+// (SEC-026: bidirectional NodeId registration).
 // ─────────────────────────────────────────────────────────────────────────────
 
 Result DtlsUdpBackend::send_hello_datagram()
 {
     NEVER_COMPILED_OUT_ASSERT(m_local_node_id != NODE_ID_INVALID);  // pre: NodeId set
-    NEVER_COMPILED_OUT_ASSERT(!m_is_server);                         // pre: client only
+    // SEC-026: server also calls this to respond to client HELLO; no is_server guard.
 
     MessageEnvelope hello;
     envelope_init(hello);
@@ -1212,11 +1259,16 @@ Result DtlsUdpBackend::send_wire_bytes(const uint8_t* buf, uint32_t len)
             return Result::ERR_IO;
         }
     } else {
+        // SEC-026 / SEC-023: server must reply to the client's ephemeral source
+        // port (m_peer_src_port, learned on first datagram), not m_cfg.peer_port
+        // which is the server's own listen port. Client always uses m_cfg.peer_port.
+        const uint16_t dest_port = (m_is_server && (m_peer_src_port != 0U))
+                                   ? m_peer_src_port : m_cfg.peer_port;
         if (!m_sock_ops->send_to(m_sock_fd, buf, len,
-                                 m_cfg.peer_ip, m_cfg.peer_port)) {
+                                 m_cfg.peer_ip, dest_port)) {
             Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
                         "send_message: socket_send_to failed to %s:%u",
-                        m_cfg.peer_ip, m_cfg.peer_port);
+                        m_cfg.peer_ip, dest_port);
             return Result::ERR_IO;
         }
     }
@@ -1390,9 +1442,10 @@ void DtlsUdpBackend::close()
         ++m_connections_closed;  // REQ-7.2.4: socket close event
     }
 
-    // REQ-6.2.4 / SEC-023: reset peer registration so a subsequent init() starts fresh
+    // REQ-6.2.4 / SEC-023 / SEC-027: reset peer registration so a subsequent init() starts fresh
     m_peer_node_id        = static_cast<NodeId>(NODE_ID_INVALID);
     m_peer_hello_received = false;
+    m_pending_src_port    = 0U;   // SEC-027: clear candidate port
     m_peer_src_port       = 0U;   // SEC-023: clear locked port for new session
 
     m_open = false;

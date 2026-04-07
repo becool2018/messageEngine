@@ -183,7 +183,10 @@ private:
 
     /// Set up the session ticket context and register callbacks on m_ssl_conf.
     /// Fix 2: extracted from setup_tls_config() to keep its CC ≤ 10 (REQ-6.3.4).
-    /// Called only when session_resumption_enabled is true.
+    /// Called only when session_resumption_enabled is true and
+    /// MBEDTLS_SSL_SESSION_TICKETS is defined; cppcheck-suppress guards the
+    /// false-positive unusedPrivateFunction when tickets are compiled out.
+    // cppcheck-suppress unusedPrivateFunction
     Result setup_session_tickets(uint32_t lifetime_s);
 
     /// Apply Fix 1 cipher suite restriction and minimum TLS version to m_ssl_conf.

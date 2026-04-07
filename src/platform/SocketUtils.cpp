@@ -265,13 +265,10 @@ bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
     // SEC-022: a zero timeout makes poll() return immediately (POSIX: poll with
     // timeout=0 is a non-blocking check), which causes connect() to appear to
     // time out on every call. Reject it early with a defensive guard.
+    // SEC-022: timeout_ms == 0 makes poll() a non-blocking check, so connect()
+    // always appears to time out. The assert enforces the precondition; no
+    // additional runtime check is needed (cppcheck: if-check would be always-false).
     NEVER_COMPILED_OUT_ASSERT(timeout_ms > 0U);  // SEC-022: must have positive timeout
-    if (timeout_ms == 0U) {
-        Logger::log(Severity::WARNING_HI, "SocketUtils",
-                    "SEC-022: socket_connect_with_timeout called with timeout_ms=0; "
-                    "rejecting (would always fail)");
-        return false;
-    }
 
     // Set socket to non-blocking before connecting
     if (!socket_set_nonblocking(fd)) {
@@ -590,13 +587,11 @@ bool tcp_recv_frame(int fd, uint8_t* buf, uint32_t buf_cap,
         return false;
     }
 
-    // Receive frame payload
-    if (frame_len > 0U) {
-        if (!socket_recv_exact(fd, buf, frame_len, timeout_ms)) {
-            Logger::log(Severity::WARNING_HI, "SocketUtils",
-                       "tcp_recv_frame: failed to receive payload (%u bytes)", frame_len);
-            return false;
-        }
+    // Receive frame payload (frame_len >= WIRE_HEADER_SIZE > 0 guaranteed above).
+    if (!socket_recv_exact(fd, buf, frame_len, timeout_ms)) {
+        Logger::log(Severity::WARNING_HI, "SocketUtils",
+                   "tcp_recv_frame: failed to receive payload (%u bytes)", frame_len);
+        return false;
     }
 
     *out_len = frame_len;
