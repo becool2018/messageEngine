@@ -796,6 +796,8 @@ The [`docs/use_cases/`](docs/use_cases/) directory contains detailed use case do
 
 - **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 61 use cases, grouped by high-level capability (HL-1 through HL-29), Application Workflow patterns, and System Internal sub-functions.
 - **[USE_CASE_FREQUENCY.md](docs/use_cases/USE_CASE_FREQUENCY.md)** — frequency classification of all 61 use cases (hottest path → high → medium → low → system internals); use this to guide performance analysis, profiling focus, and code review prioritisation.
+  - [Hottest path](docs/use_cases/USE_CASE_FREQUENCY.md#hottest-path--called-on-every-message-and-every-event-loop-tick) — 7 use cases on every send / receive / event-loop tick
+  - [High frequency](docs/use_cases/USE_CASE_FREQUENCY.md#high-frequency--called-frequently-during-active-messaging) — per-message use cases when reliability modes or impairments are active
 
 Each individual `UC_*.md` document follows a 15-section flow-of-control format covering: entry points, end-to-end control flow, call tree, branching logic, concurrency behavior, memory ownership, error handling, external interactions, state changes, and known risks.
 
