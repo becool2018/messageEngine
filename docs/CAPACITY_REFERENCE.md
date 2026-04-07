@@ -36,6 +36,10 @@ The maximum number of payload bytes a single logical application message may car
 
 On the wire, payloads larger than `FRAG_MAX_PAYLOAD_BYTES` (1 024 bytes) are automatically split into up to `FRAG_MAX_COUNT` (4) fragments, each fitting inside a single DTLS datagram.  The receiver reassembles them transparently.
 
+### Why
+
+4 096 bytes covers the common embedded and avionics message sizes (telemetry frames, command blocks, file-transfer chunks) without requiring heap allocation.  It is large enough that most application messages fit in a single logical envelope, yet small enough that a `MessageEnvelope` on the stack does not exhaust the thread stack budget documented in `docs/STACK_ANALYSIS.md`.  The value is exactly four times `FRAG_MAX_PAYLOAD_BYTES` (1 024 B), which gives the reassembly layer a clean 4-fragment maximum and keeps `FRAG_MAX_COUNT` at 4 — a power of two that simplifies index arithmetic and static analysis of loop bounds (Power of 10 Rule 2).
+
 ### Memory impact
 
 `Serializer` allocates no heap; it works on caller-supplied buffers.  `MessageEnvelope::payload[MSG_MAX_PAYLOAD_BYTES]` is an inline array inside each envelope struct.  Every stack or static `MessageEnvelope` instance pays this cost.
@@ -70,6 +74,10 @@ On the wire, payloads larger than `FRAG_MAX_PAYLOAD_BYTES` (1 024 bytes) are aut
 
 This protects `RELIABLE_RETRY` receivers from delivering the same logical message twice when the sender retransmits before an ACK arrives.
 
+### Why
+
+128 entries provides headroom for the product `MAX_RETRY_COUNT × MAX_PEER_NODES` (5 × 16 = 80) with a comfortable margin.  If the window were sized exactly to that product, a single slow peer that exhausts all retries before its ACK arrives could push its own earlier retransmissions out of the window, causing a false-negative dedup and a duplicate delivery.  Doubling the product (≈ 160) and rounding down to the next lower power of two (128) balances protection against false negatives with the 1 024-byte static memory cost.  A power of two was chosen deliberately: the age-based eviction scan (`find_evict_idx()`) iterates over exactly `DEDUP_WINDOW_SIZE` entries, and a power-of-two bound is the clearest proof of a finite loop for static analysis tools (Power of 10 Rule 2).
+
 ### Memory impact
 
 Each slot stores two `uint32_t` values (8 bytes).  Total: `DEDUP_WINDOW_SIZE × 8` = 1 024 bytes, held in a static array inside `DuplicateFilter`.
@@ -102,6 +110,10 @@ Each slot stores two `uint32_t` values (8 bytes).  Total: `DEDUP_WINDOW_SIZE × 
 `AckTracker` maintains a fixed-size table of messages that have been sent but not yet ACKed.  Each slot records the `message_id`, the peer `NodeId`, the expiry timestamp, and the current state (`PENDING` / `ACKED` / `EXPIRED`).
 
 When `send()` is called with `RELIABLE_ACK` or `RELIABLE_RETRY`, a slot is allocated in `AckTracker`.  When the matching ACK arrives (or the expiry deadline passes), the slot is freed.  If all 32 slots are occupied, `send()` returns `ERR_FULL`.
+
+### Why
+
+32 slots matches the typical pipeline depth of a hub-and-spoke reliable messaging system: with 16 peers and 2 concurrent reliable messages per peer in flight, 32 slots are exactly saturated.  This prevents unbounded resource growth if ACKs are delayed — when all slots are full, back-pressure is applied immediately (the caller receives `ERR_FULL`) rather than silently queuing more messages and running out of memory.  The `pump_retries()` scan is O(ACK_TRACKER_CAPACITY), so keeping the capacity modest also bounds the worst-case execution time of that safety-critical function (see `docs/WCET_ANALYSIS.md`).
 
 ### Memory impact
 
@@ -138,6 +150,10 @@ After `MAX_RETRY_COUNT` exhausted retransmissions without an ACK, the slot is fr
 
 The retry manager shares the same slot table sizing as `AckTracker` (`ACK_TRACKER_CAPACITY` slots).
 
+### Why
+
+5 attempts balances two opposing risks.  Too few retries mean a transient loss event (a single dropped packet) results in a premature failure report.  Too many retries lengthen the time-to-detect a permanently failed peer: with exponential backoff capped at 60 s, 5 retries bound worst-case detection latency at approximately 1 + 2 + 4 + 8 + 60 = 75 s — an operationally acceptable ceiling for infrastructure software.  The value also keeps `DEDUP_WINDOW_SIZE` (128) comfortably above the `MAX_RETRY_COUNT × MAX_PEER_NODES` product (80), preserving the dedup safety margin described in §2.
+
 ### How to change it
 
 1. Edit `MAX_RETRY_COUNT` in `src/core/Types.hpp`.
@@ -166,6 +182,10 @@ The retry manager shares the same slot table sizing as `AckTracker` (`ACK_TRACKE
 Each transport backend (TCP, UDP, TLS, DTLS, `LocalSimHarness`) holds an inbound `RingBuffer` of `MSG_RING_CAPACITY` `MessageEnvelope` slots.  Received frames are deserialized and placed into this ring; `DeliveryEngine::receive()` drains from it.
 
 If the ring is full when a new message arrives the backend drops the incoming message and emits a `WARNING_HI` log.  This is the backpressure mechanism — it prevents unbounded memory growth under a slow consumer.
+
+### Why
+
+64 slots is exactly double `ACK_TRACKER_CAPACITY` (32).  The inbound ring must be able to absorb a burst of ACK and DATA messages from all peers simultaneously — if the ring were smaller than the number of in-flight reliable messages, an ACK burst could trigger ring-full drops, causing the sender to time out messages that actually succeeded.  Doubling the ACK tracker capacity gives the consumer (`DeliveryEngine::receive()`) a full ACK-tracker-worth of headroom to drain before any message is lost.  The value is also the bound used by `pump_retries()` for its pre-allocated `m_retry_buf` member array, so both structures share a single well-justified number.
 
 ### Memory impact
 
@@ -201,6 +221,10 @@ When the ninth client connects while eight are already active, the server reject
 
 In client mode this constant is not used; a client opens exactly one connection.
 
+### Why
+
+8 connections supports the primary hub-and-spoke topology targeted by this library (`MAX_PEER_NODES` = 16 addressable nodes, but a single server hub typically handles a subset at once).  The NodeId → slot routing table (REQ-6.1.9) is scanned linearly on every outbound unicast frame; keeping the connection count in single digits bounds that scan to a negligible number of iterations.  Each additional slot also consumes one file descriptor and one 8 KB receive buffer (~65 KB total for 8 slots), so the value was chosen to stay well within the static memory budget.  Applications requiring more than 8 simultaneous clients should evaluate whether a larger value is justified against the increased scan cost and memory footprint.
+
 ### Memory impact
 
 Each slot is a struct of ~16 bytes plus a `SOCKET_RECV_BUF_BYTES` (8 192-byte) buffer.  Total server-side: `MAX_TCP_CONNECTIONS × (16 + 8192)` ≈ 65 KB.
@@ -233,6 +257,10 @@ Because the codebase enforces Power of 10 Rule 1 (no recursion), the call graph 
 The dominant frame is `send_test_message()` in the demo client, which places a 256-byte payload buffer on the stack.  The production SC functions themselves are modest: `DeliveryEngine::send()` ≈ 64 bytes, `Serializer::serialize()` ≈ 80 bytes.
 
 On all supported platforms (macOS / Linux) the default per-thread stack is ≥ 8 MB, giving >10 000× headroom.
+
+### Why
+
+Stack depth analysis is a NASA-STD-8719.13C obligation for safety-critical software.  The no-recursion rule (Power of 10 Rule 1) is what makes static worst-case analysis possible: without recursion the call graph is a DAG and the longest path can be enumerated exhaustively.  Documenting the worst case here serves two purposes: (1) it gives embedded porters a concrete number to check against their platform's stack size before deployment, and (2) it provides a regression baseline — if a future change increases the worst-case depth beyond the documented value, the `docs/STACK_ANALYSIS.md` update trigger fires and the change is explicitly reviewed before merge.
 
 ### When to update the analysis
 
