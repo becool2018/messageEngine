@@ -125,6 +125,16 @@ REQ-6.2.4 is now enforced:
   `source_id` does not match the registered NodeId are silently discarded with WARNING_HI.
   Duplicate HELLO frames are also rejected (HAZ-011 / DEF-015-3).
 
+  **SEC-027 (two-phase port-locking):** Prior to this fix, `validate_source()` locked
+  `m_peer_src_port` on the *first raw datagram* from the trusted IP, before
+  deserialization or HELLO validation. A malformed packet, or a DATA-before-HELLO packet
+  from the right host, could poison the locked port and cause a legitimate client arriving
+  on a different ephemeral port to be permanently dropped. Fix: `validate_source()` now
+  only records a *candidate* port in `m_pending_src_port`; `commit_pending_src_port()` is
+  called from `process_hello_or_validate()` and moves the candidate to `m_peer_src_port`
+  only after a valid HELLO frame is confirmed. Garbage or pre-HELLO datagrams leave
+  `m_peer_src_port` at zero so the next datagram from any port can still produce a HELLO.
+
   **SEC-026 (bidirectional HELLO):** When the server processes the first client HELLO,
   `process_hello_or_validate()` immediately sends a HELLO response back to the client via
   `send_hello_datagram()`. This allows the client's own `m_peer_hello_received` guard to

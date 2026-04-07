@@ -160,12 +160,20 @@ private:
     /// SEC-018: local NodeId stored by register_local_id() for future use
     /// (e.g., source_id stamping in outbound frames). NODE_ID_INVALID until set.
     NodeId          m_local_node_id;                  ///< Local NodeId (REQ-6.1.10, SEC-018)
-    /// SEC-023: peer source port learned from first accepted plaintext datagram.
-    /// 0 = not yet learned (learning phase); non-zero = locked (enforced by validate_source).
-    /// Prevents a rogue process on the trusted host IP from injecting datagrams
-    /// after the real peer establishes the port binding.  DTLS mode is unaffected
-    /// (validate_source returns true immediately on the DTLS path).
-    uint16_t        m_peer_src_port;                  ///< Locked peer source port (plaintext server only). SEC-023
+    /// SEC-023 / SEC-027: peer source port for plaintext server mode.
+    /// Locking lifecycle (SEC-027):
+    ///   1. m_pending_src_port ← src_port of first IP-matching raw datagram
+    ///      (validate_source — before deserialization or HELLO validation).
+    ///   2. m_peer_src_port   ← m_pending_src_port on first valid HELLO
+    ///      (process_hello_or_validate — after deserialization succeeds and
+    ///      HELLO frame type is confirmed).
+    /// This two-phase commit prevents a malformed packet or a DATA-before-HELLO
+    /// packet from the configured IP from poisoning the locked port and blocking
+    /// a legitimate client that arrives on a different ephemeral port.
+    /// Both members are 0 until the respective phase completes.
+    /// DTLS mode is unaffected (validate_source returns true immediately).
+    uint16_t        m_pending_src_port;               ///< Candidate port (not yet validated by HELLO). SEC-027
+    uint16_t        m_peer_src_port;                  ///< Locked peer source port (set on first valid HELLO). SEC-023
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
@@ -274,6 +282,9 @@ private:
     /// NodeId before any DATA frame arrives (REQ-6.1.8, REQ-6.1.10).
     /// @return OK on success; ERR_IO / ERR_INVALID on failure.
     Result send_hello_datagram();
+    /// SEC-027: commit m_pending_src_port → m_peer_src_port on first valid HELLO.
+    /// No-op in client mode or when no pending port is recorded.
+    void   commit_pending_src_port();
 
     /// Send @p len bytes from @p buf via TLS or plaintext UDP.
     /// Extracted from send_message() to reduce its CC.

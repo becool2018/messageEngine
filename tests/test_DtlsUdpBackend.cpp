@@ -2377,6 +2377,102 @@ static void test_server_hello_response_enables_client_recv()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SEC-027: a DATA-before-HELLO packet from the right host must NOT poison
+// the locked port.  A second client on a different ephemeral port that then
+// sends a valid HELLO must still be accepted.
+// Verifies: REQ-6.2.4, REQ-6.1.8
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.2.4, REQ-6.1.8
+static void test_early_data_does_not_poison_port_lock()
+{
+    // Strategy (SEC-027 two-phase port-locking):
+    //   1. server init() (plaintext, port 14772).
+    //   2. client1 (port A) sends DATA without a prior HELLO.
+    //      Server: validate_source sets m_pending_src_port = A; deserialize OK;
+    //      process_hello_or_validate drops DATA-before-HELLO; m_peer_src_port
+    //      stays 0 (NOT poisoned to A).
+    //   3. client2 (port B, different DtlsUdpBackend) sends HELLO.
+    //      Server: validate_source sets m_pending_src_port = B (m_peer_src_port
+    //      still 0 → IP-only pass); process_hello_or_validate commits
+    //      m_peer_src_port = B.
+    //   4. client2 sends DATA → server delivers it (source_id matches, port matches).
+    static const uint16_t PORT = 14772U;
+
+    DtlsUdpBackend server;
+    TransportConfig srv_cfg;
+    make_dtls_config(srv_cfg, true, PORT, false);
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+    assert(server.register_local_id(1U) == Result::OK);
+
+    // Step 2: client1 sends DATA before HELLO (should be dropped; must not lock port).
+    DtlsUdpBackend client1;
+    TransportConfig cli1_cfg;
+    make_dtls_config(cli1_cfg, false, PORT, false);
+    assert(client1.init(cli1_cfg) == Result::OK);
+
+    MessageEnvelope early_data;
+    envelope_init(early_data);
+    early_data.message_type      = MessageType::DATA;
+    early_data.message_id        = 0xE001ULL;
+    early_data.source_id         = 7U;
+    early_data.destination_id    = 1U;
+    early_data.reliability_class = ReliabilityClass::BEST_EFFORT;
+    assert(client1.send_message(early_data) == Result::OK);
+
+    // Server drops the DATA-before-HELLO; port must NOT be locked to client1's port.
+    MessageEnvelope d1;
+    assert(server.receive_message(d1, 500U) == Result::ERR_TIMEOUT);
+
+    // Step 3: client2 (different ephemeral port) sends HELLO — must be accepted.
+    DtlsUdpBackend client2;
+    TransportConfig cli2_cfg;
+    make_dtls_config(cli2_cfg, false, PORT, false);
+    assert(client2.init(cli2_cfg) == Result::OK);
+
+    MessageEnvelope hello;
+    envelope_init(hello);
+    hello.message_type      = MessageType::HELLO;
+    hello.message_id        = 0xE002ULL;
+    hello.source_id         = 8U;
+    hello.destination_id    = 1U;
+    hello.reliability_class = ReliabilityClass::BEST_EFFORT;
+    hello.payload_length    = 0U;
+    assert(client2.send_message(hello) == Result::OK);
+
+    // Server accepts HELLO from client2; port locked to client2's ephemeral port.
+    MessageEnvelope d2;
+    assert(server.receive_message(d2, 500U) == Result::ERR_TIMEOUT);  // HELLO consumed
+
+    // Drain server HELLO response on client2's side.
+    MessageEnvelope d3;
+    assert(client2.receive_message(d3, 500U) == Result::ERR_TIMEOUT);
+
+    // Step 4: client2 sends DATA → must be delivered.
+    MessageEnvelope data;
+    envelope_init(data);
+    data.message_type      = MessageType::DATA;
+    data.message_id        = 0xE003ULL;
+    data.source_id         = 8U;
+    data.destination_id    = 1U;
+    data.reliability_class = ReliabilityClass::BEST_EFFORT;
+    assert(client2.send_message(data) == Result::OK);
+
+    MessageEnvelope rcv;
+    Result r = server.receive_message(rcv, 500U);
+    assert(r == Result::OK);
+    assert(rcv.source_id == 8U);
+
+    client1.close();
+    client2.close();
+    server.close();
+
+    printf("PASS: test_early_data_does_not_poison_port_lock\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SEC-023: after first datagram is accepted the server locks the source port.
 // A second client from the same IP but a different ephemeral port must be
 // silently dropped; server receive_message() returns ERR_TIMEOUT.
@@ -2515,6 +2611,9 @@ int main()
     test_hello_registers_peer_and_data_passes();
     test_source_id_spoof_after_hello_dropped();
     test_duplicate_hello_rejected();
+
+    // SEC-027: early DATA must not poison port lock (REQ-6.2.4)
+    test_early_data_does_not_poison_port_lock();
 
     // SEC-023: plaintext server port-locking test (REQ-6.2.4)
     test_plaintext_server_wrong_port_after_learn_dropped();
