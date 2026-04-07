@@ -27,8 +27,6 @@ A C++ networking library for building and testing systems that must survive unre
 
 > **Standards note:** MISRA C++:2023 is a proprietary standard published by MISRA (misra.org.uk) and must be purchased separately. This project targets MISRA C++:2023 guidelines and documents all deviations, but does not claim third-party-audited certification. NASA technical standards (NASA-STD-8719.13C, NASA-STD-8739.8A, NPR 7150.2D) are publicly available at standards.nasa.gov.
 
-**Library version: 2.0.0** — protocol v2 milestone adds bounded fragmentation and reassembly (`Fragmentation`, `ReassemblyBuffer`), per-peer in-order delivery enforcement (`OrderingBuffer`), and wire-format v2 (`WIRE_HEADER_SIZE` 44→52 bytes, `PROTO_VERSION` 1→2). Phase 3 (1.3.0) adds `RequestReplyEngine` and `drain_events()`; v2 is additive on top of that.
-
 > **AI experiment note:** This codebase was produced by Claude Sonnet 4.6 (Anthropic) to evaluate whether an AI assistant can consistently follow safety-critical engineering requirements. Code review by GPT-5.4 (OpenAI). If you are using an AI assistant with this project, read `.claude/CLAUDE.md` and `CLAUDE.md` before making changes — both are normative.
 
 ---
@@ -49,7 +47,8 @@ A C++ networking library for building and testing systems that must survive unre
 12. [Coding Standards](#coding-standards)
 13. [Project Standards Files](#project-standards-files)
 14. [Claude Skills](#claude-skills)
-15. [Code Statistics](#code-statistics)
+15. [Release History](#release-history)
+16. [Code Statistics](#code-statistics)
 
 ---
 
@@ -1051,6 +1050,15 @@ All nine documents are validated simultaneously using three dependency-ordered w
    ```
 3. Write the skill prompt body below the front matter — this is what Claude executes when the skill is invoked.
 4. Reference the new skill in this table.
+
+---
+
+## Release History
+
+| Version | Highlights |
+|---|---|
+| **2.0.0** | Bounded fragmentation and reassembly (`Fragmentation`, `ReassemblyBuffer`); per-peer in-order delivery enforcement (`OrderingBuffer`); wire-format v2 (`WIRE_HEADER_SIZE` 44→52 bytes, `PROTO_VERSION` 1→2) |
+| **1.3.0** | `RequestReplyEngine` (correlated request/reply over `DeliveryEngine`); `drain_events()` bulk observability drain |
 
 ---
 
