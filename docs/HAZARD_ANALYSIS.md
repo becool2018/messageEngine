@@ -342,9 +342,9 @@ All `SocketUtils` functions are **NSC** — raw POSIX I/O primitives with no mes
 | `send_hello_frame()` | `TcpBackend` | NSC | — |
 | `find_client_slot()` | `TcpBackend` | NSC | — |
 | `handle_hello_frame()` | `TcpBackend` | NSC | — |
-| `recv_from_client()` | `TcpBackend` | SC | HAZ-009 |
+| `recv_from_client()` | `TcpBackend` | SC | HAZ-009, HAZ-016 |
 | `send_to_slot()` | `TcpBackend` | NSC | — |
-| `validate_source_id()` | `TcpBackend` | SC | HAZ-009 |
+| `validate_source_id()` | `TcpBackend` | SC | HAZ-009, HAZ-016 |
 | `close()` | `TcpBackend` | NSC | — |
 | `is_open()` | `TcpBackend` | NSC | — |
 | `get_transport_stats()` | `TcpBackend` | NSC | — |
