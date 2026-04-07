@@ -272,8 +272,10 @@ The impairment engine must be able to apply, per channel or globally:
     `virtual Result register_local_id(NodeId id)` with a default body returning OK.
     TCP/TLS backends (client mode) override this to send the HELLO frame on-wire.
     TCP/TLS backends (server mode) override this to store the local NodeId for
-    reference. All other transports (UDP, DTLS-UDP, LocalSimHarness) inherit the
-    default no-op.
+    reference. UDP and DTLS-UDP backends override this to store the local NodeId
+    and send a HELLO datagram to the configured peer (UDP always; DTLS client mode
+    only — server has no connected peer at registration time). LocalSimHarness
+    inherits the default no-op.
     DeliveryEngine::init() calls register_local_id(local_id) immediately after
     transport->init() returns OK; any failure is logged at WARNING_HI.
   - [REQ-6.1.11] TCP/TLS source address validation:
