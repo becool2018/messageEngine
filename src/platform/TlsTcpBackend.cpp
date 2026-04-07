@@ -462,8 +462,14 @@ Result TlsTcpBackend::setup_tls_config(const TlsConfig& tls_cfg)
     if (!result_ok(res)) { return res; }
 
     // Fix 2: set up session ticket key (extracted to keep this function CC ≤ 10).
-    Result ticket_res = maybe_setup_session_tickets(tls_cfg);
-    if (!result_ok(ticket_res)) { return ticket_res; }
+    // Guard with the same macro as maybe_setup_session_tickets so that cppcheck
+    // does not flag the error check as always-false in non-ticket builds.
+#if defined(MBEDTLS_SSL_SESSION_TICKETS)
+    {
+        Result ticket_res = maybe_setup_session_tickets(tls_cfg);
+        if (!result_ok(ticket_res)) { return ticket_res; }
+    }
+#endif /* MBEDTLS_SSL_SESSION_TICKETS */
 
     Logger::log(Severity::INFO, "TlsTcpBackend",
                 "TLS config ready: role=%s verify_peer=%d cert=%s",

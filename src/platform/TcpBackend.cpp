@@ -638,11 +638,10 @@ void TcpBackend::poll_clients_once(uint32_t timeout_ms)
 
     // Block until a fd is readable or timeout_ms elapses.
     // Power of 10 Rule 2 deviation: infrastructure poll; bounded per-call timeout.
-    // CERT INT31-C: clamp uint32_t → int before passing to poll().
-    static const uint32_t k_poll_max_ms = static_cast<uint32_t>(INT_MAX);
-    const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
+    // CERT INT31-C: timeout_ms <= 60000U (asserted above) << INT_MAX, so the
+    // static_cast<int> is safe without an explicit clamp.
     int poll_rc = poll(pfds, static_cast<nfds_t>(nfds),
-                       static_cast<int>(clamped_ms));
+                       static_cast<int>(timeout_ms));
     if (poll_rc <= 0) {
         return;  // Timeout (0) or error (−1): nothing to accept or receive
     }

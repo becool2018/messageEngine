@@ -103,7 +103,7 @@ static uint64_t gather_os_entropy()
         }
     }
 #endif
-    NEVER_COMPILED_OUT_ASSERT(entropy != 0ULL || true);  // Power of 10: assert present; 0 is valid failure
+    NEVER_COMPILED_OUT_ASSERT(sizeof(entropy) == sizeof(uint64_t));  // Power of 10: buffer width invariant
     return entropy;
 }
 
@@ -542,7 +542,8 @@ static uint64_t sat_add_us(uint64_t now_us, uint32_t delta_ms)
 {
     const uint64_t k_max   = 0xFFFFFFFFFFFFFFFFULL;
     const uint64_t delta   = static_cast<uint64_t>(delta_ms) * 1000ULL;
-    NEVER_COMPILED_OUT_ASSERT(delta_ms <= 0xFFFFFFFFUL);   // Pre: fits uint32
+    // CERT INT30-C: delta_ms is uint32_t; *1000 fits uint64_t (max ~4.3e12 << UINT64_MAX).
+    NEVER_COMPILED_OUT_ASSERT(delta <= static_cast<uint64_t>(0xFFFFFFFFUL) * 1000ULL);
     return (now_us > k_max - delta) ? k_max : now_us + delta;
 }
 
