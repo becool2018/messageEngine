@@ -145,8 +145,57 @@ Result UdpBackend::register_local_id(NodeId id)
 {
     NEVER_COMPILED_OUT_ASSERT(id != NODE_ID_INVALID);  // pre-condition: valid NodeId
     NEVER_COMPILED_OUT_ASSERT(m_open);  // pre-condition: transport must be initialised
-    // REQ-6.1.10: store local NodeId for reference (parallel to TCP/TLS server role).
+    // REQ-6.1.8 / REQ-6.1.10: store NodeId then send HELLO so the peer can register
+    // this side before any DATA frame arrives.  Mirrors TCP client send_hello_frame().
     m_local_node_id = id;
+    return send_hello_datagram();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// send_hello_datagram() — private helper (REQ-6.1.8, REQ-6.1.10)
+//
+// Serializes a HELLO envelope and sends it directly to the configured peer via
+// send_to(), bypassing the impairment engine.  HELLO is a control frame whose
+// delivery must not be subject to artificial loss or delay.
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result UdpBackend::send_hello_datagram()
+{
+    NEVER_COMPILED_OUT_ASSERT(m_local_node_id != NODE_ID_INVALID);  // pre: NodeId set
+    NEVER_COMPILED_OUT_ASSERT(m_fd >= 0);                            // pre: socket open
+
+    if (m_cfg.peer_ip[0] == '\0' || m_cfg.peer_port == 0U) {
+        Logger::log(Severity::WARNING_HI, "UdpBackend",
+                    "send_hello_datagram: peer not configured; cannot send HELLO");
+        return Result::ERR_INVALID;
+    }
+
+    MessageEnvelope hello;
+    envelope_init(hello);
+    hello.message_type   = MessageType::HELLO;
+    hello.source_id      = m_local_node_id;
+    hello.destination_id = NODE_ID_INVALID;  // peer NodeId not yet known
+    hello.payload_length = 0U;
+
+    uint32_t wire_len = 0U;
+    Result res = Serializer::serialize(hello, m_wire_buf, SOCKET_RECV_BUF_BYTES, wire_len);
+    if (!result_ok(res)) {
+        Logger::log(Severity::WARNING_HI, "UdpBackend",
+                    "send_hello_datagram: serialize failed");
+        return res;
+    }
+
+    if (!m_sock_ops->send_to(m_fd, m_wire_buf, wire_len,
+                             m_cfg.peer_ip, m_cfg.peer_port)) {
+        Logger::log(Severity::WARNING_HI, "UdpBackend",
+                    "send_hello_datagram: send_to %s:%u failed",
+                    m_cfg.peer_ip, static_cast<unsigned int>(m_cfg.peer_port));
+        return Result::ERR_IO;
+    }
+
+    Logger::log(Severity::INFO, "UdpBackend",
+                "HELLO sent: local_id=%u", static_cast<unsigned int>(m_local_node_id));
+    NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);  // post: something was sent
     return Result::OK;
 }
 

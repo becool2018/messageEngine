@@ -76,6 +76,7 @@
 #include <climits>        // INT_MAX — SEC-017 CERT INT31-C poll timeout clamp
 #include <poll.h>         // poll()
 #include <cstring>
+#include <cerrno>    // errno — used in tls_path_is_regular_file() lstat() error path
 
 // ─────────────────────────────────────────────────────────────────────────────
 // File-local helper — log mbedTLS error code
@@ -1144,10 +1145,54 @@ Result DtlsUdpBackend::register_local_id(NodeId id)
 {
     NEVER_COMPILED_OUT_ASSERT(id != NODE_ID_INVALID);  // pre-condition: valid NodeId
     NEVER_COMPILED_OUT_ASSERT(m_open);  // pre-condition: transport must be initialised
-    // SEC-018: store local NodeId for outbound frame source_id stamping and
-    // observability. DTLS/UDP has no connection-oriented HELLO registration
-    // (REQ-6.1.10), but recording the NodeId enables future source_id injection.
+    // REQ-6.1.8 / REQ-6.1.10: store NodeId, then send HELLO in client mode so the
+    // server registers this side before any DATA frame arrives.  Server mode skips
+    // HELLO here — the server has no connected client at registration time; HELLO is
+    // sent by the client, received in deserialize_and_dispatch(), and registered there.
     m_local_node_id = id;
+    if (!m_is_server) {
+        return send_hello_datagram();
+    }
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// send_hello_datagram() — private helper (REQ-6.1.8, REQ-6.1.10)
+//
+// Serializes a HELLO envelope and sends it via send_wire_bytes() (DTLS or
+// plaintext UDP), bypassing the impairment engine.  Client mode only.
+// ─────────────────────────────────────────────────────────────────────────────
+
+Result DtlsUdpBackend::send_hello_datagram()
+{
+    NEVER_COMPILED_OUT_ASSERT(m_local_node_id != NODE_ID_INVALID);  // pre: NodeId set
+    NEVER_COMPILED_OUT_ASSERT(!m_is_server);                         // pre: client only
+
+    MessageEnvelope hello;
+    envelope_init(hello);
+    hello.message_type   = MessageType::HELLO;
+    hello.source_id      = m_local_node_id;
+    hello.destination_id = NODE_ID_INVALID;  // server NodeId not yet known
+    hello.payload_length = 0U;
+
+    uint32_t wire_len = 0U;
+    Result res = Serializer::serialize(hello, m_wire_buf, SOCKET_RECV_BUF_BYTES, wire_len);
+    if (!result_ok(res) || wire_len > DTLS_MAX_DATAGRAM_BYTES) {
+        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
+                    "send_hello_datagram: serialize failed or MTU exceeded");
+        return Result::ERR_IO;
+    }
+
+    Result send_res = send_wire_bytes(m_wire_buf, wire_len);
+    if (send_res != Result::OK) {
+        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
+                    "send_hello_datagram: send_wire_bytes failed");
+        return send_res;
+    }
+
+    Logger::log(Severity::INFO, "DtlsUdpBackend",
+                "HELLO sent: local_id=%u", static_cast<unsigned int>(m_local_node_id));
+    NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);  // post: something was sent
     return Result::OK;
 }
 

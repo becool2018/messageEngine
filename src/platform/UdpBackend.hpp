@@ -66,7 +66,8 @@ public:
 
     // TransportInterface implementation
     Result init(const TransportConfig& config) override;
-    // SC: stores local NodeId for reference; overrides TransportInterface no-op per REQ-6.1.10.
+    // Safety-critical (SC): HAZ-005 — sends HELLO on wire; failure prevents peer from accepting DATA.
+    // SC: stores local NodeId and sends HELLO datagram to peer (REQ-6.1.8, REQ-6.1.10).
     Result register_local_id(NodeId id) override;
     // Safety-critical (SC): HAZ-005, HAZ-006 — verified to M5
     Result send_message(const MessageEnvelope& envelope) override;
@@ -97,6 +98,13 @@ private:
     // ───────────────────────────────────────────────────────────────────────
     // Private helper methods (Power of 10: small, single-purpose functions)
     // ───────────────────────────────────────────────────────────────────────
+
+    /// Serialize a HELLO frame and send it directly to the configured peer,
+    /// bypassing the impairment engine.  Called by register_local_id() so the
+    /// peer can register this side's NodeId before any DATA frame arrives
+    /// (REQ-6.1.8, REQ-6.1.10).
+    /// @return OK on success; ERR_IO on send failure; ERR_INVALID if peer not configured.
+    Result send_hello_datagram();
 
     /// Enforce HELLO-before-data and source_id consistency (REQ-6.1.8, REQ-6.2.4).
     /// Mirrors DtlsUdpBackend::process_hello_or_validate() for the plaintext UDP path.
