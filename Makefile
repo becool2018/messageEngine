@@ -1,6 +1,45 @@
 # Detect OS
 UNAME_S := $(shell uname -s)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Installation paths — Yocto do_install sets DESTDIR=${D}; prefix defaults to
+# /usr which matches the Yocto standard layout.  Override on the command line:
+#   make install DESTDIR=/path/to/staging prefix=/usr
+# ─────────────────────────────────────────────────────────────────────────────
+DESTDIR ?=
+prefix  ?= /usr
+bindir  ?= $(prefix)/bin
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Release profile — set RELEASE=1 for production / Yocto target builds.
+# Activates -O2 (required for _FORTIFY_SOURCE=2) and -D_FORTIFY_SOURCE=2.
+# Debug builds (default) omit both to preserve accurate line-level debug info.
+# CLAUDE.md §7e: -D_FORTIFY_SOURCE=2 requires -O1+; PENDING in debug builds.
+# ─────────────────────────────────────────────────────────────────────────────
+RELEASE ?= 0
+ifeq ($(RELEASE),1)
+RELEASE_CXXFLAGS := -O2 -D_FORTIFY_SOURCE=2
+else
+RELEASE_CXXFLAGS :=
+endif
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Extra flag hooks for cross-compilation environments (e.g. Yocto).
+# Yocto recipes pass sysroot paths, target tune flags, and security hardening
+# via these variables:
+#   EXTRA_CXXFLAGS  — appended to CXXFLAGS after all project-required flags
+#   EXTRA_LDFLAGS   — appended to LDFLAGS / EXE_LDFLAGS after library flags
+# Example Yocto do_compile override:
+#   oe_runmake CXX="${CXX}" \
+#       MBEDTLS_CFLAGS="-I${STAGING_INCDIR}" \
+#       MBEDTLS_LIBS="-L${STAGING_LIBDIR} -lmbedtls -lmbedx509 -lmbedcrypto" \
+#       EXTRA_CXXFLAGS="${TARGET_CXXFLAGS}" \
+#       EXTRA_LDFLAGS="${TARGET_LDFLAGS}" \
+#       RELEASE=1
+# ─────────────────────────────────────────────────────────────────────────────
+EXTRA_CXXFLAGS ?=
+EXTRA_LDFLAGS  ?=
+
 # Optional tool for discovering system-provided mbedTLS flags.
 PKG_CONFIG ?= pkg-config
 
@@ -56,18 +95,33 @@ CXXFLAGS  := -std=c++17 -fno-exceptions -fno-rtti \
              -Wshadow -Wconversion -Wsign-conversion \
              -Wcast-align -Wformat=2 -Wnull-dereference \
              -Wdouble-promotion -Wno-unknown-pragmas \
-             -fstack-protector-strong \
-			 -Isrc $(MBEDTLS_CFLAGS) -g
+             -fstack-protector-strong -fPIE \
+             $(RELEASE_CXXFLAGS) \
+             -Isrc $(MBEDTLS_CFLAGS) -g \
+             $(EXTRA_CXXFLAGS)
 # Security hardening (.claude/CLAUDE.md §7e):
 #   -fstack-protector-strong  ACTIVE: stack canaries on functions with buffers >= 8 bytes.
-#   -D_FORTIFY_SOURCE=2       PENDING: requires -O1+; enable in a dedicated release profile.
-#   -fPIE / -pie              Apply to server/client link rules only (executables, not objects).
-#   -Wl,-z,relro -Wl,-z,now   Linux-only; not applicable on macOS/Darwin.
+#   -fPIE                     ACTIVE: position-independent code for all objects.
+#   -D_FORTIFY_SOURCE=2       ACTIVE when RELEASE=1 (requires -O2, set via RELEASE_CXXFLAGS).
+#   -pie                      Applied per-executable in EXE_LDFLAGS below.
+#   -Wl,-z,relro -Wl,-z,now   Linux-only; applied per-executable in EXE_LDFLAGS below.
 
 # mbedTLS linking (portable default). Users can override.
 # On Ubuntu with libmbedtls-dev installed, these libs are on the default linker path.
 MBEDTLS_LIBS ?= $(if $(strip $(MBEDTLS_PKG_LIBS)),$(MBEDTLS_PKG_LIBS),$(if $(strip $(MBEDTLS_FALLBACK_LIBS)),$(MBEDTLS_FALLBACK_LIBS),-lmbedtls -lmbedx509 -lmbedcrypto))
-LDFLAGS      := -lpthread $(MBEDTLS_LIBS)
+LDFLAGS      := -lpthread $(MBEDTLS_LIBS) $(EXTRA_LDFLAGS)
+
+# Per-executable hardening flags (CLAUDE.md §7e).
+# -Wl,-pie:              enables ASLR for the resulting executable.
+#                        Passed via -Wl, to avoid -Wunused-command-line-argument
+#                        when $(CXXFLAGS) (which includes -Werror) appears on the
+#                        same link command line (Apple clang macOS behaviour).
+# -Wl,-z,relro/now:      makes GOT/PLT read-only after startup (Linux only).
+ifeq ($(UNAME_S),Linux)
+EXE_LDFLAGS := -Wl,-pie -Wl,-z,relro -Wl,-z,now
+else
+EXE_LDFLAGS := -Wl,-pie
+endif
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Sanitizer flags (ASan + UBSan)
@@ -136,7 +190,7 @@ ALL_LIB_OBJS := $(CORE_OBJS) $(PLATFORM_OBJS)
 # ─────────────────────────────────────────────────────────────────────────────
 # Targets
 # ─────────────────────────────────────────────────────────────────────────────
-.PHONY: all clean tests stress_tests run_stress_tests server client check_traceability \
+.PHONY: all clean install tests stress_tests run_stress_tests server client check_traceability \
         lint cppcheck pclint scan_build static_analysis \
         coverage coverage_show coverage_report \
         sanitize_tests run_sanitize \
@@ -145,10 +199,10 @@ ALL_LIB_OBJS := $(CORE_OBJS) $(PLATFORM_OBJS)
 all: server client tests
 
 server: $(ALL_LIB_OBJS) build/objs/app/Server.o
-	$(CXX) $(CXXFLAGS) -o build/server $^ $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -o build/server $^ $(LDFLAGS) $(EXE_LDFLAGS)
 
 client: $(ALL_LIB_OBJS) build/objs/app/Client.o
-	$(CXX) $(CXXFLAGS) -o build/client $^ $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -o build/client $^ $(LDFLAGS) $(EXE_LDFLAGS)
 
 tests: \
     build/test_MessageEnvelope \
@@ -684,6 +738,16 @@ coverage_report: coverage
 	@echo ""
 	@echo "  See CLAUDE.md §14 for full policy and ceiling justifications."
 	@echo "================================================================"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# install — Yocto do_install calls: make install DESTDIR=${D}
+# Installs server and client binaries to $(DESTDIR)$(bindir).
+# Build must complete first: make server client && make install DESTDIR=...
+# ─────────────────────────────────────────────────────────────────────────────
+install: server client
+	install -d $(DESTDIR)$(bindir)
+	install -m 0755 build/server $(DESTDIR)$(bindir)/me-server
+	install -m 0755 build/client $(DESTDIR)$(bindir)/me-client
 
 clean:
 	rm -rf build/
