@@ -63,6 +63,7 @@ static const int   RECV_TIMEOUT_MS           = 100;
 static const int   INTER_MESSAGE_SLEEP_MS    = 100;
 static const int   PAYLOAD_BUILD_MAX         = 256;
 static const int   LOCAL_CLIENT_NODE_ID      = 2U;
+static const int   LOCAL_SERVER_NODE_ID      = 1U;
 static const int   DEFAULT_PEER_PORT         = 9000;
 static const char* DEFAULT_PEER_IP           = "127.0.0.1";
 
@@ -230,7 +231,7 @@ static void run_client_iteration(DeliveryEngine& engine, int msg_idx,
 
     uint64_t now_us = timestamp_now_us();
 
-    Result res = send_test_message(engine, 1U, msg_idx, now_us);
+    Result res = send_test_message(engine, static_cast<NodeId>(LOCAL_SERVER_NODE_ID), msg_idx, now_us);
     if (result_ok(res)) {
         ++messages_sent;
         Logger::log(Severity::INFO, "Client", "Sent message #%d\n", msg_idx);
