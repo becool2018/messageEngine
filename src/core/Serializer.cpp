@@ -287,6 +287,28 @@ static bool fragment_header_valid(const MessageEnvelope& env)
     return (static_cast<uint32_t>(env.total_payload_length) <= MSG_MAX_PAYLOAD_BYTES);
 }
 
+/// Validate that the declared payload_length fits within the buffer and does
+/// not exceed the protocol maximum.  Extracted from deserialize() to keep its
+/// cognitive complexity within the Rule 4 ceiling of 10 after SEC-027 added
+/// the source_id == NODE_ID_INVALID rejection.
+/// @param[in] payload_length  Value read from the wire header.
+/// @param[in] buf_len         Total received buffer length (>= WIRE_HEADER_SIZE).
+/// @return true if payload fits; false if the frame must be rejected.
+static bool payload_length_valid(uint32_t payload_length, uint32_t buf_len)
+{
+    NEVER_COMPILED_OUT_ASSERT(buf_len >= Serializer::WIRE_HEADER_SIZE);  // Assert: caller pre-checked
+    if (payload_length > MSG_MAX_PAYLOAD_BYTES) {
+        return false;
+    }
+    // F-3 / CERT INT30-C: overflow guard (mathematically impossible given the
+    // preceding check, but retained for defence-in-depth and static analysis).
+    if (payload_length > (UINT32_MAX - Serializer::WIRE_HEADER_SIZE)) {
+        return false;
+    }
+    NEVER_COMPILED_OUT_ASSERT(payload_length + Serializer::WIRE_HEADER_SIZE >= Serializer::WIRE_HEADER_SIZE);  // Assert: no wrap
+    return (buf_len >= Serializer::WIRE_HEADER_SIZE + payload_length);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Deserialization
 // ─────────────────────────────────────────────────────────────────────────────
@@ -348,6 +370,14 @@ Result Serializer::deserialize(const uint8_t*  buf,
 
     env.source_id = read_u32(buf, offset);
     offset += 4U;
+    // SEC-027: source_id == NODE_ID_INVALID (0) is the "not yet assigned" sentinel.
+    // A wire frame carrying source_id == 0 is malformed; reject with ERR_INVALID so
+    // the postcondition NEVER_COMPILED_OUT_ASSERT(envelope_valid(env)) is unreachable
+    // for this input — prevents a crafted packet from driving abort() / the reset
+    // handler (remote DoS vector via untrusted network input).
+    if (env.source_id == NODE_ID_INVALID) {
+        return Result::ERR_INVALID;
+    }
 
     env.destination_id = read_u32(buf, offset);
     offset += 4U;
@@ -386,21 +416,10 @@ Result Serializer::deserialize(const uint8_t*  buf,
     // Power of 10 rule 5: assertion after header read
     NEVER_COMPILED_OUT_ASSERT(offset == WIRE_HEADER_SIZE);  // Assert: header size matches constant
 
-    // Validate payload_length against message definition
-    if (env.payload_length > MSG_MAX_PAYLOAD_BYTES) {
-        return Result::ERR_INVALID;
-    }
-
-    // F-3 defense-in-depth overflow guard (CERT INT30-C): although the preceding check
-    // makes this overflow mathematically impossible (4096+52 << UINT32_MAX), we add an
-    // explicit guard for consistency with serialize() and to satisfy static analysis.
-    if (env.payload_length > (UINT32_MAX - WIRE_HEADER_SIZE)) {
-        return Result::ERR_INVALID;
-    }
-
-    // Check that total message fits in buffer
-    uint32_t total_size = WIRE_HEADER_SIZE + env.payload_length;
-    if (buf_len < total_size) {
+    // Validate payload_length: fits protocol max, no integer overflow, fits buffer.
+    // Three checks extracted into payload_length_valid() to keep deserialize() CC ≤ 10
+    // after the SEC-027 source_id guard was added.
+    if (!payload_length_valid(env.payload_length, buf_len)) {
         return Result::ERR_INVALID;
     }
 

@@ -785,6 +785,49 @@ static bool test_serialize_payload_length_at_boundary()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SEC-027: deserialize must reject frames whose source_id == NODE_ID_INVALID (0)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_deserialize_rejects_source_id_zero()
+{
+    // Build a valid envelope, serialize it, then overwrite the source_id field
+    // in the wire buffer with zero — simulating a crafted / malformed frame.
+    // Without the SEC-027 fix, deserialize() would reach the postcondition
+    // NEVER_COMPILED_OUT_ASSERT(envelope_valid(env)) and fire abort() —
+    // a remote DoS vector.  With the fix it must return ERR_INVALID cleanly.
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type       = MessageType::DATA;
+    env.source_id          = 42U;          // valid nonzero sender
+    env.destination_id     = 1U;
+    env.payload_length     = 0U;
+
+    uint32_t out_len = 0U;
+    Result sr = Serializer::serialize(env, wire_buf, sizeof(wire_buf), out_len);
+    assert(sr == Result::OK);
+
+    // Wire layout (big-endian):
+    //   byte 0:   message_type
+    //   byte 1:   reliability_class
+    //   byte 2:   priority
+    //   byte 3:   proto_version
+    //   bytes 4-11:  message_id
+    //   bytes 12-19: timestamp_us
+    //   bytes 20-23: source_id   <-- overwrite these with 0x00000000
+    wire_buf[20U] = 0U;
+    wire_buf[21U] = 0U;
+    wire_buf[22U] = 0U;
+    wire_buf[23U] = 0U;
+
+    MessageEnvelope out;
+    envelope_init(out);
+    Result dr = Serializer::deserialize(wire_buf, out_len, out);
+    assert(dr == Result::ERR_INVALID);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -950,6 +993,13 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_serialize_payload_length_at_boundary\n");
+    }
+
+    if (!test_deserialize_rejects_source_id_zero()) {
+        printf("FAIL: test_deserialize_rejects_source_id_zero\n");
+        ++failed;
+    } else {
+        printf("PASS: test_deserialize_rejects_source_id_zero\n");
     }
 
     return (failed > 0) ? 1 : 0;
