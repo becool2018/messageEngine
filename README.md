@@ -1,7 +1,7 @@
 # messageEngine
 
 ![CI](https://github.com/becool2018/messageEngine/actions/workflows/CI.yml/badge.svg)
-![Stress Tests](https://github.com/becool2018/messageEngine/actions/workflows/stress.yml/badge.yml)
+![Stress Tests](https://github.com/becool2018/messageEngine/actions/workflows/stress.yml/badge.svg)
 
 A C++ networking library for building and testing systems that must survive unreliable networks. It provides:
 
