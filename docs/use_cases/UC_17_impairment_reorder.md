@@ -20,8 +20,9 @@
 ```cpp
 // src/platform/ImpairmentEngine.cpp
 Result ImpairmentEngine::process_inbound(
-    const MessageEnvelope& env, uint64_t now_us,
-    MessageEnvelope* out_buf, uint32_t* out_count);
+    const MessageEnvelope& in_env, uint64_t now_us,
+    MessageEnvelope* out_buf, uint32_t buf_cap,
+    uint32_t& out_count);
 ```
 
 Called internally by backend `recv_from_client()` / `recv_one_datagram()` after deserialization.
@@ -30,14 +31,14 @@ Called internally by backend `recv_from_client()` / `recv_one_datagram()` after 
 
 ## 3. End-to-End Control Flow
 
-1. Backend calls `m_impairment.process_inbound(env, now_us, inbound_delay_buf, &inbound_count)`.
+1. Backend calls `m_impairment.process_inbound(env, now_us, inbound_delay_buf, buf_cap, inbound_count)`.
 2. `NEVER_COMPILED_OUT_ASSERT(out_buf != nullptr)`.
-3. `*out_count = 0`.
+3. `out_count = 0`.
 4. **Partition check (inbound):** `is_partition_active(now_us)` — if true, drop all inbound; return OK.
 5. **Reorder enabled:**
    a. The `env` is placed in a reorder window buffer (a circular buffer of `reorder_window_size` entries, separate from the outbound delay buffer).
-   b. If the window is not yet full: the entry is buffered; `*out_count = 0`. No message released yet.
-   c. If the window is full: the oldest entry is moved to `out_buf[0]`; `*out_count = 1`. The new `env` takes the freed slot.
+   b. If the window is not yet full: the entry is buffered; `out_count = 0`. No message released yet.
+   c. If the window is full: the oldest entry is moved to `out_buf[0]`; `out_count = 1`. The new `env` takes the freed slot.
 6. The released entry (if any) is passed back to the backend, which pushes it to the inbound `RingBuffer`.
 
 ---

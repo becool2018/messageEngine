@@ -31,7 +31,7 @@ Result DeliveryEngine::receive(MessageEnvelope& env, uint32_t timeout_ms, uint64
 1. **`DeliveryEngine::receive(env, timeout_ms, now_us)`** — entry.
 2. `NEVER_COMPILED_OUT_ASSERT(m_initialized)`.
 3. `NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL)`.
-4. Compute deadline: `uint64_t deadline_us = timestamp_now_us() + (uint64_t)timeout_ms * 1000ULL`.
+4. Compute deadline: `uint64_t deadline_us = timestamp_deadline_us(now_us, timeout_ms)` = `now_us + (uint64_t)timeout_ms * 1000ULL`. Uses the caller-supplied `now_us` rather than making a fresh clock read.
 5. **Poll loop** (bounded by `timeout_ms` deadline — Rule 2 infrastructure deviation):
    a. `m_transport->receive_message(recv_timeout_ms, &raw_env)` — block up to `recv_timeout_ms` ms waiting for a frame from the transport.
    b. If `Result::ERR_TIMEOUT`: check `timestamp_now_us() >= deadline_us` → if expired, return `ERR_TIMEOUT`. Else retry.

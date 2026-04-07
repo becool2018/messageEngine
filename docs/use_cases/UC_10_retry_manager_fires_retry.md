@@ -30,8 +30,8 @@ Called from the User's application event loop. Synchronous in the caller's threa
 
 1. **`DeliveryEngine::pump_retries(now_us)`** — entry.
 2. `NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr)`.
-3. `MessageEnvelope due_buf[ACK_TRACKER_CAPACITY]` — 32-slot stack array for due entries.
-4. **`m_retry_mgr.collect_due(now_us, due_buf, ACK_TRACKER_CAPACITY)`** (`RetryManager.cpp`):
+3. Pre-allocated member buffer `m_retry_buf[MSG_RING_CAPACITY]` (64 slots, zero-initialised in `init()`) is used for due entries. No stack allocation.
+4. **`m_retry_mgr.collect_due(now_us, m_retry_buf, MSG_RING_CAPACITY)`** (`RetryManager.cpp`):
    a. `NEVER_COMPILED_OUT_ASSERT(out_buf != nullptr)` and `NEVER_COMPILED_OUT_ASSERT(buf_cap > 0)`.
    b. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]`:
       - Skip inactive entries (`active == false`).
@@ -42,7 +42,7 @@ Called from the User's application event loop. Synchronous in the caller's threa
         - `advance_backoff(entry, now_us)`: `entry.backoff_ms = min(entry.backoff_ms * 2, 60000UL)`, `entry.next_retry_us = now_us + entry.backoff_ms * 1000ULL`.
       - If `retry_count >= max_retries`: `entry.active = false`.
    c. Returns `due_count` directly as `uint32_t`.
-5. Back in `pump_retries()`: for each `due_buf[i]` (`i` in `0..due_count-1`):
+5. Back in `pump_retries()`: for each `m_retry_buf[i]` (`i` in `0..due_count-1`):
    a. **`send_via_transport(due_buf[i], now_us)`** — expiry check, then `m_transport->send_message()`.
    b. If non-OK: `Logger::log(WARNING_LO, ...)` ("retry send failed"); continue.
 6. Returns `due_count` to the User.
@@ -97,8 +97,8 @@ DeliveryEngine::pump_retries(now_us)                          [DeliveryEngine.cp
 
 ## 8. Memory & Ownership Semantics
 
-- `due_buf[ACK_TRACKER_CAPACITY]` — 32 × 4144-byte `MessageEnvelope` array on the stack: approximately 130 KB. This is the largest stack frame in the codebase.
-- `RetryEntry::env` is read during `collect_due()` (copied to `due_buf`); not modified.
+- `m_retry_buf[MSG_RING_CAPACITY]` — 64-slot pre-allocated member array (initialised in `DeliveryEngine::init()`). Using a member buffer avoids a ~260 KB stack frame that would otherwise be needed for the due-entries collection.
+- `RetryEntry::env` is read during `collect_due()` (copied to `m_retry_buf`); not modified.
 - No heap allocation. Power of 10 Rule 3 satisfied.
 
 ---
@@ -137,7 +137,7 @@ Per due entry:
 ```
 User
   -> DeliveryEngine::pump_retries(now_us)
-       -> RetryManager::collect_due(now_us, due_buf, MSG_RING_CAPACITY)
+       -> RetryManager::collect_due(now_us, m_retry_buf, MSG_RING_CAPACITY)
             [scan; collect due; advance backoff; deactivate exhausted/expired]
             <- uint32_t N
        [for i in 0..N-1:]
@@ -162,7 +162,7 @@ User
 
 ## 14. Known Risks / Observations
 
-- **Large stack frame (~132 KB):** `due_buf[32]` is a substantial stack allocation. Embedded targets should verify stack headroom.
+- **Pre-allocated member buffer:** `m_retry_buf[MSG_RING_CAPACITY]` (64 slots × 4144 bytes = ~260 KB) is a value member of `DeliveryEngine`, initialised in `init()`. This avoids a large stack allocation on every `pump_retries()` call. The tradeoff is that `DeliveryEngine` holds this memory permanently even when retries are rare.
 - **Receiver dedup required:** Same `message_id` retransmitted. Receiver's `DuplicateFilter` must be active for RELIABLE_RETRY paths to suppress redundant copies.
 - **Backoff cap at 60s:** With `max_retries=5`, worst-case total retry window is bounded.
 - **Entry stays active on transport failure:** Repeated failures keep the entry alive until expiry or budget exhaustion.

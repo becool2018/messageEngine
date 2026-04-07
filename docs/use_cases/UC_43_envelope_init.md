@@ -10,26 +10,25 @@
 
 - **Trigger:** User calls `envelope_init(envelope)` before populating a `MessageEnvelope` for sending. File: `src/core/Envelope.cpp` (or `src/core/Envelope.hpp` as an inline function).
 - **Goal:** Zero-initialize all fields of a `MessageEnvelope` to safe, deterministic values so that no field is left in an undefined state before field assignment. `message_type` is set to `MessageType::INVALID` to ensure an unfinished envelope cannot be mistaken for a valid DATA or ACK message.
-- **Success outcome:** All fields of `*env` are zeroed. `env->message_type == MessageType::INVALID`. `env->payload_length == 0`. `env->payload` buffer is zeroed.
-- **Error outcomes:** None — `envelope_init()` has no error states. The parameter must be non-null (asserted).
+- **Success outcome:** All fields of `env` are zeroed. `env.message_type == MessageType::INVALID`. `env.payload_length == 0`. `env.payload` buffer is zeroed.
+- **Error outcomes:** None — `envelope_init()` has no error states. The parameter is a reference; null is not possible.
 
 ---
 
 ## 2. Entry Points
 
 ```cpp
-// src/core/Envelope.hpp (inline) or src/core/Envelope.cpp
-void envelope_init(MessageEnvelope* env);
+// src/core/MessageEnvelope.hpp (inline)
+void envelope_init(MessageEnvelope& env);
 ```
 
 ---
 
 ## 3. End-to-End Control Flow
 
-1. **`envelope_init(env)`** — entry.
-2. `NEVER_COMPILED_OUT_ASSERT(env != nullptr)`.
-3. `memset(env, 0, sizeof(MessageEnvelope))` — zero all bytes of the struct.
-4. `env->message_type = MessageType::INVALID` — explicitly mark envelope as not-yet-valid (value 255 / 0xFF, distinct from DATA=0, ACK=1, NAK=2, HEARTBEAT=3).
+1. **`envelope_init(env)`** — entry (reference parameter; no null check needed).
+2. `memset(&env, 0, sizeof(MessageEnvelope))` — zero all bytes of the struct.
+3. `env.message_type = MessageType::INVALID` — explicitly mark envelope as not-yet-valid (value 255 / 0xFF, distinct from DATA=0, ACK=1, NAK=2, HEARTBEAT=3).
 5. Returns (void).
 
 ---
@@ -37,10 +36,9 @@ void envelope_init(MessageEnvelope* env);
 ## 4. Call Tree
 
 ```
-envelope_init(env)                                 [Envelope.hpp / Envelope.cpp]
- ├── NEVER_COMPILED_OUT_ASSERT(env != nullptr)
- ├── memset(env, 0, sizeof(MessageEnvelope))
- └── env->message_type = MessageType::INVALID
+envelope_init(env)                                 [MessageEnvelope.hpp inline]
+ ├── memset(&env, 0, sizeof(MessageEnvelope))
+ └── env.message_type = MessageType::INVALID
 ```
 
 ---
@@ -58,7 +56,7 @@ No branching logic. The function performs a fixed sequence of operations on any 
 
 | Condition | True branch | False branch |
 |-----------|-------------|--------------|
-| `env == nullptr` | NEVER_COMPILED_OUT_ASSERT fires | memset + set INVALID |
+| (no branching) | memset + set INVALID | N/A |
 
 ---
 
@@ -93,18 +91,17 @@ No branching logic. The function performs a fixed sequence of operations on any 
 
 | Object | Member | Before | After |
 |--------|--------|--------|-------|
-| `*env` | all fields | undefined | zeroed |
-| `*env` | `message_type` | undefined | `MessageType::INVALID` |
-| `*env` | `payload_length` | undefined | 0 |
-| `*env` | `payload[*]` | undefined | all bytes 0 |
+| `env` | all fields | undefined | zeroed |
+| `env` | `message_type` | undefined | `MessageType::INVALID` |
+| `env` | `payload_length` | undefined | 0 |
+| `env` | `payload[*]` | undefined | all bytes 0 |
 
 ---
 
 ## 12. Sequence Diagram
 
 ```
-User -> envelope_init(&env)
-  -> NEVER_COMPILED_OUT_ASSERT(env != nullptr)
+User -> envelope_init(env)
   -> memset(&env, 0, sizeof(MessageEnvelope))
   -> env.message_type = MessageType::INVALID
   <- (void)
