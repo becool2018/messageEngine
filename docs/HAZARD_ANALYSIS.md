@@ -371,13 +371,16 @@ Classification: NSC. `flush_delayed_to_clients()` as a whole remains SC (HAZ-005
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
 | `init()` | `UdpBackend` | NSC | — |
-| `register_local_id()` | `UdpBackend` | NSC | — |
+| `register_local_id()` | `UdpBackend` | SC | HAZ-005 |
+| `send_hello_datagram()` | `UdpBackend` | SC | HAZ-005 |
 | `send_message()` | `UdpBackend` | SC | HAZ-005, HAZ-006 |
 | `receive_message()` | `UdpBackend` | SC | HAZ-004, HAZ-005 |
 | `close()` | `UdpBackend` | NSC | — |
 | `is_open()` | `UdpBackend` | NSC | — |
 | `get_transport_stats()` | `UdpBackend` | NSC | — |
 | `process_hello_or_validate()` | `UdpBackend` | SC | HAZ-015 |
+
+`register_local_id()` and `send_hello_datagram()` reclassified SC (HAZ-005) as of the HELLO lifecycle fix (REQ-6.1.10): `register_local_id()` stores the local NodeId and calls `send_hello_datagram()` to transmit a HELLO frame to the peer; failure means the peer never registers this side's NodeId and all subsequent DATA frames are silently dropped (data-before-HELLO enforcement). This mirrors the TCP/TLS client pattern.
 
 ### src/platform/LocalSimHarness.hpp
 
@@ -429,6 +432,8 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
 | `init()` | `DtlsUdpBackend` | NSC | — |
+| `register_local_id()` | `DtlsUdpBackend` | SC | HAZ-005 |
+| `send_hello_datagram()` | `DtlsUdpBackend` | SC | HAZ-005 |
 | `send_message()` | `DtlsUdpBackend` | SC | HAZ-005, HAZ-006 |
 | `receive_message()` | `DtlsUdpBackend` | SC | HAZ-004, HAZ-005 |
 | `client_connect_and_handshake()` | `DtlsUdpBackend` | SC | HAZ-008 |
@@ -439,7 +444,7 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `is_open()` | `DtlsUdpBackend` | NSC | — |
 | `get_transport_stats()` | `DtlsUdpBackend` | NSC | — |
 
-`DtlsUdpBackend` is a drop-in replacement for `UdpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `UdpBackend`. The DTLS layer (when enabled) is an init-phase concern (cert/key loading, DTLS handshake, cookie exchange); enabling or disabling TLS does not alter the SC classification of the send/receive path. The MTU enforcement in `send_message()` (returns `ERR_INVALID` for payloads exceeding `DTLS_MAX_DATAGRAM_BYTES`) is part of the HAZ-005 mitigation. `deserialize_and_dispatch()` is SC (HAZ-005) as the inbound wire-to-envelope path — an error here could deliver a malformed envelope to the DeliveryEngine. `process_hello_or_validate()` is SC (HAZ-009) because it enforces DTLS peer NodeId binding; failure allows source_id spoofing to corrupt ACK/retry state. `load_crl_if_configured()` is NSC: called only during `init()` certificate loading and carries no runtime message-delivery policy.
+`DtlsUdpBackend` is a drop-in replacement for `UdpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `UdpBackend`. The DTLS layer (when enabled) is an init-phase concern (cert/key loading, DTLS handshake, cookie exchange); enabling or disabling TLS does not alter the SC classification of the send/receive path. The MTU enforcement in `send_message()` (returns `ERR_INVALID` for payloads exceeding `DTLS_MAX_DATAGRAM_BYTES`) is part of the HAZ-005 mitigation. `deserialize_and_dispatch()` is SC (HAZ-005) as the inbound wire-to-envelope path — an error here could deliver a malformed envelope to the DeliveryEngine. `process_hello_or_validate()` is SC (HAZ-009) because it enforces DTLS peer NodeId binding; failure allows source_id spoofing to corrupt ACK/retry state. `register_local_id()` and `send_hello_datagram()` reclassified SC (HAZ-005) as of the HELLO lifecycle fix (REQ-6.1.10): in client mode `register_local_id()` sends the mandatory HELLO datagram via `send_hello_datagram()`; failure prevents the server from registering this side's NodeId, causing all subsequent DATA frames to be silently dropped (data-before-HELLO enforcement). Server mode returns OK immediately (no connected peer at registration time). `load_crl_if_configured()` is NSC: called only during `init()` certificate loading and carries no runtime message-delivery policy.
 
 ### src/platform/IMbedtlsOps.hpp / src/platform/MbedtlsOpsImpl.hpp
 
