@@ -268,6 +268,13 @@ private:
     /// Extracted from init() to reduce its CC.
     Result run_tls_handshake_phase(const TransportConfig& config);
 
+    /// Serialize a HELLO frame and send it directly to the configured peer via
+    /// send_wire_bytes(), bypassing the impairment engine.  Called by
+    /// register_local_id() in client mode so the server can register this side's
+    /// NodeId before any DATA frame arrives (REQ-6.1.8, REQ-6.1.10).
+    /// @return OK on success; ERR_IO / ERR_INVALID on failure.
+    Result send_hello_datagram();
+
     /// Send @p len bytes from @p buf via TLS or plaintext UDP.
     /// Extracted from send_message() to reduce its CC.
     Result send_wire_bytes(const uint8_t* buf, uint32_t len);
