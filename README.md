@@ -11,7 +11,7 @@ A C++ networking library for building and testing systems that must survive unre
 - **Bounded, fixed-allocation design** — no heap allocation on critical paths after init; all capacities are compile-time constants in `src/core/Types.hpp`
 - **Observable by default** — severity-tagged logging, per-engine delivery counters, and an 8-kind event ring (`poll_event` / `drain_events`) for post-hoc analysis without callbacks or heap
 
-**Quick capacity reference:**
+**Quick capacity reference** ([full details →](docs/CAPACITY_REFERENCE.md))**:**
 
 | Resource | Limit |
 |---|---|
