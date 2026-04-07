@@ -1,23 +1,35 @@
 # messageEngine
 
 ![CI](https://github.com/becool2018/messageEngine/actions/workflows/CI.yml/badge.svg)
-![Stress Tests](https://github.com/becool2018/messageEngine/actions/workflows/stress.yml/badge.svg)
+![Stress Tests](https://github.com/becool2018/messageEngine/actions/workflows/stress.yml/badge.yml)
 
-> **Note:** This codebase is produced by Claude (Anthropic) as an experiment to evaluate whether an AI assistant can consistently follow strict safety-critical software engineering requirements — including NASA standards, JPL Power of 10, and MISRA C++:2023 .
+A C++ networking library for building and testing systems that must survive unreliable networks. It provides:
 
-> **AI tooling:** Code was written by **Claude Sonnet 4.6** (Anthropic). Code review was performed by **GPT-5.4** (OpenAI).
+- **Three delivery modes** — best-effort, reliable-with-ACK, and reliable-with-retry-and-dedup — implemented at the application layer, transport-independent
+- **Five transport backends** — TCP, UDP, TLS/TCP, DTLS/UDP, and an in-process simulation harness (`LocalSimHarness`) that needs no OS sockets
+- **A fault injection engine** — inject latency, jitter, packet loss, duplication, reordering, and link partitions, all driven by a seedable PRNG for reproducible test runs
+- **Bounded, fixed-allocation design** — no heap allocation on critical paths after init; all capacities are compile-time constants in `src/core/Types.hpp`
+- **Observable by default** — severity-tagged logging, per-engine delivery counters, and an 8-kind event ring (`poll_event` / `drain_events`) for post-hoc analysis without callbacks or heap
 
-> **AI contributors:** If you are using an AI assistant with this project, ensure it reads **`.claude/CLAUDE.md`** (global C/C++ coding standard — targets Power of 10, MISRA C++:2023, F-Prime subset; documented deviations listed therein) and **`CLAUDE.md`** (project-specific requirements — architecture, traceability, safety, verification policy) before making any changes. Both files are normative and must be followed.
+**Quick capacity reference:**
 
-A safety-critical C++ networking library that models realistic communication problems — latency, jitter, packet loss, duplication, reordering, and link partitions — while providing consistent, reusable messaging utilities across five transport backends (plaintext TCP, TLS/TCP, plaintext UDP, DTLS/UDP, and an in-process simulation harness).
+| Resource | Limit |
+|---|---|
+| Max payload | 4 096 bytes |
+| Dedup window | 128 `(source, msg_id)` pairs — sliding window that detects and drops duplicate retransmissions |
+| ACK tracker | 32 pending slots |
+| Retry manager | 32 pending slots |
+| Inbound ring | 64 messages per backend |
+| Concurrent clients (TCP/TLS) | 8 (configurable via `MAX_TCP_CONNECTIONS` in `Types.hpp`) |
+| Worst-case stack depth | ~764 bytes / 10 frames (DTLS outbound send path) |
 
-All production code is written to **JPL Power of 10**, **MISRA C++:2023**, and an **F-Prime style subset**: no exceptions, no templates, no RTTI, no STL, and no dynamic allocation on critical paths after initialization. Where a rule cannot be followed without compromising correctness or using a third-party API, a documented deviation is recorded in-code with a justification comment and in `.claude/CLAUDE.md`. There are minor STL exceptions; these are listed in the [Coding Standards](#coding-standards) section.
+**Written to:** JPL Power of 10 · MISRA C++:2023 · F-Prime style subset · NASA Class C (voluntary Class B test rigor). No exceptions, no templates, no RTTI. STL is excluded from production code with one deliberate exception: `std::atomic<T>` for integral types is permitted and used for shared state — it has no dynamic allocation, maps directly to hardware primitives, and is what MISRA C++:2023 endorses for lock-free concurrency. All other STL containers, algorithms, and headers are absent from `src/`.
 
 > **Standards note:** MISRA C++:2023 is a proprietary standard published by MISRA (misra.org.uk) and must be purchased separately. This project targets MISRA C++:2023 guidelines and documents all deviations, but does not claim third-party-audited certification. NASA technical standards (NASA-STD-8719.13C, NASA-STD-8739.8A, NPR 7150.2D) are publicly available at standards.nasa.gov.
 
-The library targets **NASA-STD-8719.13C** and **NASA-STD-8739.8A** software assurance practices at **Class C** classification (infrastructure / networking library), with voluntary **Class B** rigor in testing discipline: all safety-critical functions require branch coverage, mandatory peer inspection (M1), and static analysis (M2), with MC/DC coverage as the goal for the five highest-hazard functions.
-
 **Library version: 2.0.0** — protocol v2 milestone adds bounded fragmentation and reassembly (`Fragmentation`, `ReassemblyBuffer`), per-peer in-order delivery enforcement (`OrderingBuffer`), and wire-format v2 (`WIRE_HEADER_SIZE` 44→52 bytes, `PROTO_VERSION` 1→2). Phase 3 (1.3.0) adds `RequestReplyEngine` and `drain_events()`; v2 is additive on top of that.
+
+> **AI experiment note:** This codebase was produced by Claude Sonnet 4.6 (Anthropic) to evaluate whether an AI assistant can consistently follow safety-critical engineering requirements. Code review by GPT-5.4 (OpenAI). If you are using an AI assistant with this project, read `.claude/CLAUDE.md` and `CLAUDE.md` before making changes — both are normative.
 
 ---
 
