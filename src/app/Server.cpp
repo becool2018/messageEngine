@@ -40,6 +40,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <csignal>
+#include <cerrno>   // SEC-020: errno for strtol error detection
 #include <unistd.h>
 #include "core/Assert.hpp"
 
@@ -155,9 +156,19 @@ static uint16_t parse_server_port(int argc, char* const argv[])
     if (argc < 2) {
         return static_cast<uint16_t>(DEFAULT_BIND_PORT);
     }
-    // bugprone-unchecked-string-to-number-conversion: strtol detects non-numeric input
+    // SEC-020: set errno to 0 before strtol to detect overflow/underflow.
+    // POSIX requires errno check after strtol when LONG_MIN or LONG_MAX is
+    // returned — a range error that end_ptr alone cannot distinguish.
+    errno = 0;
     char* end_ptr = nullptr;
     const long port_long = strtol(argv[1], &end_ptr, 10);
+    // SEC-020: reject if strtol set errno (overflow/underflow) or if no digits
+    // were consumed (end_ptr == argv[1]) or if trailing junk follows the number.
+    if (errno != 0) {
+        Logger::log(Severity::WARNING_LO, "Server",
+                    "SEC-020: strtol failed for port argument (errno=%d)", errno);
+        return static_cast<uint16_t>(DEFAULT_BIND_PORT);
+    }
     const int port_val = (end_ptr != argv[1] && *end_ptr == '\0')
                          ? static_cast<int>(port_long) : 0;
     if (port_val > 0 && port_val <= 65535) {

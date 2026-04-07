@@ -111,6 +111,9 @@ private:
     /// @param[in]  env       Deserialized inbound envelope.
     /// @param[out] consumed  Set true if env was a HELLO and must not reach DeliveryEngine.
     /// @return true if the frame should proceed; false if it must be dropped.
+    // Safety-critical (SC): HAZ-015 — enforces HELLO-before-data and source_id
+    // consistency; failure allows source_id spoofing to corrupt ordering/dedup
+    // state in the DeliveryEngine (mirrors DtlsUdpBackend HAZ-009 protection).
     bool process_hello_or_validate(const MessageEnvelope& env, bool& consumed);
 
     /// Validate that the source address of a received datagram matches the

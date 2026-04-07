@@ -123,6 +123,13 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 | `UdpBackend::send_message()` | serialize + process_outbound + 1 sendto | O(P) = O(4096) | Single datagram |
 | `UdpBackend::receive_message()` | poll_count × (recv + deserialize) | O(poll_count × P) = O(50 × 4096) | |
 
+### src/core/Fragmentation.hpp
+
+| Function | Worst-case operations | Bound | Notes |
+|----------|----------------------|-------|-------|
+| `Fragmentation::fragment_message()` | Up to FRAG_MAX_COUNT (4) envelope copies + header field writes | O(FRAG_MAX_COUNT × P) = O(4 × 4096) | SC: HAZ-001, HAZ-006. Each fragment carries a copy of the payload slice; dominant cost is FRAG_MAX_COUNT × `envelope_copy()`. Cost is implicit in `send_fragments()` called from each retry-pump iteration. |
+| `Fragmentation::needs_fragmentation()` | 1 comparison | O(1) | NSC. |
+
 ### src/platform/ImpairmentEngine.hpp
 
 | Function | Worst-case operations | Bound | Notes |

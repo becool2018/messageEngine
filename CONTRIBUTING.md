@@ -84,7 +84,11 @@ If your change touches any function classified SC in `docs/HAZARD_ANALYSIS.md §
   ```cpp
   // Safety-critical (SC): HAZ-NNN[, HAZ-NNN...]
   ```
-- Branch coverage of all reachable branches is required.
+- Branch coverage of all reachable branches is required. Measure it with:
+  ```bash
+  make coverage
+  ```
+  A regression on any SC function branch is a blocking defect per `CLAUDE.md §14`.
 - A peer review (not self-merge) is mandatory — see `CLAUDE.md §12`.
 - Update `docs/DEFECT_LOG.md` with an inspection record per `docs/INSPECTION_CHECKLIST.md`.
 

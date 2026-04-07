@@ -299,7 +299,7 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `seed()` | `PrngEngine` | SC | HAZ-002, HAZ-007 |
 | `next()` | `PrngEngine` | SC | HAZ-002, HAZ-007 |
 | `next_double()` | `PrngEngine` | SC | HAZ-002, HAZ-007 |
-| `next_range()` | `PrngEngine` | SC | HAZ-002, HAZ-007 |
+| `next_range()` | `PrngEngine` | SC | HAZ-002, HAZ-007, HAZ-013 |
 
 ### src/platform/ImpairmentConfig.hpp
 
@@ -342,9 +342,9 @@ All `SocketUtils` functions are **NSC** — raw POSIX I/O primitives with no mes
 | `send_hello_frame()` | `TcpBackend` | NSC | — |
 | `find_client_slot()` | `TcpBackend` | NSC | — |
 | `handle_hello_frame()` | `TcpBackend` | NSC | — |
-| `recv_from_client()` | `TcpBackend` | SC | HAZ-009, HAZ-016 |
+| `recv_from_client()` | `TcpBackend` | SC | HAZ-009 |
 | `send_to_slot()` | `TcpBackend` | NSC | — |
-| `validate_source_id()` | `TcpBackend` | SC | HAZ-009, HAZ-016 |
+| `validate_source_id()` | `TcpBackend` | SC | HAZ-009 |
 | `close()` | `TcpBackend` | NSC | — |
 | `is_open()` | `TcpBackend` | NSC | — |
 | `get_transport_stats()` | `TcpBackend` | NSC | — |
@@ -438,13 +438,13 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `receive_message()` | `DtlsUdpBackend` | SC | HAZ-004, HAZ-005 |
 | `client_connect_and_handshake()` | `DtlsUdpBackend` | SC | HAZ-008 |
 | `deserialize_and_dispatch()` | `DtlsUdpBackend` | SC | HAZ-005 |
-| `process_hello_or_validate()` | `DtlsUdpBackend` | SC | HAZ-009 |
+| `process_hello_or_validate()` | `DtlsUdpBackend` | SC | HAZ-009, HAZ-011 |
 | `load_crl_if_configured()` | `DtlsUdpBackend` | NSC | — |
 | `close()` | `DtlsUdpBackend` | NSC | — |
 | `is_open()` | `DtlsUdpBackend` | NSC | — |
 | `get_transport_stats()` | `DtlsUdpBackend` | NSC | — |
 
-`DtlsUdpBackend` is a drop-in replacement for `UdpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `UdpBackend`. The DTLS layer (when enabled) is an init-phase concern (cert/key loading, DTLS handshake, cookie exchange); enabling or disabling TLS does not alter the SC classification of the send/receive path. The MTU enforcement in `send_message()` (returns `ERR_INVALID` for payloads exceeding `DTLS_MAX_DATAGRAM_BYTES`) is part of the HAZ-005 mitigation. `deserialize_and_dispatch()` is SC (HAZ-005) as the inbound wire-to-envelope path — an error here could deliver a malformed envelope to the DeliveryEngine. `process_hello_or_validate()` is SC (HAZ-009) because it enforces DTLS peer NodeId binding; failure allows source_id spoofing to corrupt ACK/retry state. `register_local_id()` and `send_hello_datagram()` reclassified SC (HAZ-005) as of the HELLO lifecycle fix (REQ-6.1.10): in client mode `register_local_id()` sends the mandatory HELLO datagram via `send_hello_datagram()`; failure prevents the server from registering this side's NodeId, causing all subsequent DATA frames to be silently dropped (data-before-HELLO enforcement). Server mode returns OK immediately (no connected peer at registration time). `load_crl_if_configured()` is NSC: called only during `init()` certificate loading and carries no runtime message-delivery policy.
+`DtlsUdpBackend` is a drop-in replacement for `UdpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `UdpBackend`. The DTLS layer (when enabled) is an init-phase concern (cert/key loading, DTLS handshake, cookie exchange); enabling or disabling TLS does not alter the SC classification of the send/receive path. The MTU enforcement in `send_message()` (returns `ERR_INVALID` for payloads exceeding `DTLS_MAX_DATAGRAM_BYTES`) is part of the HAZ-005 mitigation. `deserialize_and_dispatch()` is SC (HAZ-005) as the inbound wire-to-envelope path — an error here could deliver a malformed envelope to the DeliveryEngine. `process_hello_or_validate()` is SC (HAZ-009, HAZ-011) because it enforces DTLS peer NodeId binding; failure allows source_id spoofing to corrupt ACK/retry state (HAZ-009 = TCP/TLS cross-transport class; HAZ-011 = DTLS-specific source_id spoofing after MAC verification). `register_local_id()` and `send_hello_datagram()` reclassified SC (HAZ-005) as of the HELLO lifecycle fix (REQ-6.1.10): in client mode `register_local_id()` sends the mandatory HELLO datagram via `send_hello_datagram()`; failure prevents the server from registering this side's NodeId, causing all subsequent DATA frames to be silently dropped (data-before-HELLO enforcement). Server mode returns OK immediately (no connected peer at registration time). `load_crl_if_configured()` is NSC: called only during `init()` certificate loading and carries no runtime message-delivery policy.
 
 ### src/platform/IMbedtlsOps.hpp / src/platform/MbedtlsOpsImpl.hpp
 
@@ -482,6 +482,16 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 ### src/core/DeliveryStats.hpp
 
 All functions in this header are **NSC** — they are plain zero-initialisation helpers for the stats structs (`delivery_stats_init()`, `impairment_stats_init()`, `retry_stats_init()`, `ack_tracker_stats_init()`, `transport_stats_init()`). No message-delivery policy is encoded here.
+
+### HAZ-010, HAZ-012, HAZ-014 — init-phase and teardown mitigations (no SC annotation required)
+
+The following hazards are mitigated exclusively in init-phase initialisation or object teardown code, not in runtime SC functions. No `// Safety-critical (SC): HAZ-NNN` annotation is required on the mitigating code; the classification note below explains why each is NSC.
+
+| HAZ ID | Mitigating code | Why NSC |
+|--------|-----------------|---------|
+| HAZ-010 | `DeliveryEngine::init()` — derives entropy seed for `MessageIdGen` via `arc4random_buf` / `getrandom` XOR `local_id` (DEF-015-2) | Init-phase only; runs once before any message is sent or received. The seed is consumed during `MessageIdGen::init()`; all subsequent PRNG calls (which are SC) use the already-seeded state. |
+| HAZ-012 | `TlsTcpBackend::~TlsTcpBackend()` and `DtlsUdpBackend::~DtlsUdpBackend()` — call `mbedtls_platform_zeroize()` before `mbedtls_pk_free()` (DEF-016-2/3) | Teardown/destructor; executes after the transport is closed and no further message traffic can occur. Key zeroing is a residual-data concern, not a runtime message-delivery concern. |
+| HAZ-014 | `OrderingBuffer::seq_next_guarded()` private helper — wraps UINT32_MAX+1 to 1, preventing the UNORDERED sentinel collision (DEF-016-5) | `seq_next_guarded()` is called only from `sweep_expired_holds()` and `advance_next_expected()`, both of which are classified NSC (sequence advancement is a lifecycle bookkeeping function; the SC delivery decision is in `ingest()` and `try_release_next()`). |
 
 ---
 

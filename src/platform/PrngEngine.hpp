@@ -119,7 +119,7 @@ public:
         return result;
     }
 
-    // Safety-critical (SC): HAZ-002, HAZ-007 — verified to M5
+    // Safety-critical (SC): HAZ-002, HAZ-007, HAZ-013 — verified to M5
     /**
      * @brief Generate a pseudorandom integer in [lo, hi].
      *
