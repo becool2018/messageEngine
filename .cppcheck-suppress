@@ -179,6 +179,13 @@ uninitMemberVarPrivate:src/core/RequestReplyEngine.hpp
 # the mbedTLS-conditional code path and incorrectly classifies it as unused.
 # Deviation: false positive; verified by grep.
 unusedPrivateFunction:src/platform/TlsTcpBackend.cpp
+# Justification: setup_session_tickets() and maybe_setup_session_tickets() are declared
+# in TlsTcpBackend.hpp and called only when MBEDTLS_SSL_SESSION_TICKETS is defined.
+# Cppcheck analyses the header independently and cannot see the preprocessor-guarded
+# call sites in TlsTcpBackend.cpp. The inline cppcheck-suppress comments in the .hpp
+# are not honoured in all cppcheck versions for warnings reported at declaration sites.
+# Deviation: false positive from conditional-compilation call-site visibility.
+unusedPrivateFunction:src/platform/TlsTcpBackend.hpp
 
 # Justification: poll_event(), pending_event_count(), and drain_events() are public API
 # methods called from tests/test_DeliveryEngine.cpp, which is outside the src/ directory
