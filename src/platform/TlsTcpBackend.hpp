@@ -195,6 +195,8 @@ private:
 
     /// Configure session tickets if session_resumption_enabled; no-op otherwise.
     /// Fix 2: extracted from setup_tls_config() to reduce its CC (REQ-6.3.4).
+    /// Called only when MBEDTLS_SSL_SESSION_TICKETS is defined.
+    // cppcheck-suppress unusedPrivateFunction
     Result maybe_setup_session_tickets(const TlsConfig& tls_cfg);
 
     /// Handle an inbound HELLO frame (Fix 4) or reject data from unregistered
