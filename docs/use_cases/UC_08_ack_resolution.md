@@ -9,8 +9,8 @@
 ## 1. Use Case Overview
 
 - **Trigger:** `DeliveryEngine::receive()` dequeues an envelope with `message_type == MessageType::ACK` and calls `m_ack_tracker.on_ack(src, message_id)` (via `process_ack()`). File: `src/core/AckTracker.cpp`.
-- **Goal:** Locate the `PENDING` slot in `AckTracker` matching the received `message_id`, transition its state to `ACKED`, and immediately free the slot back to `FREE` (so it can be reused).
-- **Success outcome:** The matching slot is found; state transitions `PENDING → ACKED → FREE`. `on_ack()` returns `Result::OK`. `receive()` also returns `Result::OK` (ACK is a control message; it is passed through to the caller, not suppressed).
+- **Goal:** Locate the `PENDING` slot in `AckTracker` matching the received `message_id` and transition its state to `ACKED`. The `ACKED → FREE` transition is deferred to the next `sweep_expired()` call, which frees all `ACKED` slots in a single pass.
+- **Success outcome:** The matching slot is found; state transitions `PENDING → ACKED`. `on_ack()` returns `Result::OK`. `receive()` also returns `Result::OK` (ACK is a control message; it is passed through to the caller, not suppressed).
 - **Error outcomes:**
   - `Result::ERR_INVALID` from `on_ack()` — no `PENDING` slot matches `(src, message_id)`. Logged at `INFO`; `receive()` still returns `OK` (unexpected ACK is non-fatal).
 
@@ -38,8 +38,9 @@ Not called directly by the User.
    b. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]`:
       - For each entry: if `entry.state == PENDING && entry.env.source_id == src && entry.env.message_id == msg_id`:
         - `entry.state = ACKED`.
-        - `entry.state = FREE` (immediately freed; ACKED is transitional).
-        - Returns `Result::OK`.
+        - `++m_stats.acks_received`.
+        - `NEVER_COMPILED_OUT_ASSERT(m_slots[i].state == EntryState::ACKED)`.
+        - Returns `Result::OK`.  (The slot remains `ACKED`; `ACKED → FREE` happens in the next `sweep_expired()` call via `sweep_one_slot()`.)
    c. If no match: returns `Result::ERR_INVALID`.
 6. If `on_ack()` returns `ERR_INVALID`: `Logger::log(INFO, ...)` ("ACK has no matching ack_tracker slot").
 7. **`m_retry_mgr.on_ack(raw.destination_id, raw.message_id)`** is also called (`RetryManager.cpp`) to cancel any pending retry for the same `(src, message_id)`:
@@ -76,7 +77,7 @@ DeliveryEngine::receive()                            [DeliveryEngine.cpp]
 | Condition | True branch | False branch |
 |-----------|-------------|--------------|
 | `message_type == ACK` | Call `on_ack()` | Pass through as other control message |
-| Matching PENDING slot found | `PENDING -> ACKED -> FREE`; return OK | Return ERR_INVALID |
+| Matching PENDING slot found | `PENDING -> ACKED`; return OK (FREE deferred to `sweep_expired()`) | Return ERR_INVALID |
 | `on_ack()` returns ERR_INVALID | Log INFO; continue | Continue normally |
 | Matching active retry entry found | `active = false` (cancelled) | No action |
 
@@ -116,7 +117,7 @@ DeliveryEngine::receive()                            [DeliveryEngine.cpp]
 
 | Object | Member | Before | After |
 |--------|--------|--------|-------|
-| `AckTracker` | `m_entries[slot].state` | `PENDING` | `FREE` |
+| `AckTracker` | `m_entries[slot].state` | `PENDING` | `ACKED` (transitions to `FREE` on next `sweep_expired()`) |
 | `AckTracker` | `m_entries[slot].message_id` | assigned ID | unchanged (logically stale) |
 | `RetryManager` | `m_entries[slot].active` | `true` (if retry exists) | `false` |
 
@@ -131,7 +132,7 @@ DeliveryEngine::receive()
   -> [message_type == ACK]                    <- true
   -> process_ack(m_ack_tracker, m_retry_manager, env)
        -> AckTracker::on_ack(env.destination_id, env.message_id)
-            [scan; find PENDING slot; PENDING -> ACKED -> FREE]
+            [scan; find PENDING slot; PENDING -> ACKED (slot freed to FREE on next sweep_expired())]
             <- Result::OK
        -> RetryManager::on_ack(env.destination_id, env.message_id)
             [scan; find active retry; set active=false]
@@ -154,7 +155,7 @@ DeliveryEngine::receive()
 ## 14. Known Risks / Observations
 
 - **ACK delivered to caller:** The caller receives the ACK envelope via `receive()` return value. The caller must check `message_type == ACK` and handle it appropriately (e.g., not treat it as a DATA envelope).
-- **ACKED state is transitional:** The code transitions `PENDING -> ACKED` and then immediately `ACKED -> FREE` in the same function call. The ACKED state has no observable duration; it exists only as a coding step.
+- **ACKED state persists until sweep:** `on_ack()` transitions the slot `PENDING → ACKED`. The `ACKED → FREE` transition is deferred to `sweep_expired()`, which calls `sweep_one_slot()` on every entry. A slot can remain in the `ACKED` state for a brief period if `sweep_expired()` is not called between the `on_ack()` return and the next `track()` attempt; the `track()` call only looks for `FREE` slots and will skip an `ACKED` slot, which means capacity is temporarily reduced.
 - **Duplicate ACK:** If two ACKs arrive for the same `message_id`, the first frees the slot; the second finds no PENDING slot and logs `ERR_INVALID` (non-fatal, expected behavior).
 
 ---

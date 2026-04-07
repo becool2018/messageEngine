@@ -10,7 +10,7 @@
 
 - **Trigger:** `TcpBackend::send_to_all_clients(buf, len)` is called by `TcpBackend::send_message()` after serialization and impairment processing. File: `src/platform/TcpBackend.cpp`.
 - **Goal:** Send a length-prefixed framed message to every currently-connected TCP client, handling partial writes.
-- **Success outcome:** All bytes of the frame are written to all client sockets. Returns void; no direct error return from `send_to_all_clients()`.
+- **Success outcome:** All bytes of the frame are written to all client sockets. Returns `bool` — `true` if all sends succeeded, `false` if at least one client send failed.
 - **Error outcomes:** Socket write failure for a client is logged and the client is removed from the table. Other clients still receive the message.
 
 **Invoking UC:** UC_01, UC_02, UC_03, UC_10 (any send path) invoke this function.
@@ -21,7 +21,7 @@
 
 ```cpp
 // src/platform/TcpBackend.cpp (private)
-void TcpBackend::send_to_all_clients(const uint8_t* buf, uint32_t len);
+bool TcpBackend::send_to_all_clients(const uint8_t* buf, uint32_t len);
 ```
 
 Not called directly by the User.

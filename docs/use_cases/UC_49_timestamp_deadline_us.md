@@ -8,7 +8,7 @@
 
 ## 1. Use Case Overview
 
-- **Trigger:** A component calls `timestamp_deadline_us(duration_ms)` to compute an absolute deadline `timeout_ms` milliseconds from now. File: `src/core/Timestamp.hpp` or `src/core/Timestamp.cpp`.
+- **Trigger:** A component calls `timestamp_deadline_us(now_us, duration_ms)` to compute an absolute deadline `duration_ms` milliseconds from the provided `now_us` base time. File: `src/core/Timestamp.hpp`.
 - **Goal:** Return an absolute deadline in monotonic microseconds suitable for comparison with future `timestamp_now_us()` values. Used to set `expiry_time_us` on outbound envelopes and to compute polling deadlines in `receive()`.
 - **Success outcome:** Returns `timestamp_now_us() + (uint64_t)duration_ms * 1000ULL`.
 - **Error outcomes:** None — pure arithmetic after reading the clock. Inherits the clock-failure behaviour of `timestamp_now_us()`.
@@ -18,32 +18,31 @@
 ## 2. Entry Points
 
 ```cpp
-// src/core/Timestamp.hpp
-uint64_t timestamp_deadline_us(uint32_t duration_ms);
+// src/core/Timestamp.hpp (inline)
+uint64_t timestamp_deadline_us(uint64_t now_us, uint32_t duration_ms);
 ```
 
 ---
 
 ## 3. End-to-End Control Flow
 
-1. **`timestamp_deadline_us(duration_ms)`** — entry.
-2. `uint64_t now = timestamp_now_us()`.
-3. Return `now + (uint64_t)duration_ms * 1000ULL`.
+1. **`timestamp_deadline_us(now_us, duration_ms)`** — entry. `now_us` is the current monotonic time supplied by the caller.
+2. Return `now_us + (uint64_t)duration_ms * 1000ULL`. No internal clock read; the caller is responsible for providing a fresh `now_us` from `timestamp_now_us()`.
 
 ---
 
 ## 4. Call Tree
 
 ```
-timestamp_deadline_us(duration_ms)                 [Timestamp.hpp]
- └── timestamp_now_us()                            [Timestamp.hpp — reads CLOCK_MONOTONIC]
+timestamp_deadline_us(now_us, duration_ms)          [Timestamp.hpp inline]
+ └── (pure arithmetic: now_us + duration_ms * 1000ULL)
 ```
 
 ---
 
 ## 5. Key Components Involved
 
-- **`timestamp_now_us()`** — provides the monotonic base time (see UC_48).
+- **`now_us` parameter** — caller-supplied monotonic base time (from `timestamp_now_us()`); no internal clock read.
 - **Duration conversion** — `duration_ms * 1000` converts milliseconds to microseconds; result is the absolute deadline.
 
 ---
@@ -60,7 +59,7 @@ No branching. Pure arithmetic.
 
 ## 7. Concurrency / Threading Behavior
 
-- Thread-safe (delegates to `timestamp_now_us()` which is thread-safe).
+- Thread-safe (pure arithmetic on immutable inputs; no shared state).
 - No `std::atomic` operations.
 
 ---
@@ -81,7 +80,7 @@ No branching. Pure arithmetic.
 
 ## 10. External Interactions
 
-- `::clock_gettime(CLOCK_MONOTONIC)` — called indirectly via `timestamp_now_us()`.
+- None — pure arithmetic; no OS calls. The caller is responsible for reading the clock via `timestamp_now_us()`.
 
 ---
 
@@ -95,11 +94,8 @@ None. Pure time computation; no state is modified.
 
 ```
 [DeliveryEngine::send(env) — setting expiry]
-  -> timestamp_deadline_us(cfg.expiry_ms)
-       -> timestamp_now_us()
-            -> ::clock_gettime(CLOCK_MONOTONIC, &ts)
-            <- now_us
-       <- now_us + duration_ms * 1000
+  -> timestamp_deadline_us(now_us, cfg.expiry_ms)
+       <- now_us + cfg.expiry_ms * 1000ULL
   [env.expiry_time_us = deadline]
 ```
 
@@ -122,5 +118,5 @@ None. Pure time computation; no state is modified.
 
 ## 15. Unknowns / Assumptions
 
-- `[ASSUMPTION]` `timestamp_deadline_us()` is a two-line inline wrapper around `timestamp_now_us()` plus the multiplication; no caching of the "now" value.
+- `[CONFIRMED]` `timestamp_deadline_us(now_us, duration_ms)` is a one-line inline: `return now_us + (uint64_t)duration_ms * 1000ULL`. The caller supplies `now_us` to avoid a redundant clock read and to keep the computation deterministic in tests.
 - `[ASSUMPTION]` The conversion uses `(uint64_t)duration_ms * 1000ULL` to prevent 32-bit overflow before widening.

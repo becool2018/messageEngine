@@ -115,16 +115,16 @@ ImpairmentEngine::process_outbound()         [ImpairmentEngine.cpp]
 ## 12. Sequence Diagram
 
 ```
-ImpairmentEngine::process_outbound(env, now_us, ...)
+ImpairmentEngine::process_outbound(env, now_us)
   -> check_loss()                                  <- false
   [lo_ms = (variance<=mean) ? mean-variance : 0]
   [hi_ms = mean + variance]
   -> PrngEngine::next_range(lo_ms, hi_ms)          [draw d in [lo_ms, hi_ms]]
   [jitter_us = d * 1000ULL]
-  [deliver_time = now_us + lat_us + jitter_us]
-  -> queue_to_delay_buf(env, deliver_time)
-  -> collect_deliverable(now_us, ...)              [*out_count = 0; not due yet]
+  [release_us = compute_release_us(now_us, lat_us, jitter_us)]
+  -> queue_to_delay_buf(env, release_us)
   <- Result::OK
+[Backend calls collect_deliverable(now_us, out_buf, cap) → returns 0; not due yet]
 ```
 
 ---

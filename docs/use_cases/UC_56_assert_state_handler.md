@@ -31,11 +31,13 @@ namespace assert_state {
 }
 
 // src/core/IResetHandler.hpp
-class IResetHandler { virtual void on_fatal_assert() = 0; };
+class IResetHandler {
+    virtual void on_fatal_assert(const char* cond, const char* file, int line) = 0;
+};
 
 // src/core/AbortResetHandler.hpp
 class AbortResetHandler : public IResetHandler {
-    void on_fatal_assert() override;           // calls ::abort()
+    void on_fatal_assert(const char* cond, const char* file, int line) override;  // calls ::abort()
     static AbortResetHandler& instance();
 };
 ```
@@ -50,7 +52,7 @@ class AbortResetHandler : public IResetHandler {
 3. In production build:
    a. `g_fatal_fired = true` (or `assert_state::set_fatal_fired()`).
    b. `IResetHandler* h = assert_state::get_reset_handler()`.
-   c. If `h != nullptr`: `h->on_fatal_assert()` — virtual dispatch to registered handler.
+   c. If `h != nullptr`: `h->on_fatal_assert(#cond, __FILE__, __LINE__)` — virtual dispatch to registered handler, passing condition text, file name, and line number.
    d. If `h == nullptr` or `on_fatal_assert()` returns: `::abort()` as fallback.
 
 **`assert_state::set_reset_handler(handler)`:**
@@ -71,8 +73,8 @@ NEVER_COMPILED_OUT_ASSERT(cond)                    [Assert.hpp macro]
  └── [production path]
       ├── assert_state::set_fatal_fired()
       ├── assert_state::get_reset_handler()
-      └── IResetHandler::on_fatal_assert()         [virtual dispatch]
-           └── AbortResetHandler::on_fatal_assert() -> ::abort()
+      └── IResetHandler::on_fatal_assert(cond, file, line)  [virtual dispatch]
+           └── AbortResetHandler::on_fatal_assert(cond, file, line) -> ::abort()
 ```
 
 ---

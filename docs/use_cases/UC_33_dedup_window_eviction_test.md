@@ -19,22 +19,22 @@
 
 ```cpp
 // src/core/DuplicateFilter.cpp (called from check_and_record())
-void DuplicateFilter::record(NodeId source_id, uint64_t message_id);
+void DuplicateFilter::record(NodeId source_id, uint64_t message_id, uint64_t now_us);
 ```
 
-Called from `check_and_record()` when `is_duplicate()` returns false.
+Called from `check_and_record()` when `is_duplicate()` returns false. `now_us` is used to timestamp the new entry for age-based eviction (SECfix-3).
 
 ---
 
 ## 3. End-to-End Control Flow
 
-1. `check_and_record(source_id, message_id)` is called.
+1. `check_and_record(source_id, message_id, now_us)` is called.
 2. `is_duplicate()` scans `m_buf[0..m_count-1]` — returns false (new unique message).
-3. **`record(source_id, message_id)`** is called:
-   a. `m_buf[m_write_idx] = {source_id, message_id}`.
-   b. `m_write_idx = (m_write_idx + 1) % DEDUP_WINDOW_SIZE` — advance circular write pointer.
+3. **`record(source_id, message_id, now_us)`** is called:
+   a. **Eviction slot selection (SECfix-3):** When `m_count >= DEDUP_WINDOW_SIZE`, call `find_evict_idx()` — this scans all 128 entries and returns the index of the entry with the smallest `recorded_us` timestamp (oldest-by-time). This prevents an attacker from predicting the eviction slot by flooding exactly 128 unique pairs to rotate a predictable circular pointer.
+   b. `m_buf[write_idx] = {source_id, message_id, recorded_us: now_us}`.
    c. `if (m_count < DEDUP_WINDOW_SIZE) { m_count++; }` — cap at window size.
-4. After this call, the entry at the old `m_write_idx` (now overwritten) is no longer in the window. A future call to `is_duplicate()` for that evicted `(source_id, message_id)` will return `false`.
+4. After this call, the oldest entry (now overwritten) is no longer in the window. A future call to `is_duplicate()` for that evicted `(source_id, message_id)` will return `false`.
 5. Returns (void).
 
 ---
@@ -42,19 +42,20 @@ Called from `check_and_record()` when `is_duplicate()` returns false.
 ## 4. Call Tree
 
 ```
-DuplicateFilter::check_and_record()            [DuplicateFilter.cpp]
+DuplicateFilter::check_and_record(src, id, now_us)  [DuplicateFilter.cpp]
  ├── DuplicateFilter::is_duplicate()           [linear scan; returns false]
- └── DuplicateFilter::record()                 [DuplicateFilter.cpp]
-      [m_buf[m_write_idx] = {source_id, message_id}]
-      [m_write_idx = (m_write_idx + 1) % 128]
-      [m_count stays 128]
+ └── DuplicateFilter::record(src, id, now_us)  [DuplicateFilter.cpp]
+      ├── find_evict_idx()                     [scan for oldest recorded_us; SECfix-3]
+      └── [m_buf[write_idx] = {src, id, recorded_us=now_us}]
+          [m_count stays 128]
 ```
 
 ---
 
 ## 5. Key Components Involved
 
-- **`DuplicateFilter::record()`** — Circular write into `m_buf`. When `m_count == DEDUP_WINDOW_SIZE`, `m_count` is not incremented; the modulo write wraps around and overwrites the oldest slot.
+- **`DuplicateFilter::record()`** — When `m_count >= DEDUP_WINDOW_SIZE`, calls `find_evict_idx()` to find the oldest entry by `recorded_us` timestamp (SECfix-3: prevents predictable-pointer attacks). Overwrites that slot; `m_count` stays at 128.
+- **`DuplicateFilter::find_evict_idx()`** — Scans all 128 entries; returns the index with the smallest `recorded_us` value. O(N=128); called only when the window is full.
 - **`DuplicateFilter::is_duplicate()`** — Linear scan O(N=128). The evicted entry is no longer in the buffer; future duplicates of it will be delivered.
 
 ---
@@ -63,8 +64,8 @@ DuplicateFilter::check_and_record()            [DuplicateFilter.cpp]
 
 | Condition | True branch | False branch |
 |-----------|-------------|--------------|
+| `m_count >= DEDUP_WINDOW_SIZE` | Call `find_evict_idx()` for oldest slot | Use next free slot |
 | `m_count < DEDUP_WINDOW_SIZE` | Increment `m_count` | Keep `m_count` at 128 (full) |
-| `m_write_idx + 1 == DEDUP_WINDOW_SIZE` | Wrap to 0 (modulo) | Increment normally |
 
 ---
 
@@ -97,8 +98,7 @@ DuplicateFilter::check_and_record()            [DuplicateFilter.cpp]
 
 | Object | Member | Before | After |
 |--------|--------|--------|-------|
-| `DuplicateFilter` | `m_buf[m_write_idx]` | oldest entry | new `(source_id, message_id)` |
-| `DuplicateFilter` | `m_write_idx` | W | `(W+1) % 128` |
+| `DuplicateFilter` | `m_buf[find_evict_idx()]` | oldest-by-time entry | new `(source_id, message_id, recorded_us=now_us)` |
 | `DuplicateFilter` | `m_count` | 128 | 128 (unchanged) |
 
 ---
@@ -106,12 +106,12 @@ DuplicateFilter::check_and_record()            [DuplicateFilter.cpp]
 ## 12. Sequence Diagram
 
 ```
-[m_count == 128; m_write_idx = W]
-DuplicateFilter::check_and_record(new_src, new_id)
+[m_count == 128; now_us = T]
+DuplicateFilter::check_and_record(new_src, new_id, T)
   -> is_duplicate(new_src, new_id)  <- false
-  -> record(new_src, new_id)
-       [m_buf[W] = {new_src, new_id}]       [oldest entry EVICTED]
-       [m_write_idx = (W+1) % 128]
+  -> record(new_src, new_id, T)
+       -> find_evict_idx()           [scans 128 entries; returns idx of smallest recorded_us]
+       [m_buf[evict_idx] = {new_src, new_id, recorded_us=T}]   [oldest-by-time entry EVICTED]
        [m_count stays 128]
 
 [Later: is_duplicate(old_src, old_id) for the evicted entry -> false (no longer in window)]

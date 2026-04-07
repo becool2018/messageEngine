@@ -53,7 +53,7 @@ Called internally by all backends on every received frame.
    - Bytes 36–39: `envelope.payload_length = read_u32(buf, 36)`.
    - Bytes 40–43: `magic_word = read_u32(buf, 40)` — if `magic_word != (PROTO_MAGIC << 16)` → return `ERR_INVALID`.
 5. **Validate:** `envelope.payload_length > MSG_MAX_PAYLOAD_BYTES` → return `ERR_INVALID`.
-6. **Validate:** `wire_len != WIRE_HEADER_SIZE + envelope.payload_length` → return `ERR_INVALID`.
+6. **Validate:** `wire_len < WIRE_HEADER_SIZE + envelope.payload_length` → return `ERR_INVALID`. (Frames with trailing data beyond the declared payload are accepted; only undersize frames are rejected.)
 7. **`memcpy(envelope.payload, buf + WIRE_HEADER_SIZE, envelope.payload_length)`**.
 8. `NEVER_COMPILED_OUT_ASSERT(envelope.payload_length <= MSG_MAX_PAYLOAD_BYTES)`.
 9. Returns `Result::OK`.
@@ -87,7 +87,7 @@ Serializer::deserialize(buf, wire_len, envelope)   [Serializer.cpp]
 | `proto_ver != PROTO_VERSION` | Return ERR_INVALID | Continue reading header |
 | `magic_word != (PROTO_MAGIC << 16)` | Return ERR_INVALID | Continue |
 | `payload_length > MSG_MAX_PAYLOAD_BYTES` | Return ERR_INVALID | Continue |
-| `wire_len < WIRE_HEADER_SIZE + payload_length` | Return ERR_INVALID | memcpy payload |
+| `wire_len < WIRE_HEADER_SIZE + payload_length` | Return ERR_INVALID (checked via `payload_length_valid()` helper) | memcpy payload |
 
 ---
 

@@ -24,7 +24,7 @@
 
 ```cpp
 // src/platform/TcpBackend.cpp (private)
-Result TcpBackend::recv_from_client(uint32_t idx, uint32_t timeout_ms);
+Result TcpBackend::recv_from_client(int client_fd, uint32_t timeout_ms);
 ```
 
 Called internally by the system; never called directly by User code.
@@ -33,10 +33,10 @@ Called internally by the system; never called directly by User code.
 
 ## 3. End-to-End Control Flow
 
-1. `poll_clients_once()` calls `recv_from_client(idx, 100)` for each client where `::poll()` signaled `POLLIN`.
-2. `NEVER_COMPILED_OUT_ASSERT(idx < m_client_count)` — bounds check.
-3. `NEVER_COMPILED_OUT_ASSERT(m_client_fds[idx] >= 0)` — fd validity check.
-4. **`m_sock_ops->recv_frame(m_client_fds[idx], m_wire_buf, SOCKET_RECV_BUF_BYTES, timeout_ms, &wire_len)`** is called. This dispatches to `tcp_recv_frame()` (`SocketUtils.cpp`):
+1. `poll_clients_once()` calls `recv_from_client(m_client_fds[i], timeout_ms)` for each client where `::poll()` signaled `POLLIN`.
+2. `NEVER_COMPILED_OUT_ASSERT(client_fd >= 0)` — fd validity check.
+3. `NEVER_COMPILED_OUT_ASSERT(m_open)` — transport must be initialised.
+4. **`m_sock_ops->recv_frame(client_fd, m_wire_buf, SOCKET_RECV_BUF_BYTES, timeout_ms, &wire_len)`** is called. This dispatches to `tcp_recv_frame()` (`SocketUtils.cpp`):
    a. Read 4-byte big-endian length prefix via `socket_recv_exact(fd, hdr_buf, 4, timeout_ms)` → `::recv()` retry loop.
    b. Decode `payload_len = ntohl(...)`.
    c. Validate `payload_len + 4 <= buf_cap`.
@@ -62,7 +62,7 @@ Called internally by the system; never called directly by User code.
 ## 4. Call Tree
 
 ```
-TcpBackend::recv_from_client(idx, timeout_ms)   [TcpBackend.cpp]
+TcpBackend::recv_from_client(client_fd, timeout_ms)   [TcpBackend.cpp]
  ├── ISocketOps::recv_frame()                   [SocketOpsImpl/ISocketOps.hpp]
  │    └── tcp_recv_frame()                      [SocketUtils.cpp]
  │         └── socket_recv_exact() -> ::recv()  [POSIX]
@@ -145,7 +145,7 @@ TcpBackend::recv_from_client(idx, timeout_ms)   [TcpBackend.cpp]
 
 ```
 TcpBackend::poll_clients_once()
-  -> TcpBackend::recv_from_client(idx, 100)
+  -> TcpBackend::recv_from_client(client_fd, timeout_ms)
        -> ISocketOps::recv_frame()
             -> tcp_recv_frame()
                  -> socket_recv_exact() -> ::recv()  [4-byte length header]
