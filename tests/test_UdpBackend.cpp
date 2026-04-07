@@ -185,10 +185,9 @@ static void test_udp_loopback_send_receive()
     assert(side_a.init(cfg_a) == Result::OK);
     assert(side_b.init(cfg_b) == Result::OK);
 
-    // REQ-6.1.8 / REQ-6.2.4: HELLO required before DATA; side_a registers with side_b.
-    MessageEnvelope hello_env;
-    make_hello_envelope(hello_env, 1U);  // source_id matches DATA frames
-    assert(side_a.send_message(hello_env) == Result::OK);
+    // REQ-6.1.8 / REQ-6.1.10 / REQ-6.2.4: register_local_id() sends HELLO on wire
+    // so side_b can accept DATA frames from source_id=1.
+    assert(side_a.register_local_id(1U) == Result::OK);
 
     // Side A sends; datagram enters OS kernel buffer immediately (non-blocking)
     MessageEnvelope send_env;
@@ -230,11 +229,8 @@ static void test_udp_multiple_messages()
     assert(side_a.init(cfg_a) == Result::OK);
     assert(side_b.init(cfg_b) == Result::OK);
 
-    // REQ-6.1.8 / REQ-6.2.4: HELLO required before DATA
-    MessageEnvelope hello;
-    make_hello_envelope(hello, 1U);
-    Result rh = side_a.send_message(hello);
-    assert(rh == Result::OK);
+    // REQ-6.1.8 / REQ-6.1.10 / REQ-6.2.4: register_local_id() sends HELLO to peer.
+    assert(side_a.register_local_id(1U) == Result::OK);
 
     // Send N messages from A to B
     // Power of 10 Rule 2: fixed loop bound (N = 4)
@@ -835,13 +831,10 @@ static void test_udp_inbound_partition_drops_received()
     assert(r == Result::OK);
     assert(side_b.is_open() == true);
 
-    // REQ-6.1.8 / REQ-6.2.4: HELLO required before DATA; side_a (source_id=2) registers.
-    {
-        MessageEnvelope hello;
-        make_hello_envelope(hello, 2U);  // matches warmup and test datagram source_id
-        r = side_a.send_message(hello);
-        assert(r == Result::OK);
-    }
+    // REQ-6.1.8 / REQ-6.1.10 / REQ-6.2.4: register_local_id() sends HELLO to peer.
+    // source_id=2 matches warmup and test datagram source_id.
+    r = side_a.register_local_id(2U);
+    assert(r == Result::OK);
 
     // Step 1: send a warm-up datagram; side_b receives it (partition not yet
     // active — first call to is_partition_active() just initialises the timer).
@@ -900,10 +893,9 @@ static void test_udp_hello_registration()
     assert(side_a.init(cfg_a) == Result::OK);
     assert(side_b.init(cfg_b) == Result::OK);
 
-    // Step 1: HELLO is consumed — receive_message must NOT return it to the caller.
-    MessageEnvelope hello;
-    make_hello_envelope(hello, 1U);
-    assert(side_a.send_message(hello) == Result::OK);
+    // Step 1: register_local_id() sends HELLO on wire; side_b consumes it internally.
+    // receive_message must NOT return the HELLO to the caller (REQ-6.1.10).
+    assert(side_a.register_local_id(1U) == Result::OK);
 
     MessageEnvelope recv_hello;
     Result r = side_b.receive_message(recv_hello, 500U);
@@ -983,10 +975,8 @@ static void test_udp_source_id_rotation_rejected()
     assert(side_a.init(cfg_a) == Result::OK);
     assert(side_b.init(cfg_b) == Result::OK);
 
-    // Register HELLO with source_id=1; consume it.
-    MessageEnvelope hello;
-    make_hello_envelope(hello, 1U);
-    assert(side_a.send_message(hello) == Result::OK);
+    // Register with source_id=1 via register_local_id(); side_b consumes HELLO.
+    assert(side_a.register_local_id(1U) == Result::OK);
 
     MessageEnvelope recv_hello;
     Result r = side_b.receive_message(recv_hello, 500U);
@@ -1032,10 +1022,8 @@ static void test_udp_duplicate_hello_dropped()
     assert(side_a.init(cfg_a) == Result::OK);
     assert(side_b.init(cfg_b) == Result::OK);
 
-    // First HELLO: registers source_id=1.
-    MessageEnvelope hello1;
-    make_hello_envelope(hello1, 1U);
-    assert(side_a.send_message(hello1) == Result::OK);
+    // First HELLO: register_local_id() sends HELLO; registers source_id=1 at side_b.
+    assert(side_a.register_local_id(1U) == Result::OK);
 
     // Second HELLO: duplicate; dropped with WARNING_HI.
     MessageEnvelope hello2;
