@@ -47,7 +47,7 @@ A C++ networking library for building and testing systems that must survive unre
 10. [Use Cases](#use-cases)
 11. [Safety & Assurance Documents](#safety--assurance-documents)
 12. [Coding Standards](#coding-standards)
-13. [Standards Sources](#standards-sources)
+13. [Standards Sources and Conflicts](#standards-sources-and-conflicts)
 14. [Project Standards Files](#project-standards-files)
 14. [Claude Skills](#claude-skills)
 15. [Release History](#release-history)
@@ -968,9 +968,9 @@ Items 6 and 7 are also required for Class A reclassification; Item 9 is required
 
 ---
 
-## Standards Sources
+## Standards Sources and Conflicts
 
-[`docs/STANDARDS_SOURCES.md`](docs/STANDARDS_SOURCES.md) lists every external standard, guideline, and rule set referenced in the project's coding standards files — where each one comes from, whether it is free or proprietary, and a plain-English summary of what it is and what obligations it imposes on this codebase.
+[`docs/STANDARDS_SOURCES_AND_CONFLICTS.md`](docs/STANDARDS_SOURCES_AND_CONFLICTS.md) lists every external standard, guideline, and rule set referenced in the project's coding standards files — where each one comes from, whether it is free or proprietary, and a plain-English summary of what it is and what obligations it imposes on this codebase. It also documents all known contradictions and tensions between the combined standard set, with resolution status for each.
 
 ---
 
