@@ -35,7 +35,8 @@ The library targets **NASA-STD-8719.13C** and **NASA-STD-8739.8A** software assu
 10. [Use Cases](#use-cases)
 11. [Safety & Assurance Documents](#safety--assurance-documents)
 12. [Coding Standards](#coding-standards)
-13. [Project Standards Files](#project-standards-files)
+13. [Standards Sources](#standards-sources)
+14. [Project Standards Files](#project-standards-files)
 14. [Claude Skills](#claude-skills)
 15. [Code Statistics](#code-statistics)
 
@@ -941,6 +942,12 @@ The project voluntarily meets Class B verification rigor (M1 + M2 + M4 + M5 for 
 | 9 | **Independent V&V** | A second qualified engineer (not the author) must complete a structured inspection of all SC functions per [`docs/INSPECTION_CHECKLIST.md`](docs/INSPECTION_CHECKLIST.md) and record findings in [`docs/DEFECT_LOG.md`](docs/DEFECT_LOG.md) (INSP-002 onward) | Second qualified reviewer |
 
 Items 6 and 7 are also required for Class A reclassification; Item 9 is required at both Class B and Class A (NPR 7150.2D §3.11). Item 8 closes the Tier 3 static analysis gap (see [`docs/STATIC_ANALYSIS_TOOLCHAIN.md`](docs/STATIC_ANALYSIS_TOOLCHAIN.md)).
+
+---
+
+## Standards Sources
+
+[`docs/STANDARDS_SOURCES.md`](docs/STANDARDS_SOURCES.md) lists every external standard, guideline, and rule set referenced in the project's coding standards files — where each one comes from, whether it is free or proprietary, and a plain-English summary of what it is and what obligations it imposes on this codebase.
 
 ---
 
