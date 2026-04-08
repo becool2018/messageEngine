@@ -924,22 +924,22 @@ All production code (`src/`) is written to the following standards. Where a rule
 
 **Software classification:** NASA-STD-8719.13C / NASA-STD-8739.8A **Class C** (infrastructure / networking library). **Verification discipline voluntarily targets Class B**: all safety-critical functions require branch coverage (M4), mandatory peer inspection (M1), and static analysis (M2); MC/DC coverage (M5) is the goal for the five highest-hazard functions. See `docs/HAZARD_ANALYSIS.md` and `docs/MCDC_ANALYSIS.md`.
 
-| Standard | How this project targets it |
+| Standard / Property | How this project targets it |
 |---|---|
 | **JPL Power of 10** | No goto, no recursion; fixed loop bounds; no dynamic allocation after init; cyclomatic complexity ≤ 10 per function (enforced by `make lint`); ≥ 2 assertions per function; minimal variable scope; all return values checked; minimal preprocessor use; ≤ 1 pointer indirection; zero compiler warnings |
 | **MISRA C++:2023** | Required rules enforced; advisory rules followed; all deviations documented in-code and in `.claude/CLAUDE.md` |
-| **F-Prime subset** | ISO C++17; `-fno-exceptions`; `-fno-rtti`; no templates; no explicit function pointers (vtable-backed virtual dispatch is a documented exception); no STL, with the following justified exceptions (see `.claude/CLAUDE.md` §3): |
+| **F-Prime subset** | ISO C++17; `-fno-exceptions`; `-fno-rtti`; no templates; no explicit function pointers (vtable-backed virtual dispatch is a documented exception); no STL except `std::atomic` (see below) |
+| **Error handling** | All errors returned via `Result` enum (`OK`, `ERR_TIMEOUT`, `ERR_FULL`, `ERR_IO`, …); no exceptions |
+| **Assertions** | `NEVER_COMPILED_OUT_ASSERT(cond)` — always compiled in; in debug/test builds calls `abort()`; in production logs FATAL and triggers a controlled reset |
+| **Layering** | App → Core → Platform → OS; no upward dependencies; no cyclic dependencies |
 
-**STL exceptions:**
+**`std::atomic` exceptions to the no-STL rule** (see `.claude/CLAUDE.md §3`):
 
 | File | Exception | Justification |
 |---|---|---|
 | `src/core/RingBuffer.hpp` | `std::atomic<uint32_t>` | Lock-free head/tail indices; no dynamic allocation; maps directly to a hardware primitive |
 | `src/core/AssertState.hpp/cpp` | `std::atomic<bool>` | `g_fatal_fired` flag must be visible across threads without a mutex |
 | `src/core/Assert.hpp` | `std::memory_order_*` | Required by `std::atomic` store in the assert macro |
-| **Error handling** | All errors returned via `Result` enum (`OK`, `ERR_TIMEOUT`, `ERR_FULL`, `ERR_IO`, …); no exceptions |
-| **Assertions** | `NEVER_COMPILED_OUT_ASSERT(cond)` — always compiled in; in debug/test builds calls `abort()`; in production logs FATAL and triggers a controlled reset |
-| **Layering** | App → Core → Platform → OS; no upward dependencies; no cyclic dependencies |
 
 ### Work Required to Achieve Formal Class B Classification
 
