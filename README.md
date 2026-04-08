@@ -46,12 +46,13 @@ A C++ networking library for building and testing systems that must survive unre
 9. [Using the Library](#using-the-library)
 10. [Use Cases](#use-cases)
 11. [Safety & Assurance Documents](#safety--assurance-documents)
-12. [Coding Standards](#coding-standards)
-13. [Standards Sources and Conflicts](#standards-sources-and-conflicts)
-14. [Project Standards Files](#project-standards-files)
-14. [Claude Skills](#claude-skills)
-15. [Release History](#release-history)
-16. [Code Statistics](#code-statistics)
+12. [Design Patterns](#design-patterns)
+13. [Coding Standards](#coding-standards)
+14. [Standards Sources and Conflicts](#standards-sources-and-conflicts)
+15. [Project Standards Files](#project-standards-files)
+16. [Claude Skills](#claude-skills)
+17. [Release History](#release-history)
+18. [Code Statistics](#code-statistics)
 
 ---
 
@@ -913,6 +914,14 @@ Each Safety & Assurance document depends on the following inputs. Update the lis
 | [DEFECT_LOG.md](docs/DEFECT_LOG.md) | [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md), [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md), [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md) |
 | [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md) | [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md) |
 | [SECURITY_ASSUMPTIONS.md](docs/SECURITY_ASSUMPTIONS.md) | — (primary artifact; no doc dependencies) |
+
+---
+
+## Design Patterns
+
+[`docs/DESIGN_PATTERNS.md`](docs/DESIGN_PATTERNS.md) documents every design pattern used in the codebase — where each pattern appears (file, class, method), and why it was chosen given the project's Power of 10 / MISRA C++:2023 / F-Prime constraints.
+
+Patterns in use: Strategy, Adapter/Bridge, Facade, State Machine, Observer/Event Ring, Chain of Responsibility, Non-Virtual Interface (NVI), Dependency Injection, Singleton (safety variant), Slot Pool, Value Object, Serializer, Ring Buffer (SPSC lock-free), RAII Lifecycle.
 
 ---
 
