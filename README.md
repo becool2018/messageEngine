@@ -970,7 +970,7 @@ Items 6 and 7 are also required for Class A reclassification; Item 9 is required
 
 ## Standards Sources and Conflicts
 
-[`docs/STANDARDS_SOURCES.md`](docs/STANDARDS_SOURCES.md) lists every external standard, guideline, and rule set referenced in the project's coding standards files — where each one comes from, whether it is free or proprietary, and a plain-English summary of what it is and what obligations it imposes on this codebase.
+[`docs/STANDARDS_SOURCES_AND_CONFLICTS.md`](docs/STANDARDS_SOURCES_AND_CONFLICTS.md) lists every external standard, guideline, and rule set referenced in the project's coding standards files — where each one comes from, whether it is free or proprietary, and a plain-English summary of what it is and what obligations it imposes on this codebase. It also documents all known contradictions and tensions between the combined standard set, with resolution status for each.
 
 ---
 
