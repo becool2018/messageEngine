@@ -390,6 +390,18 @@ The impairment engine must be able to apply, per channel or globally:
 - Prefer small, well-defined modules that map cleanly to requirements (message layer, transport, impairment, backend).
 - Always keep testability and determinism in mind, especially for impairment and retry logic.
 
+8.3 Project-specific security rule applicability (.claude/CLAUDE.md §7c–§7d)
+The global security rules §7c and §7d apply to the following project components:
+
+§7c — Secure zeroing of cryptographic material:
+  Applies to: all key-loading paths in TlsTcpBackend (src/platform/TlsTcpBackend.cpp) and
+  DtlsUdpBackend (src/platform/DtlsUdpBackend.cpp), and any future code that handles
+  TLS/DTLS credentials or session tokens.
+
+§7d — Timing-safe comparisons:
+  Currently applies to: the DTLS cookie exchange path in DtlsUdpBackend (REQ-6.4.2,
+  src/platform/DtlsUdpBackend.cpp). Extend to any future MAC/HMAC validation path.
+
 ---
 
 9. Power of 10 / MISRA compliance table by directory
