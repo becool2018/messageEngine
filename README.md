@@ -1,23 +1,35 @@
 # messageEngine
 
+> **Experimental project.** This codebase is a learning and research exercise largely produced with AI assistance (Claude Code). It is not production software. APIs, behavior, and documentation may change without notice.
+
 ![CI](https://github.com/becool2018/messageEngine/actions/workflows/CI.yml/badge.svg)
 ![Stress Tests](https://github.com/becool2018/messageEngine/actions/workflows/stress.yml/badge.svg)
 
-> **Note:** This codebase is produced by Claude (Anthropic) as an experiment to evaluate whether an AI assistant can consistently follow strict safety-critical software engineering requirements — including NASA standards, JPL Power of 10, and MISRA C++:2023 .
+A C++ networking library for building and testing systems that must survive unreliable networks. It provides:
 
-> **AI tooling:** Code was written by **Claude Sonnet 4.6** (Anthropic). Code review was performed by **GPT-5.4** (OpenAI).
+- **Three delivery modes** — best-effort, reliable-with-ACK, and reliable-with-retry-and-dedup — implemented at the application layer, transport-independent
+- **Five transport backends** — TCP, UDP, TLS/TCP, DTLS/UDP, and an in-process simulation harness (`LocalSimHarness`) that needs no OS sockets
+- **A fault injection engine** — inject latency, jitter, packet loss, duplication, reordering, and link partitions, all driven by a seedable PRNG for reproducible test runs
+- **Bounded, fixed-allocation design** — no heap allocation on critical paths after init; all capacities are compile-time constants in `src/core/Types.hpp`
+- **Observable by default** — severity-tagged logging, per-engine delivery counters, and an 8-kind event ring (`poll_event` / `drain_events`) for post-hoc analysis without callbacks or heap
 
-> **AI contributors:** If you are using an AI assistant with this project, ensure it reads **`.claude/CLAUDE.md`** (global C/C++ coding standard — targets Power of 10, MISRA C++:2023, F-Prime subset; documented deviations listed therein) and **`CLAUDE.md`** (project-specific requirements — architecture, traceability, safety, verification policy) before making any changes. Both files are normative and must be followed.
+**Quick capacity reference** ([full details →](docs/CAPACITY_REFERENCE.md))**:**
 
-A safety-critical C++ networking library that models realistic communication problems — latency, jitter, packet loss, duplication, reordering, and link partitions — while providing consistent, reusable messaging utilities across three transport backends (TCP, UDP, and an in-process simulation harness).
+| Resource | Limit |
+|---|---|
+| Max payload | 4 096 bytes |
+| Dedup window | 128 `(source, msg_id)` pairs — sliding window that detects and drops duplicate retransmissions |
+| ACK tracker | 32 pending slots |
+| Retry manager | 32 pending slots |
+| Inbound ring | 64 messages per backend |
+| Concurrent clients (TCP/TLS) | 8 (configurable via `MAX_TCP_CONNECTIONS` in `Types.hpp`) |
+| Worst-case stack depth | ~764 bytes / 10 frames (DTLS outbound send path) |
 
-All production code is written to **JPL Power of 10**, **MISRA C++:2023**, and an **F-Prime style subset**: no exceptions, no templates, no RTTI, no STL, and no dynamic allocation on critical paths after initialization. Where a rule cannot be followed without compromising correctness or using a third-party API, a documented deviation is recorded in-code with a justification comment and in `.claude/CLAUDE.md`. There are minor STL exceptions; these are listed in the [Coding Standards](#coding-standards) section.
+**Written to:** JPL Power of 10 · MISRA C++:2023 · F-Prime style subset · NASA Class C (voluntary Class B test rigor). No exceptions, no templates, no RTTI. STL is excluded from production code with one deliberate exception: `std::atomic<T>` for integral types is permitted and used for shared state — it has no dynamic allocation, maps directly to hardware primitives, and is what MISRA C++:2023 endorses for lock-free concurrency. All other STL containers, algorithms, and headers are absent from `src/`.
 
 > **Standards note:** MISRA C++:2023 is a proprietary standard published by MISRA (misra.org.uk) and must be purchased separately. This project targets MISRA C++:2023 guidelines and documents all deviations, but does not claim third-party-audited certification. NASA technical standards (NASA-STD-8719.13C, NASA-STD-8739.8A, NPR 7150.2D) are publicly available at standards.nasa.gov.
 
-The library targets **NASA-STD-8719.13C** and **NASA-STD-8739.8A** software assurance practices at **Class C** classification (infrastructure / networking library), with voluntary **Class B** rigor in testing discipline: all safety-critical functions require branch coverage, mandatory peer inspection (M1), and static analysis (M2), with MC/DC coverage as the goal for the five highest-hazard functions.
-
-**Library version: 2.0.0** — protocol v2 milestone adds bounded fragmentation and reassembly (`Fragmentation`, `ReassemblyBuffer`), per-peer in-order delivery enforcement (`OrderingBuffer`), and wire-format v2 (`WIRE_HEADER_SIZE` 44→52 bytes, `PROTO_VERSION` 1→2). Phase 3 (1.3.0) adds `RequestReplyEngine` and `drain_events()`; v2 is additive on top of that.
+> **AI experiment note:** This codebase was produced by Claude Sonnet 4.6 (Anthropic) to evaluate whether an AI assistant can consistently follow safety-critical engineering requirements. Code review by GPT-5.4 (OpenAI). If you are using an AI assistant with this project, read `.claude/CLAUDE.md` and `CLAUDE.md` before making changes — both are normative.
 
 ---
 
@@ -35,9 +47,11 @@ The library targets **NASA-STD-8719.13C** and **NASA-STD-8739.8A** software assu
 10. [Use Cases](#use-cases)
 11. [Safety & Assurance Documents](#safety--assurance-documents)
 12. [Coding Standards](#coding-standards)
-13. [Project Standards Files](#project-standards-files)
+13. [Standards Sources](#standards-sources)
+14. [Project Standards Files](#project-standards-files)
 14. [Claude Skills](#claude-skills)
-15. [Code Statistics](#code-statistics)
+15. [Release History](#release-history)
+16. [Code Statistics](#code-statistics)
 
 ---
 
@@ -45,7 +59,7 @@ The library targets **NASA-STD-8719.13C** and **NASA-STD-8739.8A** software assu
 
 ### 1. Message Envelope
 Every message is carried in a standard `MessageEnvelope` containing:
-- **Message type** — DATA, ACK, NAK, or HEARTBEAT
+- **Message type** — DATA, ACK, NAK, HEARTBEAT, or HELLO
 - **Unique message ID** — 64-bit, monotonically increasing, never zero
 - **Timestamps** — creation time and expiry time (microsecond resolution)
 - **Node addressing** — `source_id` and `destination_id`
@@ -76,10 +90,10 @@ A single `TransportInterface` API (`init`, `send_message`, `receive_message`, `c
 
 | Backend | Description |
 |---|---|
-| **TcpBackend** | Connection-oriented; length-prefixed framing; multi-client server support |
-| **UdpBackend** | Connectionless; one datagram per message; no built-in reliability |
-| **TlsTcpBackend** | TLS-encrypted TCP (mbedTLS 4.0 PSA Crypto); per-client TLS context; plaintext fallback for tests; TLS session resumption (`session_resumption_enabled` in `TlsConfig`) |
-| **DtlsUdpBackend** | DTLS-encrypted UDP; DTLS cookie anti-replay; MTU enforcement (1,400 bytes); plaintext fallback |
+| **TcpBackend** | Connection-oriented; length-prefixed framing; multi-client server support; client sends HELLO on connect; server maintains NodeId→slot routing table; source_id validated on every receive frame (REQ-6.1.8–6.1.11) |
+| **UdpBackend** | Connectionless; one datagram per message; no built-in reliability; HELLO-before-data enforcement; source_id binding after first HELLO (REQ-6.2.4) |
+| **TlsTcpBackend** | TLS-encrypted TCP (mbedTLS 4.0 PSA Crypto); per-client TLS context; plaintext fallback for tests; TLS session resumption (`session_resumption_enabled` in `TlsConfig`); peer hostname verification via `mbedtls_ssl_set_hostname()` when `verify_peer=true` (SEC-021 / REQ-6.4.6) |
+| **DtlsUdpBackend** | DTLS-encrypted UDP; DTLS cookie anti-replay; MTU enforcement (1,400 bytes); plaintext fallback; HELLO-before-data enforcement; two-phase port-locking (SEC-027 — candidate port committed only after valid HELLO); bidirectional HELLO registration (SEC-026 — server replies to client HELLO so both sides can send DATA) |
 | **LocalSimHarness** | In-process; two instances linked by pointer; no OS sockets; deterministic |
 
 ### 5. Impairment Engine
@@ -340,6 +354,8 @@ messageEngine/
 │   ├── test_UdpBackend.cpp
 │   ├── test_TlsTcpBackend.cpp
 │   ├── test_DtlsUdpBackend.cpp
+│   ├── test_PrngEngine.cpp
+│   ├── test_RingBuffer.cpp
 │   └── test_stress_capacity.cpp    # Stress suite (run via make run_stress_tests)
 ├── docs/                 # Requirements, design, and analysis documents
 ├── Makefile
@@ -437,6 +453,8 @@ build/test_TcpBackend
 build/test_UdpBackend
 build/test_TlsTcpBackend
 build/test_DtlsUdpBackend
+build/test_PrngEngine
+build/test_RingBuffer
 ```
 
 ---
@@ -493,26 +511,28 @@ make coverage_show
 
 Policy floor: 100% of all reachable branches for SC files (CLAUDE.md §14). Per-file ceilings below 100% are documented in `docs/COVERAGE_CEILINGS.md`; every missed branch is individually justified.
 
+> **Methodology note (2026-04-06 rebaseline):** LLVM source-based coverage now counts each branch outcome (True and False) as a separate entry, roughly doubling the raw branch count relative to prior decision-level counts. All thresholds below reflect the current LLVM output. MC/DC tests 60–64 (added 2026-04-06) closed 10 previously-missed branches in `DeliveryEngine.cpp`.
+
 | File | Branch % | SC? | Status |
 |---|---|---|---|
-| `core/Serializer.cpp` | 74.36% | SC | Ceiling — 20 missed assert `[[noreturn]]` branches |
-| `core/DuplicateFilter.cpp` | 76.19% | SC | Pass |
-| `core/AckTracker.cpp` | 76.71% | SC | Pass |
-| `core/RetryManager.cpp` | 79.12% | SC | Pass |
-| `core/DeliveryEngine.cpp` | 75.22% | SC | Pass |
+| `core/Serializer.cpp` | 73.79% | SC | Ceiling — assert `[[noreturn]]` branches |
+| `core/DuplicateFilter.cpp` | 73.13% | SC | Ceiling — assert `[[noreturn]]` branches |
+| `core/AckTracker.cpp` | 64.47% | SC | Ceiling — assert `[[noreturn]]` branches |
+| `core/RetryManager.cpp` | 73.25% | SC | Ceiling — assert `[[noreturn]]` branches |
+| `core/DeliveryEngine.cpp` | 71.68% | SC | Ceiling — assert `[[noreturn]]` branches + init-guard paths |
 | `core/AssertState.cpp` | 50.00% | NSC-infra | Ceiling — abort() False branch untestable |
-| `platform/ImpairmentEngine.cpp` | 74.19% | SC | Ceiling — 40 assert + 8 unreachable branches |
-| `platform/ImpairmentConfigLoader.cpp` | 82.50% | SC | Ceiling — 23 assert + 5 unreachable branches |
-| `platform/TcpBackend.cpp` | 77.73% | SC | Ceiling — 38 assert + 15 unreachable branches |
-| `platform/UdpBackend.cpp` | 75.51% | SC | Pass |
-| `platform/TlsTcpBackend.cpp` | 76.25% | SC | Pass |
-| `platform/DtlsUdpBackend.cpp` | 81.76% | SC | Ceiling — 35 assert + 19 unreachable branches |
-| `platform/LocalSimHarness.cpp` | 72.46% | SC | Ceiling — 17 assert + 2 unreachable branches |
-| `platform/MbedtlsOpsImpl.cpp` | 69.77% | SC | Ceiling — 26 assert `[[noreturn]]` branches |
-| `platform/SocketUtils.cpp` | 64.94% | NSC | Ceiling — POSIX errors unreachable on loopback |
-| `platform/SocketOpsImpl.cpp` | 68.57% | NSC | Line coverage sufficient |
+| `platform/ImpairmentEngine.cpp` | 71.88% | SC | Ceiling — assert + unreachable branches |
+| `platform/ImpairmentConfigLoader.cpp` | 80.46% | SC | Ceiling — assert + unreachable branches |
+| `platform/TcpBackend.cpp` | 68.97% | SC | Ceiling — assert + unreachable branches |
+| `platform/UdpBackend.cpp` | 70.10% | SC | Ceiling — assert `[[noreturn]]` branches |
+| `platform/TlsTcpBackend.cpp` | 70.01% | SC | Ceiling — assert + mbedTLS error paths |
+| `platform/DtlsUdpBackend.cpp` | 75.56% | SC | Ceiling — assert + mbedTLS/POSIX error paths |
+| `platform/LocalSimHarness.cpp` | 70.49% | SC | Ceiling — assert + structurally-unreachable branches |
+| `platform/MbedtlsOpsImpl.cpp` | 70.33% | SC | Ceiling — assert `[[noreturn]]` branches |
+| `platform/SocketUtils.cpp` | 61.44% | NSC | Ceiling — POSIX errors unreachable on loopback |
+| `platform/SocketOpsImpl.cpp` | 66.67% | NSC | Line coverage sufficient |
 
-Ceiling files are at the maximum achievable coverage: `NEVER_COMPILED_OUT_ASSERT` generates one permanently-missed branch per call (the `[[noreturn]]` `abort()` path), and certain POSIX/mbedTLS error paths cannot be triggered in a loopback test environment. All are documented deviations, not defects.
+Ceiling files are at the maximum achievable coverage: `NEVER_COMPILED_OUT_ASSERT` generates permanently-missed branch outcomes (the `[[noreturn]]` `abort()` path), and certain POSIX/mbedTLS error paths cannot be triggered in a loopback test environment. All are documented deviations, not defects. Full per-file justifications are in `docs/COVERAGE_CEILINGS.md`.
 
 ---
 
@@ -779,6 +799,8 @@ The [`docs/use_cases/`](docs/use_cases/) directory contains detailed use case do
 
 - **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 61 use cases, grouped by high-level capability (HL-1 through HL-29), Application Workflow patterns, and System Internal sub-functions.
 - **[USE_CASE_FREQUENCY.md](docs/use_cases/USE_CASE_FREQUENCY.md)** — frequency classification of all 61 use cases (hottest path → high → medium → low → system internals); use this to guide performance analysis, profiling focus, and code review prioritisation.
+  - [Hottest path](docs/use_cases/USE_CASE_FREQUENCY.md#hottest-path--called-on-every-message-and-every-event-loop-tick) — 7 use cases on every send / receive / event-loop tick
+  - [High frequency](docs/use_cases/USE_CASE_FREQUENCY.md#high-frequency--called-frequently-during-active-messaging) — per-message use cases when reliability modes or impairments are active
 
 Each individual `UC_*.md` document follows a 15-section flow-of-control format covering: entry points, end-to-end control flow, call tree, branching logic, concurrency behavior, memory ownership, error handling, external interactions, state changes, and known risks.
 
@@ -799,6 +821,7 @@ NASA-STD-8719.13C / NASA-STD-8739.8A compliance artifacts maintained in [`docs/`
 | [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md) | Moderator-led formal inspection checklist (NPR 7150.2D §3 / NASA-STD-8739.8); entry/exit criteria, severity definitions, and waiver policy for all `src/` changes. |
 | [DEFECT_LOG.md](docs/DEFECT_LOG.md) | Cumulative inspection defect record; every defect found during formal review of `src/` changes is logged here with disposition and sign-off. |
 | [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md) | Verification policy (VVP-001); defines the minimum verification methods (M1–M7) required at each software classification level (Class C / B / A), architectural ceiling rules, fault injection requirements, and injectable interface obligations. |
+| [SECURITY_ASSUMPTIONS.md](docs/SECURITY_ASSUMPTIONS.md) | Security assumptions the library relies on but cannot enforce: monotonic time contract (SEC-007), unique message IDs per session, constant peer node IDs, transport-layer source address validation (HELLO-before-data, source_id binding across all four backends), TLS/DTLS peer hostname verification, cryptographic material zeroing, and timing-safe comparisons. Every assumption violation is a contract breach with undefined behavior. |
 
 ### Document Dependencies
 
@@ -889,6 +912,7 @@ Each Safety & Assurance document depends on the following inputs. Update the lis
 | [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md) | [DEFECT_LOG.md](docs/DEFECT_LOG.md) |
 | [DEFECT_LOG.md](docs/DEFECT_LOG.md) | [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md), [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md), [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md) |
 | [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md) | [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md) |
+| [SECURITY_ASSUMPTIONS.md](docs/SECURITY_ASSUMPTIONS.md) | — (primary artifact; no doc dependencies) |
 
 ---
 
@@ -941,6 +965,12 @@ The project voluntarily meets Class B verification rigor (M1 + M2 + M4 + M5 for 
 | 9 | **Independent V&V** | A second qualified engineer (not the author) must complete a structured inspection of all SC functions per [`docs/INSPECTION_CHECKLIST.md`](docs/INSPECTION_CHECKLIST.md) and record findings in [`docs/DEFECT_LOG.md`](docs/DEFECT_LOG.md) (INSP-002 onward) | Second qualified reviewer |
 
 Items 6 and 7 are also required for Class A reclassification; Item 9 is required at both Class B and Class A (NPR 7150.2D §3.11). Item 8 closes the Tier 3 static analysis gap (see [`docs/STATIC_ANALYSIS_TOOLCHAIN.md`](docs/STATIC_ANALYSIS_TOOLCHAIN.md)).
+
+---
+
+## Standards Sources
+
+[`docs/STANDARDS_SOURCES.md`](docs/STANDARDS_SOURCES.md) lists every external standard, guideline, and rule set referenced in the project's coding standards files — where each one comes from, whether it is free or proprietary, and a plain-English summary of what it is and what obligations it imposes on this codebase.
 
 ---
 
@@ -1034,15 +1064,24 @@ All nine documents are validated simultaneously using three dependency-ordered w
 
 ---
 
+## Release History
+
+| Version | Highlights |
+|---|---|
+| **2.0.0** | Bounded fragmentation and reassembly (`Fragmentation`, `ReassemblyBuffer`); per-peer in-order delivery enforcement (`OrderingBuffer`); wire-format v2 (`WIRE_HEADER_SIZE` 44→52 bytes, `PROTO_VERSION` 1→2) |
+| **1.3.0** | `RequestReplyEngine` (correlated request/reply over `DeliveryEngine`); `drain_events()` bulk observability drain |
+
+---
+
 ## Code Statistics
 
 | Category | Lines |
 |---|---|
-| `src/` (production + headers) | 15,899 |
-| `tests/` | 19,467 |
-| **Total** | **35,366** |
+| `src/` (production + headers) | 19,400 |
+| `tests/` | 25,039 |
+| **Total** | **44,439** |
 
-68 source files across 3 layers; 21 test suites + 1 stress suite + 2 shared mock headers (24 test files).
+68 source files across 3 layers; 23 test suites + 1 stress suite + 2 shared mock headers (26 test files).
 
 ---
 

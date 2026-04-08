@@ -10,8 +10,8 @@
 
 - **Trigger:** `ImpairmentEngine::process_outbound()` is called by any backend's `send_message()` when `m_cfg.enabled == true` and `m_cfg.loss_probability > 0.0`. File: `src/platform/ImpairmentEngine.cpp`.
 - **Goal:** Drop the outbound message with the configured probability, preventing it from reaching the transport write layer.
-- **Success outcome (dropped):** `process_outbound()` does not place the envelope in `out_buf`; `*out_count` stays at 0 (or unchanged). The backend's `send_to_all_clients()` / `sendto()` is never called for this envelope. Returns `Result::OK`.
-- **Success outcome (not dropped):** Envelope is placed in `out_buf[0]`; `*out_count = 1`. Backend proceeds with normal send.
+- **Success outcome (dropped):** `process_outbound()` returns `Result::ERR_IO`; the backend skips the subsequent `collect_deliverable()` call (or it returns 0). `send_to_all_clients()` / `sendto()` is never called.
+- **Success outcome (not dropped):** `process_outbound()` returns `Result::OK`; the envelope is queued in the internal delay buffer. `collect_deliverable()` extracts due envelopes; the backend sends each one.
 - **Error outcomes:** None — `process_outbound()` always returns `Result::OK`; loss is a silent drop.
 
 ---
@@ -20,9 +20,11 @@
 
 ```cpp
 // src/platform/ImpairmentEngine.cpp (called from backend send_message())
-Result ImpairmentEngine::process_outbound(
-    const MessageEnvelope& env, uint64_t now_us,
-    MessageEnvelope* out_buf, uint32_t* out_count);
+Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env, uint64_t now_us);
+
+// Called after process_outbound() to retrieve due envelopes from the delay buffer:
+uint32_t ImpairmentEngine::collect_deliverable(uint64_t now_us,
+    MessageEnvelope* out_buf, uint32_t buf_cap);
 ```
 
 Called internally by `TcpBackend::send_message()`, `UdpBackend::send_message()`, `LocalSimHarness::send_message()`, `TlsTcpBackend::send_message()`, `DtlsUdpBackend::send_message()`.
@@ -31,32 +33,32 @@ Called internally by `TcpBackend::send_message()`, `UdpBackend::send_message()`,
 
 ## 3. End-to-End Control Flow
 
-1. Backend `send_message()` calls `m_impairment.process_outbound(env, now_us, out_buf, &out_count)`.
-2. `NEVER_COMPILED_OUT_ASSERT(out_buf != nullptr)` and `NEVER_COMPILED_OUT_ASSERT(out_count != nullptr)`.
-3. `*out_count = 0`.
-4. **Partition check:** `is_partition_active(now_us)` — if true, the message is silently dropped (partition covers all traffic). For this UC: partition is inactive.
-5. **Loss check:** `check_loss()` is called:
+1. Backend `send_message()` calls `m_impairment.process_outbound(envelope, now_us)`.
+2. `NEVER_COMPILED_OUT_ASSERT(m_initialized)` and `NEVER_COMPILED_OUT_ASSERT(envelope_valid(in_env))`.
+3. **Partition check:** `is_partition_active(now_us)` — if true, `++m_stats.partition_drops`, log `WARNING_LO`, return `ERR_IO`. For this UC: partition is inactive.
+4. **Loss check:** `check_loss()` is called:
    a. `m_prng.next_double()` — xorshift64 produces a uniform double in `[0.0, 1.0)`.
    b. If `random_value < m_cfg.loss_probability`: return `true` (drop).
    c. Otherwise: return `false` (forward).
-6. If `check_loss()` returns true:
-   - `Logger::log(WARNING_LO, "ImpairmentEngine", "Packet loss: dropping outbound message id=%llu")`.
-   - Returns `Result::OK` with `*out_count = 0`. The envelope is not placed in `out_buf`.
-7. If not lost: apply duplication (UC_14) and latency (UC_15/UC_16) if configured. For pure loss UC: envelope is placed in `out_buf[0]`, `*out_count = 1`.
-8. Returns `Result::OK`.
-9. Back in backend `send_message()`: loop over `out_buf[0..*out_count-1]`. Since `*out_count == 0`, no socket write occurs.
+5. If `check_loss()` returns true:
+   - `++m_stats.loss_drops`.
+   - `Logger::log(WARNING_LO, "ImpairmentEngine", "message dropped (loss probability)")`.
+   - Returns `Result::ERR_IO`. The envelope is NOT placed in the delay buffer.
+6. If not lost: compute `release_us` (latency + jitter), call `queue_to_delay_buf(in_env, release_us)`. Apply duplication (UC_14) if configured. Returns `Result::OK`.
+7. Back in backend `send_message()`: `process_outbound()` returned `ERR_IO`, so the backend skips `collect_deliverable()` (or calls it and gets 0 due entries). No socket write occurs for the dropped message.
 
 ---
 
 ## 4. Call Tree
 
 ```
-TcpBackend::send_message()                    [TcpBackend.cpp]
- └── ImpairmentEngine::process_outbound()    [ImpairmentEngine.cpp]
-      ├── is_partition_active(now_us)
-      ├── check_loss()
-      │    └── PrngEngine::next_double()      [PrngEngine.hpp]
-      └── [if not lost: apply_duplication, queue_to_delay_buf]
+TcpBackend::send_message()                            [TcpBackend.cpp]
+ ├── ImpairmentEngine::process_outbound(env, now_us)  [ImpairmentEngine.cpp]
+ │    ├── is_partition_active(now_us)
+ │    ├── check_loss()
+ │    │    └── PrngEngine::next_double()               [PrngEngine.hpp]
+ │    └── [if not lost: queue_to_delay_buf; apply_duplication]
+ └── ImpairmentEngine::collect_deliverable(now_us, out_buf, cap)  [if process_outbound OK]
 ```
 
 ---
@@ -73,9 +75,9 @@ TcpBackend::send_message()                    [TcpBackend.cpp]
 
 | Condition | True branch | False branch |
 |-----------|-------------|--------------|
-| `!m_cfg.enabled` | Pass through (no impairments) | Apply impairments |
-| `is_partition_active(now_us)` | Drop all (partition); UC_18 | Check loss |
-| `random < loss_probability` | Drop; `*out_count = 0` | Forward envelope |
+| `!m_cfg.enabled` | Pass through to delay buf immediately | Apply impairments |
+| `is_partition_active(now_us)` | Return `ERR_IO` (partition drop); UC_18 | Check loss |
+| `random < loss_probability` | Return `ERR_IO` (loss drop) | Queue to delay buf |
 | `loss_probability == 0.0` | Never drops (check not entered) | Normal |
 | `loss_probability == 1.0` | Always drops (UC_32) | Normal |
 
@@ -123,14 +125,14 @@ TcpBackend::send_message()                    [TcpBackend.cpp]
 
 ```
 TcpBackend::send_message()
-  -> ImpairmentEngine::process_outbound(env, now_us, out_buf, &out_count)
+  -> ImpairmentEngine::process_outbound(env, now_us)
        -> is_partition_active()              <- false
        -> check_loss()
             -> PrngEngine::next_double()     [xorshift64; returns r in [0,1)]
-            [r < loss_probability]           <- true
-       <- *out_count = 0; Result::OK (dropped)
-  [out_count == 0; loop does not execute; no ::send() called]
-  <- Result::OK
+            [r < loss_probability]           <- true (drop)
+       <- Result::ERR_IO (dropped; not queued)
+  [ERR_IO: collect_deliverable not called; no ::send() occurs]
+  <- Result::OK  [backend returns OK; loss is silent to the caller]
 ```
 
 ---

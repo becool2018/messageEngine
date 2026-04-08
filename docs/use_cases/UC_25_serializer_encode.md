@@ -128,7 +128,7 @@ TcpBackend::send_message()
   -> Serializer::serialize(envelope, m_wire_buf, SOCKET_RECV_BUF_BYTES, &wire_len)
        -> write_u8/u32/u64 helpers   [header fields; big-endian]
        -> memcpy(payload)
-       -> *wire_len = 44 + payload_length
+       -> *wire_len = 52 + payload_length
   <- Result::OK; m_wire_buf[0..wire_len-1] populated
 ```
 

@@ -99,7 +99,7 @@ DeliveryEngine::sweep_ack_timeouts(now_us)                     [DeliveryEngine.c
 
 ## 10. External Interactions
 
-- **`stderr`:** `Logger::log(WARNING_LO)` for each timed-out entry.
+- **`stderr`:** `Logger::log(WARNING_HI)` for each timed-out entry.
 - No network calls, file I/O, or hardware interaction.
 
 ---
@@ -111,7 +111,7 @@ Per expired entry:
 | Object | Member | Before | After |
 |--------|--------|--------|-------|
 | `AckTracker` | `m_entries[slot].state` | `PENDING` | `FREE` |
-| `stderr` | output | — | one WARNING_LO line per timeout |
+| `stderr` | output | — | one WARNING_HI line per timeout |
 
 ---
 

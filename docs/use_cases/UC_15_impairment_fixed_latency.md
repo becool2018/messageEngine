@@ -10,7 +10,7 @@
 
 - **Trigger:** `ImpairmentEngine::process_outbound()` is called when `m_cfg.fixed_latency_ms > 0`. The envelope is placed in the delay buffer with `deliver_time = now_us + fixed_latency_ms * 1000`. File: `src/platform/ImpairmentEngine.cpp`.
 - **Goal:** Hold an outbound message in a fixed-size delay buffer and release it only after the configured fixed latency has elapsed.
-- **Success outcome:** On the first `process_outbound()` call: envelope queued with `deliver_time` in the future; `*out_count = 0`. On a subsequent `collect_deliverable()` call (from the next `send_message()` or `flush_delayed_to_clients()`): envelope transferred to `out_buf`; `*out_count = 1`.
+- **Success outcome:** `process_outbound()` returns `OK`; envelope is queued with `release_us` in the future. A subsequent `collect_deliverable()` call (from the next `send_message()` or `flush_delayed_to_clients()`) scans the delay buffer and transfers due entries to `out_buf`; returns count ≥ 1 when entries are ready.
 - **Error outcomes:** If the delay buffer is full, the envelope is silently discarded. No error is returned.
 
 ---
@@ -19,12 +19,10 @@
 
 ```cpp
 // src/platform/ImpairmentEngine.cpp
-Result ImpairmentEngine::process_outbound(
-    const MessageEnvelope& env, uint64_t now_us,
-    MessageEnvelope* out_buf, uint32_t* out_count);
+Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env, uint64_t now_us);
 
-Result ImpairmentEngine::collect_deliverable(
-    MessageEnvelope* out_buf, uint32_t* out_count, uint64_t now_us);
+uint32_t ImpairmentEngine::collect_deliverable(uint64_t now_us,
+    MessageEnvelope* out_buf, uint32_t buf_cap);
 ```
 
 Both called from backend `send_message()` and `flush_delayed_to_clients()`.
@@ -34,18 +32,18 @@ Both called from backend `send_message()` and `flush_delayed_to_clients()`.
 ## 3. End-to-End Control Flow
 
 **First call (envelope queued):**
-1. `process_outbound(env, now_us, out_buf, &out_count)`:
+1. `process_outbound(env, now_us)`:
    a. Partition and loss checks pass.
-   b. `deliver_time = now_us + (uint64_t)m_cfg.fixed_latency_ms * 1000ULL` (plus optional jitter, UC_16).
-   c. **`queue_to_delay_buf(env, deliver_time)`**: if `m_delay_count < IMPAIR_DELAY_BUF_SIZE`, store `{env, deliver_time}` at `m_delay_buf[m_delay_count++]`.
-   d. `collect_deliverable(...)`: scan buffer; no entries have `deliver_time <= now_us` yet (they are all in the future). `*out_count = 0`.
-2. Backend's `send_to_all_clients()` loop runs zero iterations; no socket write.
+   b. `release_us = compute_release_us(now_us, base_delay_us, jitter_us)` (latency + optional jitter, UC_16).
+   c. **`queue_to_delay_buf(env, release_us)`**: if `m_delay_count < IMPAIR_DELAY_BUF_SIZE`, store `{env, release_us}` at next slot.
+   d. Returns `OK`.
+2. Backend calls `collect_deliverable(now_us, out_buf, cap)`: scan buffer; no entries have `release_us <= now_us` yet (they are all in the future). Returns 0. No socket write.
 
 **Second call (latency elapsed, message released):**
-1. `flush_delayed_to_clients(now_us)` (or next `send_message()`) calls `collect_deliverable(delay_buf, delay_count, now_us, out_buf, &out_count)`:
+1. `flush_delayed_to_clients(now_us)` (or next `send_message()`) calls `collect_deliverable(now_us, out_buf, buf_cap)`:
    a. Scan `m_delay_buf[0..m_delay_count-1]`.
-   b. For each entry where `entry.deliver_time <= now_us`: copy to `out_buf`; mark slot empty; `out_count++`.
-   c. Compact the buffer (remove released entries).
+   b. For each entry where `entry.release_us <= now_us`: copy to `out_buf[count++]`; mark slot empty.
+   c. Returns count (≥ 1 when entries are ready).
 2. Backend sends each `out_buf[i]` via `send_to_all_clients()`.
 
 ---
@@ -124,7 +122,7 @@ TcpBackend::flush_delayed_to_clients(now_us)       [TcpBackend.cpp]
 | Object | Member | Before | After |
 |--------|--------|--------|-------|
 | `ImpairmentEngine` | `m_delay_count` | D | D-1 (compacted) |
-| `out_count` | 0 | 1 |
+| `collect_deliverable()` return | 0 | 1 |
 
 ---
 
@@ -132,14 +130,15 @@ TcpBackend::flush_delayed_to_clients(now_us)       [TcpBackend.cpp]
 
 ```
 TcpBackend::send_message()  [first call; now_us = T]
-  -> ImpairmentEngine::process_outbound(env, T, ...)
-       -> queue_to_delay_buf(env, T + latency_us)    [deliver_time in future]
-       -> collect_deliverable(T, ...)                [no entries due; *out_count=0]
-  <- Result::OK  [no ::send() called]
+  -> ImpairmentEngine::process_outbound(env, T)
+       -> queue_to_delay_buf(env, T + latency_us)    [release_us in future]
+  <- Result::OK
+  -> ImpairmentEngine::collect_deliverable(T, out_buf, cap)  [no entries due; returns 0]
+  [no ::send() called]
 
 TcpBackend::flush_delayed_to_clients()  [later; now_us = T + latency_us]
-  -> ImpairmentEngine::collect_deliverable(T+lat, ...)
-       [entry.deliver_time <= T+lat; copy to out_buf; *out_count=1]
+  -> ImpairmentEngine::collect_deliverable(T+lat, out_buf, cap)
+       [entry.release_us <= T+lat; copy to out_buf; returns 1]
   -> send_to_all_clients(out_buf[0])
        -> ::send()
 ```

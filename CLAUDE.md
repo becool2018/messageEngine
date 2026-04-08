@@ -83,6 +83,13 @@ Before every git commit, run `make lint` and `make run_tests`. Both must pass wi
 before the commit is created. If either fails, fix the issue first — do not commit broken or
 lint-failing code. These checks are also entry criteria for the formal inspection process (§12).
 
+Branch coverage report (`make coverage`) is required **before any merge to main** for SC
+function verification; it is a pre-merge review gate, not a CI automation gate. CI
+automatically verifies M1 (lint), M2 (static analysis), and M4 dynamic test paths (via
+`run_tests` + `run_sanitize`). The human reviewer must confirm no regression in SC function
+branch coverage before approving a merge. See docs/COVERAGE_CEILINGS.md for per-file thresholds
+and docs/VERIFICATION_POLICY.md §4 for ceiling argument policy.
+
 Stress tests (`make run_stress_tests`) are NOT required on every commit. Run them when any of
 the following change:
   - A capacity constant in src/core/Types.hpp (ACK_TRACKER_CAPACITY, DEDUP_WINDOW_SIZE,

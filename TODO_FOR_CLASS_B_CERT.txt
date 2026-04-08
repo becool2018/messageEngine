@@ -1,6 +1,6 @@
 messageEngine — Remaining Tasks for Class B Certification
 ==========================================================
-Generated: 2026-03-31
+Generated: 2026-03-31  (last updated: 2026-04-06)
 Policy references: NPR 7150.2D, NASA-STD-8719.13C, NASA-STD-8739.8A
 Verification policy: .claude/VERIFICATION_POLICY.md (VVP-001)
 
@@ -11,10 +11,13 @@ The items below require external tools, licenses, or a second human reviewer.
 Item 6 — TLA+ model checking
 ------------------------------------------------------------------------------
 Requirement: CLAUDE.md §17 / docs/STATE_MACHINES.md
-What:  Formally verify the three safety-critical state machines —
-         AckTracker (§1), RetryManager (§2), ImpairmentEngine (§3) —
-       against all invariants documented in docs/STATE_MACHINES.md using
-       TLA+ or SPIN model checking.
+What:  Formally verify ALL five safety-critical state machines against all
+       invariants documented in docs/STATE_MACHINES.md using TLA+ or SPIN:
+         AckTracker        (§1)
+         RetryManager      (§2)
+         ImpairmentEngine  (§3)
+         ReassemblyBuffer  (§4)  ← added when Item 11 completed
+         OrderingBuffer    (§5)  ← added when Item 11 completed
 Blocker: Requires TLA+ toolchain (TLA+ Tools / TLC model checker) and a
          team member with TLA+ authoring experience.
 Artifact: TLA+ spec files + model-checker output added to docs/formal/.
@@ -62,28 +65,20 @@ Artifact: INSP-002+ entries in docs/DEFECT_LOG.md.
 ------------------------------------------------------------------------------
 Item 10 — MC/DC written demonstration (5 highest-hazard SC functions)
 ------------------------------------------------------------------------------
+COMPLETED 2026-04-04
 Requirement: CLAUDE.md §14 §2 / VVP-001 §4 (M6)
-What:  For each of the five highest-hazard SC functions, produce a written
-       test-case analysis demonstrating that every condition in each decision
-       independently affects the outcome (MC/DC). Tool branch coverage alone
-       is insufficient; a human must review each test case and record which
-       condition is being independently varied.
-
-       Functions in scope:
-         1. DeliveryEngine::send         (HAZ-001, HAZ-002, HAZ-006)
-         2. DeliveryEngine::receive      (HAZ-001, HAZ-003, HAZ-004, HAZ-005)
-         3. DuplicateFilter::check_and_record  (HAZ-003)
-         4. Serializer::serialize        (HAZ-005)
-         5. Serializer::deserialize      (HAZ-001, HAZ-005)
-
-       For each function, the analysis must list:
-         - Every multi-condition decision (compound boolean expression)
-         - For each condition: the two test cases that independently toggle
-           that condition while holding all others fixed
-         - The test function(s) in tests/ that provide that evidence
-
-Blocker: Requires human analysis; MC/DC cannot be demonstrated by tooling alone.
-Artifact: docs/MCDC_ANALYSIS.md (one section per function).
+What was done:
+  docs/MCDC_ANALYSIS.md created 2026-04-04 covering all five SC functions:
+    1. DeliveryEngine::send         (HAZ-001, HAZ-002, HAZ-006)
+    2. DeliveryEngine::receive      (HAZ-001, HAZ-003, HAZ-004, HAZ-005)
+    3. DuplicateFilter::check_and_record  (HAZ-003)
+    4. Serializer::serialize        (HAZ-005)
+    5. Serializer::deserialize      (HAZ-001, HAZ-005)
+  All 27 decisions (25 reachable) fully analysed; 3 compound decisions
+  demonstrated via independence pairs; status ALL DEMONSTRATED; 0 new
+  tests required. Commit 8a21ca3 added 5 additional MC/DC tests
+  (Tests 60–64) to close the final send/receive branch gaps.
+Artifact: docs/MCDC_ANALYSIS.md
 
 ------------------------------------------------------------------------------
 Item 11 — Implement OrderingMode enforcement (REQ-3.3.5, REQ-4.2.1)
@@ -106,18 +101,23 @@ Artifacts: MessageEnvelope.hpp, Types.hpp, Serializer.cpp, DeliveryEngine.hpp/.c
            Fragmentation.hpp/.cpp, ReassemblyBuffer.hpp/.cpp, OrderingBuffer.hpp/.cpp,
            docs/STATE_MACHINES.md §4-5, docs/HAZARD_ANALYSIS.md §3.
 
-Class B reclassification additional obligation for REQ-3.3.5:
-  - TLA+ model check of ReassemblyBuffer state machine (§4 STATE_MACHINES.md)
-  - TLA+ model check of OrderingBuffer state machine (§5 STATE_MACHINES.md)
-  - MC/DC analysis of ReassemblyBuffer::ingest() and OrderingBuffer::ingest()
+Class B reclassification additional obligations for REQ-3.3.5:
+  - TLA+ model check of ReassemblyBuffer (§4) and OrderingBuffer (§5):
+    rolled into Item 6 above.
+  - MC/DC analysis of ReassemblyBuffer::ingest() and OrderingBuffer::ingest():
+    these functions are NSC; MC/DC is therefore not required at Class B
+    (Class B MC/DC obligation applies to SC functions only per CLAUDE.md §14).
 
 ------------------------------------------------------------------------------
 Status summary
 ------------------------------------------------------------------------------
-  Engineering (programmatic) work:  0 items remain (Item 11 completed)
-  External/organizational work:     5 items remain (Items 6-10 above)
+  Engineering (programmatic) work:  0 items remain
+  External/organizational work:     4 items remain (Items 6, 7, 8, 9)
+  Completed since last update:      Item 10 (MC/DC analysis — 2026-04-04)
 
-  Latest commits on main:
-    13a1043  Add INSP-001 record; update STACK_ANALYSIS and WCET_ANALYSIS
-    44aea03  Complete M5 fault injection: ssl_handshake/ssl_read injectable
-    a1d9c5b  Add P0/P2 coverage remediation: 13 new SC branch tests
+  Latest commits on main (as of 2026-04-06):
+    f493fc6  Merge PR #50: cppcheck TlsTcpBackend.hpp suppression
+    ff1c685  fix(cppcheck): suppress unusedPrivateFunction for TlsTcpBackend.hpp
+    891f45b  Merge PR #49: SEC-027 security fix
+    8a21ca3  test(mc-dc): add 5 MC/DC tests closing send/receive branch gaps
+    0e01f9a  security: reject MessageType::INVALID (0xFF) on wire

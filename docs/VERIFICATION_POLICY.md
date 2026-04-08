@@ -15,8 +15,8 @@ classification is explicitly insufficient, regardless of the quality
 of its execution.
 
 Although the software classification is Class C, all verification
-activity shall meet the method requirements of Class B (M1 + M2 + M4
-+ M5 for all functions). This is a voluntary elevation of testing
+activity voluntarily meets the method requirements of Class B (M1 + M2
++ M4 + M5 for all functions). This is a voluntary elevation of testing
 rigor, not a reclassification.
 
 ---
@@ -169,20 +169,29 @@ d) Not introduce dynamic allocation, function pointers visible at
 
 ## 5. Verification Evidence Traceability
 
-Every test file must carry a comment identifying the verification
-methods applied to the functions under test:
+Every test file must carry a comment identifying either the
+verification methods applied OR the requirements verified:
 
 ```cpp
 // Verification: M1 + M2 + M4
 // Verification: M1 + M2 + M4 + M5 (fault injection via <InterfaceName>)
+// — OR —
+// Verifies: REQ-x.x[, REQ-y.y ...]   (per CLAUDE.md §11 traceability policy)
 ```
 
+Both forms satisfy the evidence traceability requirement. The
+`// Verifies: REQ-x.x` form is the project standard per CLAUDE.md §11;
+the `// Verification: M1 + M2 + M4` form may be added for additional
+clarity at Class B or Class A.
+
 Every SC function declaration must carry a comment identifying the
-highest verification method achieved:
+applicable hazards, and optionally the highest verification method
+achieved:
 
 ```cpp
-// Safety-critical (SC): HAZ-NNN — verified to M4
-// Safety-critical (SC): HAZ-NNN — verified to M5
+// Safety-critical (SC): HAZ-NNN[, HAZ-NNN...]
+// Safety-critical (SC): HAZ-NNN — verified to M4   (optional M-label)
+// Safety-critical (SC): HAZ-NNN — verified to M5   (optional M-label)
 ```
 
 A mismatch between the declared method and the evidence in the

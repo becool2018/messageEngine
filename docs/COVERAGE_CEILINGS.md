@@ -54,9 +54,11 @@ branches in `core/DeliveryEngine.cpp`.
 ### core/Serializer.cpp — ceiling 74.36% (58/78)
 
 20 permanently-missed branches from `NEVER_COMPILED_OUT_ASSERT` calls — one per
-assert across the 8 functions (6 helpers × 2 asserts + `serialize` × 4 +
-`deserialize` × 4). All 58 reachable decision-level branches (actual
-serialization/deserialization logic) are 100% covered.
+assert across the 14 functions (2 public: `serialize` × 4 + `deserialize` × 4;
+8 private I/O helpers × 2 asserts each; 4 file-local validators × 0 NCAs —
+these use `return`-based guards rather than assertions). All 58 reachable
+decision-level branches (actual serialization/deserialization logic) are 100%
+covered.
 
 Threshold: **74%** (maximum achievable).
 
@@ -65,7 +67,8 @@ Threshold: **74%** (maximum achievable).
 ### core/DuplicateFilter.cpp — ceiling 76.19% (32/42)
 
 10 permanently-missed branches from `NEVER_COMPILED_OUT_ASSERT` calls across the
-4 functions. All 32 reachable decision-level branches are 100% covered.
+5 functions (`init`, `is_duplicate`, `record`, `check_and_record`, private
+`find_evict_idx`). All 32 reachable decision-level branches are 100% covered.
 
 Threshold: **75%** (maximum achievable rounds to 76%).
 
@@ -74,7 +77,9 @@ Threshold: **75%** (maximum achievable rounds to 76%).
 ### core/AckTracker.cpp — ceiling 76.71% (56/73)
 
 17 permanently-missed branches from `NEVER_COMPILED_OUT_ASSERT` calls across the
-5 functions. All 56 reachable decision-level branches are 100% covered.
+9 functions (`init`, `track`, `on_ack`, `cancel`, `sweep_expired`,
+`get_send_timestamp`, `get_tracked_destination`, `get_stats`, private
+`sweep_one_slot`). All 56 reachable decision-level branches are 100% covered.
 
 Threshold: **75%** (maximum achievable rounds to 76%).
 

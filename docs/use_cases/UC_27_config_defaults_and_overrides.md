@@ -34,8 +34,8 @@ Also referenced in UC_47.
    b. `cfg.kind = TransportKind::TCP` — default to TCP transport.
    c. `cfg.is_server = false`.
    d. `cfg.send_timeout_ms = 1000`.
-   e. `cfg.recv_timeout_ms = 5000`.
-   f. `cfg.connect_timeout_ms = 3000`.
+   e. `cfg.recv_timeout_ms = 1000`.
+   f. `cfg.connect_timeout_ms = 5000`.
    g. `cfg.local_node_id = NODE_ID_INVALID`.
    h. For each of `MAX_CHANNELS` channels: `channel_config_default(cfg.channels[i])`.
 2. User calls `channel_config_default(ch)`:

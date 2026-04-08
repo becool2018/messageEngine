@@ -238,8 +238,10 @@ private:
     ///                        must not be passed to the impairment engine.
     /// @return false if the envelope must be dropped (spoofing or duplicate HELLO);
     ///         true if the envelope is allowed through (or was consumed as HELLO).
-    // Safety-critical (SC): HAZ-009 — enforces peer NodeId binding; failure allows
+    // Safety-critical (SC): HAZ-009, HAZ-011 — enforces DTLS peer NodeId binding; failure allows
     // source_id spoofing to corrupt ACK/retry state in the DeliveryEngine.
+    // (HAZ-009 = TCP/TLS cross-transport spoofing class; HAZ-011 = DTLS-specific source_id
+    // spoofing after MAC verification — both mitigated here via HELLO registration.)
     bool process_hello_or_validate(const MessageEnvelope& env, bool& consumed);
 
     // ── CC-reduction helpers (extracted to keep each caller CC ≤ 10) ─────────

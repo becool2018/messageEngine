@@ -32,7 +32,7 @@ ChannelConfig   channel_config_default();
 2. Set `cfg.is_server = false`.
 3. Set `cfg.peer_ip[0] = '\0'` (empty peer address).
 4. Set `cfg.peer_port = 0`.
-5. Set `cfg.bind_ip = "0.0.0.0"` (bind to all interfaces).
+5. Set `cfg.bind_ip = "127.0.0.1"` (loopback by default; caller sets to `"0.0.0.0"` or a specific interface for network-accessible deployments).
 6. Set `cfg.bind_port = 0`.
 7. Set `cfg.connect_timeout_ms = 5000` (5-second connect timeout).
 8. Set `cfg.recv_timeout_ms = 1000` (1-second receive timeout).

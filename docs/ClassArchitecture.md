@@ -51,8 +51,8 @@ Dependencies flow downward only — no lower layer may reference a higher one, a
                       │  implements TransportInterface
 ┌─────────────────────▼───────────────────────────────┐
 │  Platform Layer  (src/platform/)                     │
-│  TcpBackend · UdpBackend · LocalSimHarness           │
-│  ImpairmentEngine                                    │
+│  TcpBackend · TlsTcpBackend · UdpBackend             │
+│  DtlsUdpBackend · LocalSimHarness · ImpairmentEngine │
 └─────────────────────┬───────────────────────────────┘
                       │  POSIX sockets / OS APIs
 ┌─────────────────────▼───────────────────────────────┐
@@ -127,8 +127,10 @@ Pure-virtual abstract base class defining the single transport API. All concrete
 | | `virtual Result receive_message(MessageEnvelope&, uint32_t timeout_ms)` |
 | | `virtual void close()` |
 | | `virtual bool is_open() const` |
-| **Depends on** | `Types.hpp`, `MessageEnvelope.hpp`, `ChannelConfig.hpp` |
-| **Used by** | `DeliveryEngine`, `TcpBackend`, `UdpBackend`, `LocalSimHarness` |
+| | `virtual Result register_local_id(NodeId id)` — default returns OK; overridden by TCP/UDP/DTLS backends to send HELLO frame (REQ-6.1.10) |
+| | `virtual void get_transport_stats(TransportStats&) const` — default no-op; overridden by all backends (REQ-7.2.4) |
+| **Depends on** | `Types.hpp`, `MessageEnvelope.hpp`, `ChannelConfig.hpp`, `DeliveryStats.hpp` |
+| **Used by** | `DeliveryEngine`, `TcpBackend`, `UdpBackend`, `TlsTcpBackend`, `DtlsUdpBackend`, `LocalSimHarness` |
 
 ---
 
@@ -272,13 +274,181 @@ Per-channel coordinator. Owns and orchestrates `AckTracker`, `RetryManager`, `Du
 
 | | |
 |---|---|
-| **Key API** | `void init(TransportInterface*, const ChannelConfig&, NodeId local_id)` |
+| **Key API** | `Result init(TransportInterface*, const ChannelConfig&, NodeId local_id)` |
 | | `Result send(MessageEnvelope&, uint64_t now_us)` |
 | | `Result receive(MessageEnvelope&, uint32_t timeout_ms, uint64_t now_us)` |
 | | `uint32_t pump_retries(uint64_t now_us)` |
 | | `uint32_t sweep_ack_timeouts(uint64_t now_us)` |
-| **Depends on** | `TransportInterface` (pointer; injected at `init`), `AckTracker`, `RetryManager`, `DuplicateFilter` (owned by value), `MessageIdGen`, `Timestamp`, `Logger` |
+| | `bool poll_event(DeliveryEvent&)` — pull one observability event from the ring |
+| | `uint32_t drain_events(DeliveryEvent*, uint32_t cap)` — drain up to cap events |
+| | `uint32_t pending_event_count() const` |
+| | `void get_stats(DeliveryEngineStats&) const` |
+| **Depends on** | `TransportInterface` (pointer; injected at `init`), `AckTracker`, `RetryManager`, `DuplicateFilter`, `MessageIdGen`, `DeliveryEventRing`, `Timestamp`, `Logger` (all owned by value) |
 | **Used by** | `Server` (`src/app/`), `Client` (`src/app/`) |
+
+---
+
+### `ProtocolVersion`
+**Files:** `ProtocolVersion.hpp`
+
+Wire-format version constants. Every serialized frame carries these two values; the deserializer rejects frames that do not match.
+
+| | |
+|---|---|
+| **Key API** | `PROTO_VERSION` — current version byte (byte 3 of wire header) |
+| | `PROTO_MAGIC` — 2-byte magic 0x4D45 = 'ME' (wire bytes 40–41) |
+| **Depends on** | — |
+| **Used by** | `Serializer`, all backends |
+
+---
+
+### `Fragmentation`
+**Files:** `Fragmentation.hpp`, `Fragmentation.cpp`
+
+Stateless helper that splits an oversized logical `MessageEnvelope` into N wire-fragment envelopes. Each fragment carries `fragment_index` and `fragment_count` in its header. No state — safe to call from multiple contexts.
+
+| | |
+|---|---|
+| **Key API** | `static uint32_t fragment_count(payload_len, frag_payload_max)` |
+| | `static Result fragment_message(const MessageEnvelope&, out_frags[], frag_cap, frag_payload_max, out_count)` |
+| **Depends on** | `Types.hpp`, `MessageEnvelope.hpp` |
+| **Used by** | `Serializer` (send path), backends on large messages |
+
+---
+
+### `ReassemblyBuffer`
+**Files:** `ReassemblyBuffer.hpp`, `ReassemblyBuffer.cpp`
+
+Bounded reassembly table. Collects incoming fragments keyed on `(source_id, message_id)`; releases the complete logical envelope when all `fragment_count` fragments arrive. Reclaims stale slots older than `recv_timeout_ms` (REQ-3.2.9).
+
+| | |
+|---|---|
+| **Key API** | `void init(uint32_t recv_timeout_ms)` |
+| | `Result add_fragment(const MessageEnvelope& frag, uint64_t now_us)` → `OK` (stored), `ERR_FULL` (slot complete or evicted), `ERR_DUPLICATE` |
+| | `bool is_complete(NodeId src, uint64_t msg_id) const` |
+| | `Result get_complete(NodeId src, uint64_t msg_id, MessageEnvelope& out)` |
+| | `uint32_t sweep_stale(uint64_t now_us)` |
+| **Depends on** | `Types.hpp`, `MessageEnvelope.hpp` |
+| **Used by** | `DeliveryEngine` (receive path) |
+
+---
+
+### `OrderingBuffer`
+**Files:** `OrderingBuffer.hpp`, `OrderingBuffer.cpp`
+
+Per-peer in-order delivery gate. Holds out-of-sequence DATA envelopes until the expected `sequence_num` arrives, then releases the run in order. Used for channels with `ORDERED` delivery mode.
+
+| | |
+|---|---|
+| **Key API** | `void init()` |
+| | `Result add(const MessageEnvelope&)` |
+| | `bool has_next(NodeId src) const` |
+| | `Result pop_next(NodeId src, MessageEnvelope&)` |
+| **Depends on** | `Types.hpp`, `MessageEnvelope.hpp` |
+| **Used by** | `DeliveryEngine` (receive path for ordered channels) |
+
+---
+
+### `RequestReplyHeader`
+**Files:** `RequestReplyHeader.hpp`
+
+Packed 12-byte prefix embedded at the start of `MessageEnvelope::payload` for request/reply correlation. Identifies the correlation ID and message kind (REQUEST or REPLY).
+
+| | |
+|---|---|
+| **Key API** | `struct RequestReplyHeader { uint64_t request_id; uint32_t kind; }` |
+| | `request_reply_header_serialize(hdr, buf, buf_len)` |
+| | `request_reply_header_deserialize(buf, buf_len, hdr)` |
+| **Depends on** | `Types.hpp` |
+| **Used by** | `RequestReplyEngine` |
+
+---
+
+### `RequestReplyEngine`
+**Files:** `RequestReplyEngine.hpp`, `RequestReplyEngine.cpp`
+
+Bounded request/response helper built on top of `DeliveryEngine`. Manages a fixed-capacity pending-requests table; matches incoming replies by `request_id`; invokes registered per-request callbacks on match or timeout.
+
+| | |
+|---|---|
+| **Key API** | `Result init(DeliveryEngine*, NodeId local_id)` |
+| | `Result send_request(MessageEnvelope&, uint32_t timeout_ms, uint64_t now_us, uint64_t& out_request_id)` |
+| | `Result pump(uint64_t now_us)` — matches replies and fires callbacks |
+| **Depends on** | `DeliveryEngine`, `RequestReplyHeader`, `Types`, `Timestamp`, `Logger` |
+| **Used by** | Applications requiring synchronized request/reply semantics |
+
+---
+
+### `DeliveryEvent` / `DeliveryEventRing`
+**Files:** `DeliveryEvent.hpp`, `DeliveryEventRing.hpp`
+
+Pull-style observability for `DeliveryEngine`. `DeliveryEvent` is a POD record carrying `kind`, `source_id`, `message_id`, and `timestamp_us`. `DeliveryEventRing` is a fixed-capacity overwrite-on-full ring buffer backed by `std::atomic<uint32_t>` head/tail indices. No dynamic allocation; no blocking.
+
+| | |
+|---|---|
+| **Key API** | `enum class DeliveryEventKind` — SEND_OK, SEND_FAIL, ACK_RECEIVED, ACK_TIMEOUT, DUPLICATE_DROP, EXPIRY_DROP, RETRY_FIRED, MISROUTE_DROP |
+| | `void push(const DeliveryEvent&)` — overwrites oldest on full |
+| | `bool poll(DeliveryEvent&)` — returns false if empty |
+| | `uint32_t drain(DeliveryEvent*, uint32_t cap)` |
+| | `uint32_t pending_count() const` |
+| **Depends on** | `Types.hpp`, `<atomic>` (permitted carve-out) |
+| **Used by** | `DeliveryEngine` (owned by value) |
+
+---
+
+### `DeliveryStats`
+**Files:** `DeliveryStats.hpp`
+
+POD metrics structs aggregated by `AckTracker`, `RetryManager`, and backend classes. Consumed by `DeliveryEngine::get_stats()` and `TransportInterface::get_transport_stats()`.
+
+| | |
+|---|---|
+| **Key API** | `struct AckTrackerStats { slots_used, ack_count, timeout_count, … }` |
+| | `struct RetryManagerStats { active_count, retry_fired_count, exhausted_count }` |
+| | `struct TransportStats { messages_sent, messages_received, send_errors, recv_errors, connections_opened, connections_closed }` |
+| **Depends on** | `Types.hpp` |
+| **Used by** | `AckTracker`, `RetryManager`, `TcpBackend`, `UdpBackend`, `TlsTcpBackend`, `DtlsUdpBackend` |
+
+---
+
+### `TlsConfig`
+**Files:** `TlsConfig.hpp`
+
+POD configuration struct shared by `TlsTcpBackend` and `DtlsUdpBackend`. Holds TLS/DTLS parameters: enabled flag, certificate paths, CA cert path, `verify_peer` flag, and expected `peer_hostname`.
+
+| | |
+|---|---|
+| **Key API** | `struct TlsConfig { tls_enabled, cert_path[], key_path[], ca_cert_path[], verify_peer, peer_hostname[] }` |
+| **Depends on** | `Types.hpp` |
+| **Used by** | `TlsTcpBackend`, `DtlsUdpBackend`, `TransportConfig` |
+
+---
+
+### `Version`
+**Files:** `Version.hpp`
+
+Compile-time project version constants: `MESSAGE_ENGINE_VERSION_MAJOR`, `MESSAGE_ENGINE_VERSION_MINOR`, `MESSAGE_ENGINE_VERSION_PATCH`, and `MESSAGE_ENGINE_VERSION_STRING`.
+
+| | |
+|---|---|
+| **Depends on** | — |
+| **Used by** | App layer for version reporting |
+
+---
+
+### `IResetHandler` / `AssertState` / `AbortResetHandler`
+**Files:** `IResetHandler.hpp`, `AssertState.hpp`, `AssertState.cpp`, `AbortResetHandler.hpp`
+
+Assert-failure handling infrastructure. `IResetHandler` is a pure-virtual interface with one method: `on_fatal_assert()`. `AssertState` holds the global handler pointer and the `g_fatal_fired` flag; `NEVER_COMPILED_OUT_ASSERT` calls through it. `AbortResetHandler` is the POSIX concrete implementation (calls `::abort()`).
+
+| | |
+|---|---|
+| **Key API** | `class IResetHandler { virtual void on_fatal_assert() = 0; }` |
+| | `assert_state::set_reset_handler(IResetHandler*)` |
+| | `assert_state::trigger_handler_for_test()` |
+| | `AbortResetHandler::instance()` — singleton |
+| **Depends on** | `Types.hpp` |
+| **Used by** | `Assert.hpp` (macro expansion), production main, test fixtures |
 
 ---
 
@@ -406,6 +576,89 @@ In-process simulation transport. Two instances are linked via `link()`; messages
 
 ---
 
+### `ISocketOps` / `SocketOpsImpl`
+**Files:** `ISocketOps.hpp`, `SocketOpsImpl.hpp`, `SocketOpsImpl.cpp`
+
+Injectable interface for all POSIX socket operations used by `TcpBackend` and `UdpBackend`. `ISocketOps` is the pure-virtual seam; `SocketOpsImpl` is the singleton production implementation that delegates to real POSIX calls. In tests, `MockSocketOps` is substituted to exercise error paths (M5 fault injection).
+
+| | |
+|---|---|
+| **Key API** | `virtual int create_tcp()` / `create_udp()` |
+| | `virtual bool do_bind(fd, ip, port)` / `do_listen` / `do_accept` |
+| | `virtual bool send_frame(fd, buf, len, ms)` / `recv_frame` |
+| | `virtual bool send_to(fd, buf, len, ip, port, ms)` / `recv_from` |
+| | `SocketOpsImpl& SocketOpsImpl::instance()` — singleton |
+| **Depends on** | POSIX sockets, `Types.hpp` |
+| **Used by** | `TcpBackend`, `UdpBackend` (inject at construction) |
+
+---
+
+### `TlsTcpBackend`
+**Files:** `TlsTcpBackend.hpp`, `TlsTcpBackend.cpp`
+
+Drop-in `TransportInterface` replacement for `TcpBackend` that adds optional mbedTLS 4.0 TLS encryption over TCP. When `tls_enabled=false`, operates identically to `TcpBackend` (REQ-6.3.4). Supports up to `MAX_TCP_CONNECTIONS` = 8 simultaneous TLS sessions in server mode. SC functions: `send_message` (HAZ-005, HAZ-006), `receive_message` (HAZ-004, HAZ-005).
+
+| | |
+|---|---|
+| **Key API** | `Result init(const TransportConfig&)` |
+| | `Result send_message(const MessageEnvelope&)` |
+| | `Result receive_message(MessageEnvelope&, uint32_t timeout_ms)` |
+| | `void close()` / `bool is_open() const` |
+| **Depends on** | `TransportInterface` (implements), `TlsConfig`, `SocketUtils`, `Serializer`, `ImpairmentEngine`, `RingBuffer`, mbedTLS PSA Crypto API |
+| **Used by** | Secure TCP clients and servers |
+
+---
+
+### `DtlsUdpBackend`
+**Files:** `DtlsUdpBackend.hpp`, `DtlsUdpBackend.cpp`
+
+`TransportInterface` over DTLS-encrypted UDP (DATAGRAM transport mode, REQ-6.4.1). Implements DTLS cookie anti-replay (REQ-6.4.2), configurable retransmission timer (REQ-6.4.3), MTU enforcement at `DTLS_MAX_DATAGRAM_BYTES` = 1400 (REQ-6.4.4), and plaintext UDP fallback when `tls_enabled=false` (REQ-6.4.5). SC functions: `send_message` (HAZ-005, HAZ-006), `receive_message` (HAZ-004, HAZ-005).
+
+| | |
+|---|---|
+| **Key API** | `Result init(const TransportConfig&)` |
+| | `Result send_message(const MessageEnvelope&)` |
+| | `Result receive_message(MessageEnvelope&, uint32_t timeout_ms)` |
+| | `void close()` / `bool is_open() const` |
+| | *(private)* `process_hello_or_validate(env, consumed)` — HAZ-009, HAZ-011 |
+| **Depends on** | `TransportInterface` (implements), `TlsConfig`, `IMbedtlsOps` (injected), `Serializer`, `ImpairmentEngine`, `RingBuffer`, mbedTLS DTLS |
+| **Used by** | Secure UDP peers |
+
+---
+
+### `IMbedtlsOps` / `MbedtlsOpsImpl`
+**Files:** `IMbedtlsOps.hpp`, `MbedtlsOpsImpl.hpp`, `MbedtlsOpsImpl.cpp`
+
+Injectable interface for all mbedTLS library calls used by `DtlsUdpBackend`. `MbedtlsOpsImpl` is the singleton production implementation. `MockMbedtlsOps` (in `tests/`) returns configurable error codes to exercise DTLS error paths (M5). SC functions in the interface: `ssl_handshake` (HAZ-004, HAZ-005, HAZ-006), `ssl_write` (HAZ-005, HAZ-006), `ssl_read` (HAZ-004, HAZ-005).
+
+| | |
+|---|---|
+| **Key API** | `virtual int crypto_init()` |
+| | `virtual int ssl_config_defaults(cfg, endpoint, transport, preset)` |
+| | `virtual int x509_crt_parse_file(cert, path)` |
+| | `virtual int pk_parse_keyfile(pk, path, password, rng, ctx)` |
+| | `virtual int ssl_setup(ssl, cfg)` |
+| | `virtual int ssl_handshake(ssl)` |
+| | `virtual int ssl_read(ssl, buf, len)` / `ssl_write` |
+| | `MbedtlsOpsImpl& MbedtlsOpsImpl::instance()` — singleton |
+| **Depends on** | mbedTLS 4.0 PSA Crypto, `Types.hpp` |
+| **Used by** | `DtlsUdpBackend` (inject at construction) |
+
+---
+
+### `ImpairmentConfigLoader`
+**Files:** `ImpairmentConfigLoader.hpp`, `ImpairmentConfigLoader.cpp`
+
+Free function `impairment_config_load(path, cfg)`. Reads an INI-style `key=value` text file (at most `MAX_CONFIG_LINES` = 64 lines, 128 bytes/line) and populates an `ImpairmentConfig` struct. Always initialises `cfg` to safe defaults before parsing; probability fields clamped to [0.0, 1.0]; unknown keys logged at WARNING_LO. SC: HAZ-002, HAZ-007.
+
+| | |
+|---|---|
+| **Key API** | `Result impairment_config_load(const char* path, ImpairmentConfig& cfg)` |
+| **Depends on** | `ImpairmentConfig`, `Logger`, `Types` |
+| **Used by** | Application startup / configuration loading |
+
+---
+
 ## 5. App Layer
 
 ### `Server` (main)
@@ -446,12 +699,16 @@ All sub-components are statically allocated at class scope — no heap after `in
 
 | Owner | Owned Sub-components |
 |---|---|
-| `DeliveryEngine` | `AckTracker`, `RetryManager`, `DuplicateFilter`, `MessageIdGen` |
-| `TcpBackend` | `ImpairmentEngine`, `RingBuffer` (recv queue), `wire_buf[8192]` |
-| `UdpBackend` | `ImpairmentEngine`, `RingBuffer` (recv queue), `wire_buf[8192]` |
+| `DeliveryEngine` | `AckTracker`, `RetryManager`, `DuplicateFilter`, `MessageIdGen`, `DeliveryEventRing`, `ReassemblyBuffer`, `OrderingBuffer` |
+| `RequestReplyEngine` | Pending-requests table (fixed array), held pointer to `DeliveryEngine` |
+| `TcpBackend` | `ImpairmentEngine`, `RingBuffer` (recv queue), `wire_buf[SOCKET_RECV_BUF_BYTES]` |
+| `TlsTcpBackend` | `ImpairmentEngine`, `RingBuffer` (recv queue), `wire_buf[SOCKET_RECV_BUF_BYTES]`, mbedTLS ssl_context array |
+| `UdpBackend` | `ImpairmentEngine`, `RingBuffer` (recv queue), `wire_buf[SOCKET_RECV_BUF_BYTES]` |
+| `DtlsUdpBackend` | `ImpairmentEngine`, `RingBuffer` (recv queue), `wire_buf[SOCKET_RECV_BUF_BYTES]`, mbedTLS ssl/cfg/cert state |
 | `LocalSimHarness` | `ImpairmentEngine`, `RingBuffer` (recv queue) |
-| `ImpairmentEngine` | `PrngEngine`, `DelayEntry[32]` (delay buffer), `MessageEnvelope[32]` (reorder buffer) |
-| `RingBuffer` | `MessageEnvelope[64]` (statically allocated array) |
+| `ImpairmentEngine` | `PrngEngine`, `DelayEntry[IMPAIR_DELAY_BUF_SIZE]` (delay buffer), `MessageEnvelope[IMPAIR_DELAY_BUF_SIZE]` (reorder buffer) |
+| `RingBuffer` | `MessageEnvelope[MSG_RING_CAPACITY]` (statically allocated array) |
+| `DeliveryEventRing` | `DeliveryEvent[DELIVERY_EVENT_RING_CAPACITY]` (statically allocated array) |
 
 ### 6.2 Dependency Injection (pointer / reference)
 
@@ -499,24 +756,45 @@ The application calls `DeliveryEngine::pump_retries(now_us)` periodically (typic
 | Class | Depends On |
 |---|---|
 | `Types` | — (no project dependencies) |
+| `Version` | — |
 | `Logger` | `Types` |
 | `MessageEnvelope` | `Types` |
-| `ChannelConfig` / `TransportConfig` | `Types` |
-| `TransportInterface` | `Types`, `MessageEnvelope`, `ChannelConfig` |
-| `RingBuffer` | `Types`, `MessageEnvelope` |
-| `Serializer` | `Types`, `MessageEnvelope` |
+| `ChannelConfig` / `TransportConfig` | `Types`, `TlsConfig` |
+| `ProtocolVersion` | — |
+| `DeliveryStats` | `Types` |
+| `DeliveryEvent` | `Types` |
+| `DeliveryEventRing` | `Types`, `DeliveryEvent`, `<atomic>` |
+| `TransportInterface` | `Types`, `MessageEnvelope`, `ChannelConfig`, `DeliveryStats` |
+| `RingBuffer` | `Types`, `MessageEnvelope`, `<atomic>` |
+| `Serializer` | `Types`, `MessageEnvelope`, `ProtocolVersion` |
+| `Fragmentation` | `Types`, `MessageEnvelope` |
+| `ReassemblyBuffer` | `Types`, `MessageEnvelope` |
+| `OrderingBuffer` | `Types`, `MessageEnvelope` |
+| `RequestReplyHeader` | `Types` |
 | `MessageIdGen` | `Types` |
 | `Timestamp` (free functions) | POSIX `<ctime>`, `CLOCK_MONOTONIC` |
 | `DuplicateFilter` | `Types` |
-| `AckTracker` | `Types`, `MessageEnvelope`, `Timestamp` |
-| `RetryManager` | `Types`, `MessageEnvelope`, `Timestamp` |
-| `DeliveryEngine` | `TransportInterface`, `AckTracker`, `RetryManager`, `DuplicateFilter`, `MessageIdGen`, `Timestamp`, `Logger` |
+| `AckTracker` | `Types`, `MessageEnvelope`, `Timestamp`, `DeliveryStats` |
+| `RetryManager` | `Types`, `MessageEnvelope`, `Timestamp`, `DeliveryStats` |
+| `DeliveryEngine` | `TransportInterface`, `AckTracker`, `RetryManager`, `DuplicateFilter`, `MessageIdGen`, `DeliveryEventRing`, `ReassemblyBuffer`, `OrderingBuffer`, `Timestamp`, `Logger` |
+| `RequestReplyEngine` | `DeliveryEngine`, `RequestReplyHeader`, `Timestamp`, `Logger`, `Types` |
+| `IResetHandler` | `Types` |
+| `AssertState` | `IResetHandler`, `Types` |
+| `AbortResetHandler` | `IResetHandler` |
+| `TlsConfig` | `Types` |
 | `PrngEngine` | `Types` |
 | `ImpairmentConfig` | `Types` |
 | `ImpairmentEngine` | `PrngEngine`, `ImpairmentConfig`, `MessageEnvelope`, `Timestamp`, `Logger`, `Types` |
-| `SocketUtils` | POSIX sockets/poll/fcntl, `Serializer`, `Types`, `Logger` |
-| `TcpBackend` | `TransportInterface` (implements), `SocketUtils`, `Serializer`, `ImpairmentEngine`, `RingBuffer`, `Logger`, `Timestamp` |
-| `UdpBackend` | `TransportInterface` (implements), `SocketUtils`, `Serializer`, `ImpairmentEngine`, `RingBuffer`, `Logger` |
+| `ImpairmentConfigLoader` | `ImpairmentConfig`, `Logger`, `Types` |
+| `ISocketOps` | `Types` |
+| `SocketOpsImpl` | `ISocketOps`, POSIX sockets |
+| `SocketUtils` | POSIX sockets/poll/fcntl, `Types`, `Logger` |
+| `TcpBackend` | `TransportInterface` (implements), `ISocketOps`, `Serializer`, `ImpairmentEngine`, `RingBuffer`, `Logger`, `Timestamp`, `DeliveryStats` |
+| `UdpBackend` | `TransportInterface` (implements), `ISocketOps`, `Serializer`, `ImpairmentEngine`, `RingBuffer`, `Logger`, `DeliveryStats` |
+| `IMbedtlsOps` | `Types` |
+| `MbedtlsOpsImpl` | `IMbedtlsOps`, mbedTLS 4.0 PSA Crypto |
+| `TlsTcpBackend` | `TransportInterface` (implements), `TlsConfig`, `SocketUtils`, `Serializer`, `ImpairmentEngine`, `RingBuffer`, `Logger`, mbedTLS |
+| `DtlsUdpBackend` | `TransportInterface` (implements), `TlsConfig`, `IMbedtlsOps`, `Serializer`, `ImpairmentEngine`, `RingBuffer`, `Logger` |
 | `LocalSimHarness` | `TransportInterface` (implements), `ImpairmentEngine`, `RingBuffer`, `Logger` |
 | `Server` (main) | `TcpBackend`, `DeliveryEngine`, `ChannelConfig`, `Logger`, `Timestamp` |
 | `Client` (main) | `TcpBackend`, `DeliveryEngine`, `ChannelConfig`, `Logger`, `Timestamp` |

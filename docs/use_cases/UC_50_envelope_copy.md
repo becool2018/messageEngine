@@ -13,15 +13,15 @@ This is a System Internal use case. It is invoked by `RingBuffer::push()`, `Ring
 - **Trigger:** `RingBuffer::push(env)` or `RingBuffer::pop(out_env)` needs to transfer envelope contents between the caller's stack and the fixed-array buffer slot. File: `src/core/RingBuffer.hpp`.
 - **Goal:** Perform a safe, complete copy of a `MessageEnvelope` struct (including the 4096-byte payload array) without any pointer aliasing.
 - **Success outcome:** Destination `MessageEnvelope` is byte-identical to source. No partial copies.
-- **Error outcomes:** None — `envelope_copy()` has no error states if called with valid non-null pointers.
+- **Error outcomes:** None — `envelope_copy()` has no error states. Both parameters are references; null cannot be passed.
 
 ---
 
 ## 2. Entry Points
 
 ```cpp
-// src/core/Envelope.hpp (inline) or src/core/Envelope.cpp
-void envelope_copy(MessageEnvelope* dst, const MessageEnvelope* src);
+// src/core/MessageEnvelope.hpp (inline)
+void envelope_copy(MessageEnvelope& dst, const MessageEnvelope& src);
 ```
 
 Called from:
@@ -33,11 +33,9 @@ Called from:
 
 ## 3. End-to-End Control Flow
 
-1. **`envelope_copy(dst, src)`** — entry.
-2. `NEVER_COMPILED_OUT_ASSERT(dst != nullptr)`.
-3. `NEVER_COMPILED_OUT_ASSERT(src != nullptr)`.
-4. `NEVER_COMPILED_OUT_ASSERT(dst != src)` — no self-copy.
-5. `memcpy(dst, src, sizeof(MessageEnvelope))` — full struct copy including payload array.
+1. **`envelope_copy(dst, src)`** — entry (reference parameters; null is not possible).
+2. `NEVER_COMPILED_OUT_ASSERT(&dst != &src)` — no self-copy.
+3. `memcpy(&dst, &src, sizeof(MessageEnvelope))` — full struct copy including payload array.
 6. Returns (void).
 
 ---
@@ -45,11 +43,9 @@ Called from:
 ## 4. Call Tree
 
 ```
-envelope_copy(dst, src)                            [Envelope.hpp/cpp]
- ├── NEVER_COMPILED_OUT_ASSERT(dst != nullptr)
- ├── NEVER_COMPILED_OUT_ASSERT(src != nullptr)
- ├── NEVER_COMPILED_OUT_ASSERT(dst != src)
- └── memcpy(dst, src, sizeof(MessageEnvelope))
+envelope_copy(dst, src)                            [MessageEnvelope.hpp inline]
+ ├── NEVER_COMPILED_OUT_ASSERT(&dst != &src)
+ └── memcpy(&dst, &src, sizeof(MessageEnvelope))
 ```
 
 ---
@@ -77,7 +73,7 @@ No branching beyond the assertion checks.
 
 ## 8. Memory & Ownership Semantics
 
-- `dst` and `src` are pointers to `MessageEnvelope` objects owned by their respective callers.
+- `dst` and `src` are references to `MessageEnvelope` objects owned by their respective callers.
 - `sizeof(MessageEnvelope) 4144 bytes` — copying this on every push/pop is the dominant memory operation in the receive path; documented in WCET analysis.
 - No heap allocation. Power of 10 Rule 3 compliant.
 
@@ -109,13 +105,13 @@ No branching beyond the assertion checks.
 
 ```
 [RingBuffer::push(env)]
-  -> envelope_copy(&m_buf[head], &env)
-       -> memcpy(dst, src, sizeof(MessageEnvelope))
+  -> envelope_copy(m_buf[head], env)
+       -> memcpy(&dst, &src, sizeof(MessageEnvelope))
   [m_head.store(next_head, release)]
 
 [RingBuffer::pop(out_env)]
-  -> envelope_copy(out_env, &m_buf[tail])
-       -> memcpy(dst, src, sizeof(MessageEnvelope))
+  -> envelope_copy(out_env, m_buf[tail])
+       -> memcpy(&dst, &src, sizeof(MessageEnvelope))
   [m_tail.store(next_tail, release)]
 ```
 
