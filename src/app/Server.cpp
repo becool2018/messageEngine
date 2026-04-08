@@ -15,6 +15,7 @@
 /**
  * @file Server.cpp
  * @brief Safety-critical TCP server demo.
+ * @generated Produced by Claude Sonnet 4.6 (Anthropic) with human review.
  *
  * Requirement traceability: messageEngine/CLAUDE.md overall architecture.
  *

@@ -190,7 +190,9 @@ ALL_LIB_OBJS := $(CORE_OBJS) $(PLATFORM_OBJS)
 # ─────────────────────────────────────────────────────────────────────────────
 # Targets
 # ─────────────────────────────────────────────────────────────────────────────
-.PHONY: all clean install tests stress_tests run_stress_tests server client check_traceability \
+.PHONY: all clean install tests stress_tests run_stress_tests server client \
+        tls_demo dtls_demo demos \
+        check_traceability \
         lint cppcheck pclint scan_build static_analysis \
         coverage coverage_show coverage_report \
         sanitize_tests run_sanitize \
@@ -203,6 +205,14 @@ server: $(ALL_LIB_OBJS) build/objs/app/Server.o
 
 client: $(ALL_LIB_OBJS) build/objs/app/Client.o
 	$(CXX) $(CXXFLAGS) -o build/client $^ $(LDFLAGS) $(EXE_LDFLAGS)
+
+tls_demo: $(ALL_LIB_OBJS) build/objs/app/TlsTcpDemo.o
+	$(CXX) $(CXXFLAGS) -o build/tls_demo $^ $(LDFLAGS)
+
+dtls_demo: $(ALL_LIB_OBJS) build/objs/app/DtlsUdpDemo.o
+	$(CXX) $(CXXFLAGS) -o build/dtls_demo $^ $(LDFLAGS)
+
+demos: tls_demo dtls_demo
 
 tests: \
     build/test_MessageEnvelope \
