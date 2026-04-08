@@ -217,8 +217,8 @@ cookie secret must be explicitly zeroed before the buffer goes out of scope or i
   - Use `mbedtls_platform_zeroize(buf, len)` for any buffer associated with mbedTLS operations.
   - Do not use `memset()` for this purpose; optimizing compilers are permitted to elide memset()
     calls to dead storage, leaving key material in memory (CWE-14).
-  - Applies to: all key-loading paths in TlsTcpBackend and DtlsUdpBackend, and any future
-    code that handles credentials or session tokens.
+  - Applies to: any code that loads TLS/DTLS keys, session secrets, authentication tokens,
+    or cookie secrets. Project-specific applicability is documented in CLAUDE.md §8.3.
 
 7d. Timing-safe comparisons for security-sensitive equality (Required)
 Equality comparisons that guard authentication, authorization, or integrity decisions must use
@@ -228,7 +228,7 @@ a constant-time comparison function.
     (e.g., DTLS cookie verification, future MAC or HMAC validation).
   - Standard `memcmp()` short-circuits on the first differing byte and leaks information about
     the compared values via execution time — a timing oracle (CWE-208).
-  - Currently relevant to: DTLS cookie exchange path in DtlsUdpBackend (REQ-6.4.2).
+  - Project-specific applicability is documented in CLAUDE.md §8.3.
 
 7e. Compiler hardening flags (Required for production builds)
 The following flags must be enabled in production (non-debug) build profiles. They do not change
