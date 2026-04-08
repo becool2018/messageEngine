@@ -386,7 +386,7 @@ static int run_client(uint16_t port)
 // ─────────────────────────────────────────────────────────────────────────────
 // Parse port from argv
 // ─────────────────────────────────────────────────────────────────────────────
-static uint16_t parse_port(int argc, char* const argv[], int idx)
+static uint16_t parse_port(int argc, const char* const argv[], int idx)
 {
     NEVER_COMPILED_OUT_ASSERT(argc >= 1);        // Assert: valid argc
     NEVER_COMPILED_OUT_ASSERT(argv != nullptr);  // Assert: valid argv
