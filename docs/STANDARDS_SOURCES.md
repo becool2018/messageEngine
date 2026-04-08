@@ -11,7 +11,8 @@
 2. [Security Rules](#2-security-rules)
 3. [NASA Software Assurance Standards](#3-nasa-software-assurance-standards)
 4. [Supporting Language Standards](#4-supporting-language-standards)
-5. [Summary by Source](#5-summary-by-source)
+5. [Contradictions and Tensions Between Standards](#5-contradictions-and-tensions-between-standards)
+6. [Summary by Source](#6-summary-by-source)
 
 ---
 
@@ -224,7 +225,66 @@
 
 ---
 
-## 5. Summary by Source
+## 5. Contradictions and Tensions Between Standards
+
+The standards above are largely complementary, but several genuine conflicts exist. Four are formally documented and resolved in the project's `CLAUDE.md` files; three are real but only partially addressed.
+
+---
+
+### Resolved conflicts
+
+#### Conflict 1 — Power of 10 Rule 5 (always-on assertions) vs. `assert()` + `NDEBUG`
+**Standards in tension:** JPL Power of 10 Rule 5 (assertions must be active in all builds) vs. the C/C++ convention that `assert()` is compiled out when `NDEBUG` is defined.
+**Where documented:** `.claude/CLAUDE.md §8`, `CLAUDE.md §10`.
+**Resolution:** `assert()` is prohibited in production code. All production assertions use the project macro `NEVER_COMPILED_OUT_ASSERT(cond)`, which is never disabled by `NDEBUG`. In debug builds it calls `abort()`; in production builds it calls a registered reset handler. See `src/core/Assert.hpp`.
+
+---
+
+#### Conflict 2 — Power of 10 universality vs. test framework needs
+**Standards in tension:** JPL Power of 10 (all code must obey all rules) vs. the practical requirement that test frameworks (Catch2, etc.) internally use dynamic allocation, STL containers, function pointers, and templates — all of which Power of 10 bans.
+**Where documented:** `CLAUDE.md §1b`, `CLAUDE.md §9`.
+**Resolution:** An explicit per-rule exemption table in `CLAUDE.md §9` defines exactly which rules are relaxed in `tests/` only and why. Production code (`src/`) has no exemptions.
+
+---
+
+#### Conflict 3 — Power of 10 Rule 2 (fixed loop bounds) vs. server/networking loops
+**Standards in tension:** JPL Power of 10 Rule 2 requires every loop to have a statically provable finite upper bound. TCP accept loops, UDP poll loops, and server event loops have no meaningful finite iteration count — they are designed to run for the lifetime of a connection or process.
+**Where documented:** `.claude/CLAUDE.md §2.2` (infrastructure loop deviation).
+**Resolution:** Designated infrastructure loops are exempt from Rule 2 provided they satisfy three conditions: (1) bounded per-iteration work, (2) a runtime termination condition (signal, timeout, connection close, or mode change), and (3) an in-code comment citing the deviation. All other loops must comply with Rule 2 as written.
+
+---
+
+#### Conflict 4 — Power of 10 Rule 9 (no function pointers) vs. C++ virtual dispatch
+**Standards in tension:** JPL Power of 10 Rule 9 prohibits function pointers in production code. C++ virtual dispatch is implemented by the compiler using vtables, which are tables of function pointers.
+**Where documented:** `.claude/CLAUDE.md §2` (Rule 9 exception), `CLAUDE.md §9`.
+**Resolution:** Virtual dispatch is the approved architectural polymorphism mechanism. It is explicitly permitted as a carve-out from Rule 9 because: (1) no explicit function pointer declarations appear in application code — the compiler generates the vtable; (2) MISRA C++:2023 explicitly endorses virtual functions under its own rules; (3) it is the F´ framework's standard interface pattern. All virtual functions must conform to MISRA C++:2023 rules on virtual functions.
+
+---
+
+### Unresolved or partially addressed tensions
+
+#### Tension 1 — `signal()` deviation mis-labelled
+**Standards in tension:** JPL Power of 10 Rule 9 (no function pointers) and MISRA C++:2023 (restricted use of function pointers). `signal()` takes a function pointer argument with no POSIX alternative.
+**Current state:** Every call site in the codebase is annotated `// MISRA deviation: signal() requires a function pointer; no alternative POSIX API available.` This correctly acknowledges the MISRA angle but does not explicitly acknowledge the Power of 10 Rule 9 deviation. The fix to the underlying tension (replacing `signal()` with `sigaction()`) does not help — `sigaction` also takes a function pointer.
+**Practical impact:** Low. The deviation is documented and the use is minimal (one call per program). The labeling gap is a documentation issue, not a safety issue.
+
+---
+
+#### Tension 2 — CERT §7a integer safety vs. MISRA integer rules produce redundant guards
+**Standards in tension:** SEI CERT INT30–33-C and MISRA C++:2023 both mandate range validation of externally-supplied integers, but from different perspectives (CERT: exploitation vectors; MISRA: implementation-defined behavior and UB). Following both rigorously produces overlapping validation guards for the same value.
+**Current state:** Both are applied; the resulting code has more range checks than either standard alone would require. This mildly conflicts with JPL Power of 10 Rule 4 (short functions, CC ≤ 10) and the F´ principle of simplicity — extra guards add complexity and length.
+**Practical impact:** Low in the current codebase (the overlap is small). Could become noticeable in dense parsing functions. No project-level resolution is documented; contributors are expected to apply both and accept the redundancy.
+
+---
+
+#### Tension 3 — Voluntary Class B practices on a formal Class C classification
+**Standards in tension:** NPR 7150.2D classifies this project as Class C (infrastructure software, no direct actuator or safety-barrier control). Class C mandates only a baseline set of verification methods. The project voluntarily applies Class B obligations from NASA-STD-8739.8A: MC/DC coverage, FMEA, hazard analysis, formal state machine documentation, WCET analysis, and full inspection records.
+**Current state:** The project sits between classifications — it exceeds Class C requirements but still has documented gaps before it could formally claim Class B (no TLA+/SPIN model checking, no Frama-C WP proofs, no independent V&V). See `TODO_FOR_CLASS_B_CERT.txt`.
+**Practical impact:** Medium. A strict Class C audit would treat many safety artifacts as optional over-engineering. A Class B audit would find the gaps. The project's intent is to provide "flight-like" assurance without committing to a full Class B certification program; this intent is documented in `CLAUDE.md §17` but the boundary between what is required and what is voluntary is not always clear to new contributors.
+
+---
+
+## 6. Summary by Source
 
 | Source | Standards |
 |---|---|
