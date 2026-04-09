@@ -840,10 +840,10 @@ The project has 24 test binaries. The stress test (`test_stress_capacity`) is ru
 | `test_ImpairmentEngine` | `ImpairmentEngine` | 24 |
 | `test_ImpairmentConfigLoader` | `ImpairmentConfigLoader` | 24 |
 | `test_SocketUtils` | `SocketUtils` (POSIX helpers) | 22 |
-| `test_TcpBackend` | `TcpBackend` | 28 |
-| `test_UdpBackend` | `UdpBackend` | 20 |
-| `test_TlsTcpBackend` | `TlsTcpBackend` | 34 |
-| `test_DtlsUdpBackend` | `DtlsUdpBackend` | 39 |
+| `test_TcpBackend` | `TcpBackend` | 44 |
+| `test_UdpBackend` | `UdpBackend` | 30 |
+| `test_TlsTcpBackend` | `TlsTcpBackend` | 47 |
+| `test_DtlsUdpBackend` | `DtlsUdpBackend` | 52 |
 | `test_LocalSim` | `LocalSimHarness` | 11 |
 | `test_stress_capacity` | Stress: capacity limits under load | 8 |
 

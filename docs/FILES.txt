@@ -516,25 +516,32 @@ test_AssertState.cpp
   check_and_clear_true, and check_and_clear_idempotent.
 
 test_TcpBackend.cpp
-  28 tests covering the TcpBackend via MockSocketOps injection: config
+  44 tests covering the TcpBackend via MockSocketOps injection: config
   defaults, server bind/close, client connect failure, receive timeout, send
   with no clients, close-before-init, is_open lifecycle, loopback roundtrip,
   large-timeout cap, bad bind IP, num_channels_zero, garbage-frame
   deserialize failure, two-client compaction, client detects server close,
-  7 mock-injection fault tests (socket create, reuseaddr, listen, nonblocking,
-  impairment delay paths, recv queue overflow, send_frame fail, loss impairment
-  drop), and 3 integration tests (test_connection_limit_reached,
-  test_tcp_inbound_partition_drops_received,
+  7 original mock-injection fault tests (socket create, reuseaddr, listen,
+  nonblocking, impairment delay paths, recv queue overflow, send_frame fail,
+  loss impairment drop), 5 M5 fault-injection tests added in INSP-019
+  (test_mock_tcp_server_bind_fail, test_mock_tcp_client_connect_fail,
+  test_mock_tcp_recv_frame_fail, test_mock_tcp_send_hello_frame_fail,
+  test_mock_tcp_get_stats), and 3 integration tests
+  (test_connection_limit_reached, test_tcp_inbound_partition_drops_received,
   test_tcp_inbound_reorder_buffers_message).
 
 test_UdpBackend.cpp
-  20 tests covering the UdpBackend via MockSocketOps injection: config
+  30 tests covering the UdpBackend via MockSocketOps injection: config
   defaults, bind/close, receive timeout, loopback send/receive, multiple
   messages, close-before-init, is_open lifecycle, unreachable peer, bad
   bind IP, num_channels_zero, garbage datagram, recv_wrong_source_dropped
-  (REQ-6.2.4 source validation), 5 mock-injection fault tests (create
-  fail, reuseaddr fail, impairment delay paths, send loss impairment,
-  send_to fail, recv_from fail, recv queue initial pop), and
+  (REQ-6.2.4 source validation), 5 original mock-injection fault tests
+  (create fail, reuseaddr fail, impairment delay paths, send loss impairment,
+  send_to fail, recv_from fail, recv queue initial pop), 4 M5 fault-injection
+  tests added in INSP-019 (test_mock_udp_bind_fail,
+  test_mock_udp_send_hello_send_to_fail, test_mock_udp_send_hello_no_peer,
+  test_mock_udp_get_stats), 2 targeted branch-coverage tests
+  (test_udp_invalid_num_channels, test_udp_send_hello_peer_port_zero), and
   test_udp_inbound_partition_drops_received.
 
 test_SocketUtils.cpp
@@ -556,7 +563,7 @@ MockTransportInterface.hpp
   receive_message(), enabling M5 fault injection of transport-layer errors.
 
 test_TlsTcpBackend.cpp
-  34 tests covering TlsTcpBackend via ISocketOps injection: TlsConfig
+  47 tests covering TlsTcpBackend via ISocketOps injection: TlsConfig
   defaults, transport_config includes TLS fields, server bind plaintext,
   bad cert/key path, server bind TLS, plaintext loopback, TLS loopback,
   connect bad host, receive timeout, send no clients, echo loopback
@@ -568,11 +575,13 @@ test_TlsTcpBackend.cpp
   TLS zero-length frame, DI constructor, recv queue overflow,
   test_send_impairment_loss_drop, test_session_resumption_disabled_by_default,
   test_tls_session_saved_after_handshake,
-  test_tls_session_resumption_reconnect_cycle, and
-  test_tls_inbound_partition_drops_received.
+  test_tls_session_resumption_reconnect_cycle,
+  test_tls_inbound_partition_drops_received, and 3 M5/targeted tests added
+  in INSP-019 (test_tls_send_hello_frame_fail_via_mock, test_tls_get_stats,
+  test_tls_cert_is_directory).
 
 test_DtlsUdpBackend.cpp
-  39 tests covering DtlsUdpBackend via IMbedtlsOps/ISocketOps injection:
+  52 tests covering DtlsUdpBackend via IMbedtlsOps/ISocketOps injection:
   plaintext server bind, DTLS bad cert, plaintext loopback, DTLS loopback,
   oversized payload rejected (ERR_INVALID), receive timeout, bad key path,
   bad CA cert file, server init timeout (ERR_TIMEOUT), client bad peer IP,
@@ -583,8 +592,12 @@ test_DtlsUdpBackend.cpp
   fault tests (crypto_init fail, ssl_config_defaults fail, ssl_conf_own_cert
   fail, ssl_cookie_setup fail, server recvfrom_peek fail, server net_connect
   fail, server ssl_setup fail, server ssl_set_transport_id fail, client
-  net_connect fail, client ssl_setup fail, and more), and
-  test_dtls_inbound_partition_drops_received.
+  net_connect fail, client ssl_setup fail, and more),
+  test_dtls_inbound_partition_drops_received, and 5 M5/targeted tests added
+  in INSP-019 (test_mock_dtls_sock_bind_fail,
+  test_mock_dtls_plaintext_recv_from_fail,
+  test_mock_dtls_plaintext_send_to_fail, test_mock_dtls_get_stats,
+  test_dtls_cert_is_directory).
 
 test_ImpairmentConfigLoader.cpp
   24 tests: file not found (ERR_IO), empty file, all fields parsed, partial

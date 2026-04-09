@@ -3192,6 +3192,103 @@ static void test_tls_source_id_match_accepted()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Mock fault-injection: TlsTcpBackend send_hello_frame failure via ISocketOps
+// Covers: TlsTcpBackend::send_hello_frame() tls_send_frame-failure path
+//         (plaintext: m_sock_ops->send_frame returns false → ERR_IO)
+// Verifies: REQ-6.1.8, REQ-6.1.10
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.8, REQ-6.1.10
+// Verification: M1 + M2 + M4 + M5 (fault injection via ISocketOps)
+static void test_tls_send_hello_frame_fail_via_mock()
+{
+    // Note: TlsTcpBackend client connects via mbedtls_net_connect() (not ISocketOps),
+    // so a real loopback server is needed for init() to succeed.  After init() the
+    // injected mock intercepts the plaintext send_frame call in send_hello_frame().
+    static const uint16_t PORT = 19910U;
+
+    TlsHello1ServerArg srv_arg;
+    srv_arg.port   = PORT;
+    srv_arg.result = Result::ERR_IO;
+
+    pthread_t srv_tid = create_thread_4mb(tls_hello1_server_thread, &srv_arg);
+    usleep(80000U);  // allow server to bind and listen
+
+    MockSocketOps mock;
+    TlsTcpBackend client(mock);
+
+    TransportConfig cli_cfg;
+    make_transport_config(cli_cfg, false, PORT, false);  // plaintext client
+
+    Result r = client.init(cli_cfg);
+    assert(r == Result::OK);
+    assert(client.is_open() == true);
+
+    mock.fail_send_frame = true;  // inject after init: next send_frame fails
+
+    // register_local_id() → send_hello_frame() → tls_send_frame() →
+    // m_sock_ops->send_frame() (mock, returns false) → ERR_IO
+    r = client.register_local_id(9U);
+    assert(r == Result::ERR_IO);
+
+    client.close();
+    (void)pthread_join(srv_tid, nullptr);
+
+    printf("PASS: test_tls_send_hello_frame_fail_via_mock\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// get_transport_stats() — previously uncovered (zero executions in any test)
+// Covers: TlsTcpBackend::get_transport_stats() (lines 1842+)
+// Verifies: REQ-7.2.4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-7.2.4
+static void test_tls_get_stats()
+{
+    // get_transport_stats() was never called in any test; all its lines had
+    // 0 executions.  This test exercises the function and verifies the
+    // counters are zero for a freshly-initialised server with no connections.
+    MockSocketOps mock;
+    TlsTcpBackend backend(mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, true, 19911U, false);  // plaintext server
+    assert(backend.init(cfg) == Result::OK);
+
+    TransportStats stats;
+    transport_stats_init(stats);
+    backend.get_transport_stats(stats);
+
+    assert(stats.connections_opened == 0U);
+    assert(stats.connections_closed == 0U);
+
+    backend.close();
+    printf("PASS: test_tls_get_stats\n");
+}
+
+static void test_tls_cert_is_directory()
+{
+    // Verifies: REQ-6.3.4
+    // Covers: tls_path_is_regular_file() !S_ISREG(st.st_mode) True branch (L126)
+    // Strategy: pass /tmp (always-present directory) as cert_file so lstat()
+    //           succeeds but S_ISREG() returns false → ERR_IO.
+    TlsTcpBackend backend;
+    TransportConfig cfg;
+    make_transport_config(cfg, true, 19912U, true);
+
+    // Override cert_file with an existing directory — regular-file check fires.
+    uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.cert_file)) - 1U;
+    (void)strncpy(cfg.tls.cert_file, "/tmp", path_max);
+    cfg.tls.cert_file[path_max] = '\0';
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!backend.is_open());
+    printf("PASS: test_tls_cert_is_directory\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3254,6 +3351,11 @@ int main()
     // Source address validation tests (REQ-6.1.11)
     test_tls_source_id_mismatch_dropped();
     test_tls_source_id_match_accepted();
+
+    // Mock fault-injection: ISocketOps send_hello_frame failure (M5)
+    test_tls_send_hello_frame_fail_via_mock();
+    test_tls_get_stats();
+    test_tls_cert_is_directory();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);

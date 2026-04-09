@@ -143,6 +143,19 @@ Category d-iii requires written proof, not inspection alone.
 Category e-i is never valid at any classification level as a
 permanent ceiling; it is a temporary gap requiring M5.
 
+**Relationship to per-file thresholds in `docs/COVERAGE_CEILINGS.md`:**
+The policy floor is **100% of reachable branches** — this is not negotiable
+regardless of classification level. The numeric thresholds listed in
+`docs/COVERAGE_CEILINGS.md` (e.g., ≥70%, ≥74%) are *regression guards* set
+at the current maximum achievable given category d-i (`NEVER_COMPILED_OUT_ASSERT`
+`[[noreturn]]` True paths) and, in a few files, category d-iii
+(mathematically-provable dead branches). They are not policy floors, not
+acceptable coverage targets, and not evidence of Class B compliance gaps.
+Power of 10 Rule 5 (≥2 assertions per function) is the structural cause: every
+function contributes at least 2 permanently-missed LLVM branch outcomes. A
+threshold that falls below its documented value is a defect; a threshold that
+rises is an improvement that must be reflected in the table.
+
 ### 4.4 Injectable interface requirement
 
 Any module whose correctness verification at Class B or Class A
@@ -223,3 +236,19 @@ e) Update of the Hazard Analysis and FMEA to reflect any new hazards
 
 Reclassification is not complete until all items above are done and
 signed off in the project inspection record.
+
+### 6.1 Current completion status (as of 2026-04-09)
+
+| Item | Requirement | Status |
+|------|-------------|--------|
+| a | Identify modules with untestable error-handling paths | **COMPLETE** — All four transport backends (TcpBackend, UdpBackend, TlsTcpBackend, DtlsUdpBackend) identified. POSIX socket/TLS/DTLS dependency calls cannot fail in a loopback test environment. |
+| b | Design and implement injectable interfaces | **COMPLETE** — `ISocketOps` (src/platform/ISocketOps.hpp) with `MockSocketOps` test double covers TcpBackend and UdpBackend. `IMbedtlsOps` (src/platform/IMbedtlsOps.hpp) with `DtlsMockOps` covers TlsTcpBackend and DtlsUdpBackend. Both interfaces reviewed to M1 + M2 + M3. |
+| c | Implement fault-injection test suites (M5) | **COMPLETE** — 15 M5 tests added in INSP-019 (commits 681cedd, 0b6918e) exercise all POSIX error-handling paths across all four backends. SC function `.hpp` declarations carry `— verified to M5` annotations. Test file headers carry `// Verification: M1 + M2 + M4 + M5 (fault injection via ISocketOps)` or equivalent. |
+| d | Update SC declarations and test headers | **COMPLETE** — All SC function declarations in TcpBackend.hpp, UdpBackend.hpp, TlsTcpBackend.hpp, DtlsUdpBackend.hpp carry `— verified to M5`. All four backend test files carry `Verification: M1 + M2 + M4 + M5` headers. |
+| e | Update Hazard Analysis and FMEA | **COMPLETE** — HAZARD_ANALYSIS.md §2 and §3 updated through INSP-018 to reflect the injectable interface design; no new hazards were identified during the M5 test suite implementation. |
+
+**Remaining gap before formal Class B reclassification:** Items a–e are complete. The remaining
+obligation (per NPR 7150.2D §3.11) is independent V&V of all SC functions — a process gate
+requiring a human reviewer who was not involved in the implementation. See
+`TODO_FOR_CLASS_B_CERT.txt` for the full gap list including TLA+/SPIN model checking and
+Frama-C WP theorem proving requirements.

@@ -2550,6 +2550,143 @@ static void test_plaintext_server_wrong_port_after_learn_dropped()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Additional ISocketOps mock fault-injection tests (VVP-001 M5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_mock_dtls_sock_bind_fail()
+{
+    // Verifies: REQ-6.4.5, REQ-6.3.2
+    // Covers: DtlsUdpBackend::init() bind-failure path (ISocketOps::do_bind
+    //         returns false in plaintext mode — lines 1053–1058)
+    MockSocketOps sock_mock;
+    sock_mock.fail_do_bind = true;
+
+    DtlsMockOps tls_mock;
+
+    DtlsUdpBackend backend(sock_mock, tls_mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_dtls_config(cfg, true, 15001U, false);  // plaintext server
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!backend.is_open());
+    assert(sock_mock.n_do_close >= 1);
+
+    printf("PASS: test_mock_dtls_sock_bind_fail\n");
+}
+
+static void test_mock_dtls_plaintext_recv_from_fail()
+{
+    // Verifies: REQ-4.1.3, REQ-6.4.5, REQ-6.3.2
+    // Covers: DtlsUdpBackend::recv_one_dtls_datagram() recv_from-failure path
+    //         (plaintext mode lines 872–875: m_sock_ops->recv_from returns false)
+    // Strategy: set fail_recv_from before init; init still succeeds (create/bind
+    //           don't use recv_from); receive_message → recv_from fails → ERR_TIMEOUT.
+    MockSocketOps sock_mock;
+    sock_mock.fail_recv_from = true;  // inject before init; only recv path affected
+
+    DtlsMockOps tls_mock;
+
+    DtlsUdpBackend backend(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_dtls_config(cfg, true, 15002U, false);  // plaintext server
+
+    Result init_res = backend.init(cfg);
+    assert(init_res == Result::OK);
+    assert(backend.is_open());
+
+    MessageEnvelope env;
+    Result r = backend.receive_message(env, 200U);
+    assert(r == Result::ERR_TIMEOUT);
+
+    assert(backend.is_open());  // backend remains open after receive failure
+    backend.close();
+    printf("PASS: test_mock_dtls_plaintext_recv_from_fail\n");
+}
+
+static void test_mock_dtls_plaintext_send_to_fail()
+{
+    // Verifies: REQ-4.1.2, REQ-6.4.5, REQ-6.3.2
+    // Covers: DtlsUdpBackend::send_wire_bytes() send_to-failure path
+    //         (plaintext mode lines 1267–1273: m_sock_ops->send_to returns false)
+    // Strategy: init succeeds; inject send_to failure; send_message → ERR_IO.
+    MockSocketOps sock_mock;
+    DtlsMockOps tls_mock;
+
+    DtlsUdpBackend backend(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_dtls_config(cfg, false, 15003U, false);  // plaintext client
+    assert(backend.init(cfg) == Result::OK);
+    assert(backend.is_open());
+
+    sock_mock.fail_send_to = true;  // inject after init
+
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.message_id        = 0xD7150003ULL;
+    env.source_id         = 2U;
+    env.destination_id    = 1U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+
+    Result r = backend.send_message(env);
+    assert(r == Result::ERR_IO);
+
+    backend.close();
+    printf("PASS: test_mock_dtls_plaintext_send_to_fail\n");
+}
+
+static void test_mock_dtls_get_stats()
+{
+    // Verifies: REQ-7.2.4
+    // Covers: DtlsUdpBackend::get_transport_stats() — all lines previously uncovered.
+    MockSocketOps sock_mock;
+    DtlsMockOps tls_mock;
+
+    DtlsUdpBackend backend(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_dtls_config(cfg, true, 15004U, false);  // plaintext server
+    assert(backend.init(cfg) == Result::OK);
+
+    TransportStats stats;
+    transport_stats_init(stats);
+    backend.get_transport_stats(stats);
+
+    // UDP bind counts as a connection event (REQ-7.2.4).
+    assert(stats.connections_opened >= 1U);
+    assert(stats.connections_closed == 0U);
+
+    backend.close();
+    printf("PASS: test_mock_dtls_get_stats\n");
+}
+
+static void test_dtls_cert_is_directory()
+{
+    // Verifies: REQ-6.4.1
+    // Covers: tls_path_is_regular_file() !S_ISREG(st.st_mode) True branch (L120)
+    // Strategy: pass /tmp (always-present directory) as cert_file so lstat()
+    //           succeeds but S_ISREG() returns false → ERR_IO.
+    DtlsUdpBackend backend;
+    TransportConfig cfg;
+    make_dtls_config(cfg, true, 15005U, true);
+
+    // Override cert_file with an existing directory — regular-file check fires.
+    uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.cert_file)) - 1U;
+    (void)strncpy(cfg.tls.cert_file, "/tmp", path_max);
+    cfg.tls.cert_file[path_max] = '\0';
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!backend.is_open());
+    printf("PASS: test_dtls_cert_is_directory\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2620,6 +2757,12 @@ int main()
 
     // SEC-026: server HELLO response enables bidirectional client receive (REQ-6.1.8)
     test_server_hello_response_enables_client_recv();
+
+    test_mock_dtls_sock_bind_fail();
+    test_mock_dtls_plaintext_recv_from_fail();
+    test_mock_dtls_plaintext_send_to_fail();
+    test_mock_dtls_get_stats();
+    test_dtls_cert_is_directory();
 
     printf("=== test_DtlsUdpBackend: ALL TESTS PASSED ===\n");
     return 0;

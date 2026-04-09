@@ -2354,6 +2354,126 @@ static void test_tcp_client_server_nodeid_rotation_rejected()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Additional mock fault-injection tests (VVP-001 M5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_mock_tcp_server_bind_fail()
+{
+    // Verifies: REQ-6.1.1, REQ-6.3.2
+    // Covers: TcpBackend::bind_and_listen() bind-failure path
+    MockSocketOps mock;
+    mock.fail_do_bind = true;
+
+    TcpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_tcp_server_cfg(cfg, 19760U);
+
+    Result r = backend.init(cfg);
+    assert(r == Result::ERR_IO);
+    assert(!backend.is_open());
+    assert(mock.n_do_close >= 1);
+
+    printf("PASS: test_mock_tcp_server_bind_fail\n");
+}
+
+static void test_mock_tcp_client_connect_fail()
+{
+    // Verifies: REQ-6.1.2, REQ-6.3.2
+    // Covers: TcpBackend::connect_to_server() connect-failure path
+    MockSocketOps mock;
+    mock.fail_connect = true;
+
+    TcpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_tcp_client_cfg(cfg, 19761U);
+
+    Result r = backend.init(cfg);
+    assert(r == Result::ERR_IO);
+    assert(!backend.is_open());
+    assert(mock.n_do_close >= 1);
+
+    printf("PASS: test_mock_tcp_client_connect_fail\n");
+}
+
+static void test_mock_tcp_recv_frame_fail()
+{
+    // Verifies: REQ-6.1.6, REQ-6.3.2
+    // Covers: TcpBackend::init() client path + receive_message no-crash guarantee
+    //         with fail_recv_frame injected.
+    // Note: poll() does not fire on FAKE_FD (not a real OS socket), so the
+    //       recv_frame failure branch (remove_client_fd) is exercised by the real
+    //       loopback test test_client_detect_server_close.  This test verifies that
+    //       injecting fail_recv_frame after a successful mock init causes no crash
+    //       and receive_message returns without delivering a message.
+    MockSocketOps mock;
+    TcpBackend backend(mock);
+
+    TransportConfig cfg;
+    make_tcp_client_cfg(cfg, 19762U);
+    assert(backend.init(cfg) == Result::OK);
+    assert(backend.is_open());
+
+    mock.fail_recv_frame = true;  // inject after init
+
+    MessageEnvelope env;
+    Result r = backend.receive_message(env, 50U);
+    // poll() on FAKE_FD yields POLLNVAL or timeout; either is not OK.
+    assert(r != Result::OK);
+
+    backend.close();
+    printf("PASS: test_mock_tcp_recv_frame_fail\n");
+}
+
+static void test_mock_tcp_send_hello_frame_fail()
+{
+    // Verifies: REQ-6.1.8, REQ-6.1.10
+    // Covers: TcpBackend::send_hello_frame() send_frame-failure path
+    // Strategy: init succeeds (mock connect → FAKE_FD); inject send_frame failure;
+    //           register_local_id() calls send_hello_frame() → ERR_IO.
+    MockSocketOps mock;
+    TcpBackend backend(mock);
+
+    TransportConfig cfg;
+    make_tcp_client_cfg(cfg, 19763U);
+    assert(backend.init(cfg) == Result::OK);
+    assert(backend.is_open());
+
+    mock.fail_send_frame = true;  // inject after init
+
+    Result r = backend.register_local_id(5U);
+    assert(r == Result::ERR_IO);
+
+    backend.close();
+    printf("PASS: test_mock_tcp_send_hello_frame_fail\n");
+}
+
+static void test_mock_tcp_get_stats()
+{
+    // Verifies: REQ-7.2.4
+    // Covers: TcpBackend::get_transport_stats() — all lines previously uncovered.
+    MockSocketOps mock;
+    TcpBackend backend(mock);
+
+    TransportConfig cfg;
+    make_tcp_server_cfg(cfg, 19764U);
+    assert(backend.init(cfg) == Result::OK);
+
+    TransportStats stats;
+    transport_stats_init(stats);
+    backend.get_transport_stats(stats);
+
+    assert(stats.connections_opened == 0U);
+    assert(stats.connections_closed == 0U);
+
+    backend.close();
+    printf("PASS: test_mock_tcp_get_stats\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2383,6 +2503,11 @@ int main()
     test_mock_tcp_server_nonblocking_fail();
     test_mock_tcp_client_create_fail();
     test_mock_tcp_client_reuseaddr_fail();
+    test_mock_tcp_server_bind_fail();
+    test_mock_tcp_client_connect_fail();
+    test_mock_tcp_recv_frame_fail();
+    test_mock_tcp_send_hello_frame_fail();
+    test_mock_tcp_get_stats();
 
     // Impairment delay-path tests (Option A — full ImpairmentConfig in ChannelConfig)
     test_tcp_impairment_delay_paths();

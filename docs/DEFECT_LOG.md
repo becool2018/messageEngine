@@ -1001,3 +1001,62 @@ All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-04-06. All 14 defects (DEF-018-1 through DEF-018-14) resolved in commit 4cda101. All entry and exit criteria satisfied. Inspection INSP-018 closed PASS.
+
+---
+
+### INSP-019 — M5 fault-injection test suite + targeted branch coverage (2026-04-09)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-09 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | CLOSED — 7 defects found and fixed (commits 681cedd, 0b6918e) |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `tests/test_TcpBackend.cpp` | Added 5 MockSocketOps M5 fault-injection tests: `test_mock_tcp_server_bind_fail`, `test_mock_tcp_client_connect_fail`, `test_mock_tcp_recv_frame_fail`, `test_mock_tcp_send_hello_frame_fail`, `test_mock_tcp_get_stats` |
+| `tests/test_UdpBackend.cpp` | Added 4 MockSocketOps M5 tests: `test_mock_udp_bind_fail`, `test_mock_udp_send_hello_send_to_fail`, `test_mock_udp_send_hello_no_peer`, `test_mock_udp_get_stats`; added 2 targeted branch-coverage tests: `test_udp_invalid_num_channels`, `test_udp_send_hello_peer_port_zero` |
+| `tests/test_TlsTcpBackend.cpp` | Added 2 MockSocketOps M5 tests: `test_tls_send_hello_frame_fail_via_mock`, `test_tls_get_stats`; added 1 targeted branch test: `test_tls_cert_is_directory` |
+| `tests/test_DtlsUdpBackend.cpp` | Added 4 MockSocketOps/DtlsMockOps M5 tests: `test_mock_dtls_sock_bind_fail`, `test_mock_dtls_plaintext_recv_from_fail`, `test_mock_dtls_plaintext_send_to_fail`, `test_mock_dtls_get_stats`; added 1 targeted branch test: `test_dtls_cert_is_directory` |
+| `docs/COVERAGE_CEILINGS.md` | Updated thresholds and per-file notes for all 4 backends; added round 1 and round 2 methodology entries |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations (CC ≤ 10 enforced) | PASS |
+| `make run_tests` all tests green | PASS |
+| All new/modified `tests/` files carry `// Verifies: REQ-x.x` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Defects found
+
+| ID | File : function | Description | Severity | Disposition | Resolution |
+|----|----------------|-------------|----------|-------------|------------|
+| DEF-019-1 | `tests/test_TcpBackend.cpp` : `test_mock_tcp_server_bind_fail`, `test_mock_tcp_client_connect_fail`, `test_mock_tcp_recv_frame_fail` | **Sign-compare: `n_do_close >= 1U` where `n_do_close` is `int`.** `MockSocketOps::n_do_close` is declared as `int` (counter starts at 0, increments on each close call). Three assertions compared `int` to unsigned literal `1U`, triggering `-Werror,-Wsign-compare` and preventing compilation. | MAJOR | FIX | Changed `>= 1U` to `>= 1` in all three assertions. |
+| DEF-019-2 | `tests/test_UdpBackend.cpp` : `test_mock_udp_bind_fail` | **Sign-compare: `n_do_close >= 1U` (same class as DEF-019-1).** | MAJOR | FIX | Changed `>= 1U` to `>= 1`. |
+| DEF-019-3 | `tests/test_DtlsUdpBackend.cpp` : `test_mock_dtls_sock_bind_fail` | **Sign-compare: `n_do_close >= 1U` (same class as DEF-019-1).** | MAJOR | FIX | Changed `>= 1U` to `>= 1`. |
+| DEF-019-4 | `tests/test_TcpBackend.cpp` : `test_mock_tcp_recv_frame_fail` | **Incorrect assertion: `assert(mock.n_do_close >= 1)` expected `recv_frame()` failure to trigger `do_close()`, but `poll()` on `FAKE_FD=100` (not a real OS socket) returns `POLLNVAL` or times out rather than `POLLIN`. The `recv_frame` failure path is never reached; `receive_message()` returns non-OK via poll timeout instead.** The test asserted a side-effect that cannot occur with a fake fd, causing a spurious assertion failure. | MAJOR | FIX | Redesigned test to assert `r != Result::OK` only (poll timeout or POLLNVAL is sufficient evidence of failure); removed the `n_do_close` assertion; added a comment documenting why the actual `recv_frame` path is covered by `test_client_detect_server_close` via real loopback. |
+| DEF-019-5 | `tests/test_UdpBackend.cpp` : `test_mock_udp_get_stats` | **Incorrect assertion: `connections_opened == 0U` expected no connections after mock init, but `UdpBackend::init()` increments `connections_opened` on successful `bind()` (line 131 of UdpBackend.cpp), not only on `accept()`. The mock's `do_bind` succeeds, so the counter reaches 1.** | MINOR | FIX | Changed assertion to `connections_opened >= 1U`. |
+| DEF-019-6 | `tests/test_DtlsUdpBackend.cpp` : `test_mock_dtls_get_stats` | **Same incorrect assertion as DEF-019-5 applied to `DtlsUdpBackend`.** `DtlsUdpBackend::init()` in plaintext mode calls `do_bind()` and increments `connections_opened`. | MINOR | FIX | Changed assertion to `connections_opened >= 1U`. |
+| DEF-019-7 | `tests/test_UdpBackend.cpp` : `test_mock_udp_send_hello_peer_port_zero` | **Missing second sub-branch coverage for `send_hello_datagram()` `||` condition at UdpBackend.cpp L167: `peer_ip[0] == '\0' \|\| peer_port == 0U`.** The existing `test_mock_udp_send_hello_no_peer` cleared `peer_ip` (first operand true, short-circuit). The second sub-branch (peer_ip non-empty but port zero) was never exercised, leaving a reachable `ERR_INVALID` path uncovered. | MINOR | FIX | Added `test_udp_send_hello_peer_port_zero`: `peer_ip="127.0.0.1"`, `peer_port=0`; asserts `register_local_id` returns `ERR_INVALID`. |
+
+#### Checklist reference
+
+All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
+- DEF-019-1 through DEF-019-3 (sign-compare): `n_do_close` is `int` throughout `MockSocketOps`; all comparisons now use untyped integer literal `1`. ✓
+- DEF-019-4 (incorrect assertion): `receive_message()` on a backend with no real OS socket correctly returns non-OK via poll; the test goal (fault-injection path returns failure) is satisfied without requiring `do_close()` to be called. ✓
+- DEF-019-5, DEF-019-6 (stats counter): `connections_opened` semantics verified against UdpBackend.cpp L131 and DtlsUdpBackend.cpp analogous line; incremented on bind, not on handshake completion. ✓
+- Power of 10 Rule 5: all new test functions carry at least one `assert()` (test relaxation permitted per CLAUDE.md §1b). ✓
+- All new test functions carry `// Verifies: REQ-x.x` per traceability policy. ✓
+- Branch coverage improvements documented in `docs/COVERAGE_CEILINGS.md`. ✓
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-09. All 7 defects (DEF-019-1 through DEF-019-7) resolved in commits 681cedd and 0b6918e. All entry and exit criteria satisfied. Inspection INSP-019 closed PASS.

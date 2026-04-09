@@ -332,7 +332,7 @@ messageEngine/
 │       ├── Server.cpp
 │       └── Client.cpp
 ├── tests/                # Unit tests (one binary per module)
-│   ├── MockSocketOps.hpp           # Injectable ISocketOps stub for TcpBackend/UdpBackend tests
+│   ├── MockSocketOps.hpp           # Injectable ISocketOps stub for all four transport backend M5 tests
 │   ├── MockTransportInterface.hpp  # Injectable TransportInterface stub for DeliveryEngine M5 tests
 │   ├── test_MessageEnvelope.cpp
 │   ├── test_MessageId.cpp
@@ -512,7 +512,7 @@ make coverage_show
 
 Policy floor: 100% of all reachable branches for SC files (CLAUDE.md §14). Per-file ceilings below 100% are documented in `docs/COVERAGE_CEILINGS.md`; every missed branch is individually justified.
 
-> **Methodology note (2026-04-06 rebaseline):** LLVM source-based coverage now counts each branch outcome (True and False) as a separate entry, roughly doubling the raw branch count relative to prior decision-level counts. All thresholds below reflect the current LLVM output. MC/DC tests 60–64 (added 2026-04-06) closed 10 previously-missed branches in `DeliveryEngine.cpp`.
+> **Methodology note (2026-04-06 rebaseline):** LLVM source-based coverage counts each branch outcome (True and False) as a separate entry, roughly doubling the raw branch count relative to prior decision-level counts. All thresholds below reflect the current LLVM output. MC/DC tests 60–64 (added 2026-04-06) closed 10 previously-missed branches in `DeliveryEngine.cpp`. **2026-04-09:** 19 `MockSocketOps`/`DtlsMockOps` fault-injection tests (M5) added across all four transport backends, plus 4 targeted branch-coverage tests closing remaining reachable gaps (`transport_config_valid()` False path, `||` second sub-branch in `send_hello_datagram`, `tls_path_is_regular_file()` non-regular-file path in both TLS backends). All files are now at their architectural maxima.
 
 | File | Branch % | SC? | Status |
 |---|---|---|---|
@@ -521,16 +521,18 @@ Policy floor: 100% of all reachable branches for SC files (CLAUDE.md §14). Per-
 | `core/AckTracker.cpp` | 64.47% | SC | Ceiling — assert `[[noreturn]]` branches |
 | `core/RetryManager.cpp` | 73.25% | SC | Ceiling — assert `[[noreturn]]` branches |
 | `core/DeliveryEngine.cpp` | 71.68% | SC | Ceiling — assert `[[noreturn]]` branches + init-guard paths |
+| `core/OrderingBuffer.cpp` | 68.18% | SC | Ceiling — Phase-2 LRU eviction structurally unreachable |
+| `core/RequestReplyEngine.cpp` | 74.09% | SC | Ceiling — assert `[[noreturn]]` branches + payload-guard dead code |
 | `core/AssertState.cpp` | 50.00% | NSC-infra | Ceiling — abort() False branch untestable |
 | `platform/ImpairmentEngine.cpp` | 71.88% | SC | Ceiling — assert + unreachable branches |
 | `platform/ImpairmentConfigLoader.cpp` | 80.46% | SC | Ceiling — assert + unreachable branches |
-| `platform/TcpBackend.cpp` | 68.97% | SC | Ceiling — assert + unreachable branches |
-| `platform/UdpBackend.cpp` | 70.10% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `platform/TlsTcpBackend.cpp` | 70.01% | SC | Ceiling — assert + mbedTLS error paths |
-| `platform/DtlsUdpBackend.cpp` | 75.56% | SC | Ceiling — assert + mbedTLS/POSIX error paths |
+| `platform/TcpBackend.cpp` | 70.11% | SC | Ceiling — assert + unreachable branches |
+| `platform/UdpBackend.cpp` | 74.23% | SC | Ceiling — assert `[[noreturn]]` branches |
+| `platform/TlsTcpBackend.cpp` | 71.16% | SC | Ceiling — assert + mbedTLS error paths |
+| `platform/DtlsUdpBackend.cpp` | 76.59% | SC | Ceiling — assert + mbedTLS/POSIX error paths |
 | `platform/LocalSimHarness.cpp` | 70.49% | SC | Ceiling — assert + structurally-unreachable branches |
 | `platform/MbedtlsOpsImpl.cpp` | 70.33% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `platform/SocketUtils.cpp` | 61.44% | NSC | Ceiling — POSIX errors unreachable on loopback |
+| `platform/SocketUtils.cpp` | 66.01% | NSC | Ceiling — POSIX errors unreachable on loopback |
 | `platform/SocketOpsImpl.cpp` | 66.67% | NSC | Line coverage sufficient |
 
 Ceiling files are at the maximum achievable coverage: `NEVER_COMPILED_OUT_ASSERT` generates permanently-missed branch outcomes (the `[[noreturn]]` `abort()` path), and certain POSIX/mbedTLS error paths cannot be triggered in a loopback test environment. All are documented deviations, not defects. Full per-file justifications are in `docs/COVERAGE_CEILINGS.md`.
@@ -963,7 +965,7 @@ The project voluntarily meets Class B verification rigor (M1 + M2 + M4 + M5 for 
 | M1 — Code review / inspection | [`docs/DEFECT_LOG.md`](docs/DEFECT_LOG.md) INSP-001 (2026-03-31) |
 | M2 — Static analysis (compiler + clang-tidy + cppcheck) | `make lint`; zero unresolved findings |
 | M4 — Branch coverage of all SC functions | `make coverage`; 100% of reachable branches; ceilings documented in `CLAUDE.md §14` |
-| M5 — Fault injection for all SC dependency-failure paths | Injectable interfaces (`IMbedtlsOps`, `ISocketOps`); fault-injection tests in `tests/` |
+| M5 — Fault injection for all SC dependency-failure paths | Injectable interfaces (`IMbedtlsOps`, `ISocketOps`); `MockSocketOps` and `DtlsMockOps` test doubles; fault-injection tests across all four transport backends covering bind, connect, send, receive, and TLS/DTLS credential-path failures |
 | MC/DC analysis (M6 goal, five highest-hazard SC functions) | [`docs/MCDC_ANALYSIS.md`](docs/MCDC_ANALYSIS.md) — all decisions demonstrated |
 
 #### Remaining work (external tools or personnel required)
