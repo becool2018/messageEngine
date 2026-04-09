@@ -18,6 +18,7 @@ All capacity limits are compile-time constants.  No heap allocation occurs on cr
 6. [Concurrent Clients — `MAX_TCP_CONNECTIONS`](#6-concurrent-clients--max_tcp_connections)
 7. [Worst-Case Stack Depth](#7-worst-case-stack-depth)
 8. [Related Constants](#8-related-constants)
+9. [Static RAM Footprint Summary](#9-static-ram-footprint-summary)
 
 ---
 
@@ -292,6 +293,55 @@ These constants are not in the README capacity table but interact with the ones 
 | `MAX_PEER_NODES` | 16 | Total addressable peer node IDs | Drives `ORDERING_PEER_COUNT`; also affects routing table scan cost |
 | `DELIVERY_EVENT_RING_CAPACITY` | 64 | Events in the observability ring | Increase if `drain_events()` is called infrequently under high traffic |
 | `SOCKET_RECV_BUF_BYTES` | 8 192 B | Per-connection TCP/TLS receive buffer | Must be ≥ `MSG_MAX_PAYLOAD_BYTES + WIRE_HEADER_SIZE_V2` |
+
+---
+
+## 9. Static RAM Footprint Summary
+
+All memory is allocated statically at compile time.  No heap allocation occurs after `init()`.
+The dominant cost is `MessageEnvelope` (≈ 4,144 bytes each at the default `MSG_MAX_PAYLOAD_BYTES = 4096`),
+which is embedded inline in every pre-allocated buffer across `DeliveryEngine` and its sub-components.
+
+### Per-buffer breakdown (one `DeliveryEngine` + `TcpBackend` instance)
+
+| Buffer | Count | Each | Total |
+|---|---|---|---|
+| `DeliveryEngine::m_retry_buf` | 64 | 4,144 B | ~265 KB |
+| `AckTracker::m_slots` (envelope + deadline + state) | 32 | ~4,160 B | ~130 KB |
+| `RetryManager::m_slots` (envelope + schedule metadata) | 32 | ~4,176 B | ~130 KB |
+| `DeliveryEngine::m_timeout_buf` | 32 | 4,144 B | ~129 KB |
+| `ReassemblyBuffer` slots | 8 | ~4,200 B | ~34 KB |
+| `OrderingBuffer` slots | 8 | ~4,200 B | ~34 KB |
+| `DeliveryEngine::m_ordering_freed_buf` | 8 | 4,144 B | ~32 KB |
+| `DeliveryEngine::m_frag_buf` | 4 | 4,144 B | ~16 KB |
+| `TcpBackend` recv buf (×8 clients) | 8 | 8,192 B | ~64 KB |
+| `DuplicateFilter::m_window` | 128 | 32 B | ~4 KB |
+| `DeliveryEngine::m_held_pending` | 1 | 4,144 B | ~4 KB |
+| **Total** | | | **~842 KB** |
+
+### The single dominant variable
+
+`MSG_MAX_PAYLOAD_BYTES` multiplies across approximately 189 embedded `MessageEnvelope` instances.
+Halving it from 4 096 to 2 048 reduces the total footprint by roughly 390 KB.
+
+### Tuning for constrained targets
+
+The three constants with the greatest impact per unit change:
+
+| Constant | Default | Reduce to | Approx. saving |
+|---|---|---|---|
+| `MSG_MAX_PAYLOAD_BYTES` | 4 096 B | 2 048 B | ~390 KB |
+| `MSG_RING_CAPACITY` | 64 | 16 | ~200 KB |
+| `ACK_TRACKER_CAPACITY` | 32 | 8 | ~130 KB |
+
+Reducing all three to the values above brings the total footprint below 200 KB.
+Always run `make run_stress_tests` after changing any capacity constant (`CLAUDE.md §1c`).
+
+### Public API surface
+
+For reference: `DeliveryEngine` exposes 9 public methods (4 safety-critical, 5 NSC observability).
+`TransportInterface` exposes 5 abstract methods.  The full API is documented in
+`src/core/DeliveryEngine.hpp` and `src/core/TransportInterface.hpp`.
 
 ---
 
