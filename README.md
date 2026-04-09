@@ -45,14 +45,15 @@ A C++ networking library for building and testing systems that must survive unre
 8. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
 9. [Using the Library](#using-the-library)
 10. [Use Cases](#use-cases)
-11. [Safety & Assurance Documents](#safety--assurance-documents)
-12. [Design Patterns](#design-patterns)
-13. [Coding Standards](#coding-standards)
-14. [Standards Sources and Conflicts](#standards-sources-and-conflicts)
-15. [Project Standards Files](#project-standards-files)
-16. [Claude Skills](#claude-skills)
-17. [Release History](#release-history)
-18. [Code Statistics](#code-statistics)
+11. [Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
+12. [Safety & Assurance Documents](#safety--assurance-documents)
+13. [Design Patterns](#design-patterns)
+14. [Coding Standards](#coding-standards)
+15. [Standards Sources and Conflicts](#standards-sources-and-conflicts)
+16. [Project Standards Files](#project-standards-files)
+17. [Claude Skills](#claude-skills)
+18. [Release History](#release-history)
+19. [Code Statistics](#code-statistics)
 
 ---
 
