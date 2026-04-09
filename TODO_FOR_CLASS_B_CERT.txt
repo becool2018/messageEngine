@@ -1,11 +1,21 @@
 messageEngine — Remaining Tasks for Class B Certification
 ==========================================================
-Generated: 2026-03-31  (last updated: 2026-04-06)
+Generated: 2026-03-31  (last updated: 2026-04-09)
 Policy references: NPR 7150.2D, NASA-STD-8719.13C, NASA-STD-8739.8A
-Verification policy: .claude/VERIFICATION_POLICY.md (VVP-001)
+Verification policy: docs/VERIFICATION_POLICY.md (VVP-001)
 
 All engineering work that can be done programmatically is complete.
 The items below require external tools, licenses, or a second human reviewer.
+
+Note: VVP-001 §6 Class B reclassification items a–e are now complete as of
+2026-04-09 (branch test/socketutils-coverage-2026-04, INSP-019):
+  a) All modules with untestable error-handling paths identified.
+  b) Injectable interfaces (ISocketOps, IMbedtlsOps) designed and reviewed.
+  c) M5 fault-injection test suites implemented for all 4 backends (19 tests).
+  d) SC function declarations and test headers carry verified-to-M5 annotations.
+  e) Hazard Analysis and FMEA updated through INSP-018.
+The remaining gap before formal Class B reclassification is Item 9 (independent
+V&V) — a process gate, not an engineering task.
 
 ------------------------------------------------------------------------------
 Item 6 — TLA+ model checking
@@ -113,7 +123,9 @@ Status summary
 ------------------------------------------------------------------------------
   Engineering (programmatic) work:  0 items remain
   External/organizational work:     4 items remain (Items 6, 7, 8, 9)
-  Completed since last update:      Item 10 (MC/DC analysis — 2026-04-04)
+  Completed since last update:      VVP-001 §6 items a–e (M5 injectable
+                                    interfaces + fault-injection tests,
+                                    INSP-019 — 2026-04-09)
 
   Latest commits on main (as of 2026-04-06):
     f493fc6  Merge PR #50: cppcheck TlsTcpBackend.hpp suppression
@@ -121,3 +133,11 @@ Status summary
     891f45b  Merge PR #49: SEC-027 security fix
     8a21ca3  test(mc-dc): add 5 MC/DC tests closing send/receive branch gaps
     0e01f9a  security: reject MessageType::INVALID (0xFF) on wire
+
+  In-flight (branch test/socketutils-coverage-2026-04, PR #79, not yet merged):
+    1ccfbb3  docs: clarify 100% policy floor vs per-file regression guards
+    1983036  docs: update test counts in Design.md and FILES.txt for INSP-019
+    f473619  docs: add INSP-019, update traceability matrix and verification policy
+    46d5af3  docs: update README coverage table for 2026-04-09 fault-injection
+    0b6918e  test(coverage): close 7 more reachable branches in UDP/DTLS/TLS
+    681cedd  test(coverage): add MockSocketOps fault-injection tests to all 4 backends
