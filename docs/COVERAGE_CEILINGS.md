@@ -40,6 +40,9 @@ coverable branches: `test_udp_invalid_num_channels` (config validation False pat
 `test_dtls_cert_is_directory` and `test_tls_cert_is_directory`
 (`tls_path_is_regular_file() !S_ISREG()` True branch in both TLS backends).
 
+**2026-04-09 update (round 3):** Phase-2 LRU eviction dead code removed from
+`OrderingBuffer.cpp`; threshold raised from ≥68% to ≥79% (see ceiling justification).
+
 **Policy floor vs. regression guard:** The policy floor is **100% of reachable branches**
 (VERIFICATION_POLICY.md M4; CLAUDE.md §14.4). The "Threshold" column below is a *regression
 guard* — it is set at the current maximum achievable and must not fall. It is not a relaxation
@@ -50,7 +53,7 @@ two categories is a defect, not a ceiling.
 
 | File | Branches | Missed | Coverage | Threshold (regression guard, not policy floor) | Source |
 |------|----------|--------|----------|------------------------------------------------|--------|
-| core/OrderingBuffer.cpp | 220 | 70 | 68.18% | ≥68% | SC |
+| core/OrderingBuffer.cpp | 191 | 39 | 79.58% | ≥79% | SC |
 | core/RequestReplyEngine.cpp | 274 | 71 | 74.09% | ≥74% | SC |
 | core/Serializer.cpp | 145 | 38 | 73.79% | ≥73% | SC |
 | core/DuplicateFilter.cpp | 67 | 18 | 73.13% | ≥73% | SC |
@@ -73,46 +76,31 @@ two categories is a defect, not a ceiling.
 
 ## Per-file ceiling justifications
 
-### core/OrderingBuffer.cpp — ceiling 86.57% lines / 68.18% branches
+### core/OrderingBuffer.cpp — ceiling 79.58% branches (191 total, 39 missed)
 
-**Line coverage: 245/283 (86.57%)** — 38 permanently-missed lines.
-**Branch coverage: 150/220 (68.18%)** — 70 permanently-missed branches.
+**2026-04-09:** Phase-2 LRU eviction dead code removed.
 
-**Root cause: phase-2 LRU eviction is structurally unreachable with current constants.**
+`find_lru_peer_idx()` and `free_holds_for_peer()` were deleted. `evict_lru_peer()`
+now holds only Phase 1 (`evict_peer_no_holds()`) plus a `NEVER_COMPILED_OUT_ASSERT`
+confirming the result is valid.  The dead `if (peer_idx == ORDERING_PEER_COUNT)` guard
+in `ingest()` was replaced with a `NEVER_COMPILED_OUT_ASSERT`.  A
+`static_assert(ORDERING_HOLD_COUNT < ORDERING_PEER_COUNT, ...)` in the .cpp locks
+the structural invariant at compile time.
 
-`evict_lru_peer()` has two phases:
-- Phase 1 (`evict_peer_no_holds()`): scans active peers for one with zero hold slots; evicts it immediately.
-- Phase 2 (`find_lru_peer_idx()` + `free_holds_for_peer()`): runs only when Phase 1 fails — i.e., only when *every* active peer has at least one hold slot.
+**Prior result:** 220 branches, 70 missed, 68.18% (2 functions missed).
+**Current result:** 191 branches, 39 missed, 79.58%.  Functions: 14/14 (100%).
 
-With `ORDERING_HOLD_COUNT = 8` and `ORDERING_PEER_COUNT = 16` and
-`k_hold_per_peer_max = ORDERING_HOLD_COUNT / 2 = 4`, it is impossible for all 16
-active peer slots to simultaneously hold at least one message: that would require
-≥16 hold slots, but only 8 exist.  Therefore Phase 1 always finds a peer with
-zero holds, and Phase 2 never executes.
+**Remaining permanently-missed branches (39):** All are `NEVER_COMPILED_OUT_ASSERT`
+True (`[[noreturn]]` abort) paths — one per assert call across the 14 functions
+(VVP-001 §4.3 d-i).  One additional missed line: the `return ORDERING_PEER_COUNT`
+tail of `evict_peer_no_holds()` — unreachable because the structural invariant
+(proved by `static_assert`) guarantees Phase 1 always finds a zero-hold candidate
+(VVP-001 §4.3 d-iii).
 
-Additionally, `ingest()` lines 343–346 (`peer_idx == ORDERING_PEER_COUNT` guard
-after `get_or_create_peer()`) are dead code: `get_or_create_peer()` always returns
-a valid index because `evict_lru_peer()` always provides one.
+All reachable decision-level branches are 100% covered by the 16 test cases in
+`tests/test_OrderingBuffer.cpp`.
 
-**Permanently-missed lines (38):**
-
-| Lines | Location | Reason |
-|-------|----------|--------|
-| 127 | `evict_peer_no_holds()` return | Phase 1 never exhausts (always finds a zero-hold peer) |
-| 137–155 | `find_lru_peer_idx()` — entire function | Phase 2 entry; never called |
-| 163–173 | `free_holds_for_peer()` — entire function | Phase 2 cleanup; never called |
-| 195–204 | `evict_lru_peer()` phase-2 block | Phase 2 path; never reached |
-| 343–346 | `ingest()` peer-table-full guard | `get_or_create_peer()` always returns a valid index |
-
-This ceiling persists for as long as `ORDERING_HOLD_COUNT < ORDERING_PEER_COUNT`.
-If the constants are ever adjusted so that `ORDERING_HOLD_COUNT ≥ ORDERING_PEER_COUNT`,
-these lines become reachable and tests must be added.
-
-All other reachable lines (including `try_release_next` unknown-peer, `advance_sequence`
-unknown-peer, wraparound, sweep, per-peer cap, and all normal delivery paths) are
-covered by the 16 test cases in `tests/test_OrderingBuffer.cpp`.
-
-Threshold: **≥68% branches / 86.57% lines** (maximum achievable).
+Threshold: **≥79%** (maximum achievable).
 
 ---
 

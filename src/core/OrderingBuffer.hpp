@@ -144,21 +144,17 @@ private:
     // Find a held message for (src, seq). Returns ORDERING_HOLD_COUNT if not found.
     uint32_t find_held(NodeId src, uint32_t seq) const;
 
-    /// Evict the LRU peer slot: preferably one with no active hold slots.
-    /// Frees all hold slots belonging to the evicted peer.
+    /// Evict a peer slot with zero active hold slots (no buffered state lost).
+    /// Guaranteed to find one: ORDERING_HOLD_COUNT (8) < ORDERING_PEER_COUNT (16)
+    /// means at most 8 peers can hold simultaneously; ≥8 always have zero holds.
     /// Returns the freed slot index.
     uint32_t evict_lru_peer();
 
-    /// Phase-1 of LRU eviction: find a peer with no active hold slots.
-    /// Returns index of such peer (after evicting it) if found, else ORDERING_PEER_COUNT.
+    /// Phase-1 of LRU eviction: scan active peers for one with zero hold slots.
+    /// Evicts it immediately and returns the freed index.
+    /// Returns ORDERING_PEER_COUNT only if every active peer has ≥1 hold —
+    /// unreachable with current constants (see static_assert in .cpp).
     uint32_t evict_peer_no_holds();
-
-    /// Find the peer index with the smallest lru_stamp among active peers.
-    /// Returns the index (always valid since table is full when called).
-    uint32_t find_lru_peer_idx() const;
-
-    /// Free all hold slots belonging to the peer at peer_idx.
-    void free_holds_for_peer(uint32_t peer_idx);
 
     /// Count the number of active hold slots for src (O(ORDERING_HOLD_COUNT)).
     /// Used to enforce per-peer hold cap (SECfix-7).

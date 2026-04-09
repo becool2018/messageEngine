@@ -36,6 +36,22 @@
 // With ORDERING_HOLD_COUNT = 8 this gives 4 slots per peer.
 static const uint32_t k_hold_per_peer_max = ORDERING_HOLD_COUNT / 2U;
 
+// Structural invariant enforced at compile time:
+// Phase-2 LRU eviction (which would require find_lru_peer_idx() and
+// free_holds_for_peer()) is only reachable when ORDERING_HOLD_COUNT >=
+// ORDERING_PEER_COUNT — that is, when every one of the ORDERING_PEER_COUNT
+// active peers could simultaneously occupy a hold slot.  With current
+// constants (8 < 16) that condition is mathematically impossible: at most
+// ORDERING_HOLD_COUNT (8) peers can hold a message at once, leaving at least
+// (ORDERING_PEER_COUNT - ORDERING_HOLD_COUNT = 8) peers with zero holds.
+// evict_peer_no_holds() therefore always finds a zero-hold candidate, and
+// Phase 2 is unreachable dead code.  Those functions have been removed.
+// If this assert ever fires (HOLD >= PEER), restore find_lru_peer_idx() and
+// free_holds_for_peer(), update evict_lru_peer(), and add tests before merging.
+static_assert(ORDERING_HOLD_COUNT < ORDERING_PEER_COUNT,
+    "Phase-2 LRU eviction is now reachable: restore find_lru_peer_idx() and "
+    "free_holds_for_peer() in OrderingBuffer.cpp and add tests before merging.");
+
 // ─────────────────────────────────────────────────────────────────────────────
 // OrderingBuffer::init
 // ─────────────────────────────────────────────────────────────────────────────
@@ -128,56 +144,11 @@ uint32_t OrderingBuffer::evict_peer_no_holds()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OrderingBuffer::find_lru_peer_idx (private)
-// Scan active peers and return the index with the smallest lru_stamp.
-// Called only when the peer table is full, so at least one entry is active.
-// Power of 10 Rule 5: 2 assertions. CC <= 10.
-// ─────────────────────────────────────────────────────────────────────────────
-uint32_t OrderingBuffer::find_lru_peer_idx() const
-{
-    NEVER_COMPILED_OUT_ASSERT(m_initialized);             // Assert: initialized
-    NEVER_COMPILED_OUT_ASSERT(ORDERING_PEER_COUNT > 0U);  // Assert: valid capacity
-
-    // G-7: use ORDERING_PEER_COUNT as a sentinel for "not yet found" and skip
-    // inactive slots.  The prior code started from index 0 unconditionally,
-    // silently picking an inactive peer as the LRU candidate, causing
-    // free_holds_for_peer() to operate on the wrong source_id.
-    uint32_t lru_idx = ORDERING_PEER_COUNT;  // sentinel: not yet found
-    for (uint32_t i = 0U; i < ORDERING_PEER_COUNT; ++i) {
-        if (!m_peers[i].active) { continue; }
-        if (lru_idx == ORDERING_PEER_COUNT ||
-            m_peers[i].lru_stamp < m_peers[lru_idx].lru_stamp) {
-            lru_idx = i;
-        }
-    }
-    NEVER_COMPILED_OUT_ASSERT(lru_idx < ORDERING_PEER_COUNT);  // Assert: valid LRU slot found
-    return lru_idx;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// OrderingBuffer::free_holds_for_peer (private)
-// Release all hold slots whose source_id matches the peer at peer_idx.
-// Power of 10 Rule 5: 2 assertions. CC <= 10.
-// ─────────────────────────────────────────────────────────────────────────────
-void OrderingBuffer::free_holds_for_peer(uint32_t peer_idx)
-{
-    NEVER_COMPILED_OUT_ASSERT(m_initialized);                   // Assert: initialized
-    NEVER_COMPILED_OUT_ASSERT(peer_idx < ORDERING_PEER_COUNT);  // Assert: valid index
-
-    for (uint32_t j = 0U; j < ORDERING_HOLD_COUNT; ++j) {
-        if (m_hold[j].active &&
-            m_hold[j].env.source_id == m_peers[peer_idx].src) {
-            m_hold[j].active = false;
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // OrderingBuffer::evict_lru_peer (private)
-// Selects the LRU peer slot: first looks for a peer with zero active hold slots
-// (evicting such a peer loses no buffered state); if all have holds, picks the
-// one with the smallest lru_stamp.  Frees all hold slots belonging to the chosen
-// peer and logs WARNING_HI.
+// Evicts the LRU peer slot with zero active hold slots (no buffered state lost).
+// Guaranteed to find one: static_assert above proves ORDERING_HOLD_COUNT (8) <
+// ORDERING_PEER_COUNT (16), so at most 8 peers can hold simultaneously; the
+// remaining ≥8 always have zero holds.
 // SECfix-2: prevents 16 spoofed senders permanently exhausting the peer table.
 // Power of 10 Rule 5: 2 assertions. CC <= 10.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -185,22 +156,10 @@ uint32_t OrderingBuffer::evict_lru_peer()
 {
     NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: initialized
 
-    // Phase 1: prefer a peer with no active hold slots (no buffered state).
     uint32_t no_holds_idx = evict_peer_no_holds();
-    if (no_holds_idx != ORDERING_PEER_COUNT) {
-        return no_holds_idx;
-    }
-
-    // Phase 2: all peers have holds — evict the one with the smallest lru_stamp.
-    uint32_t lru_idx = find_lru_peer_idx();
-    free_holds_for_peer(lru_idx);
-    Logger::log(Severity::WARNING_HI, "OrderingBuffer",
-                "peer table full: evicting LRU peer src=%u (SECfix-2)",
-                static_cast<unsigned>(m_peers[lru_idx].src));
-    m_peers[lru_idx].active = false;
-
-    NEVER_COMPILED_OUT_ASSERT(lru_idx < ORDERING_PEER_COUNT);  // Assert: valid index
-    return lru_idx;
+    // Assert: always finds a zero-hold peer (guaranteed by static_assert above).
+    NEVER_COMPILED_OUT_ASSERT(no_holds_idx < ORDERING_PEER_COUNT);
+    return no_holds_idx;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -334,16 +293,11 @@ Result OrderingBuffer::ingest(const MessageEnvelope& msg,
         return Result::OK;
     }
 
-    // Ordered DATA message: apply ordering gate
+    // Ordered DATA message: apply ordering gate.
+    // evict_lru_peer() is guaranteed (by static_assert) to always return a valid
+    // slot, so get_or_create_peer() never returns ORDERING_PEER_COUNT.
     uint32_t peer_idx = get_or_create_peer(msg.source_id);
-    if (peer_idx == ORDERING_PEER_COUNT) {
-        // No peer slot available: ordering guarantee cannot be maintained.
-        // Return ERR_FULL so the caller can log and drop the frame rather than
-        // silently delivering it out of order (Issue 5 fix: honour ordering contract).
-        Logger::log(Severity::WARNING_HI, "OrderingBuffer",
-                    "Peer table full; cannot enforce ordering for src=%u", msg.source_id);
-        return Result::ERR_FULL;
-    }
+    NEVER_COMPILED_OUT_ASSERT(peer_idx < ORDERING_PEER_COUNT);  // Assert: valid peer slot
 
     uint32_t expected = m_peers[peer_idx].next_expected_seq;
 
