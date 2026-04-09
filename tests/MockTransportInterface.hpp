@@ -99,6 +99,30 @@ struct MockTransportInterface : public TransportInterface {
         return Result::ERR_TIMEOUT;  // default: no message available
     }
 
+    // ── HELLO reconnect queue — REQ-3.3.6 ────────────────────────────────────
+    // Simulates the backend HELLO queue for drain_hello_reconnects() testing.
+    // Push a NodeId with push_hello_peer(); pop_hello_peer() drains FIFO order.
+    NodeId   m_hello_queue[8] = {};
+    uint32_t m_hello_r = 0U;
+    uint32_t m_hello_w = 0U;
+
+    void push_hello_peer(NodeId src)
+    {
+        uint32_t next = (m_hello_w + 1U) % 8U;
+        if (next != m_hello_r) {
+            m_hello_queue[m_hello_w] = src;
+            m_hello_w = next;
+        }
+    }
+
+    NodeId pop_hello_peer() override
+    {
+        if (m_hello_r == m_hello_w) { return NODE_ID_INVALID; }
+        NodeId src = m_hello_queue[m_hello_r];
+        m_hello_r = (m_hello_r + 1U) % 8U;
+        return src;
+    }
+
     // ── Stats — NSC no-op; zeros all fields (REQ-7.2.4) ────────────────────
 
     void get_transport_stats(TransportStats& out) const override

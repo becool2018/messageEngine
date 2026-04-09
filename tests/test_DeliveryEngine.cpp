@@ -24,7 +24,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: simple test framework using assert() and printf().
  *
- * Verifies: REQ-3.2.3, REQ-3.2.4, REQ-3.2.5, REQ-3.2.6, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.5, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+ * Verifies: REQ-3.2.3, REQ-3.2.4, REQ-3.2.5, REQ-3.2.6, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.5, REQ-3.3.6, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
  */
 // Verification: M1 + M2 + M4 + M5
 // M4: all reachable branches exercised via LocalSimHarness loopback (tests 1–23).
@@ -3082,6 +3082,491 @@ static void test_mcdc_receive_held_pending_ok()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// REQ-3.3.6: DeliveryEngine::reset_peer_ordering() clears stale ordering state.
+// Sends seq 1+2 to advance next_expected to 3, resets, verifies seq=1 accepted.
+// Verifies: REQ-3.3.6
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_reset_peer_ordering_clears_stale_sequence()
+{
+    // Verifies: REQ-3.3.6
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_ordered_engines(ha, hb, engine_a, engine_b);
+
+    // Engine A sends seq=1 and seq=2 so engine_b's ordering gate advances to 3.
+    MessageEnvelope env1, env2;
+    make_data_envelope(env1, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
+    make_data_envelope(env2, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
+
+    Result s1 = engine_a.send(env1, NOW_US);
+    assert(s1 == Result::OK);  // Assert: send succeeds
+    Result s2 = engine_a.send(env2, NOW_US + 1ULL);
+    assert(s2 == Result::OK);  // Assert: send succeeds
+
+    MessageEnvelope out1, out2;
+    Result r1 = engine_b.receive(out1, 100U, NOW_US + 10ULL);
+    assert(r1 == Result::OK);        // Assert: seq=1 delivered
+    assert(out1.sequence_num == 1U); // Assert: correct seq
+
+    Result r2 = engine_b.receive(out2, 100U, NOW_US + 11ULL);
+    assert(r2 == Result::OK);        // Assert: seq=2 delivered
+    assert(out2.sequence_num == 2U); // Assert: correct seq
+
+    // Simulate peer reconnect: reset engine_b's ordering state for src=1.
+    engine_b.reset_peer_ordering(static_cast<NodeId>(1U));
+
+    // Engine A sends seq=1 again (fresh connection); engine_b must accept it.
+    MessageEnvelope env3;
+    make_data_envelope(env3, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
+    env3.sequence_num = 1U;
+    env3.message_id   = 9001ULL;  // distinct message_id to pass dedup
+    Result s3 = ha.send_message(env3);
+    assert(s3 == Result::OK);  // Assert: transport send succeeds
+
+    MessageEnvelope out3;
+    Result r3 = engine_b.receive(out3, 100U, NOW_US + 20ULL);
+    assert(r3 == Result::OK);        // Assert: seq=1 accepted after ordering reset
+    assert(out3.sequence_num == 1U); // Assert: correct sequence
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_de_reset_peer_ordering_clears_stale_sequence\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REQ-3.3.6: drain_hello_reconnects() drains HELLO queue via pop_hello_peer().
+// Uses MockTransportInterface to inject queued NodeIds without real I/O.
+// Verifies: REQ-3.3.6
+// Verification: M1 + M2 + M5 (MockTransportInterface)
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_drain_hello_reconnects_via_transport()
+{
+    // Verifies: REQ-3.3.6
+    MockTransportInterface mock;
+
+    ChannelConfig ch;
+    channel_config_default(ch, 0U);
+    ch.max_retries      = 0U;
+    ch.recv_timeout_ms  = 1000U;
+    ch.ordering         = OrderingMode::ORDERED;
+
+    DeliveryEngine engine;
+    engine.init(&mock, ch, static_cast<NodeId>(1U));
+
+    // Queue two HELLO peers — simulates two reconnect events.
+    mock.push_hello_peer(static_cast<NodeId>(10U));
+    mock.push_hello_peer(static_cast<NodeId>(11U));
+
+    // receive() triggers drain_hello_reconnects(); returns ERR_TIMEOUT (mock default).
+    MessageEnvelope out;
+    Result r = engine.receive(out, 0U, NOW_US + 100ULL);
+    assert(r == Result::ERR_TIMEOUT);  // Assert: no message, no crash
+
+    // Queue must be empty after drain.
+    NodeId leftover = mock.pop_hello_peer();
+    assert(leftover == NODE_ID_INVALID);  // Assert: queue fully drained
+
+    printf("PASS: test_de_drain_hello_reconnects_via_transport\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MC/DC Test 65: pump_retries() non-monotonic timestamp guard (True branch)
+//
+// Exercises SEC-007 monotonic-timestamp enforcement in pump_retries().
+// All prior tests advance time monotonically; this is the first test to pass
+// a backward timestamp after m_last_now_us has been set, covering the
+// (A=T, B=T) case that is otherwise permanently missed.
+//
+// Verifies: REQ-3.2.3
+// Verification: M1 + M2 + M5 (MockTransportInterface)
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mcdc_pump_retries_backward_timestamp()
+{
+    // Verifies: REQ-3.2.3
+    MockTransportInterface mock;
+    ChannelConfig cfg;
+    make_mock_channel_config(cfg);
+    DeliveryEngine engine;
+    engine.init(&mock, cfg, 1U);
+
+    // Forward pump: A=F (m_last_now_us==0) — establishes m_last_now_us=NOW_US.
+    uint32_t c0 = engine.pump_retries(NOW_US);
+    assert(c0 == 0U);  // Assert: nothing due
+
+    // Backward pump: A=T (m_last_now_us=NOW_US > 0), B=T (NOW_US/2 < NOW_US).
+    // MC/DC: both conditions independently True → guard fires, returns 0.
+    uint32_t c1 = engine.pump_retries(NOW_US / 2ULL);
+    assert(c1 == 0U);  // Assert: backward timestamp rejected; no retry work done
+
+    printf("PASS: test_mcdc_pump_retries_backward_timestamp\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MC/DC Test 66: sweep_ack_timeouts() non-monotonic timestamp guard (True branch)
+//
+// Mirrors MC/DC Test 65 for the identical SEC-007 guard in sweep_ack_timeouts().
+// No prior test passes a backward timestamp to sweep_ack_timeouts() after
+// m_last_now_us has been established.
+//
+// Verifies: REQ-3.2.3
+// Verification: M1 + M2 + M5 (MockTransportInterface)
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mcdc_sweep_ack_timeouts_backward_timestamp()
+{
+    // Verifies: REQ-3.2.3
+    MockTransportInterface mock;
+    ChannelConfig cfg;
+    make_mock_channel_config(cfg);
+    DeliveryEngine engine;
+    engine.init(&mock, cfg, 1U);
+
+    // Forward sweep: A=F — establishes m_last_now_us=NOW_US.
+    uint32_t c0 = engine.sweep_ack_timeouts(NOW_US);
+    assert(c0 == 0U);  // Assert: nothing to sweep
+
+    // Backward sweep: A=T, B=T → guard fires, returns 0.
+    uint32_t c1 = engine.sweep_ack_timeouts(NOW_US / 2ULL);
+    assert(c1 == 0U);  // Assert: backward timestamp rejected
+
+    printf("PASS: test_mcdc_sweep_ack_timeouts_backward_timestamp\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 67: sweep_ack_timeouts() stale-reassembly-freed log branch
+//
+// Injects fragment 0 of a 2-fragment message; never sends fragment 1.
+// After recv_timeout_ms (1000 ms) has passed, sweep_ack_timeouts() calls
+// sweep_stale() which frees the stale slot. The `if (stale_freed > 0U)` True
+// branch inside sweep_ack_timeouts() — exercised for the first time — emits
+// WARNING_LO. Slot-freed verification: re-injecting frag0 opens a fresh slot
+// and receive() returns ERR_AGAIN (not ERR_INVALID).
+//
+// Verifies: REQ-3.2.9
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_sweep_stale_reassembly_freed()
+{
+    // Verifies: REQ-3.2.9
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);  // recv_timeout_ms = 1000 ms
+
+    // Inject fragment 0 of a 2-fragment message; fragment 1 is never sent.
+    MessageEnvelope frag0;
+    envelope_init(frag0);
+    frag0.message_type         = MessageType::DATA;
+    frag0.message_id           = 77001ULL;
+    frag0.timestamp_us         = NOW_US;
+    frag0.source_id            = 2U;
+    frag0.destination_id       = 1U;
+    frag0.priority             = 0U;
+    frag0.reliability_class    = ReliabilityClass::BEST_EFFORT;
+    frag0.expiry_time_us       = NOW_US + 5000000ULL;
+    frag0.sequence_num         = 0U;
+    frag0.fragment_index       = 0U;
+    frag0.fragment_count       = 2U;   // multi-fragment; frag 1 never arrives
+    frag0.total_payload_length = 8U;
+    frag0.payload_length       = 4U;
+    frag0.payload[0]           = 0xAAU;
+
+    Result inj = harness_a.inject(frag0);
+    assert(inj == Result::OK);  // Assert: inject accepted
+
+    // receive() opens a reassembly slot and returns ERR_AGAIN (missing frag 1).
+    MessageEnvelope out;
+    Result r = engine.receive(out, 0U, NOW_US);
+    assert(r == Result::ERR_AGAIN);  // Assert: partial reassembly
+
+    // Advance time past recv_timeout_ms so the open slot is stale.
+    // Slot open_time_us = NOW_US = 1,000,000.  stale_threshold_us = 1,000,000.
+    // Slot is stale when (stale_now - open_time_us) >= stale_threshold_us,
+    // i.e., stale_now >= 2,000,000.  Use NOW_US + 1,001,000 = 2,001,000.
+    const uint64_t stale_now = NOW_US + 1001000ULL;
+    uint32_t swept = engine.sweep_ack_timeouts(stale_now);
+    assert(swept == 0U);    // Assert: no ACK timeouts pending (none sent)
+    // stale_freed > 0 branch inside sweep_ack_timeouts() was hit; slot freed.
+
+    // Verify slot freed: re-injecting frag0 opens a NEW slot (returns ERR_AGAIN).
+    // If the stale slot were still present, the fragment would be mis-interpreted
+    // as a duplicate and might produce ERR_INVALID instead.
+    Result inj2 = harness_a.inject(frag0);
+    assert(inj2 == Result::OK);  // Assert: re-inject accepted
+    MessageEnvelope out2;
+    Result r2 = engine.receive(out2, 0U, stale_now + 1ULL);
+    assert(r2 == Result::ERR_AGAIN);  // Assert: fresh slot opened after stale freed
+
+    harness_a.close();
+    harness_b.close();
+    printf("PASS: test_de_sweep_stale_reassembly_freed\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 68: handle_fragment_ingest() ERR_FULL (per-source reassembly cap exceeded)
+//
+// Fills the per-source reassembly slot cap (k_reasm_per_src_max =
+// REASSEMBLY_SLOT_COUNT / 2 = 4) from a single source by injecting the first
+// fragment of 4 distinct 2-fragment messages.  A 5th first-fragment from the
+// same source exceeds the cap: ReassemblyBuffer returns ERR_FULL, which
+// propagates through handle_fragment_ingest() hitting the `res != OK` log
+// branch for a non-ERR_AGAIN error, and is returned to the caller.
+//
+// Verifies: REQ-3.2.9, REQ-3.2.3
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_reassembly_per_source_cap_drops_fragment()
+{
+    // Verifies: REQ-3.2.9, REQ-3.2.3
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Per-source cap: k_reasm_per_src_max = REASSEMBLY_SLOT_COUNT / 2 = 4.
+    // Power of 10 Rule 2: bounded loop (PER_SRC_MAX = 4 iterations).
+    static const uint32_t PER_SRC_MAX = REASSEMBLY_SLOT_COUNT / 2U;
+
+    for (uint32_t i = 0U; i < PER_SRC_MAX; ++i) {
+        MessageEnvelope f;
+        envelope_init(f);
+        f.message_type         = MessageType::DATA;
+        f.message_id           = 78000ULL + static_cast<uint64_t>(i);
+        f.timestamp_us         = NOW_US;
+        f.source_id            = 2U;
+        f.destination_id       = 1U;
+        f.priority             = 0U;
+        f.reliability_class    = ReliabilityClass::BEST_EFFORT;
+        f.expiry_time_us       = NOW_US + 5000000ULL;
+        f.sequence_num         = 0U;
+        f.fragment_index       = 0U;
+        f.fragment_count       = 2U;   // multi-fragment; only frag 0 injected
+        f.total_payload_length = 8U;
+        f.payload_length       = 4U;
+        f.payload[0]           = static_cast<uint8_t>(i & 0xFFU);
+        Result inj = harness_a.inject(f);
+        assert(inj == Result::OK);  // Assert: inject succeeds
+        MessageEnvelope out;
+        Result r = engine.receive(out, 0U,
+                                  NOW_US + static_cast<uint64_t>(i) + 1ULL);
+        assert(r == Result::ERR_AGAIN);  // Assert: fragment held in reassembly
+    }
+
+    // Inject a 5th first-fragment from the same source — must exceed per-source cap.
+    MessageEnvelope overflow;
+    envelope_init(overflow);
+    overflow.message_type         = MessageType::DATA;
+    overflow.message_id           = 78100ULL;
+    overflow.timestamp_us         = NOW_US;
+    overflow.source_id            = 2U;
+    overflow.destination_id       = 1U;
+    overflow.priority             = 0U;
+    overflow.reliability_class    = ReliabilityClass::BEST_EFFORT;
+    overflow.expiry_time_us       = NOW_US + 5000000ULL;
+    overflow.sequence_num         = 0U;
+    overflow.fragment_index       = 0U;
+    overflow.fragment_count       = 2U;
+    overflow.total_payload_length = 8U;
+    overflow.payload_length       = 4U;
+    overflow.payload[0]           = 0xFFU;
+
+    Result inj_ov = harness_a.inject(overflow);
+    assert(inj_ov == Result::OK);  // Assert: inject accepted
+    MessageEnvelope out_ov;
+    Result r_ov = engine.receive(out_ov, 0U, NOW_US + PER_SRC_MAX + 1ULL);
+    assert(r_ov == Result::ERR_FULL);  // Assert: per-source cap rejected fragment
+
+    harness_a.close();
+    harness_b.close();
+    printf("PASS: test_de_reassembly_per_source_cap_drops_fragment\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 69: handle_fragment_ingest() ERR_INVALID (malformed fragment metadata)
+//
+// Injects a fragment with fragment_index=2 >= fragment_count=2, which fails
+// the validate_metadata() bounds check.  ReassemblyBuffer returns ERR_INVALID;
+// handle_fragment_ingest() hits the `res != OK` log branch (non-ERR_AGAIN
+// error path) and propagates ERR_INVALID to the caller.
+//
+// Verifies: REQ-3.2.3
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_reassembly_invalid_fragment_drops()
+{
+    // Verifies: REQ-3.2.3
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // fragment_index=2 >= fragment_count=2 → validate_metadata returns ERR_INVALID.
+    MessageEnvelope bad_frag;
+    envelope_init(bad_frag);
+    bad_frag.message_type         = MessageType::DATA;
+    bad_frag.message_id           = 79001ULL;
+    bad_frag.timestamp_us         = NOW_US;
+    bad_frag.source_id            = 2U;
+    bad_frag.destination_id       = 1U;
+    bad_frag.priority             = 0U;
+    bad_frag.reliability_class    = ReliabilityClass::BEST_EFFORT;
+    bad_frag.expiry_time_us       = NOW_US + 5000000ULL;
+    bad_frag.sequence_num         = 0U;
+    bad_frag.fragment_index       = 2U;   // INVALID: 2 >= fragment_count (2)
+    bad_frag.fragment_count       = 2U;
+    bad_frag.total_payload_length = 8U;
+    bad_frag.payload_length       = 4U;
+    bad_frag.payload[0]           = 0xBBU;
+
+    Result inj = harness_a.inject(bad_frag);
+    assert(inj == Result::OK);  // Assert: raw inject bypasses validation
+
+    // receive() must reject the fragment at the reassembly gate.
+    MessageEnvelope out;
+    Result r = engine.receive(out, 0U, NOW_US);
+    assert(r == Result::ERR_INVALID);  // Assert: malformed fragment rejected
+
+    harness_a.close();
+    harness_b.close();
+    printf("PASS: test_de_reassembly_invalid_fragment_drops\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 70: reset_peer_ordering() discards a staged held-pending message
+//
+// Exercises the `if (m_held_pending_valid && m_held_pending.source_id == src)`
+// True branch inside reset_peer_ordering().  The existing test
+// test_de_reset_peer_ordering_clears_stale_sequence does not reach this branch
+// because m_held_pending is not staged in that test (seq=1 and seq=2 arrive
+// in order; no out-of-order hold occurs).
+//
+// Setup mirrors test_mcdc_receive_held_pending_ok (steps 1–3):
+//   1. seq=1 received → next_expected=2.
+//   2. seq=3 held (gap at seq=2); receive returns ERR_AGAIN.
+//   3. seq=2 received → delivers seq=2; seq=3 staged in m_held_pending.
+// Call: reset_peer_ordering(src=1) while m_held_pending is staged for src=1.
+//   → True branch fires → m_held_pending_valid cleared.
+// Verify: a fresh seq=1 (new message_id) is accepted immediately after reset.
+//
+// Verifies: REQ-3.3.6
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_reset_peer_ordering_discards_held_pending()
+{
+    // Verifies: REQ-3.3.6
+    LocalSimHarness ha;
+    LocalSimHarness hb;
+    DeliveryEngine  engine_a;
+    DeliveryEngine  engine_b;
+    setup_two_ordered_engines(ha, hb, engine_a, engine_b);
+
+    static const NodeId   SRC        = 1U;
+    static const NodeId   DST        = 2U;
+    static const uint64_t FAR_EXPIRY = NOW_US + 5000000ULL;
+
+    // Step 1: inject seq=1 → engine_b delivers it; next_expected=2 for SRC.
+    {
+        MessageEnvelope e1;
+        envelope_init(e1);
+        e1.message_type      = MessageType::DATA;
+        e1.message_id        = 9101ULL;
+        e1.source_id         = SRC;
+        e1.destination_id    = DST;
+        e1.timestamp_us      = NOW_US;
+        e1.expiry_time_us    = FAR_EXPIRY;
+        e1.priority          = 0U;
+        e1.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e1.sequence_num      = 1U;
+        e1.payload_length    = 1U;
+        e1.payload[0]        = 0x01U;
+        Result inj = hb.inject(e1);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out1;
+    Result r1 = engine_b.receive(out1, 0U, NOW_US + 1ULL);
+    assert(r1 == Result::OK);
+    assert(out1.sequence_num == 1U);  // Assert: seq=1 delivered
+
+    // Step 2: inject seq=3 (gap at seq=2) → held by ordering gate.
+    {
+        MessageEnvelope e3;
+        envelope_init(e3);
+        e3.message_type      = MessageType::DATA;
+        e3.message_id        = 9103ULL;
+        e3.source_id         = SRC;
+        e3.destination_id    = DST;
+        e3.timestamp_us      = NOW_US;
+        e3.expiry_time_us    = FAR_EXPIRY;
+        e3.priority          = 0U;
+        e3.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e3.sequence_num      = 3U;
+        e3.payload_length    = 1U;
+        e3.payload[0]        = 0x03U;
+        Result inj = hb.inject(e3);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out3;
+    Result r3 = engine_b.receive(out3, 0U, NOW_US + 2ULL);
+    assert(r3 == Result::ERR_AGAIN);  // Assert: seq=3 held (out of order)
+
+    // Step 3: inject seq=2 → fills gap; seq=2 delivered; seq=3 staged in
+    //         m_held_pending (m_held_pending_valid=true, source_id=SRC).
+    {
+        MessageEnvelope e2;
+        envelope_init(e2);
+        e2.message_type      = MessageType::DATA;
+        e2.message_id        = 9102ULL;
+        e2.source_id         = SRC;
+        e2.destination_id    = DST;
+        e2.timestamp_us      = NOW_US;
+        e2.expiry_time_us    = FAR_EXPIRY;
+        e2.priority          = 0U;
+        e2.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e2.sequence_num      = 2U;
+        e2.payload_length    = 1U;
+        e2.payload[0]        = 0x02U;
+        Result inj = hb.inject(e2);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out2;
+    Result r2 = engine_b.receive(out2, 0U, NOW_US + 3ULL);
+    assert(r2 == Result::OK);
+    assert(out2.sequence_num == 2U);  // Assert: seq=2 delivered; seq=3 now staged
+
+    // Step 4: reset while m_held_pending is staged for SRC.
+    // MC/DC True branch: m_held_pending_valid=true && source_id==SRC → clears held.
+    engine_b.reset_peer_ordering(SRC);
+
+    // Step 5: inject fresh seq=1 (new message_id=9200) — passes dedup.
+    //         After reset, next_expected=1 for SRC → accepted immediately.
+    {
+        MessageEnvelope e_fresh;
+        envelope_init(e_fresh);
+        e_fresh.message_type      = MessageType::DATA;
+        e_fresh.message_id        = 9200ULL;  // distinct message_id — passes dedup
+        e_fresh.source_id         = SRC;
+        e_fresh.destination_id    = DST;
+        e_fresh.timestamp_us      = NOW_US + 4ULL;
+        e_fresh.expiry_time_us    = FAR_EXPIRY;
+        e_fresh.priority          = 0U;
+        e_fresh.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e_fresh.sequence_num      = 1U;
+        e_fresh.payload_length    = 1U;
+        e_fresh.payload[0]        = 0xFFU;
+        Result inj = hb.inject(e_fresh);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out_fresh;
+    Result r_fresh = engine_b.receive(out_fresh, 0U, NOW_US + 5ULL);
+    assert(r_fresh == Result::OK);          // Assert: seq=1 accepted after reset
+    assert(out_fresh.sequence_num == 1U);   // Assert: correct sequence number
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_de_reset_peer_ordering_discards_held_pending\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -3149,6 +3634,14 @@ int main()
     test_mcdc_send_non_data_no_sequence();
     test_mcdc_send_preset_sequence_preserved();
     test_mcdc_receive_held_pending_ok();
+    test_de_reset_peer_ordering_clears_stale_sequence();
+    test_de_drain_hello_reconnects_via_transport();
+    test_mcdc_pump_retries_backward_timestamp();
+    test_mcdc_sweep_ack_timeouts_backward_timestamp();
+    test_de_sweep_stale_reassembly_freed();
+    test_de_reassembly_per_source_cap_drops_fragment();
+    test_de_reassembly_invalid_fragment_drops();
+    test_de_reset_peer_ordering_discards_held_pending();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;
