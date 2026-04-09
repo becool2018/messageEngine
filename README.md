@@ -42,7 +42,7 @@ A C++ networking library for building and testing systems that must survive unre
 5. [Running the Tests](#running-the-tests)
 6. [Coverage Analysis](#coverage-analysis)
 7. [Static Analysis](#static-analysis)
-8. [Running the Demo (Server / Client)](#running-the-demo-server--client)
+8. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
 9. [Using the Library](#using-the-library)
 10. [Use Cases](#use-cases)
 11. [Safety & Assurance Documents](#safety--assurance-documents)
@@ -581,6 +581,8 @@ build/client 127.0.0.1 9001
 ```
 
 The client sends five `RELIABLE_RETRY` messages and prints each echo reply. The server logs all received messages and echoes them back.
+
+For a line-by-line explanation of every log message — including HELLO registration, ACK tracking, retry pump, and clean shutdown — see **[`docs/DEMO_WALKTHROUGH.md`](docs/DEMO_WALKTHROUGH.md)**.
 
 ---
 
