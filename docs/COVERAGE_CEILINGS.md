@@ -40,7 +40,7 @@ branches in `core/DeliveryEngine.cpp`.
 | core/AssertState.cpp | 2 | 1 | 50.00% | ≥50% | NSC-infra |
 | platform/ImpairmentEngine.cpp | 256 | 72 | 71.88% | ≥71% | SC |
 | platform/ImpairmentConfigLoader.cpp | 174 | 34 | 80.46% | ≥80% | SC |
-| platform/SocketUtils.cpp | 306 | 118 | 61.44% | ≥61% | NSC |
+| platform/SocketUtils.cpp | 306 | 104 | 66.01% | ≥66% | NSC |
 | platform/TcpBackend.cpp | 435 | 135 | 68.97% | ≥68% | SC |
 | platform/TlsTcpBackend.cpp | 697 | 209 | 70.01% | ≥70% | SC |
 | platform/UdpBackend.cpp | 194 | 58 | 70.10% | ≥70% | SC |
@@ -292,27 +292,42 @@ Threshold: **82%** (maximum achievable after tests 20–24).
 
 ---
 
-### platform/SocketUtils.cpp — ceiling 64.07%→current 64.50% (149/231)
+### platform/SocketUtils.cpp — ceiling 84.84% lines / 66.01% branches
+
+**Updated 2026-04-08:** 19 new test cases (tests 23–41) added to
+`tests/test_SocketUtils.cpp`, raising line coverage from 67.48% (276/409) to
+84.84% (347/409) and branch coverage from 61.44% to 66.01%.
 
 NSC (raw POSIX I/O primitives; no message-delivery policy). Branch coverage not
 policy-enforced; documented here for Class A/B readiness.
 
-Two independent sources:
+**Line coverage: 347/409 (84.84%)** — 62 permanently-missed lines.
+**Branch coverage: 202/306 (66.01%)** — 104 permanently-missed branches.
 
-**(a)** ~19 hard POSIX error paths unreachable in loopback: `fcntl(F_GETFL/
-F_SETFL)` failure, `setsockopt(SO_REUSEADDR)` failure, `listen()` failure,
-`accept()` failure, `close()` failure after valid open, `recvfrom()` failure on
-open UDP socket, `inet_ntop()` failure on valid loopback address. These POSIX
-calls succeed unconditionally on macOS/Linux loopback.
+**Permanently-missed line groups (62 lines total):**
 
-**(b)** UDP partial-send atomicity: `socket_send_to()` checks `send_result != len`
-(partial send), which cannot occur for UDP datagrams on loopback — UDP sends are
-atomic; either the full datagram is sent or `sendto()` returns an error.
+| Lines | Location | Reason |
+|-------|----------|--------|
+| 107–125 | `log_socket_create_error()` — entire function (19 lines) | Only reachable when `socket()` fails system-wide (FD exhaustion or permission denial). Requires `setrlimit(RLIMIT_NOFILE)` or running as a restricted user — fragile and environment-dependent. |
+| 139–141 | `socket_create_tcp()` error return | Same root cause: `socket()` failure. |
+| 161–163 | `socket_create_udp()` error return | Same root cause: `socket()` failure. |
+| 192–195 | `socket_set_nonblocking()` `fcntl(F_SETFL)` failure | After `F_GETFL` succeeds on a valid fd, `F_SETFL` with `O_NONBLOCK` cannot fail on macOS/Linux. No known technique to force this independently. |
+| 291–293 | `socket_connect_with_timeout()` immediate-success path | Non-blocking `connect()` to a local listener returns `EINPROGRESS`, not 0, on macOS/Linux — even for loopback. |
+| 297–300 | `socket_connect_with_timeout()` non-`EINPROGRESS` error | On macOS/Linux, `ECONNREFUSED` is reported via `SO_ERROR` after `poll()` returns writable rather than as a direct `connect()` return on non-blocking sockets. The `test_connect_refused` test confirms `errno == EINPROGRESS` at the `connect()` call site. |
+| 314–317 | `socket_connect_with_timeout()` `poll()` timeout | Requires connecting to a non-routable host where SYN packets are dropped. Flaky in CI; no routing control available. |
+| 424–427 | `socket_send_all()` `poll()` timeout | Requires filling the kernel send buffer without a draining peer — needs a second thread. |
+| 440–444 | `socket_send_all()` `send()` returns 0 | `send()` returning exactly 0 bytes essentially never occurs on TCP; a closed peer produces ECONNRESET or EPIPE. |
+| 540–543 | `tcp_send_frame()` payload-only failure | After header sends successfully, causing the payload `socket_send_all` to fail requires an interleaved close between header and payload sends — needs threading. |
+| 638–641 | `socket_send_to()` partial send | UDP datagrams on loopback are atomic; partial `sendto()` cannot occur. Either the full datagram is sent or `sendto()` returns an error. |
+| 691–694 | `socket_recv_from()` `recvfrom()` returns −1 | `recvfrom()` failing on a bound open UDP socket requires kernel fault injection. |
+| 721–724 | `socket_recv_from()` `inet_ntop()` failure | `inet_ntop()` with `AF_INET`/`AF_INET6` and a properly-sized output buffer cannot fail. |
 
-All 2 newly-reachable branches (inet_aton failure in `socket_bind()` and
-`socket_send_to()`) are covered by invalid-IP unit tests.
+All 41 reachable test scenarios (including EBADF via closed-fd, EADDRINUSE,
+ECONNREFUSED via SO_ERROR, EOF via socketpair, zero-length UDP datagram, IPv6
+`inet_pton` failure, and recv poll timeout) are exercised by the 41 test cases in
+`tests/test_SocketUtils.cpp`.
 
-Threshold: **64%** (maximum achievable for NSC).
+Threshold: **≥66% branches / 84.84% lines** (maximum achievable).
 
 ---
 

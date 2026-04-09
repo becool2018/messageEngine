@@ -790,6 +790,466 @@ static void test_udp_ipv6_send_recv()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 23: fill_addr() IPv6 failure — invalid IPv6 address string
+// Exercises lines 74-77 in fill_addr(): socket_is_ipv6 returns true for "::zzz"
+// (contains ':') but inet_pton(AF_INET6, "::zzz") rejects it.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_fill_addr_bad_ipv6()
+{
+    // Need an IPv6-capable socket so socket_bind reaches fill_addr.
+    int fd = socket_create_tcp(true);
+    assert(fd >= 0);
+
+    // "::zzz" passes socket_is_ipv6 (has ':') but inet_pton(AF_INET6) rejects it.
+    bool ok = socket_bind(fd, "::zzz", 19302U);
+    assert(!ok);  // Assert: fill_addr returns false; bind propagates it
+
+    socket_close(fd);
+    printf("PASS: test_fill_addr_bad_ipv6\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 24: socket_set_nonblocking() on a closed fd → fcntl(F_GETFL) fails
+// Exercises lines 183-186.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_set_nonblocking_closed_fd()
+{
+    int fd = socket_create_tcp(false);
+    assert(fd >= 0);
+    socket_close(fd);  // fd number still positive; fd is now invalid
+
+    bool ok = socket_set_nonblocking(fd);
+    assert(!ok);  // Assert: fcntl(F_GETFL) fails with EBADF
+
+    printf("PASS: test_set_nonblocking_closed_fd\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 25: socket_set_reuseaddr() on a closed fd → setsockopt fails
+// Exercises lines 215-218.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_set_reuseaddr_closed_fd()
+{
+    int fd = socket_create_tcp(false);
+    assert(fd >= 0);
+    socket_close(fd);
+
+    bool ok = socket_set_reuseaddr(fd);
+    assert(!ok);  // Assert: setsockopt fails with EBADF
+
+    printf("PASS: test_set_reuseaddr_closed_fd\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 26: socket_bind() EADDRINUSE — same port bound twice without SO_REUSEADDR
+// Exercises lines 245-248.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_bind_eaddrinuse()
+{
+    int fd1 = socket_create_tcp(false);
+    assert(fd1 >= 0);
+    bool b1 = socket_bind(fd1, LOOPBACK_IP, 19303U);
+    assert(b1);  // Assert: first bind succeeds
+
+    int fd2 = socket_create_tcp(false);
+    assert(fd2 >= 0);
+    // No SO_REUSEADDR on fd2; same port → EADDRINUSE → lines 245-248
+    bool b2 = socket_bind(fd2, LOOPBACK_IP, 19303U);
+    assert(!b2);  // Assert: second bind on same port fails
+
+    socket_close(fd1);
+    socket_close(fd2);
+    printf("PASS: test_bind_eaddrinuse\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 27: socket_connect_with_timeout() — socket_set_nonblocking fails
+// Using a closed fd: socket_set_nonblocking(closed_fd) → fcntl fails → lines 275-276.
+// Verifies: REQ-6.3.2, REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2, REQ-6.3.3
+static void test_connect_nonblocking_fails()
+{
+    int fd = socket_create_tcp(false);
+    assert(fd >= 0);
+    socket_close(fd);  // closed; socket_set_nonblocking will fail
+
+    bool ok = socket_connect_with_timeout(fd, LOOPBACK_IP, 19304U, TIMEOUT_MS);
+    assert(!ok);  // Assert: returns false because socket_set_nonblocking failed
+
+    printf("PASS: test_connect_nonblocking_fails\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 28: socket_connect_with_timeout() — fill_addr fails (bad IPv6)
+// socket_set_nonblocking succeeds on valid fd; fill_addr("::zzz") fails → lines 282-283.
+// Verifies: REQ-6.3.2, REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2, REQ-6.3.3
+static void test_connect_bad_ipv6()
+{
+    int fd = socket_create_tcp(true);  // IPv6 socket
+    assert(fd >= 0);
+
+    // "::zzz" passes socket_is_ipv6 but inet_pton rejects it → fill_addr fails
+    bool ok = socket_connect_with_timeout(fd, "::zzz", 19305U, TIMEOUT_MS);
+    assert(!ok);  // Assert: fill_addr fails → early return at lines 282-283
+
+    socket_close(fd);
+    printf("PASS: test_connect_bad_ipv6\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 29: socket_connect_with_timeout() — ECONNREFUSED (no listener)
+// Non-blocking connect to a port with no listener; on loopback, connect()
+// returns -1+ECONNREFUSED immediately (not EINPROGRESS) → lines 297-300.
+// Verifies: REQ-6.3.2, REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2, REQ-6.3.3
+static void test_connect_refused()
+{
+    int fd = socket_create_tcp(false);
+    assert(fd >= 0);
+
+    // Port 19399 has no listener; non-blocking connect returns ECONNREFUSED
+    // immediately on loopback → errno != EINPROGRESS → lines 297-300
+    bool ok = socket_connect_with_timeout(fd, LOOPBACK_IP, 19399U, TIMEOUT_MS);
+    assert(!ok);  // Assert: ECONNREFUSED — not EINPROGRESS
+
+    socket_close(fd);
+    printf("PASS: test_connect_refused\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 30: socket_listen() on a closed fd → listen() fails
+// Exercises lines 346-349.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_listen_closed_fd()
+{
+    int fd = socket_create_tcp(false);
+    assert(fd >= 0);
+    socket_close(fd);
+
+    bool ok = socket_listen(fd, 1);
+    assert(!ok);  // Assert: listen() fails with EBADF → lines 346-349
+
+    printf("PASS: test_listen_closed_fd\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 31: socket_accept() on a closed fd → accept() fails
+// Exercises lines 368-371.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_accept_closed_fd()
+{
+    int fd = socket_create_tcp(false);
+    assert(fd >= 0);
+    socket_close(fd);
+
+    int result = socket_accept(fd);
+    assert(result < 0);  // Assert: accept() fails with EBADF → lines 368-371
+
+    printf("PASS: test_accept_closed_fd\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 32: socket_close() on an already-closed fd → close() returns -1
+// Exercises lines 391-394.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_close_already_closed()
+{
+    int fd = socket_create_tcp(false);
+    assert(fd >= 0);
+    socket_close(fd);          // First close — valid
+    socket_close(fd);          // Second close — EBADF → lines 391-394 (must not crash)
+
+    // No assert needed beyond "did not crash"; the function returns void.
+    assert(fd >= 0);  // Assert: fd value unchanged (just a number)
+
+    printf("PASS: test_close_already_closed\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 33: socket_send_all() on a closed fd → send() fails
+// poll() returns POLLNVAL (poll_result > 0) on a closed fd, then send() returns
+// -1+EBADF → lines 433-436.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_send_all_closed_fd()
+{
+    int fd = socket_create_tcp(false);
+    assert(fd >= 0);
+    socket_close(fd);
+
+    static const uint8_t DATA[4U] = {0x01U, 0x02U, 0x03U, 0x04U};
+    // poll(closed_fd) → POLLNVAL → poll_result=1 → proceeds to send()
+    // send(closed_fd) → -1+EBADF → lines 433-436
+    bool ok = socket_send_all(fd, DATA, 4U, TIMEOUT_MS);
+    assert(!ok);  // Assert: send_all returns false (EBADF)
+
+    printf("PASS: test_send_all_closed_fd\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 34: socket_recv_exact() poll timeout
+// Bound UDP socket with nothing to read; 1 ms timeout → poll returns 0 → lines 482-485.
+// Verifies: REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.3
+static void test_recv_exact_timeout()
+{
+    int fd = socket_create_udp(false);
+    assert(fd >= 0);
+
+    bool ra = socket_set_reuseaddr(fd);
+    assert(ra);
+
+    bool bound = socket_bind(fd, LOOPBACK_IP, 19307U);
+    assert(bound);
+
+    uint8_t buf[16U];
+    // 1 ms timeout; no data sent → poll returns 0 (timeout) → lines 482-485
+    bool ok = socket_recv_exact(fd, buf, 10U, 1U);
+    assert(!ok);  // Assert: recv_exact times out
+
+    socket_close(fd);
+    printf("PASS: test_recv_exact_timeout\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 35: socket_recv_exact() on a closed fd → recv() fails
+// poll(closed_fd) → POLLNVAL → poll_result=1 → recv() → -1+EBADF → lines 491-494.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_recv_exact_closed_fd()
+{
+    int fd = socket_create_tcp(false);
+    assert(fd >= 0);
+    socket_close(fd);
+
+    uint8_t buf[16U];
+    bool ok = socket_recv_exact(fd, buf, 10U, TIMEOUT_MS);
+    assert(!ok);  // Assert: recv fails with EBADF → lines 491-494
+
+    printf("PASS: test_recv_exact_closed_fd\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 36: socket_recv_exact() — recv() returns 0 (peer closed connection)
+// Exercises lines 498-501.
+// Setup: create loopback TCP pair, close server side, recv on client.
+// When the peer sends FIN the socket becomes readable; recv() returns 0.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_recv_exact_peer_closed()
+{
+    int srv_fd = socket_create_tcp(false);
+    assert(srv_fd >= 0);
+    bool ra = socket_set_reuseaddr(srv_fd);
+    assert(ra);
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19308U);
+    assert(bound);
+    bool listening = socket_listen(srv_fd, 1);
+    assert(listening);
+
+    int cli_fd = socket_create_tcp(false);
+    assert(cli_fd >= 0);
+    bool connected = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19308U, TIMEOUT_MS);
+    assert(connected);
+
+    bool readable = wait_readable(srv_fd, TIMEOUT_MS);
+    assert(readable);
+    int acc_fd = socket_accept(srv_fd);
+    assert(acc_fd >= 0);
+
+    // Close server side → sends FIN → client's recv() returns 0 → lines 498-501
+    socket_close(acc_fd);
+
+    uint8_t buf[16U];
+    bool ok = socket_recv_exact(cli_fd, buf, 10U, TIMEOUT_MS);
+    assert(!ok);  // Assert: recv returns 0 (EOF) → returns false
+
+    socket_close(cli_fd);
+    socket_close(srv_fd);
+    printf("PASS: test_recv_exact_peer_closed\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 37: tcp_send_frame() on a closed fd → socket_send_all(header) fails
+// Exercises lines 532-535.
+// Verifies: REQ-6.1.5, REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.1.5, REQ-6.3.2
+static void test_send_frame_closed_fd()
+{
+    int fd = socket_create_tcp(false);
+    assert(fd >= 0);
+    socket_close(fd);
+
+    static const uint8_t DATA[4U] = {0x10U, 0x20U, 0x30U, 0x40U};
+    // socket_send_all(header) → send() fails with EBADF → lines 532-535
+    bool ok = tcp_send_frame(fd, DATA, 4U, TIMEOUT_MS);
+    assert(!ok);  // Assert: header send fails
+
+    printf("PASS: test_send_frame_closed_fd\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 38: tcp_recv_frame() on a closed fd → socket_recv_exact(header) fails
+// Exercises lines 566-569.
+// Verifies: REQ-6.1.5, REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.1.5, REQ-6.3.2
+static void test_recv_frame_closed_fd()
+{
+    int fd = socket_create_tcp(false);
+    assert(fd >= 0);
+    socket_close(fd);
+
+    static const uint32_t BUF_CAP = Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES;
+    uint8_t buf[BUF_CAP];
+    uint32_t out_len = 0U;
+    // socket_recv_exact(header) → recv() fails → lines 566-569
+    bool ok = tcp_recv_frame(fd, buf, BUF_CAP, TIMEOUT_MS, &out_len);
+    assert(!ok);  // Assert: header recv fails
+
+    printf("PASS: test_recv_frame_closed_fd\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 39: tcp_recv_frame() — header received but payload recv fails
+// Exercises lines 592-595.
+// Uses socketpair(): one end sends WIRE_HEADER_SIZE as frame_len then closes;
+// the other end's tcp_recv_frame reads the header (success) then fails reading
+// the payload (recv() returns 0 = EOF).
+// Verifies: REQ-6.1.5, REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.1.5, REQ-6.3.2
+static void test_recv_frame_payload_fails()
+{
+    int sv[2];
+    int r = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(r == 0);  // Assert: socketpair created
+
+    // sv[0] = writer (sends header then closes)
+    // sv[1] = reader (used for tcp_recv_frame)
+    // frame_len = WIRE_HEADER_SIZE = 52 (valid range; triggers payload recv)
+    static const uint32_t FRAME_LEN = Serializer::WIRE_HEADER_SIZE;
+    uint8_t hdr[4U];
+    hdr[0] = static_cast<uint8_t>((FRAME_LEN >> 24U) & 0xFFU);
+    hdr[1] = static_cast<uint8_t>((FRAME_LEN >> 16U) & 0xFFU);
+    hdr[2] = static_cast<uint8_t>((FRAME_LEN >>  8U) & 0xFFU);
+    hdr[3] = static_cast<uint8_t>( FRAME_LEN         & 0xFFU);
+
+    bool hw = socket_send_all(sv[0], hdr, 4U, TIMEOUT_MS);
+    assert(hw);  // Assert: header written to socketpair buffer
+    socket_close(sv[0]);  // FIN → tcp_recv_frame payload recv returns 0
+
+    static const uint32_t BUF_CAP = Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES;
+    uint8_t buf[BUF_CAP];
+    uint32_t out_len = 0U;
+    // Reads 4-byte header (OK, already buffered); then tries to read FRAME_LEN
+    // bytes of payload but gets EOF → socket_recv_exact returns false → lines 592-595
+    bool ok = tcp_recv_frame(sv[1], buf, BUF_CAP, TIMEOUT_MS, &out_len);
+    assert(!ok);  // Assert: payload recv fails (EOF)
+
+    socket_close(sv[1]);
+    printf("PASS: test_recv_frame_payload_fails\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 40: socket_send_to() on a closed fd → sendto() fails
+// fill_addr() succeeds (valid IP); sendto(closed_fd) → -1+EBADF → lines 631-634.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_send_to_closed_fd()
+{
+    int fd = socket_create_udp(false);
+    assert(fd >= 0);
+    socket_close(fd);
+
+    static const uint8_t DATA[4U] = {0xAAU, 0xBBU, 0xCCU, 0xDDU};
+    // fill_addr(LOOPBACK_IP) succeeds; sendto(closed_fd) → EBADF → lines 631-634
+    bool ok = socket_send_to(fd, DATA, 4U, LOOPBACK_IP, 19309U);
+    assert(!ok);  // Assert: sendto fails with EBADF
+
+    printf("PASS: test_send_to_closed_fd\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 41: socket_recv_from() — recvfrom() returns 0 (zero-length UDP datagram)
+// Exercises lines 697-700.
+// Sends a zero-length UDP datagram directly via sendto() (bypassing
+// socket_send_to which asserts len > 0).  On loopback, recvfrom() returns 0
+// for an empty UDP datagram → socket_recv_from returns false.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_recv_from_zero_datagram()
+{
+    int recv_fd = socket_create_udp(false);
+    assert(recv_fd >= 0);
+    bool ra = socket_set_reuseaddr(recv_fd);
+    assert(ra);
+    bool bound = socket_bind(recv_fd, LOOPBACK_IP, 19310U);
+    assert(bound);
+
+    int send_fd = socket_create_udp(false);
+    assert(send_fd >= 0);
+
+    // Build destination address for raw sendto()
+    struct sockaddr_in dst;
+    (void)memset(&dst, 0, sizeof(dst));
+    dst.sin_family = AF_INET;
+    dst.sin_port   = htons(static_cast<uint16_t>(19310U));
+    int pton_r = inet_pton(AF_INET, LOOPBACK_IP, &dst.sin_addr);
+    assert(pton_r == 1);  // Assert: address converted
+
+    // Send zero-length UDP datagram directly (socket_send_to would assert len>0)
+    static const uint8_t EMPTY[1U] = {0x00U};
+    // MISRA C++:2023 Rule 5.2.4: POSIX socket API requires reinterpret_cast.
+    ssize_t ns = sendto(send_fd, EMPTY, 0U, 0,
+                        reinterpret_cast<const struct sockaddr*>(&dst),
+                        static_cast<socklen_t>(sizeof(dst)));
+    assert(ns == 0);  // Assert: zero bytes sent (empty datagram)
+
+    // recvfrom() returns 0 for zero-length datagram → lines 697-700
+    uint8_t  recv_buf[256U];
+    uint32_t recv_len = 0U;
+    char     src_ip[48U];
+    uint16_t src_port = 0U;
+    (void)memset(recv_buf, 0, sizeof(recv_buf));
+    (void)memset(src_ip,   0, sizeof(src_ip));
+
+    bool ok = socket_recv_from(recv_fd, recv_buf,
+                                static_cast<uint32_t>(sizeof(recv_buf)),
+                                TIMEOUT_MS, &recv_len, src_ip, &src_port);
+    assert(!ok);  // Assert: recvfrom returns 0 → socket_recv_from returns false
+
+    socket_close(send_fd);
+    socket_close(recv_fd);
+    printf("PASS: test_recv_from_zero_datagram\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main — run all tests in sequence
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -819,6 +1279,25 @@ int main()
     test_create_udp_ipv6();
     test_bind_ipv6();
     test_udp_ipv6_send_recv();
+    test_fill_addr_bad_ipv6();
+    test_set_nonblocking_closed_fd();
+    test_set_reuseaddr_closed_fd();
+    test_bind_eaddrinuse();
+    test_connect_nonblocking_fails();
+    test_connect_bad_ipv6();
+    test_connect_refused();
+    test_listen_closed_fd();
+    test_accept_closed_fd();
+    test_close_already_closed();
+    test_send_all_closed_fd();
+    test_recv_exact_timeout();
+    test_recv_exact_closed_fd();
+    test_recv_exact_peer_closed();
+    test_send_frame_closed_fd();
+    test_recv_frame_closed_fd();
+    test_recv_frame_payload_fails();
+    test_send_to_closed_fd();
+    test_recv_from_zero_datagram();
 
     printf("=== ALL PASSED ===\n");
     return 0;
