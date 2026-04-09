@@ -190,13 +190,58 @@ ALL_LIB_OBJS := $(CORE_OBJS) $(PLATFORM_OBJS)
 # ─────────────────────────────────────────────────────────────────────────────
 # Targets
 # ─────────────────────────────────────────────────────────────────────────────
-.PHONY: all clean install tests stress_tests run_stress_tests server client \
+.PHONY: all clean install tests stress_tests run_stress_tests run_tests server client \
         tls_demo dtls_demo demos \
         check_traceability \
-        lint cppcheck pclint scan_build static_analysis \
+        lint cppcheck cppcheck-misra pclint scan_build static_analysis \
         coverage coverage_show coverage_report \
         sanitize_tests run_sanitize \
-        check_version
+        check_version help
+
+help:
+	@echo ""
+	@echo "messageEngine — available make targets"
+	@echo ""
+	@echo "Build:"
+	@echo "  all                 Build server, client, and all tests (default)"
+	@echo "  server              Build TCP echo server  (build/server)"
+	@echo "  client              Build TCP echo client  (build/client)"
+	@echo "  tls_demo            Build TLS/TCP demo     (build/tls_demo)"
+	@echo "  dtls_demo           Build DTLS-UDP demo    (build/dtls_demo)"
+	@echo "  demos               Build tls_demo and dtls_demo"
+	@echo "  install             Install server+client to prefix/bin  (override: DESTDIR, prefix, bindir)"
+	@echo "  clean               Remove all build artifacts"
+	@echo ""
+	@echo "Test:"
+	@echo "  tests               Build all 23 unit test binaries"
+	@echo "  run_tests           Build and run the full unit test suite"
+	@echo "  stress_tests        Build capacity/slot-recycling stress test"
+	@echo "  run_stress_tests    Build and run stress tests"
+	@echo "  sanitize_tests      Build test suite with ASan + UBSan"
+	@echo "  run_sanitize        Build and run ASan + UBSan test suite"
+	@echo ""
+	@echo "Static analysis:"
+	@echo "  lint                Run clang-tidy on src/ and tests/"
+	@echo "  cppcheck            Run cppcheck flow/style analysis"
+	@echo "  cppcheck-misra      Run cppcheck + MISRA C++:2023 addon (macOS only)"
+	@echo "  scan_build          Run Clang Static Analyzer (scan-build)"
+	@echo "  static_analysis     Run lint + cppcheck + scan_build in sequence"
+	@echo "  pclint              Run PC-lint Plus MISRA report (PENDING: licence required)"
+	@echo ""
+	@echo "Coverage:"
+	@echo "  coverage            Build instrumented tests and show per-file coverage"
+	@echo "  coverage_show       Annotated line-level output (run after coverage)"
+	@echo "  coverage_report     Full per-file/per-function report with policy notes"
+	@echo ""
+	@echo "Verification:"
+	@echo "  check_traceability  Verify REQ-ID Implements/Verifies tags"
+	@echo "  check_version       Verify Version.hpp matches current git tag"
+	@echo ""
+	@echo "Options:"
+	@echo "  RELEASE=1           Enable -O2 -D_FORTIFY_SOURCE=2 (production build)"
+	@echo "  DESTDIR=<path>      Install prefix  (Yocto: set to staging dir in do_install)"
+	@echo "  CXX=<compiler>      Override compiler (default: g++)"
+	@echo ""
 
 all: server client tests
 
