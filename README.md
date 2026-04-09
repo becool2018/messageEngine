@@ -54,6 +54,7 @@ A C++ networking library for building and testing systems that must survive unre
 17. [Claude Skills](#claude-skills)
 18. [Release History](#release-history)
 19. [Code Statistics](#code-statistics)
+20. [Security Check](SNYK.IO.SECURITY_CHECK.md)
 
 ---
 
