@@ -23,7 +23,7 @@
  *             REQ-5.2.4, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
  */
 // Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5,
-//             REQ-5.2.4, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+//             REQ-3.3.6, REQ-5.2.4, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
 
 #include "DeliveryEngine.hpp"
 #include "Assert.hpp"
@@ -843,6 +843,53 @@ Result DeliveryEngine::handle_data_dedup(const MessageEnvelope& env, uint64_t no
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::reset_peer_ordering() — SC: HAZ-001
+// Clears stale ordering state for src on peer reconnect (REQ-3.3.6).
+// Also discards any staged m_held_pending envelope belonging to the same src
+// so it is not delivered after the ordering gate has been reset.
+// Power of 10 Rule 5: 2 assertions. CC <= 5.
+// ─────────────────────────────────────────────────────────────────────────────
+void DeliveryEngine::reset_peer_ordering(NodeId src)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: initialized
+    NEVER_COMPILED_OUT_ASSERT(src != 0U);       // Assert: valid source
+
+    // Clear any staged held_pending envelope that belongs to the reconnecting peer.
+    // Delivering a held message from a prior connection after the ordering gate has
+    // been reset would violate ordering correctness for the new connection.
+    if (m_held_pending_valid && (m_held_pending.source_id == src)) {
+        m_held_pending_valid = false;
+        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
+                    "reset_peer_ordering: discarded staged held_pending for src=%u (REQ-3.3.6)",
+                    static_cast<unsigned>(src));
+    }
+
+    m_ordering.reset_peer(src);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DeliveryEngine::drain_hello_reconnects() — NSC private helper
+// Polls the transport for pending HELLO peer-reconnect notifications and calls
+// reset_peer_ordering() for each. Called at the entry of receive() so stale
+// ordering state is cleared before any delivery attempt (REQ-3.3.6).
+// Power of 10 Rule 2: bounded loop (≤ ORDERING_PEER_COUNT iterations).
+// ─────────────────────────────────────────────────────────────────────────────
+void DeliveryEngine::drain_hello_reconnects()
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);           // Assert: initialized
+    NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr);  // Assert: transport assigned
+
+    // Power of 10 Rule 2: bounded by ORDERING_PEER_COUNT (max distinct ordered peers).
+    for (uint32_t i = 0U; i < ORDERING_PEER_COUNT; ++i) {
+        NodeId hello_src = m_transport->pop_hello_peer();
+        if (hello_src == NODE_ID_INVALID) {
+            break;
+        }
+        reset_peer_ordering(hello_src);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DeliveryEngine::receive()
 // ─────────────────────────────────────────────────────────────────────────────
 Result DeliveryEngine::receive(MessageEnvelope& env,
@@ -864,6 +911,10 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
         return Result::ERR_INVALID;
     }
     m_last_now_us = now_us;
+
+    // REQ-3.3.6: drain any pending HELLO reconnect notifications from the transport
+    // and reset stale per-peer ordering state before any delivery attempt.
+    drain_hello_reconnects();
 
     // REQ-3.3.5: drain any previously-held ordering message before blocking on the
     // transport. If a prior in-order delivery left a contiguous message staged in

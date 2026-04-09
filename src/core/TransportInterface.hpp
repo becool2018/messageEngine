@@ -73,6 +73,25 @@ public:
         return Result::OK;
     }
 
+    /**
+     * @brief Pop the NodeId of the most-recently-registered peer (HELLO received).
+     *
+     * Called by DeliveryEngine::receive() to detect peer reconnections and reset
+     * stale per-peer ordering state (REQ-3.3.6). Returns NODE_ID_INVALID when no
+     * new HELLO has been received since the last call.
+     *
+     * TCP/TLS server backends push a NodeId each time handle_hello_frame()
+     * successfully registers a client NodeId. UDP/DTLS drop duplicate HELLOs so
+     * reconnect semantics do not apply; those backends use the default no-op.
+     *
+     * @return NodeId of peer that sent HELLO; NODE_ID_INVALID (0) if none pending.
+     */
+    // NSC: lifecycle notification; not on the message delivery path.
+    virtual NodeId pop_hello_peer()
+    {
+        return NODE_ID_INVALID;  // default: no-op for UDP/DTLS and non-connection-oriented transports
+    }
+
     // Safety-critical (SC): HAZ-001, HAZ-005, HAZ-006 — verified to M5
     /**
      * @brief Queue / send a single message envelope.

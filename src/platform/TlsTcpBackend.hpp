@@ -111,6 +111,11 @@ public:
     /// REQ-6.1.10: store our node ID; client mode sends HELLO frame to server.
     Result register_local_id(NodeId id) override;
 
+    // REQ-3.3.6: pop one NodeId from the HELLO reconnect queue.
+    // Returns NODE_ID_INVALID when the queue is empty.
+    // Called by DeliveryEngine::drain_hello_reconnects() to reset stale ordering state.
+    NodeId pop_hello_peer() override;
+
 private:
     // ── mbedTLS contexts (fixed static allocation — Power of 10 Rule 3) ─────
     mbedtls_ssl_config  m_ssl_conf;                        ///< Shared TLS config
@@ -152,6 +157,14 @@ private:
     NodeId            m_client_node_ids[MAX_TCP_CONNECTIONS];  ///< NodeId per client slot (NODE_ID_INVALID = unknown) — REQ-6.1.9
     NodeId            m_local_node_id;            ///< Our own node identity (set by register_local_id) — REQ-6.1.10
     bool              m_client_hello_received[MAX_TCP_CONNECTIONS]; ///< True once HELLO received for this slot — REQ-6.1.8
+
+    // REQ-3.3.6: circular FIFO of NodeIds from recently-registered HELLO frames.
+    // Populated by handle_hello_frame(); drained by pop_hello_peer().
+    // DeliveryEngine polls this each receive() to reset stale ordering state on reconnect.
+    // Power of 10 Rule 3: fixed-capacity; no heap after init.
+    NodeId            m_hello_queue[MAX_TCP_CONNECTIONS] = {};  ///< HELLO peer NodeId queue
+    uint32_t          m_hello_queue_read  = 0U;                  ///< Next read index (mod MAX_TCP_CONNECTIONS)
+    uint32_t          m_hello_queue_write = 0U;                  ///< Next write index (mod MAX_TCP_CONNECTIONS)
     bool              m_client_slot_active[MAX_TCP_CONNECTIONS]; ///< Fix 5: true = slot in use; avoids ssl_context copy
 
     // ── Private helpers ──────────────────────────────────────────────────────

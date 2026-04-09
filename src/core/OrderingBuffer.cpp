@@ -22,9 +22,9 @@
  *   - MISRA C++:2023: checked casts, no UB.
  *   - F-Prime style: explicit error codes.
  *
- * Implements: REQ-3.3.5
+ * Implements: REQ-3.3.5, REQ-3.3.6
  */
-// Implements: REQ-3.3.5
+// Implements: REQ-3.3.5, REQ-3.3.6
 
 #include "OrderingBuffer.hpp"
 #include "Assert.hpp"
@@ -376,6 +376,44 @@ Result OrderingBuffer::try_release_next(NodeId src, MessageEnvelope& out)
 
     NEVER_COMPILED_OUT_ASSERT(!m_hold[hold_idx].active);  // Assert: hold slot freed
     return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OrderingBuffer::reset_peer — SC: HAZ-001
+// Clears stale per-peer ordering state when a peer reconnects (REQ-3.3.6).
+// Frees all held messages for the peer and resets next_expected_seq to 1 so
+// the new connection's messages (starting at seq=1) are delivered correctly.
+// Idempotent: if src has no active peer entry this is a no-op.
+// Power of 10 Rule 5: 2 assertions. CC <= 5.
+// ─────────────────────────────────────────────────────────────────────────────
+void OrderingBuffer::reset_peer(NodeId src)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: initialized
+    NEVER_COMPILED_OUT_ASSERT(src != 0U);       // Assert: valid source (0 is UNORDERED sentinel)
+
+    uint32_t peer_idx = find_peer(src);
+    if (peer_idx == ORDERING_PEER_COUNT) {
+        return;  // peer not tracked; no-op (idempotent)
+    }
+
+    // Free all hold slots belonging to this peer before resetting state.
+    // This prevents hold-slot leaks when the peer reconnects with a fresh
+    // sequence counter and in-flight held messages can never be delivered.
+    // Power of 10 Rule 2: bounded loop (≤ ORDERING_HOLD_COUNT iterations).
+    for (uint32_t i = 0U; i < ORDERING_HOLD_COUNT; ++i) {
+        if (m_hold[i].active && (m_hold[i].env.source_id == src)) {
+            m_hold[i].active = false;
+        }
+    }
+
+    // Reset sequence cursor to 1; 0 is the UNORDERED sentinel and is never expected.
+    m_peers[peer_idx].next_expected_seq = 1U;
+
+    Logger::log(Severity::WARNING_HI, "OrderingBuffer",
+                "Peer ordering state reset for src=%u (peer reconnect; REQ-3.3.6)",
+                static_cast<unsigned>(src));
+
+    NEVER_COMPILED_OUT_ASSERT(m_peers[peer_idx].next_expected_seq == 1U);  // Assert: reset complete
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

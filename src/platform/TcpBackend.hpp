@@ -77,6 +77,11 @@ public:
     /// REQ-6.1.10: store our node ID; client mode sends HELLO frame to server.
     Result register_local_id(NodeId id) override;
 
+    // REQ-3.3.6: pop one NodeId from the HELLO reconnect queue.
+    // Returns NODE_ID_INVALID when the queue is empty.
+    // Called by DeliveryEngine::drain_hello_reconnects() to reset stale ordering state.
+    NodeId pop_hello_peer() override;
+
 private:
     // ───────────────────────────────────────────────────────────────────────
     // Member state (Power of 10 rule 3: fixed allocation, no heap after init)
@@ -96,6 +101,14 @@ private:
     NodeId             m_client_node_ids[MAX_TCP_CONNECTIONS];     ///< NodeId for each client slot (NODE_ID_INVALID = unknown)
     NodeId             m_local_node_id;                            ///< Our own node identity (set by register_local_id)
     bool               m_client_hello_received[MAX_TCP_CONNECTIONS]; ///< True once HELLO received for this slot — REQ-6.1.8
+
+    // REQ-3.3.6: circular FIFO of NodeIds from recently-registered HELLO frames.
+    // Populated by handle_hello_frame(); drained by pop_hello_peer().
+    // DeliveryEngine polls this each receive() to reset stale ordering state on reconnect.
+    // Power of 10 Rule 3: fixed-capacity; no heap after init.
+    NodeId             m_hello_queue[MAX_TCP_CONNECTIONS] = {};   ///< HELLO peer NodeId queue
+    uint32_t           m_hello_queue_read  = 0U;                   ///< Next read index (mod MAX_TCP_CONNECTIONS)
+    uint32_t           m_hello_queue_write = 0U;                   ///< Next write index (mod MAX_TCP_CONNECTIONS)
 
     // ───────────────────────────────────────────────────────────────────────
     // Private helper methods (Power of 10: small, single-purpose functions)
