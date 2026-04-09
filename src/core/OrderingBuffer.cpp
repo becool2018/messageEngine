@@ -445,7 +445,12 @@ void OrderingBuffer::reset_peer(NodeId src)
     // Free all hold slots belonging to this peer before resetting state.
     // This prevents hold-slot leaks when the peer reconnects with a fresh
     // sequence counter and in-flight held messages can never be delivered.
-    free_holds_for_peer(peer_idx);
+    // Power of 10 Rule 2: bounded loop (≤ ORDERING_HOLD_COUNT iterations).
+    for (uint32_t i = 0U; i < ORDERING_HOLD_COUNT; ++i) {
+        if (m_hold[i].active && (m_hold[i].env.source_id == src)) {
+            m_hold[i].active = false;
+        }
+    }
 
     // Reset sequence cursor to 1; 0 is the UNORDERED sentinel and is never expected.
     m_peers[peer_idx].next_expected_seq = 1U;
