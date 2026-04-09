@@ -18,7 +18,7 @@ branch. This mechanism is identical across all files and is not re-explained bel
 
 ---
 
-## Thresholds (current run: 2026-04-06)
+## Thresholds (current run: 2026-04-09)
 
 **Methodology note (2026-04-06 re-baseline):** LLVM source-based coverage now
 counts each branch outcome (True and False) as a separate branch entry, doubling
@@ -27,6 +27,14 @@ below are recalibrated against the current LLVM output. The per-file ceiling
 justifications describe the same permanently-missed paths; only the raw counts
 changed. MC/DC tests 60–64 (added 2026-04-06) closed 10 previously-missed
 branches in `core/DeliveryEngine.cpp`.
+
+**2026-04-09 update:** 15 new MockSocketOps fault-injection tests added to
+`test_TcpBackend.cpp` (5 tests), `test_UdpBackend.cpp` (4 tests),
+`test_DtlsUdpBackend.cpp` (4 tests), and `test_TlsTcpBackend.cpp` (2 tests),
+covering POSIX error paths (bind failure, connect failure, send_frame failure,
+send_to failure, recv_from failure) and get_transport_stats() in all four backends.
+These closed 5 missed branches in TcpBackend, 4 in TlsTcpBackend, 6 in UdpBackend,
+and 4 in DtlsUdpBackend.
 
 | File | Branches | Missed | Coverage | Threshold | Source |
 |------|----------|--------|----------|-----------|--------|
@@ -41,10 +49,10 @@ branches in `core/DeliveryEngine.cpp`.
 | platform/ImpairmentEngine.cpp | 256 | 72 | 71.88% | ≥71% | SC |
 | platform/ImpairmentConfigLoader.cpp | 174 | 34 | 80.46% | ≥80% | SC |
 | platform/SocketUtils.cpp | 306 | 104 | 66.01% | ≥66% | NSC |
-| platform/TcpBackend.cpp | 435 | 135 | 68.97% | ≥68% | SC |
-| platform/TlsTcpBackend.cpp | 697 | 209 | 70.01% | ≥70% | SC |
-| platform/UdpBackend.cpp | 194 | 58 | 70.10% | ≥70% | SC |
-| platform/DtlsUdpBackend.cpp | 487 | 119 | 75.56% | ≥75% | SC |
+| platform/TcpBackend.cpp | 435 | 130 | 70.11% | ≥70% | SC |
+| platform/TlsTcpBackend.cpp | 697 | 205 | 70.59% | ≥70% | SC |
+| platform/UdpBackend.cpp | 194 | 52 | 73.20% | ≥73% | SC |
+| platform/DtlsUdpBackend.cpp | 487 | 115 | 76.39% | ≥76% | SC |
 | platform/LocalSimHarness.cpp | 122 | 36 | 70.49% | ≥70% | SC |
 | platform/MbedtlsOpsImpl.cpp | 91 | 27 | 70.33% | ≥70% | SC |
 | platform/SocketOpsImpl.cpp | 72 | 24 | 66.67% | ≥66% (NSC) | NSC |
@@ -333,6 +341,12 @@ Threshold: **≥66% branches / 84.84% lines** (maximum achievable).
 
 ### platform/TcpBackend.cpp — ceiling 77.73% (185/238)
 
+**Updated 2026-04-09:** 5 new MockSocketOps fault-injection tests (bind_fail,
+connect_fail, recv_frame_fail, send_hello_frame_fail, get_stats) closed 5
+previously-missed LLVM branch outcomes (bind and connect error-return paths,
+send_frame HELLO failure path, and get_transport_stats body).
+New LLVM result: 305/435 (70.11%), up from 300/435 (68.97%).
+
 New CC-reduction helper functions (`build_poll_fds`, `drain_readable_clients`,
 `flush_delayed_to_queue`) were added, growing the branch count from 224 to 238.
 `test_connection_limit_reached` now covers the `m_client_count >=
@@ -368,19 +382,32 @@ Threshold: **77%** (maximum achievable).
 
 ---
 
-### platform/TlsTcpBackend.cpp — target ≥76%; current 76.87% (236/307)
+### platform/TlsTcpBackend.cpp — target ≥70%; current 70.59% (492/697)
 
-SC file meeting policy floor. The exact ceiling has not been fully enumerated
-because the current result already meets the floor and there are no unexplained
-misses. Missed branches are a mix of `NEVER_COMPILED_OUT_ASSERT` True paths and
-hard mbedTLS/POSIX error paths that cannot be triggered in loopback (similar
-pattern to TcpBackend and DtlsUdpBackend).
+**Updated 2026-04-09:** 2 new MockSocketOps fault-injection tests
+(send_hello_frame_fail_via_mock, get_stats) closed 4 previously-missed LLVM
+branch outcomes. The `send_hello_frame_fail_via_mock` test uses a real loopback
+TLS server to establish the mbedTLS connection (since mbedtls_net_connect bypasses
+ISocketOps), then injects `fail_send_frame=true` to cover the send_frame failure
+path in `register_local_id()`. New LLVM result: 492/697 (70.59%), up from
+488/697 (70.01%).
 
-Threshold: **76%** (floor met).
+SC file meeting policy floor. Missed branches are a mix of
+`NEVER_COMPILED_OUT_ASSERT` True paths and hard mbedTLS/POSIX error paths that
+cannot be triggered in loopback (mbedTLS I/O failure under an established
+connection requires kernel-level fault injection).
+
+Threshold: **70%** (floor met).
 
 ---
 
 ### platform/UdpBackend.cpp — ceiling 75.51% (74/98)
+
+**Updated 2026-04-09:** 4 new MockSocketOps fault-injection tests (bind_fail,
+send_hello_send_to_fail, send_hello_no_peer, get_stats) closed 6 previously-missed
+LLVM branch outcomes (bind error-return, send_to failure in HELLO, no-peer guard,
+and get_transport_stats body). New LLVM result: 142/194 (73.20%), up from
+136/194 (70.10%).
 
 Two independent sources:
 
@@ -401,6 +428,12 @@ Threshold: **75%** (maximum achievable).
 ---
 
 ### platform/DtlsUdpBackend.cpp — ceiling 81.76% (242/296)
+
+**Updated 2026-04-09:** 4 new MockSocketOps + DtlsMockOps fault-injection tests
+(sock_bind_fail, plaintext_recv_from_fail, plaintext_send_to_fail, get_stats)
+closed 4 previously-missed LLVM branch outcomes (bind error-return, recv_from
+failure, send_to failure, and get_transport_stats body). New LLVM result:
+372/487 (76.39%), up from 368/487 (75.56%).
 
 Two CC-reduction helpers (`send_delayed_envelopes`, `flush_delayed_to_queue`)
 were added, growing the branch count from 240 to 296 (+56 branches).

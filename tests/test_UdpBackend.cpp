@@ -1048,6 +1048,99 @@ static void test_udp_duplicate_hello_dropped()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Additional mock fault-injection tests (VVP-001 M5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_mock_udp_bind_fail()
+{
+    // Verifies: REQ-6.2.1, REQ-6.3.2
+    // Covers: UdpBackend::init() bind-failure path (do_bind returns false)
+    MockSocketOps mock;
+    mock.fail_do_bind = true;
+
+    UdpBackend backend(mock);
+    assert(!backend.is_open());
+
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19710U, 19711U);
+
+    Result r = backend.init(cfg);
+    assert(r == Result::ERR_IO);
+    assert(!backend.is_open());
+    assert(mock.n_do_close >= 1);
+
+    printf("PASS: test_mock_udp_bind_fail\n");
+}
+
+static void test_mock_udp_send_hello_send_to_fail()
+{
+    // Verifies: REQ-6.1.8, REQ-6.1.10
+    // Covers: UdpBackend::send_hello_datagram() send_to-failure path
+    // Strategy: init succeeds; inject send_to failure; register_local_id → ERR_IO.
+    MockSocketOps mock;
+    UdpBackend backend(mock);
+
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19712U, 19713U);
+    assert(backend.init(cfg) == Result::OK);
+    assert(backend.is_open());
+
+    mock.fail_send_to = true;  // inject after init
+
+    Result r = backend.register_local_id(3U);
+    assert(r == Result::ERR_IO);
+
+    backend.close();
+    printf("PASS: test_mock_udp_send_hello_send_to_fail\n");
+}
+
+static void test_mock_udp_send_hello_no_peer()
+{
+    // Verifies: REQ-6.1.10
+    // Covers: UdpBackend::send_hello_datagram() no-peer guard
+    //         (peer_ip[0]=='\0' || peer_port==0 → ERR_INVALID)
+    // Strategy: configure with no peer; init still succeeds (bind only);
+    //           register_local_id → send_hello_datagram → ERR_INVALID.
+    UdpBackend backend;
+
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19714U, 0U);  // peer_port = 0 triggers the guard
+    cfg.peer_ip[0] = '\0';           // also clear peer_ip for belt-and-braces
+
+    assert(backend.init(cfg) == Result::OK);
+    assert(backend.is_open());
+
+    Result r = backend.register_local_id(2U);
+    assert(r == Result::ERR_INVALID);
+
+    backend.close();
+    printf("PASS: test_mock_udp_send_hello_no_peer\n");
+}
+
+static void test_mock_udp_get_stats()
+{
+    // Verifies: REQ-7.2.4
+    // Covers: UdpBackend::get_transport_stats() — all lines previously uncovered.
+    MockSocketOps mock;
+    UdpBackend backend(mock);
+
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19715U, 19716U);
+    assert(backend.init(cfg) == Result::OK);
+
+    TransportStats stats;
+    transport_stats_init(stats);
+    backend.get_transport_stats(stats);
+
+    // UDP bind counts as a connection event (REQ-7.2.4).
+    assert(stats.connections_opened >= 1U);
+    assert(stats.connections_closed == 0U);
+
+    backend.close();
+    printf("PASS: test_mock_udp_get_stats\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1070,6 +1163,10 @@ int main()
     // Mock fault-injection tests (VVP-001 M5)
     test_mock_udp_create_fail();
     test_mock_udp_reuseaddr_fail();
+    test_mock_udp_bind_fail();
+    test_mock_udp_send_hello_send_to_fail();
+    test_mock_udp_send_hello_no_peer();
+    test_mock_udp_get_stats();
 
     // Impairment delay-path tests (Option A — full ImpairmentConfig in ChannelConfig)
     test_udp_impairment_delay_paths();
