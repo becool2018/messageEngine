@@ -997,6 +997,37 @@ void TlsTcpBackend::handle_hello_frame(uint32_t idx, NodeId src_id)
     m_client_node_ids[idx] = src_id;
     Logger::log(Severity::INFO, "TlsTcpBackend",
                 "HELLO from client slot %u node_id=%u", idx, src_id);
+
+    // REQ-3.3.6: enqueue src_id so DeliveryEngine can reset stale ordering
+    // state for this peer on reconnect.
+    // Power of 10 Rule 2: capacity check guards against queue-full overflow.
+    uint32_t next_write = (m_hello_queue_write + 1U) %
+                          static_cast<uint32_t>(MAX_TCP_CONNECTIONS);
+    if (next_write != m_hello_queue_read) {
+        m_hello_queue[m_hello_queue_write] = src_id;
+        m_hello_queue_write = next_write;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TlsTcpBackend::pop_hello_peer() — REQ-3.3.6
+// Dequeue one NodeId from the HELLO reconnect queue. Returns NODE_ID_INVALID
+// when the queue is empty. Called by DeliveryEngine::drain_hello_reconnects().
+// Power of 10 Rule 5: 2 assertions. CC <= 3.
+// ─────────────────────────────────────────────────────────────────────────────
+NodeId TlsTcpBackend::pop_hello_peer()
+{
+    NEVER_COMPILED_OUT_ASSERT(m_hello_queue_read  < static_cast<uint32_t>(MAX_TCP_CONNECTIONS));  // Assert: valid read index
+    NEVER_COMPILED_OUT_ASSERT(m_hello_queue_write < static_cast<uint32_t>(MAX_TCP_CONNECTIONS));  // Assert: valid write index
+
+    if (m_hello_queue_read == m_hello_queue_write) {
+        return NODE_ID_INVALID;  // queue empty
+    }
+
+    NodeId src = m_hello_queue[m_hello_queue_read];
+    m_hello_queue_read = (m_hello_queue_read + 1U) %
+                         static_cast<uint32_t>(MAX_TCP_CONNECTIONS);
+    return src;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
