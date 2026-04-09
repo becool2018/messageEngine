@@ -223,3 +223,19 @@ e) Update of the Hazard Analysis and FMEA to reflect any new hazards
 
 Reclassification is not complete until all items above are done and
 signed off in the project inspection record.
+
+### 6.1 Current completion status (as of 2026-04-09)
+
+| Item | Requirement | Status |
+|------|-------------|--------|
+| a | Identify modules with untestable error-handling paths | **COMPLETE** — All four transport backends (TcpBackend, UdpBackend, TlsTcpBackend, DtlsUdpBackend) identified. POSIX socket/TLS/DTLS dependency calls cannot fail in a loopback test environment. |
+| b | Design and implement injectable interfaces | **COMPLETE** — `ISocketOps` (src/platform/ISocketOps.hpp) with `MockSocketOps` test double covers TcpBackend and UdpBackend. `IMbedtlsOps` (src/platform/IMbedtlsOps.hpp) with `DtlsMockOps` covers TlsTcpBackend and DtlsUdpBackend. Both interfaces reviewed to M1 + M2 + M3. |
+| c | Implement fault-injection test suites (M5) | **COMPLETE** — 15 M5 tests added in INSP-019 (commits 681cedd, 0b6918e) exercise all POSIX error-handling paths across all four backends. SC function `.hpp` declarations carry `— verified to M5` annotations. Test file headers carry `// Verification: M1 + M2 + M4 + M5 (fault injection via ISocketOps)` or equivalent. |
+| d | Update SC declarations and test headers | **COMPLETE** — All SC function declarations in TcpBackend.hpp, UdpBackend.hpp, TlsTcpBackend.hpp, DtlsUdpBackend.hpp carry `— verified to M5`. All four backend test files carry `Verification: M1 + M2 + M4 + M5` headers. |
+| e | Update Hazard Analysis and FMEA | **COMPLETE** — HAZARD_ANALYSIS.md §2 and §3 updated through INSP-018 to reflect the injectable interface design; no new hazards were identified during the M5 test suite implementation. |
+
+**Remaining gap before formal Class B reclassification:** Items a–e are complete. The remaining
+obligation (per NPR 7150.2D §3.11) is independent V&V of all SC functions — a process gate
+requiring a human reviewer who was not involved in the implementation. See
+`TODO_FOR_CLASS_B_CERT.txt` for the full gap list including TLA+/SPIN model checking and
+Frama-C WP theorem proving requirements.
