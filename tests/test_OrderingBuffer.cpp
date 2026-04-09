@@ -704,6 +704,61 @@ static bool test_sweep_expired_holds_sequence_num_uint32_max()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 15: try_release_next for a peer that has never been seen
+// Verifies: REQ-3.3.5
+//
+// When try_release_next() is called for a source that has never sent any
+// ordered messages (find_peer returns not-found), the function must return
+// ERR_AGAIN without modifying the output envelope.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.3.5
+static bool test_try_release_next_unknown_peer()
+{
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    MessageEnvelope out;
+    envelope_init(out);
+
+    // src=200 has never sent anything — find_peer returns ORDERING_PEER_COUNT
+    Result r = buf.try_release_next(200U, out);
+    assert(r == Result::ERR_AGAIN);  // Assert: unknown peer returns ERR_AGAIN
+    assert(out.source_id == 0U);     // Assert: output envelope is untouched
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 16: advance_sequence for a peer that has never been seen
+// Verifies: REQ-3.3.5
+//
+// When advance_sequence() is called for a source with no registered peer slot,
+// it must be a silent no-op.  Subsequent in-order delivery from that source
+// must still work normally (peer is created on first ingest).
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.3.5
+static bool test_advance_sequence_unknown_peer()
+{
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    // src=201 has never sent anything — advance_sequence must be a silent no-op
+    buf.advance_sequence(201U, 5U);  // must not crash or allocate a peer slot
+
+    // After the no-op, seq=1 from src=201 should be accepted as in-order
+    MessageEnvelope m1;
+    make_ordered(m1, 201U, 1U, 0xAAU);
+
+    MessageEnvelope out;
+    envelope_init(out);
+    Result r = buf.ingest(m1, out, 1000000ULL);
+    assert(r == Result::OK);         // Assert: in-order delivery still works
+    assert(out.sequence_num == 1U);  // Assert: correct sequence returned
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -765,6 +820,14 @@ int main()
     if (!test_sweep_expired_holds_sequence_num_uint32_max()) {
         printf("FAIL: test_sweep_expired_holds_sequence_num_uint32_max\n"); ++failed;
     } else { printf("PASS: test_sweep_expired_holds_sequence_num_uint32_max\n"); }
+
+    if (!test_try_release_next_unknown_peer()) {
+        printf("FAIL: test_try_release_next_unknown_peer\n"); ++failed;
+    } else { printf("PASS: test_try_release_next_unknown_peer\n"); }
+
+    if (!test_advance_sequence_unknown_peer()) {
+        printf("FAIL: test_advance_sequence_unknown_peer\n"); ++failed;
+    } else { printf("PASS: test_advance_sequence_unknown_peer\n"); }
 
     return (failed > 0) ? 1 : 0;
 }
