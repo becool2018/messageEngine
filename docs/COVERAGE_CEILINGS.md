@@ -40,8 +40,16 @@ coverable branches: `test_udp_invalid_num_channels` (config validation False pat
 `test_dtls_cert_is_directory` and `test_tls_cert_is_directory`
 (`tls_path_is_regular_file() !S_ISREG()` True branch in both TLS backends).
 
-| File | Branches | Missed | Coverage | Threshold | Source |
-|------|----------|--------|----------|-----------|--------|
+**Policy floor vs. regression guard:** The policy floor is **100% of reachable branches**
+(VERIFICATION_POLICY.md M4; CLAUDE.md §14.4). The "Threshold" column below is a *regression
+guard* — it is set at the current maximum achievable and must not fall. It is not a relaxation
+of the 100% floor. The gap between the threshold and 100% is entirely accounted for by
+`NEVER_COMPILED_OUT_ASSERT` `[[noreturn]]` True paths (VVP-001 §4.3 d-i) and, where noted,
+mathematically-provable dead branches (§4.3 d-iii). Any missed branch not in one of those
+two categories is a defect, not a ceiling.
+
+| File | Branches | Missed | Coverage | Threshold (regression guard, not policy floor) | Source |
+|------|----------|--------|----------|------------------------------------------------|--------|
 | core/OrderingBuffer.cpp | 220 | 70 | 68.18% | ≥68% | SC |
 | core/RequestReplyEngine.cpp | 274 | 71 | 74.09% | ≥74% | SC |
 | core/Serializer.cpp | 145 | 38 | 73.79% | ≥73% | SC |

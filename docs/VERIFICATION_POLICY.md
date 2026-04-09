@@ -143,6 +143,19 @@ Category d-iii requires written proof, not inspection alone.
 Category e-i is never valid at any classification level as a
 permanent ceiling; it is a temporary gap requiring M5.
 
+**Relationship to per-file thresholds in `docs/COVERAGE_CEILINGS.md`:**
+The policy floor is **100% of reachable branches** — this is not negotiable
+regardless of classification level. The numeric thresholds listed in
+`docs/COVERAGE_CEILINGS.md` (e.g., ≥70%, ≥74%) are *regression guards* set
+at the current maximum achievable given category d-i (`NEVER_COMPILED_OUT_ASSERT`
+`[[noreturn]]` True paths) and, in a few files, category d-iii
+(mathematically-provable dead branches). They are not policy floors, not
+acceptable coverage targets, and not evidence of Class B compliance gaps.
+Power of 10 Rule 5 (≥2 assertions per function) is the structural cause: every
+function contributes at least 2 permanently-missed LLVM branch outcomes. A
+threshold that falls below its documented value is a defect; a threshold that
+rises is an improvement that must be reflected in the table.
+
 ### 4.4 Injectable interface requirement
 
 Any module whose correctness verification at Class B or Class A
