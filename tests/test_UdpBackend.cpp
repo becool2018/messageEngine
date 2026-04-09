@@ -1140,6 +1140,42 @@ static void test_mock_udp_get_stats()
     printf("PASS: test_mock_udp_get_stats\n");
 }
 
+static void test_udp_invalid_num_channels()
+{
+    // Verifies: REQ-4.2.1
+    // Covers: UdpBackend::init() transport_config_valid() False branch (L86)
+    // Strategy: set num_channels > MAX_CHANNELS (8) → ERR_INVALID before any bind.
+    UdpBackend backend;
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19717U, 19718U);
+    cfg.num_channels = 9U;  // exceeds MAX_CHANNELS = 8
+
+    Result r = backend.init(cfg);
+    assert(r == Result::ERR_INVALID);
+    assert(!backend.is_open());
+    printf("PASS: test_udp_invalid_num_channels\n");
+}
+
+static void test_udp_send_hello_peer_port_zero()
+{
+    // Verifies: REQ-6.1.10
+    // Covers: send_hello_datagram() || second sub-branch: peer_ip[0] != '\0'
+    //         AND peer_port == 0 → ERR_INVALID (complements test_mock_udp_send_hello_no_peer
+    //         which hits the first sub-branch: peer_ip[0] == '\0').
+    UdpBackend backend;
+    TransportConfig cfg;
+    make_udp_cfg(cfg, 19719U, 0U);  // peer_ip stays "127.0.0.1"; peer_port = 0
+
+    assert(backend.init(cfg) == Result::OK);
+    assert(backend.is_open());
+
+    Result r = backend.register_local_id(3U);
+    assert(r == Result::ERR_INVALID);
+
+    backend.close();
+    printf("PASS: test_udp_send_hello_peer_port_zero\n");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1167,6 +1203,8 @@ int main()
     test_mock_udp_send_hello_send_to_fail();
     test_mock_udp_send_hello_no_peer();
     test_mock_udp_get_stats();
+    test_udp_invalid_num_channels();
+    test_udp_send_hello_peer_port_zero();
 
     // Impairment delay-path tests (Option A — full ImpairmentConfig in ChannelConfig)
     test_udp_impairment_delay_paths();

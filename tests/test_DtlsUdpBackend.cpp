@@ -2665,6 +2665,27 @@ static void test_mock_dtls_get_stats()
     printf("PASS: test_mock_dtls_get_stats\n");
 }
 
+static void test_dtls_cert_is_directory()
+{
+    // Verifies: REQ-6.4.1
+    // Covers: tls_path_is_regular_file() !S_ISREG(st.st_mode) True branch (L120)
+    // Strategy: pass /tmp (always-present directory) as cert_file so lstat()
+    //           succeeds but S_ISREG() returns false → ERR_IO.
+    DtlsUdpBackend backend;
+    TransportConfig cfg;
+    make_dtls_config(cfg, true, 15005U, true);
+
+    // Override cert_file with an existing directory — regular-file check fires.
+    uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.cert_file)) - 1U;
+    (void)strncpy(cfg.tls.cert_file, "/tmp", path_max);
+    cfg.tls.cert_file[path_max] = '\0';
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!backend.is_open());
+    printf("PASS: test_dtls_cert_is_directory\n");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2741,6 +2762,7 @@ int main()
     test_mock_dtls_plaintext_recv_from_fail();
     test_mock_dtls_plaintext_send_to_fail();
     test_mock_dtls_get_stats();
+    test_dtls_cert_is_directory();
 
     printf("=== test_DtlsUdpBackend: ALL TESTS PASSED ===\n");
     return 0;

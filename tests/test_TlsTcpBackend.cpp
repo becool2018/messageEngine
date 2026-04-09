@@ -3267,6 +3267,27 @@ static void test_tls_get_stats()
     printf("PASS: test_tls_get_stats\n");
 }
 
+static void test_tls_cert_is_directory()
+{
+    // Verifies: REQ-6.3.4
+    // Covers: tls_path_is_regular_file() !S_ISREG(st.st_mode) True branch (L126)
+    // Strategy: pass /tmp (always-present directory) as cert_file so lstat()
+    //           succeeds but S_ISREG() returns false → ERR_IO.
+    TlsTcpBackend backend;
+    TransportConfig cfg;
+    make_transport_config(cfg, true, 19912U, true);
+
+    // Override cert_file with an existing directory — regular-file check fires.
+    uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.cert_file)) - 1U;
+    (void)strncpy(cfg.tls.cert_file, "/tmp", path_max);
+    cfg.tls.cert_file[path_max] = '\0';
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!backend.is_open());
+    printf("PASS: test_tls_cert_is_directory\n");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3334,6 +3355,7 @@ int main()
     // Mock fault-injection: ISocketOps send_hello_frame failure (M5)
     test_tls_send_hello_frame_fail_via_mock();
     test_tls_get_stats();
+    test_tls_cert_is_directory();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);
