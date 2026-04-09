@@ -570,7 +570,7 @@ COV_CXXFLAGS  := $(filter-out -Werror,$(CXXFLAGS)) \
                  -fprofile-instr-generate -fcoverage-mapping -O0
 COV_LDFLAGS   := -fprofile-instr-generate $(LDFLAGS)
 COV_LIB_OBJS  := $(patsubst src/%.cpp,$(COV_OBJ_DIR)/%.o,$(ALL_LIB_SRC))
-TEST_NAMES    := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader TlsTcpBackend DtlsUdpBackend TcpBackend UdpBackend SocketUtils AssertState MessageId Timestamp
+TEST_NAMES    := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader TlsTcpBackend DtlsUdpBackend TcpBackend UdpBackend SocketUtils AssertState MessageId Timestamp RequestReplyEngine Fragmentation ReassemblyBuffer OrderingBuffer RingBuffer PrngEngine
 COV_TESTS     := $(patsubst %,build/cov_test_%,$(TEST_NAMES))
 
 $(COV_OBJ_DIR)/core/%.o: src/core/%.cpp
@@ -608,6 +608,12 @@ coverage: $(COV_TESTS)
 	@LLVM_PROFILE_FILE="build/cov/AssertState.profraw"  build/cov_test_AssertState   >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/MessageId.profraw"   build/cov_test_MessageId     >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/Timestamp.profraw"   build/cov_test_Timestamp     >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/RequestReplyEngine.profraw" build/cov_test_RequestReplyEngine >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/Fragmentation.profraw" build/cov_test_Fragmentation >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/ReassemblyBuffer.profraw" build/cov_test_ReassemblyBuffer >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/OrderingBuffer.profraw" build/cov_test_OrderingBuffer >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/RingBuffer.profraw"  build/cov_test_RingBuffer    >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/PrngEngine.profraw"  build/cov_test_PrngEngine    >/dev/null 2>&1
 	@$(LLVM_PROFDATA) merge -sparse \
 	    build/cov/MessageEnvelope.profraw \
 	    build/cov/Serializer.profraw \
@@ -626,6 +632,12 @@ coverage: $(COV_TESTS)
 	    build/cov/AssertState.profraw \
 	    build/cov/MessageId.profraw \
 	    build/cov/Timestamp.profraw \
+	    build/cov/RequestReplyEngine.profraw \
+	    build/cov/Fragmentation.profraw \
+	    build/cov/ReassemblyBuffer.profraw \
+	    build/cov/OrderingBuffer.profraw \
+	    build/cov/RingBuffer.profraw \
+	    build/cov/PrngEngine.profraw \
 	    -o build/cov/merged.profdata
 	@echo "=== Coverage Report (src/ only) ==="
 	@$(LLVM_COV) report \
@@ -647,6 +659,12 @@ coverage: $(COV_TESTS)
 	    -object build/cov_test_AssertState \
 	    -object build/cov_test_MessageId \
 	    -object build/cov_test_Timestamp \
+	    -object build/cov_test_RequestReplyEngine \
+	    -object build/cov_test_Fragmentation \
+	    -object build/cov_test_ReassemblyBuffer \
+	    -object build/cov_test_OrderingBuffer \
+	    -object build/cov_test_RingBuffer \
+	    -object build/cov_test_PrngEngine \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "Policy (CLAUDE.md §12): SC functions require >= branch coverage."
@@ -674,6 +692,12 @@ coverage_show:
 	    -object build/cov_test_AssertState \
 	    -object build/cov_test_MessageId \
 	    -object build/cov_test_Timestamp \
+	    -object build/cov_test_RequestReplyEngine \
+	    -object build/cov_test_Fragmentation \
+	    -object build/cov_test_ReassemblyBuffer \
+	    -object build/cov_test_OrderingBuffer \
+	    -object build/cov_test_RingBuffer \
+	    -object build/cov_test_PrngEngine \
 	    -format=text \
 	    -show-branches=count \
 	    $(CORE_SRC) $(PLATFORM_SRC)
@@ -708,6 +732,12 @@ coverage_report: coverage
 	    -object build/cov_test_AssertState \
 	    -object build/cov_test_MessageId \
 	    -object build/cov_test_Timestamp \
+	    -object build/cov_test_RequestReplyEngine \
+	    -object build/cov_test_Fragmentation \
+	    -object build/cov_test_ReassemblyBuffer \
+	    -object build/cov_test_OrderingBuffer \
+	    -object build/cov_test_RingBuffer \
+	    -object build/cov_test_PrngEngine \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "--- Per-function detail ---"
@@ -731,6 +761,12 @@ coverage_report: coverage
 	    -object build/cov_test_AssertState \
 	    -object build/cov_test_MessageId \
 	    -object build/cov_test_Timestamp \
+	    -object build/cov_test_RequestReplyEngine \
+	    -object build/cov_test_Fragmentation \
+	    -object build/cov_test_ReassemblyBuffer \
+	    -object build/cov_test_OrderingBuffer \
+	    -object build/cov_test_RingBuffer \
+	    -object build/cov_test_PrngEngine \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "--- Policy compliance (CLAUDE.md §14) ---"
