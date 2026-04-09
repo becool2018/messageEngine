@@ -29,7 +29,7 @@
  *
  * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
  */
-// Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+// Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-3.3.6, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
 
 #ifndef CORE_DELIVERY_ENGINE_HPP
 #define CORE_DELIVERY_ENGINE_HPP
@@ -149,6 +149,26 @@ public:
      */
     uint32_t sweep_ack_timeouts(uint64_t now_us);
 
+    // Safety-critical (SC): HAZ-001 — resets per-peer ordering gate state on reconnect.
+    /**
+     * @brief Reset ordering state for @p src on peer reconnection (REQ-3.3.6).
+     *
+     * Clears next_expected_seq and frees all held messages for @p src so that
+     * messages from the reconnected peer (which restarts its sequence at 1) are
+     * delivered correctly rather than silently discarded as out-of-order.
+     *
+     * Also clears m_held_pending if the staged envelope belongs to @p src.
+     *
+     * Called automatically by receive() via drain_hello_reconnects() when the
+     * transport reports a new HELLO from a peer. May also be called directly by
+     * the application if reconnect detection is done at a higher layer.
+     *
+     * Idempotent: safe to call even if @p src has no ordering state.
+     *
+     * @param[in] src  Source node that reconnected.
+     */
+    void reset_peer_ordering(NodeId src);
+
     // REQ-7.2.5: pull-style observability event polling API
     /**
      * @brief Pop the oldest pending observability event.
@@ -248,6 +268,14 @@ private:
     // Power of 10 Rule 3: single pre-allocated envelope; no heap after init.
     MessageEnvelope m_held_pending = {};
     bool            m_held_pending_valid = false;
+
+    // Private helper: drain all pending HELLO peer-reconnect notifications from
+    // the transport and call reset_peer_ordering() for each NodeId returned.
+    // Called at the entry of receive() before the held-pending check so that stale
+    // ordering state is cleared before any message delivery attempt (REQ-3.3.6).
+    // Power of 10 Rule 2: bounded loop (≤ ORDERING_PEER_COUNT iterations).
+    // NSC: lifecycle bookkeeping; not directly on the data-delivery path.
+    void drain_hello_reconnects();
 
     // Issue 3 fix: update msgs_dropped_expired stats and emit EXPIRY_DROP events
     // for holds freed by sweep_expired_holds().  Extracted to keep callers CC ≤ 10.

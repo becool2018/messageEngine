@@ -162,7 +162,10 @@ TlsTcpBackend::TlsTcpBackend()
         mbedtls_ssl_init(&m_ssl[i]);
         m_client_hello_received[i] = false;  // Fix 4: REQ-6.1.8
         m_client_slot_active[i]    = false;  // Fix 5: no compaction
+        m_hello_queue[i]           = NODE_ID_INVALID;  // REQ-3.3.6
     }
+    m_hello_queue_read  = 0U;  // REQ-3.3.6
+    m_hello_queue_write = 0U;  // REQ-3.3.6
 }
 
 TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops)
@@ -191,7 +194,10 @@ TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops)
         mbedtls_ssl_init(&m_ssl[i]);
         m_client_hello_received[i] = false;  // Fix 4: REQ-6.1.8
         m_client_slot_active[i]    = false;  // Fix 5: no compaction
+        m_hello_queue[i]           = NODE_ID_INVALID;  // REQ-3.3.6
     }
+    m_hello_queue_read  = 0U;  // REQ-3.3.6
+    m_hello_queue_write = 0U;  // REQ-3.3.6
 }
 
 TlsTcpBackend::~TlsTcpBackend()
