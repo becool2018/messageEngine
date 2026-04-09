@@ -45,7 +45,7 @@ A C++ networking library for building and testing systems that must survive unre
 8. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
 9. [Using the Library](#using-the-library)
 10. [Use Cases](#use-cases)
-11. [Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
+11. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
 12. [Safety & Assurance Documents](#safety--assurance-documents)
 13. [Design Patterns](#design-patterns)
 14. [Coding Standards](#coding-standards)
