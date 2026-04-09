@@ -30,6 +30,7 @@ branches in `core/DeliveryEngine.cpp`.
 
 | File | Branches | Missed | Coverage | Threshold | Source |
 |------|----------|--------|----------|-----------|--------|
+| core/OrderingBuffer.cpp | 220 | 70 | 68.18% | ≥68% | SC |
 | core/RequestReplyEngine.cpp | 274 | 71 | 74.09% | ≥74% | SC |
 | core/Serializer.cpp | 145 | 38 | 73.79% | ≥73% | SC |
 | core/DuplicateFilter.cpp | 67 | 18 | 73.13% | ≥73% | SC |
@@ -51,6 +52,49 @@ branches in `core/DeliveryEngine.cpp`.
 ---
 
 ## Per-file ceiling justifications
+
+### core/OrderingBuffer.cpp — ceiling 86.57% lines / 68.18% branches
+
+**Line coverage: 245/283 (86.57%)** — 38 permanently-missed lines.
+**Branch coverage: 150/220 (68.18%)** — 70 permanently-missed branches.
+
+**Root cause: phase-2 LRU eviction is structurally unreachable with current constants.**
+
+`evict_lru_peer()` has two phases:
+- Phase 1 (`evict_peer_no_holds()`): scans active peers for one with zero hold slots; evicts it immediately.
+- Phase 2 (`find_lru_peer_idx()` + `free_holds_for_peer()`): runs only when Phase 1 fails — i.e., only when *every* active peer has at least one hold slot.
+
+With `ORDERING_HOLD_COUNT = 8` and `ORDERING_PEER_COUNT = 16` and
+`k_hold_per_peer_max = ORDERING_HOLD_COUNT / 2 = 4`, it is impossible for all 16
+active peer slots to simultaneously hold at least one message: that would require
+≥16 hold slots, but only 8 exist.  Therefore Phase 1 always finds a peer with
+zero holds, and Phase 2 never executes.
+
+Additionally, `ingest()` lines 343–346 (`peer_idx == ORDERING_PEER_COUNT` guard
+after `get_or_create_peer()`) are dead code: `get_or_create_peer()` always returns
+a valid index because `evict_lru_peer()` always provides one.
+
+**Permanently-missed lines (38):**
+
+| Lines | Location | Reason |
+|-------|----------|--------|
+| 127 | `evict_peer_no_holds()` return | Phase 1 never exhausts (always finds a zero-hold peer) |
+| 137–155 | `find_lru_peer_idx()` — entire function | Phase 2 entry; never called |
+| 163–173 | `free_holds_for_peer()` — entire function | Phase 2 cleanup; never called |
+| 195–204 | `evict_lru_peer()` phase-2 block | Phase 2 path; never reached |
+| 343–346 | `ingest()` peer-table-full guard | `get_or_create_peer()` always returns a valid index |
+
+This ceiling persists for as long as `ORDERING_HOLD_COUNT < ORDERING_PEER_COUNT`.
+If the constants are ever adjusted so that `ORDERING_HOLD_COUNT ≥ ORDERING_PEER_COUNT`,
+these lines become reachable and tests must be added.
+
+All other reachable lines (including `try_release_next` unknown-peer, `advance_sequence`
+unknown-peer, wraparound, sweep, per-peer cap, and all normal delivery paths) are
+covered by the 16 test cases in `tests/test_OrderingBuffer.cpp`.
+
+Threshold: **≥68% branches / 86.57% lines** (maximum achievable).
+
+---
 
 ### core/RequestReplyEngine.cpp — ceiling 96.15% lines / 74.09% branches
 
