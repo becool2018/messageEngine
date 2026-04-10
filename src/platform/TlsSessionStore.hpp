@@ -58,6 +58,7 @@
 #ifndef PLATFORM_TLS_SESSION_STORE_HPP
 #define PLATFORM_TLS_SESSION_STORE_HPP
 
+#include <atomic>          // std::atomic<bool> — CLAUDE.md §1d carve-out
 #include <mbedtls/ssl.h>
 
 /**
@@ -83,7 +84,17 @@ struct TlsSessionStore {
     /// True when session contains usable, unspoiled TLS session material.
     /// Set by try_save_client_session() on success; cleared by zeroize().
     /// §7b: initialized at declaration via constructor.
-    bool session_valid;
+    ///
+    /// std::atomic<bool> — CLAUDE.md §1d carve-out (F-6):
+    /// Concurrent store.zeroize() (app thread) and try_load_client_session()
+    /// (backend thread) would be a data race on a plain bool (CWE-362).
+    /// Using std::atomic<bool> eliminates the race without requiring a mutex.
+    /// Callers must still avoid concurrent zeroize() + backend I/O at the
+    /// higher level (session data is not atomically swapped); atomic<bool>
+    /// guards the flag only.  Thread-safety contract: the caller must not
+    /// call zeroize() concurrently with any backend operation that
+    /// dereferences m_session_store_ptr.
+    std::atomic<bool> session_valid;
 
     /// Default constructor: zero-inits session struct, sets session_valid=false.
     TlsSessionStore();
