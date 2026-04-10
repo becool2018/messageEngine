@@ -637,24 +637,34 @@ Threshold updated from ≥71% to ≥72%.
 branch outcomes — 784 branches, 219 → 192 missed, 72.07% → 75.51%.  Line coverage: 90.16%
 (119 missed / 1209 total), up from 88.09%.
 
-SC file meeting policy floor. Remaining 192 missed branches are:
+**2026-04-10 (round 12 — M5 TlsMockOps fault-injection closes 15 branch outcomes):**
+22 M5 fault-injection tests added via `TlsMockOps` (implements `IMbedtlsOps`), covering
+all hard mbedTLS/POSIX dependency-failure branches previously listed in section (b):
+`psa_crypto_init`, `ssl_config_defaults`, `ssl_conf_own_cert`, `ssl_ticket_setup`,
+`net_tcp_bind`, `net_set_nonblock` (listen socket), `net_tcp_connect`, `net_set_block`
+(client and server), `ssl_setup` (client and server), `ssl_set_hostname`,
+`ssl_handshake` (client and server), `ssl_get_session`, `ssl_set_session`,
+`ssl_write` hard error, `ssl_write` WANT_WRITE/short-write loop, `ssl_read` header
+hard error, `ssl_read` header WANT_READ/timeout, `ssl_read` payload hard error,
+`ssl_read` payload WANT_READ/timeout.
+Branch count 784 → 791 (+7 newly-instrumented), missed 192 → 177 (−15 branch outcomes).
+Coverage 75.51% → 77.62%.  Line coverage: 94.57% (67 missed / 1234 total lines).
+The M5 architectural ceiling claim (VVP-001 §4.3 e-i) for section (b) below is
+**retracted** — these branches are now fully exercised by TlsMockOps fault injection
+(VVP-001 M5 satisfied for TlsTcpBackend dependency-failure paths).
 
-**(a) NEVER_COMPILED_OUT_ASSERT True paths (~60 branches):** One per `NEVER_COMPILED_OUT_ASSERT`
-call across all ~50 functions (pre-condition, post-condition, and loop-bound assertions).
-All are `[[noreturn]]` abort paths; VVP-001 §4.3 d-i.
+SC file meeting policy floor. Remaining 177 missed branches are:
 
-**(b) Hard mbedTLS/POSIX error paths (~120 branches):** Lines 298–304, 327, 371–373,
-433–436, 447–449, 546–548, 582–585, 698–701, 730–732, 755–760, 785–808, 914–926,
-947–976, 1256–1267, 1295–1296, 1330–1344, 1374–1391.  These branches require mbedTLS
-to return specific internal error codes (`ssl_conf_own_cert` failure, `psa_crypto_init`
-failure, `ssl_config_defaults` failure, `ssl_ticket_setup` failure, `net_set_nonblock`
-failure, `ssl_get_session` / `ssl_set_session` failure, stale-ticket WARNING_HI path,
-client-side TLS setup errors, server-side TLS handshake errors, `tls_write_all`
-WANT_WRITE / short-write paths, header-read timeout / error paths, payload-read
-timeout / error paths).  All require kernel-level or mbedTLS-internal fault injection;
-unreachable via the public API in a loopback test environment
-(VVP-001 §4.3 e-i — dependency-failure branches require M5 not available for mbedTLS
-internals; architectural ceiling acceptable at Class C).
+**(a) NEVER_COMPILED_OUT_ASSERT True paths (135 branches):** `TlsTcpBackend.cpp` contains
+135 `NEVER_COMPILED_OUT_ASSERT` calls; each generates one permanently-missed LLVM True path
+(the `[[noreturn]]` abort branch). A further ~12 branches arise from compound-condition
+sub-expressions in several error-check sequences where only one sub-expression outcome is
+reachable during normal or M5-fault-injection execution.
+All are `[[noreturn]]` abort paths or equivalent structural one-way conditions; VVP-001 §4.3 d-i.
+
+**(b) [RETRACTED — covered by M5 TlsMockOps tests]:** The ~120-branch M5 gap documented
+in the H-series round 11 entry has been closed by the 22 `TlsMockOps` fault-injection
+tests added in round 12.  No remaining M5 ceiling applies to `TlsTcpBackend.cpp`.
 
 **(c) Structurally-unreachable defensive guards (~12 branches):**
 - Lines 1478–1480 (`apply_inbound_impairment` recv-queue overflow guard): `receive_message`
@@ -688,7 +698,7 @@ and `try_save_client_session()`, CI must include a build configuration with
 `MBEDTLS_SSL_SESSION_TICKETS` enabled.  A build without this flag is insufficient
 for SC function verification of the session-resumption paths.
 
-Threshold: **≥75%** (maximum achievable).
+Threshold: **≥77%** (maximum achievable after M5 TlsMockOps fault-injection round).
 
 ---
 

@@ -1,6 +1,6 @@
 messageEngine — Remaining Tasks for Class B Certification
 ==========================================================
-Generated: 2026-03-31  (last updated: 2026-04-09)
+Generated: 2026-03-31  (last updated: 2026-04-10)
 Policy references: NPR 7150.2D, NASA-STD-8719.13C, NASA-STD-8739.8A
 Verification policy: docs/VERIFICATION_POLICY.md (VVP-001)
 
@@ -11,7 +11,15 @@ Note: VVP-001 §6 Class B reclassification items a–e are now complete as of
 2026-04-09 (branch test/socketutils-coverage-2026-04, INSP-019):
   a) All modules with untestable error-handling paths identified.
   b) Injectable interfaces (ISocketOps, IMbedtlsOps) designed and reviewed.
-  c) M5 fault-injection test suites implemented for all 4 backends (19 tests).
+  c) M5 fault-injection test suites implemented for all 4 backends (41 tests).
+     - 19 ISocketOps tests (INSP-019, 2026-04-09) — socket-layer dependency failures.
+     - 22 IMbedtlsOps TlsMockOps tests (round 12, 2026-04-10) — mbedTLS/PSA dependency
+       failures in TlsTcpBackend: psa_crypto_init, ssl_config_defaults, ssl_conf_own_cert,
+       ssl_ticket_setup, net_tcp_bind, net_set_nonblock, net_tcp_connect, net_set_block,
+       ssl_setup, ssl_set_hostname, ssl_handshake, ssl_get_session, ssl_set_session,
+       ssl_write hard/WANT_WRITE, ssl_read hard/WANT_READ (header and payload).
+       Closes the M5 ceiling previously documented in docs/COVERAGE_CEILINGS.md
+       §TlsTcpBackend section (b). TlsTcpBackend.cpp: 75.51% → 77.62% branch coverage.
   d) SC function declarations and test headers carry verified-to-M5 annotations.
   e) Hazard Analysis and FMEA updated through INSP-018.
 The remaining gap before formal Class B reclassification is Item 9 (independent
@@ -125,7 +133,11 @@ Status summary
   External/organizational work:     4 items remain (Items 6, 7, 8, 9)
   Completed since last update:      VVP-001 §6 items a–e (M5 injectable
                                     interfaces + fault-injection tests,
-                                    INSP-019 — 2026-04-09)
+                                    INSP-019 — 2026-04-09);
+                                    22 IMbedtlsOps TlsMockOps fault-injection
+                                    tests close M5 ceiling for TlsTcpBackend
+                                    mbedTLS dependency-failure paths
+                                    (round 12 — 2026-04-10)
 
   Latest commits on main (as of 2026-04-06):
     f493fc6  Merge PR #50: cppcheck TlsTcpBackend.hpp suppression

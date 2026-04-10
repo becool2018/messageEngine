@@ -1111,6 +1111,34 @@ struct DtlsMockOps : public IMbedtlsOps {
     {
         return r_inet_pton;
     }
+
+    // TCP net stubs — not used by DtlsUdpBackend; return success so abstract
+    // class is concrete (IMbedtlsOps extended for TlsTcpBackend M5 coverage).
+    int net_tcp_connect(mbedtls_net_context* /*ctx*/,
+                        const char* /*host*/, const char* /*port*/) override
+    { return 0; }
+    int net_tcp_bind(mbedtls_net_context* /*ctx*/,
+                     const char* /*ip*/, const char* /*port*/) override
+    { return 0; }
+    int net_tcp_accept(mbedtls_net_context* /*listen*/,
+                       mbedtls_net_context* /*client*/) override
+    { return 0; }
+    int net_set_block(mbedtls_net_context* /*ctx*/) override
+    { return 0; }
+    int net_set_nonblock(mbedtls_net_context* /*ctx*/) override
+    { return 0; }
+    int net_poll(mbedtls_net_context* /*ctx*/,
+                 uint32_t /*rw*/, uint32_t /*timeout_ms*/) override
+    { return 1; }
+    int ssl_get_session(const mbedtls_ssl_context* /*ssl*/,
+                        mbedtls_ssl_session* /*dst*/) override
+    { return 0; }
+    int ssl_set_session(mbedtls_ssl_context* /*ssl*/,
+                        const mbedtls_ssl_session* /*session*/) override
+    { return 0; }
+    int ssl_ticket_setup(mbedtls_ssl_ticket_context* /*ctx*/,
+                         uint32_t /*lifetime_s*/) override
+    { return 0; }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

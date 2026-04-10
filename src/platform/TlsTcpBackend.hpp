@@ -91,6 +91,7 @@
 #include "platform/ImpairmentEngine.hpp"
 
 class ISocketOps;      // forward declaration — see platform/ISocketOps.hpp
+class IMbedtlsOps;     // forward declaration — see platform/IMbedtlsOps.hpp
 struct TlsSessionStore; // forward declaration — see platform/TlsSessionStore.hpp
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -108,6 +109,12 @@ public:
     /// be triggered in a loopback environment.
     /// @p sock_ops must outlive this TlsTcpBackend instance.
     explicit TlsTcpBackend(ISocketOps& sock_ops);
+
+    /// Dual-injection constructor — accepts both ISocketOps and IMbedtlsOps.
+    /// Used by M5 fault-injection tests to trigger mbedTLS dependency-failure
+    /// branches (VVP-001 §4.3 e-i).
+    /// Both @p sock_ops and @p tls_ops must outlive this TlsTcpBackend instance.
+    TlsTcpBackend(ISocketOps& sock_ops, IMbedtlsOps& tls_ops);
 
     ~TlsTcpBackend() override;
 
@@ -175,8 +182,9 @@ private:
     /// close() and destructor. Server-side only (REQ-6.3.4).
     mbedtls_ssl_ticket_context m_ticket_ctx;
 
-    // ── Injected socket operations interface ─────────────────────────────────
+    // ── Injected interfaces (non-owning; never null after ctor) ──────────────
     ISocketOps*       m_sock_ops;                          ///< Non-owning; never null after ctor
+    IMbedtlsOps*      m_tls_ops;                           ///< Non-owning; never null after ctor
 
     // ── Transport state ──────────────────────────────────────────────────────
     uint32_t          m_client_count;
@@ -226,8 +234,9 @@ private:
     /// to 32 times while the result is WANT_READ or WANT_WRITE (EINTR/EAGAIN).
     /// Extracted from tls_connect_handshake() and do_tls_server_handshake() to
     /// keep their CC ≤ 10. REQ-6.3.3.
+    /// Non-static: uses m_tls_ops->ssl_handshake() for M5 fault injection.
     /// @return 0 on success, non-zero mbedTLS error code on failure.
-    static int run_tls_handshake_loop(mbedtls_ssl_context* ssl);
+    int run_tls_handshake_loop(mbedtls_ssl_context* ssl);
 
     /// Set up the session ticket context and register callbacks on m_ssl_conf.
     /// Fix 2: extracted from setup_tls_config() to keep its CC ≤ 10 (REQ-6.3.4).
