@@ -37,6 +37,8 @@
 #  include <mbedtls/version.h>      // mbedTLS 2.x
 #endif
 #include <mbedtls/ssl.h>
+#include <mbedtls/net_sockets.h>
+#include <mbedtls/ssl_ticket.h>
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/ssl_cookie.h>
@@ -46,6 +48,7 @@
 #include <sys/socket.h>   // connect(), recvfrom()
 #include <arpa/inet.h>    // inet_pton()
 #include <sys/types.h>    // ssize_t
+#include <cstdint>        // uint32_t
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Singleton
@@ -205,4 +208,104 @@ int MbedtlsOpsImpl::inet_pton_ipv4(const char* src, void* dst)
     NEVER_COMPILED_OUT_ASSERT(src != nullptr);
     NEVER_COMPILED_OUT_ASSERT(dst != nullptr);
     return inet_pton(AF_INET, src, dst);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TCP network wrappers (TlsTcpBackend M5 fault-injection paths)
+// ─────────────────────────────────────────────────────────────────────────────
+
+int MbedtlsOpsImpl::net_tcp_connect(mbedtls_net_context* ctx,
+                                     const char*          host,
+                                     const char*          port)
+{
+    NEVER_COMPILED_OUT_ASSERT(ctx  != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(host != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(port != nullptr);
+    return mbedtls_net_connect(ctx, host, port, MBEDTLS_NET_PROTO_TCP);
+}
+
+int MbedtlsOpsImpl::net_tcp_bind(mbedtls_net_context* ctx,
+                                  const char*          ip,
+                                  const char*          port)
+{
+    NEVER_COMPILED_OUT_ASSERT(ctx  != nullptr);
+    // ip may be nullptr (bind to all interfaces)
+    NEVER_COMPILED_OUT_ASSERT(port != nullptr);
+    return mbedtls_net_bind(ctx, ip, port, MBEDTLS_NET_PROTO_TCP);
+}
+
+int MbedtlsOpsImpl::net_tcp_accept(mbedtls_net_context* listen_ctx,
+                                    mbedtls_net_context* client_ctx)
+{
+    NEVER_COMPILED_OUT_ASSERT(listen_ctx != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(client_ctx != nullptr);
+    return mbedtls_net_accept(listen_ctx, client_ctx, nullptr, 0U, nullptr);
+}
+
+int MbedtlsOpsImpl::net_set_block(mbedtls_net_context* ctx)
+{
+    NEVER_COMPILED_OUT_ASSERT(ctx != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(ctx->fd >= 0);
+    return mbedtls_net_set_block(ctx);
+}
+
+int MbedtlsOpsImpl::net_set_nonblock(mbedtls_net_context* ctx)
+{
+    NEVER_COMPILED_OUT_ASSERT(ctx != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(ctx->fd >= 0);
+    return mbedtls_net_set_nonblock(ctx);
+}
+
+int MbedtlsOpsImpl::net_poll(mbedtls_net_context* ctx,
+                              uint32_t             rw,
+                              uint32_t             timeout_ms)
+{
+    NEVER_COMPILED_OUT_ASSERT(ctx != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(ctx->fd >= 0);
+    return mbedtls_net_poll(ctx, rw, timeout_ms);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TLS session management wrappers (TlsTcpBackend M5 fault-injection paths)
+// ─────────────────────────────────────────────────────────────────────────────
+
+int MbedtlsOpsImpl::ssl_get_session(const mbedtls_ssl_context* ssl,
+                                     mbedtls_ssl_session*       dst)
+{
+    NEVER_COMPILED_OUT_ASSERT(ssl != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(dst != nullptr);
+    return mbedtls_ssl_get_session(ssl, dst);
+}
+
+int MbedtlsOpsImpl::ssl_set_session(mbedtls_ssl_context*       ssl,
+                                     const mbedtls_ssl_session* session)
+{
+    NEVER_COMPILED_OUT_ASSERT(ssl     != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(session != nullptr);
+    return mbedtls_ssl_set_session(ssl, session);
+}
+
+int MbedtlsOpsImpl::ssl_ticket_setup(mbedtls_ssl_ticket_context* ctx,
+                                      uint32_t                    lifetime_s)
+{
+    NEVER_COMPILED_OUT_ASSERT(ctx         != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(lifetime_s  >  0U);
+    // mbedTLS 4.0+: PSA-native API (alg, key_type, key_bits, lifetime).
+    // mbedTLS 2.x/3.x: legacy API (f_rng, p_rng, cipher_type, lifetime).
+#if MBEDTLS_VERSION_MAJOR >= 4
+    int ret = mbedtls_ssl_ticket_setup(
+        ctx,
+        PSA_ALG_GCM,
+        PSA_KEY_TYPE_AES,
+        static_cast<psa_key_bits_t>(256U),
+        lifetime_s);
+#else
+    int ret = mbedtls_ssl_ticket_setup(
+        ctx,
+        mbedtls_psa_get_random, MBEDTLS_PSA_RANDOM_STATE,
+        MBEDTLS_CIPHER_AES_256_GCM,
+        lifetime_s);
+#endif
+    NEVER_COMPILED_OUT_ASSERT(true);  // post: ret is checked by caller
+    return ret;
 }

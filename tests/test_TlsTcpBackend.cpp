@@ -39,6 +39,10 @@
  *           REQ-6.1.11, REQ-6.3.4, REQ-5.1.6
  *           (also covers: HAZ-017 try_load_client_session True branch via
  *            test_tls_session_resumption_load_path)
+ *           M5 fault-injection (VVP-001 §4.3 e-i) via TlsMockOps: covers all
+ *           dependency-failure branches in setup_tls_config, bind_and_listen,
+ *           connect_to_server, tls_connect_handshake, do_tls_server_handshake,
+ *           tls_write_all, read_tls_header, and tls_read_payload.
  */
 
 #include <cstdio>
@@ -58,6 +62,8 @@
 #include "core/Serializer.hpp"
 #include "platform/TlsTcpBackend.hpp"
 #include "platform/TlsSessionStore.hpp"
+#include "platform/IMbedtlsOps.hpp"
+#include "platform/MbedtlsOpsImpl.hpp"
 #include "MockSocketOps.hpp"
 #if __has_include(<mbedtls/build_info.h>)
 #  include <mbedtls/build_info.h>   // mbedTLS 3.x / 4.x
@@ -4964,6 +4970,1128 @@ static void test_tls_broadcast_send_fail()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// TlsMockOps — delegation-based IMbedtlsOps for TlsTcpBackend M5 fault injection.
+//
+// By default every method delegates to MbedtlsOpsImpl::instance() so that the
+// full mbedTLS code path runs.  Setting a fail_* flag makes that specific method
+// return a hard error, exercising the dependency-failure branches that cannot
+// be triggered in a loopback environment (VVP-001 §4.3 e-i, Class B requirement).
+//
+// Usage pattern (two phases):
+//   Phase 1 — init: all flags false (delegate), call backend.init(); handshake
+//             completes via the real mbedTLS library.
+//   Phase 2 — test: set the fail_* flag of interest, then call the operation
+//             under test; it must reach the error handler.
+//
+// Call counters allow the same method to delegate on early calls (during setup)
+// and fail on a later call (during the operation under test).
+//
+// Power of 10 Rule 9 exception: virtual dispatch per CLAUDE.md §2 Rule 9
+// vtable exemption; no explicit function pointer declarations here.
+// Verifies: REQ-6.3.4 (M5 fault injection — dependency-failure branches)
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct TlsMockOps : public IMbedtlsOps {
+    // ── Per-method failure flags ──────────────────────────────────────────────
+    bool fail_crypto_init         = false;  ///< crypto_init() returns error
+    bool fail_ssl_config_defaults = false;  ///< ssl_config_defaults() returns error
+    bool fail_ssl_conf_own_cert   = false;  ///< ssl_conf_own_cert() returns error
+    bool fail_ssl_ticket_setup    = false;  ///< ssl_ticket_setup() returns error
+    bool fail_net_tcp_bind        = false;  ///< net_tcp_bind() returns error
+    bool fail_net_set_nonblock    = false;  ///< net_set_nonblock() returns error on call ≥ nonblock_fail_on
+    int  nonblock_fail_on         = 0;      ///< 0 = fail on first call; 1 = fail on second
+    bool fail_net_tcp_connect     = false;  ///< net_tcp_connect() returns error
+    bool fail_net_set_block       = false;  ///< net_set_block() returns error
+    bool fail_ssl_setup           = false;  ///< ssl_setup() returns error
+    bool fail_ssl_set_hostname    = false;  ///< ssl_set_hostname() returns error
+    bool fail_ssl_handshake       = false;  ///< ssl_handshake() returns hard error
+    bool fail_ssl_get_session     = false;  ///< ssl_get_session() returns error
+    bool fail_ssl_set_session     = false;  ///< ssl_set_session() returns error
+    bool fail_ssl_write           = false;  ///< ssl_write() returns hard error
+    bool ssl_write_want_write     = false;  ///< ssl_write() returns WANT_WRITE (triggers short-write path)
+    bool fail_net_poll            = false;  ///< net_poll() returns 0 (timeout)
+
+    // ssl_read failure control: fail on call number >= ssl_read_fail_on (-1 = never)
+    // When ssl_read_want_read is true, return WANT_READ (else hard error).
+    int  ssl_read_fail_on    = -1;         ///< -1 = never fail
+    bool ssl_read_want_read  = false;      ///< if true, return WANT_READ on failure
+
+    // ── Call counters ─────────────────────────────────────────────────────────
+    int m_net_set_nonblock_calls = 0;  ///< incremented on each net_set_nonblock call
+    int m_ssl_read_calls         = 0;  ///< incremented on each ssl_read call
+
+    ~TlsMockOps() override {}
+
+    // ── Delegation helpers ────────────────────────────────────────────────────
+
+    psa_status_t crypto_init() override
+    {
+        if (fail_crypto_init) { return PSA_ERROR_GENERIC_ERROR; }
+        return MbedtlsOpsImpl::instance().crypto_init();
+    }
+
+    int ssl_config_defaults(mbedtls_ssl_config* conf, int endpoint,
+                            int transport, int preset) override
+    {
+        if (fail_ssl_config_defaults) { return MBEDTLS_ERR_SSL_BAD_INPUT_DATA; }
+        return MbedtlsOpsImpl::instance().ssl_config_defaults(
+            conf, endpoint, transport, preset);
+    }
+
+    int x509_crt_parse_file(mbedtls_x509_crt* chain, const char* path) override
+    {
+        return MbedtlsOpsImpl::instance().x509_crt_parse_file(chain, path);
+    }
+
+    int pk_parse_keyfile(mbedtls_pk_context* ctx, const char* path,
+                         const char* pwd) override
+    {
+        return MbedtlsOpsImpl::instance().pk_parse_keyfile(ctx, path, pwd);
+    }
+
+    int ssl_conf_own_cert(mbedtls_ssl_config* conf,
+                          mbedtls_x509_crt*   own_cert,
+                          mbedtls_pk_context* pk_key) override
+    {
+        if (fail_ssl_conf_own_cert) { return MBEDTLS_ERR_SSL_BAD_INPUT_DATA; }
+        return MbedtlsOpsImpl::instance().ssl_conf_own_cert(conf, own_cert, pk_key);
+    }
+
+    int ssl_cookie_setup(mbedtls_ssl_cookie_ctx* ctx) override
+    {
+        return MbedtlsOpsImpl::instance().ssl_cookie_setup(ctx);
+    }
+
+    int ssl_setup(mbedtls_ssl_context* ssl, mbedtls_ssl_config* conf) override
+    {
+        if (fail_ssl_setup) { return MBEDTLS_ERR_SSL_BAD_INPUT_DATA; }
+        return MbedtlsOpsImpl::instance().ssl_setup(ssl, conf);
+    }
+
+    int ssl_set_hostname(mbedtls_ssl_context* ssl, const char* hostname) override
+    {
+        if (fail_ssl_set_hostname) { return MBEDTLS_ERR_SSL_BAD_INPUT_DATA; }
+        return MbedtlsOpsImpl::instance().ssl_set_hostname(ssl, hostname);
+    }
+
+    int ssl_set_client_transport_id(mbedtls_ssl_context*  ssl,
+                                    const unsigned char*  info,
+                                    size_t                ilen) override
+    {
+        return MbedtlsOpsImpl::instance().ssl_set_client_transport_id(ssl, info, ilen);
+    }
+
+    int ssl_handshake(mbedtls_ssl_context* ssl) override
+    {
+        // Return MBEDTLS_ERR_SSL_BAD_INPUT_DATA — a hard error that is neither
+        // WANT_READ nor WANT_WRITE, so run_tls_handshake_loop() exits immediately.
+        if (fail_ssl_handshake) { return MBEDTLS_ERR_SSL_BAD_INPUT_DATA; }
+        return MbedtlsOpsImpl::instance().ssl_handshake(ssl);
+    }
+
+    int ssl_write(mbedtls_ssl_context* ssl, const unsigned char* buf,
+                  size_t len) override
+    {
+        if (ssl_write_want_write) { return MBEDTLS_ERR_SSL_WANT_WRITE; }
+        if (fail_ssl_write)       { return MBEDTLS_ERR_NET_SEND_FAILED; }
+        return MbedtlsOpsImpl::instance().ssl_write(ssl, buf, len);
+    }
+
+    int ssl_read(mbedtls_ssl_context* ssl, unsigned char* buf, size_t len) override
+    {
+        int call = m_ssl_read_calls++;
+        if (ssl_read_fail_on >= 0 && call >= ssl_read_fail_on) {
+            return ssl_read_want_read
+                ? MBEDTLS_ERR_SSL_WANT_READ
+                : MBEDTLS_ERR_NET_RECV_FAILED;
+        }
+        return MbedtlsOpsImpl::instance().ssl_read(ssl, buf, len);
+    }
+
+    ssize_t recvfrom_peek(int sockfd, void* buf, size_t len,
+                          struct sockaddr* src_addr, socklen_t* addrlen) override
+    {
+        return MbedtlsOpsImpl::instance().recvfrom_peek(sockfd, buf, len,
+                                                         src_addr, addrlen);
+    }
+
+    int net_connect(int sockfd, const struct sockaddr* addr,
+                    socklen_t addrlen) override
+    {
+        return MbedtlsOpsImpl::instance().net_connect(sockfd, addr, addrlen);
+    }
+
+    int inet_pton_ipv4(const char* src, void* dst) override
+    {
+        return MbedtlsOpsImpl::instance().inet_pton_ipv4(src, dst);
+    }
+
+    int net_tcp_connect(mbedtls_net_context* ctx, const char* host,
+                        const char* port) override
+    {
+        if (fail_net_tcp_connect) { return MBEDTLS_ERR_NET_CONNECT_FAILED; }
+        return MbedtlsOpsImpl::instance().net_tcp_connect(ctx, host, port);
+    }
+
+    int net_tcp_bind(mbedtls_net_context* ctx, const char* ip,
+                     const char* port) override
+    {
+        if (fail_net_tcp_bind) { return MBEDTLS_ERR_NET_BIND_FAILED; }
+        return MbedtlsOpsImpl::instance().net_tcp_bind(ctx, ip, port);
+    }
+
+    int net_tcp_accept(mbedtls_net_context* listen_ctx,
+                       mbedtls_net_context* client_ctx) override
+    {
+        return MbedtlsOpsImpl::instance().net_tcp_accept(listen_ctx, client_ctx);
+    }
+
+    int net_set_block(mbedtls_net_context* ctx) override
+    {
+        if (fail_net_set_block) { return -1; }
+        return MbedtlsOpsImpl::instance().net_set_block(ctx);
+    }
+
+    int net_set_nonblock(mbedtls_net_context* ctx) override
+    {
+        int call = m_net_set_nonblock_calls++;
+        if (fail_net_set_nonblock && call >= nonblock_fail_on) { return -1; }
+        return MbedtlsOpsImpl::instance().net_set_nonblock(ctx);
+    }
+
+    int net_poll(mbedtls_net_context* ctx, uint32_t rw,
+                 uint32_t timeout_ms) override
+    {
+        if (fail_net_poll) { return 0; }  // 0 = timeout
+        return MbedtlsOpsImpl::instance().net_poll(ctx, rw, timeout_ms);
+    }
+
+    int ssl_get_session(const mbedtls_ssl_context* ssl,
+                        mbedtls_ssl_session* dst) override
+    {
+        if (fail_ssl_get_session) { return MBEDTLS_ERR_SSL_ALLOC_FAILED; }
+        return MbedtlsOpsImpl::instance().ssl_get_session(ssl, dst);
+    }
+
+    int ssl_set_session(mbedtls_ssl_context* ssl,
+                        const mbedtls_ssl_session* session) override
+    {
+        if (fail_ssl_set_session) { return MBEDTLS_ERR_SSL_BAD_INPUT_DATA; }
+        return MbedtlsOpsImpl::instance().ssl_set_session(ssl, session);
+    }
+
+    int ssl_ticket_setup(mbedtls_ssl_ticket_context* ctx,
+                         uint32_t lifetime_s) override
+    {
+        if (fail_ssl_ticket_setup) { return MBEDTLS_ERR_SSL_BAD_INPUT_DATA; }
+        return MbedtlsOpsImpl::instance().ssl_ticket_setup(ctx, lifetime_s);
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M5 test helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Raw TCP server: bind → listen → accept one connection → stay alive → close.
+// Used by tests 8–11 to provide a real TCP endpoint so that the TLS client's
+// net_tcp_connect() succeeds, allowing TLS-setup failures to be injected.
+struct RawListenArg {
+    uint16_t port;
+    uint32_t stay_alive_us;
+    Result   result;
+};
+
+static void* raw_tcp_listen_thread(void* raw_arg)
+{
+    RawListenArg* a = static_cast<RawListenArg*>(raw_arg);
+    assert(a != nullptr);
+
+    int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) { a->result = Result::ERR_IO; return nullptr; }
+
+    int opt = 1;
+    (void)::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt,
+                       static_cast<socklen_t>(sizeof(opt)));
+
+    struct sockaddr_in addr;
+    (void)memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(a->port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    if (::bind(listen_fd,
+               reinterpret_cast<const struct sockaddr*>(&addr),
+               static_cast<socklen_t>(sizeof(addr))) < 0) {
+        (void)::close(listen_fd);
+        a->result = Result::ERR_IO;
+        return nullptr;
+    }
+    if (::listen(listen_fd, 4) < 0) {
+        (void)::close(listen_fd);
+        a->result = Result::ERR_IO;
+        return nullptr;
+    }
+
+    struct sockaddr_in cli_addr;
+    socklen_t clen = static_cast<socklen_t>(sizeof(cli_addr));
+    int cli_fd = ::accept(listen_fd,
+                          reinterpret_cast<struct sockaddr*>(&cli_addr),
+                          &clen);
+    (void)::close(listen_fd);
+
+    if (cli_fd >= 0) {
+        usleep(a->stay_alive_us);
+        (void)::close(cli_fd);
+    }
+
+    a->result = Result::OK;
+    return nullptr;
+}
+
+// TLS server helper for M5 tests 15–22: init a real TLS server, accept one TLS
+// client into slot 0, optionally send one DATA frame (for ssl_read tests),
+// then stay alive until the client closes.
+struct M5ServerArg {
+    uint16_t port;
+    bool     send_after_accept;  ///< true = send a DATA frame after handshake
+    uint32_t stay_alive_us;
+    Result   result;
+};
+
+static void* m5_tls_server_thread(void* raw_arg)
+{
+    M5ServerArg* a = static_cast<M5ServerArg*>(raw_arg);
+    assert(a != nullptr);
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, a->port, true);  // TLS server
+    a->result = server.init(srv_cfg);
+    if (a->result != Result::OK) { return nullptr; }
+
+    // Accept the client (blocks until client connects and handshake completes).
+    MessageEnvelope env;
+    Result recv_res = server.receive_message(env, 3000U);
+    // ERR_TIMEOUT is expected if no DATA arrives (accept still happened).
+    if (recv_res != Result::OK && recv_res != Result::ERR_TIMEOUT) {
+        a->result = recv_res;
+        server.close();
+        return nullptr;
+    }
+
+    if (a->send_after_accept) {
+        // Send a DATA frame so the client's socket shows POLLIN when it calls
+        // receive_message().  The client's slot is registered by NodeId 2.
+        MessageEnvelope out;
+        envelope_init(out);
+        out.message_type      = MessageType::DATA;
+        out.message_id        = 0xDEADBEEF0001ULL;
+        out.source_id         = 1U;
+        out.destination_id    = static_cast<NodeId>(NODE_ID_INVALID);  // broadcast
+        out.reliability_class = ReliabilityClass::BEST_EFFORT;
+        out.timestamp_us      = 1U;
+        out.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+        (void)server.send_message(out);
+    }
+
+    usleep(a->stay_alive_us);
+    server.close();
+    a->result = Result::OK;
+    return nullptr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// M5 fault-injection tests — VVP-001 §4.3 e-i (Class B)
+//
+// Tests 1–4: setup_tls_config() dependency failures (no network required).
+// Tests 5–6: bind_and_listen() dependency failures.
+// Test  7:   connect_to_server() net_tcp_connect failure.
+// Tests 8–11: tls_connect_handshake() failures (need raw TCP server).
+// Tests 12–14: do_tls_server_handshake() failures (need raw TCP client).
+// Tests 15–16: post-handshake session API failures (need full TLS loopback).
+// Tests 17–18: tls_write_all() failures (need full TLS loopback).
+// Tests 19–22: read_tls_header() / tls_read_payload() failures (need loopback).
+//
+// Verifies: REQ-6.3.4
+// Verification: M1 + M2 + M5 (fault injection via TlsMockOps / IMbedtlsOps)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Test M5-1: psa_crypto_init failure ───────────────────────────────────────
+// Verifies: REQ-6.3.4
+static void test_m5_psa_crypto_init_fail()
+{
+    TlsMockOps tls_mock;
+    tls_mock.fail_crypto_init = true;
+
+    MockSocketOps sock_mock;  // not used in TLS-mode init
+    TlsTcpBackend server(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, true, 0U, true);  // TLS server; port irrelevant
+    Result res = server.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!server.is_open());
+
+    printf("PASS: test_m5_psa_crypto_init_fail\n");
+}
+
+// ── Test M5-2: ssl_config_defaults failure ────────────────────────────────────
+// Verifies: REQ-6.3.4
+static void test_m5_ssl_config_defaults_fail()
+{
+    TlsMockOps tls_mock;
+    tls_mock.fail_ssl_config_defaults = true;
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend server(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, true, 0U, true);
+    Result res = server.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!server.is_open());
+
+    printf("PASS: test_m5_ssl_config_defaults_fail\n");
+}
+
+// ── Test M5-3: ssl_conf_own_cert failure ──────────────────────────────────────
+// crypto_init and cert-file parsing succeed; ssl_conf_own_cert fails.
+// Requires TEST_CERT_FILE / TEST_KEY_FILE to exist (written by write_pem_files).
+// Verifies: REQ-6.3.4
+static void test_m5_ssl_conf_own_cert_fail()
+{
+    TlsMockOps tls_mock;
+    tls_mock.fail_ssl_conf_own_cert = true;
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend server(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, true, 0U, true);  // cert/key paths set
+    Result res = server.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!server.is_open());
+
+    printf("PASS: test_m5_ssl_conf_own_cert_fail\n");
+}
+
+// ── Test M5-4: ssl_ticket_setup failure ───────────────────────────────────────
+// Requires MBEDTLS_SSL_SESSION_TICKETS; skipped otherwise.
+// Verifies: REQ-6.3.4
+static void test_m5_ssl_ticket_setup_fail()
+{
+#if defined(MBEDTLS_SSL_SESSION_TICKETS)
+    TlsMockOps tls_mock;
+    tls_mock.fail_ssl_ticket_setup = true;
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend server(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, true, 0U, true);
+    cfg.tls.session_resumption_enabled = true;
+    Result res = server.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!server.is_open());
+
+    printf("PASS: test_m5_ssl_ticket_setup_fail\n");
+#else
+    printf("SKIP: test_m5_ssl_ticket_setup_fail (MBEDTLS_SSL_SESSION_TICKETS not defined)\n");
+#endif
+}
+
+// ── Test M5-5: net_tcp_bind failure ───────────────────────────────────────────
+// setup_tls_config succeeds; net_tcp_bind fails → bind_and_listen returns ERR_IO.
+// Verifies: REQ-6.3.4
+static void test_m5_net_tcp_bind_fail()
+{
+    static const uint16_t PORT = 19936U;
+
+    TlsMockOps tls_mock;
+    tls_mock.fail_net_tcp_bind = true;
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend server(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, true, PORT, true);
+    Result res = server.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!server.is_open());
+
+    printf("PASS: test_m5_net_tcp_bind_fail\n");
+}
+
+// ── Test M5-6: net_set_nonblock failure on listen socket ──────────────────────
+// net_tcp_bind succeeds (real); first net_set_nonblock fails.
+// Verifies: REQ-6.3.4
+static void test_m5_net_set_nonblock_listen_fail()
+{
+    static const uint16_t PORT = 19937U;
+
+    TlsMockOps tls_mock;
+    tls_mock.fail_net_set_nonblock = true;
+    tls_mock.nonblock_fail_on      = 0;  // fail on the first call (listen socket)
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend server(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, true, PORT, true);
+    Result res = server.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!server.is_open());
+
+    printf("PASS: test_m5_net_set_nonblock_listen_fail\n");
+}
+
+// ── Test M5-7: net_tcp_connect failure ────────────────────────────────────────
+// Client init: net_tcp_connect returns error without touching any real socket.
+// No server required.
+// Verifies: REQ-6.3.4
+static void test_m5_net_tcp_connect_fail()
+{
+    TlsMockOps tls_mock;
+    tls_mock.fail_net_tcp_connect = true;
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, 19938U, true);
+    cfg.peer_ip[0] = '\0';
+    (void)strncpy(cfg.peer_ip, "127.0.0.1",
+                  static_cast<uint32_t>(sizeof(cfg.peer_ip) - 1U));
+    cfg.peer_ip[sizeof(cfg.peer_ip) - 1U] = '\0';
+
+    Result res = client.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!client.is_open());
+
+    printf("PASS: test_m5_net_tcp_connect_fail\n");
+}
+
+// ── Test M5-8: net_set_block failure (client tls_connect_handshake) ───────────
+// net_tcp_connect succeeds (real TCP connection to raw server); net_set_block fails.
+// Verifies: REQ-6.3.4
+static void test_m5_net_set_block_client_fail()
+{
+    static const uint16_t PORT = 19939U;
+
+    RawListenArg raw_arg;
+    raw_arg.port          = PORT;
+    raw_arg.stay_alive_us = 500000U;
+    raw_arg.result        = Result::ERR_IO;
+    pthread_t raw_tid = create_thread_4mb(raw_tcp_listen_thread, &raw_arg);
+    usleep(50000U);  // 50 ms: let server bind and listen
+
+    TlsMockOps tls_mock;
+    tls_mock.fail_net_set_block = true;
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    Result res = client.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!client.is_open());
+
+    (void)pthread_join(raw_tid, nullptr);
+    assert(raw_arg.result == Result::OK);
+
+    printf("PASS: test_m5_net_set_block_client_fail\n");
+}
+
+// ── Test M5-9: ssl_setup failure (client tls_connect_handshake) ───────────────
+// net_tcp_connect + net_set_block succeed; ssl_setup fails.
+// Verifies: REQ-6.3.4
+static void test_m5_ssl_setup_client_fail()
+{
+    static const uint16_t PORT = 19940U;
+
+    RawListenArg raw_arg;
+    raw_arg.port          = PORT;
+    raw_arg.stay_alive_us = 500000U;
+    raw_arg.result        = Result::ERR_IO;
+    pthread_t raw_tid = create_thread_4mb(raw_tcp_listen_thread, &raw_arg);
+    usleep(50000U);
+
+    TlsMockOps tls_mock;
+    tls_mock.fail_ssl_setup = true;
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    Result res = client.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!client.is_open());
+
+    (void)pthread_join(raw_tid, nullptr);
+    assert(raw_arg.result == Result::OK);
+
+    printf("PASS: test_m5_ssl_setup_client_fail\n");
+}
+
+// ── Test M5-10: ssl_set_hostname failure (client tls_connect_handshake) ───────
+// net_set_block + ssl_setup succeed; ssl_set_hostname fails.
+// Verifies: REQ-6.3.4, REQ-6.4.6
+static void test_m5_ssl_set_hostname_fail()
+{
+    static const uint16_t PORT = 19941U;
+
+    RawListenArg raw_arg;
+    raw_arg.port          = PORT;
+    raw_arg.stay_alive_us = 500000U;
+    raw_arg.result        = Result::ERR_IO;
+    pthread_t raw_tid = create_thread_4mb(raw_tcp_listen_thread, &raw_arg);
+    usleep(50000U);
+
+    TlsMockOps tls_mock;
+    tls_mock.fail_ssl_set_hostname = true;
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+
+    // verify_peer=false so the SEC-021 empty-hostname guard is not triggered
+    // before ssl_set_hostname is called.
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    Result res = client.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!client.is_open());
+
+    (void)pthread_join(raw_tid, nullptr);
+    assert(raw_arg.result == Result::OK);
+
+    printf("PASS: test_m5_ssl_set_hostname_fail\n");
+}
+
+// ── Test M5-11: ssl_handshake failure (client tls_connect_handshake) ──────────
+// All pre-handshake steps succeed; ssl_handshake returns a hard error so the
+// retry loop in run_tls_handshake_loop() exits after one iteration.
+// Verifies: REQ-6.3.4
+static void test_m5_ssl_handshake_client_fail()
+{
+    static const uint16_t PORT = 19942U;
+
+    RawListenArg raw_arg;
+    raw_arg.port          = PORT;
+    raw_arg.stay_alive_us = 1000000U;
+    raw_arg.result        = Result::ERR_IO;
+    pthread_t raw_tid = create_thread_4mb(raw_tcp_listen_thread, &raw_arg);
+    usleep(50000U);
+
+    TlsMockOps tls_mock;
+    tls_mock.fail_ssl_handshake = true;
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    Result res = client.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(!client.is_open());
+
+    (void)pthread_join(raw_tid, nullptr);
+    assert(raw_arg.result == Result::OK);
+
+    printf("PASS: test_m5_ssl_handshake_client_fail\n");
+}
+
+// ── Test M5-12: net_set_block failure (server do_tls_server_handshake) ────────
+// Server has TlsMockOps with fail_net_set_block; a raw TCP client connects.
+// accept_and_handshake → do_tls_server_handshake → net_set_block FAIL.
+// Verifies: REQ-6.3.4
+static void test_m5_server_net_set_block_fail()
+{
+    static const uint16_t PORT = 19943U;
+
+    TlsMockOps tls_mock;
+    tls_mock.fail_net_set_block = true;
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend server(sock_mock, tls_mock);
+
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, true);
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open());
+
+    // Raw client connects to trigger accept_and_handshake on the server.
+    DummyRawClientArg cli_arg;
+    cli_arg.port          = PORT;
+    cli_arg.stay_alive_us = 1000000U;
+    cli_arg.result        = Result::ERR_IO;
+    pthread_t cli_tid = create_thread_4mb(dummy_raw_client_thread, &cli_arg);
+
+    // Server: accept → do_tls_server_handshake → net_set_block FAIL → ERR_IO
+    // internally; receive_message returns ERR_TIMEOUT (no deliverable message).
+    MessageEnvelope env;
+    Result recv_res = server.receive_message(env, 500U);
+    assert(recv_res == Result::ERR_TIMEOUT);
+
+    (void)pthread_join(cli_tid, nullptr);
+    server.close();
+    assert(cli_arg.result == Result::OK);
+
+    printf("PASS: test_m5_server_net_set_block_fail\n");
+}
+
+// ── Test M5-13: ssl_setup failure (server do_tls_server_handshake) ────────────
+// net_set_block succeeds (real); ssl_setup fails.
+// Verifies: REQ-6.3.4
+static void test_m5_server_ssl_setup_fail()
+{
+    static const uint16_t PORT = 19944U;
+
+    TlsMockOps tls_mock;
+    tls_mock.fail_ssl_setup = true;
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend server(sock_mock, tls_mock);
+
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, true);
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open());
+
+    DummyRawClientArg cli_arg;
+    cli_arg.port          = PORT;
+    cli_arg.stay_alive_us = 1000000U;
+    cli_arg.result        = Result::ERR_IO;
+    pthread_t cli_tid = create_thread_4mb(dummy_raw_client_thread, &cli_arg);
+
+    MessageEnvelope env;
+    Result recv_res = server.receive_message(env, 500U);
+    assert(recv_res == Result::ERR_TIMEOUT);
+
+    (void)pthread_join(cli_tid, nullptr);
+    server.close();
+    assert(cli_arg.result == Result::OK);
+
+    printf("PASS: test_m5_server_ssl_setup_fail\n");
+}
+
+// ── Test M5-14: ssl_handshake failure (server do_tls_server_handshake) ────────
+// net_set_block + ssl_setup succeed; ssl_handshake returns a hard error.
+// Verifies: REQ-6.3.4
+static void test_m5_server_ssl_handshake_fail()
+{
+    static const uint16_t PORT = 19945U;
+
+    TlsMockOps tls_mock;
+    tls_mock.fail_ssl_handshake = true;
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend server(sock_mock, tls_mock);
+
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, true);
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open());
+
+    DummyRawClientArg cli_arg;
+    cli_arg.port          = PORT;
+    cli_arg.stay_alive_us = 1000000U;
+    cli_arg.result        = Result::ERR_IO;
+    pthread_t cli_tid = create_thread_4mb(dummy_raw_client_thread, &cli_arg);
+
+    MessageEnvelope env;
+    Result recv_res = server.receive_message(env, 500U);
+    assert(recv_res == Result::ERR_TIMEOUT);
+
+    (void)pthread_join(cli_tid, nullptr);
+    server.close();
+    assert(cli_arg.result == Result::OK);
+
+    printf("PASS: test_m5_server_ssl_handshake_fail\n");
+}
+
+// ── Test M5-15: ssl_get_session failure (try_save_client_session) ─────────────
+// Full TLS handshake succeeds; ssl_get_session fails when saving the session.
+// The failure is non-fatal: init() still returns OK.
+// Requires MBEDTLS_SSL_SESSION_TICKETS; skipped otherwise.
+// Verifies: REQ-6.3.4
+static void test_m5_ssl_get_session_fail()
+{
+#if defined(MBEDTLS_SSL_SESSION_TICKETS)
+    static const uint16_t PORT = 19946U;
+
+    // Start a real TLS server in a background thread.
+    M5ServerArg srv_arg;
+    srv_arg.port             = PORT;
+    srv_arg.send_after_accept = false;
+    srv_arg.stay_alive_us    = 2000000U;
+    srv_arg.result           = Result::ERR_IO;
+    pthread_t srv_tid = create_thread_4mb(m5_tls_server_thread, &srv_arg);
+    usleep(100000U);  // 100 ms: let server bind and listen
+
+    // Client: TLS, session_resumption_enabled=true, TlsMockOps fails ssl_get_session.
+    TlsMockOps tls_mock;
+    tls_mock.fail_ssl_get_session = true;
+
+    MockSocketOps sock_mock;
+    TlsSessionStore store;
+    TlsTcpBackend client(sock_mock, tls_mock);
+    client.set_session_store(&store);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    cfg.tls.session_resumption_enabled = true;
+
+    // init() must succeed: ssl_get_session failure is non-fatal (WARNING_LO).
+    Result init_res = client.init(cfg);
+    assert(init_res == Result::OK);
+    // Session was NOT saved (ssl_get_session failed).
+    assert(!store.session_valid.load());
+
+    client.close();
+    (void)pthread_join(srv_tid, nullptr);
+    assert(srv_arg.result == Result::OK);
+    store.zeroize();
+
+    printf("PASS: test_m5_ssl_get_session_fail\n");
+#else
+    printf("SKIP: test_m5_ssl_get_session_fail (MBEDTLS_SSL_SESSION_TICKETS not defined)\n");
+#endif
+}
+
+// ── Test M5-16: ssl_set_session failure (try_load_client_session) ─────────────
+// A saved session is presented; ssl_set_session fails.  The failure is
+// non-fatal: full handshake proceeds and init() returns OK.
+// Requires MBEDTLS_SSL_SESSION_TICKETS; skipped otherwise.
+// Verifies: REQ-6.3.4
+static void test_m5_ssl_set_session_fail()
+{
+#if defined(MBEDTLS_SSL_SESSION_TICKETS)
+    static const uint16_t PORT = 19947U;
+
+    M5ServerArg srv_arg;
+    srv_arg.port             = PORT;
+    srv_arg.send_after_accept = false;
+    srv_arg.stay_alive_us    = 2000000U;
+    srv_arg.result           = Result::ERR_IO;
+    pthread_t srv_tid = create_thread_4mb(m5_tls_server_thread, &srv_arg);
+    usleep(100000U);
+
+    // Inject a "resumable" session (session_valid=true) without actually having
+    // saved real session data — ssl_set_session will fail on the junk data,
+    // but that is exactly the failure path we want to cover.
+    TlsSessionStore store;
+    store.session_valid.store(true);
+
+    TlsMockOps tls_mock;
+    tls_mock.fail_ssl_set_session = true;
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+    client.set_session_store(&store);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    cfg.tls.session_resumption_enabled = true;
+
+    // init() must succeed: ssl_set_session failure is non-fatal (full handshake).
+    Result init_res = client.init(cfg);
+    assert(init_res == Result::OK);
+
+    client.close();
+    (void)pthread_join(srv_tid, nullptr);
+    assert(srv_arg.result == Result::OK);
+    store.zeroize();
+
+    printf("PASS: test_m5_ssl_set_session_fail\n");
+#else
+    printf("SKIP: test_m5_ssl_set_session_fail (MBEDTLS_SSL_SESSION_TICKETS not defined)\n");
+#endif
+}
+
+// ── Test M5-17: ssl_write hard failure (tls_write_all) ────────────────────────
+// Full TLS loopback established; then ssl_write is injected to return a hard
+// error.  Client send_message() must return ERR_IO.
+// Verifies: REQ-6.3.4
+static void test_m5_ssl_write_hard_fail()
+{
+    static const uint16_t PORT = 19948U;
+
+    M5ServerArg srv_arg;
+    srv_arg.port             = PORT;
+    srv_arg.send_after_accept = false;
+    srv_arg.stay_alive_us    = 2000000U;
+    srv_arg.result           = Result::ERR_IO;
+    pthread_t srv_tid = create_thread_4mb(m5_tls_server_thread, &srv_arg);
+    usleep(100000U);
+
+    // Client: all TlsMockOps delegates during init (handshake succeeds).
+    TlsMockOps tls_mock;
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    Result init_res = client.init(cfg);
+    assert(init_res == Result::OK);
+
+    // Inject ssl_write failure AFTER the handshake.
+    tls_mock.fail_ssl_write = true;
+
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.message_id        = 0xDEAD0001ULL;
+    env.source_id         = 2U;
+    env.destination_id    = 1U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    env.timestamp_us      = 1U;
+    env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+
+    Result send_res = client.send_message(env);
+    assert(send_res == Result::ERR_IO);
+
+    client.close();
+    (void)pthread_join(srv_tid, nullptr);
+    assert(srv_arg.result == Result::OK);
+
+    printf("PASS: test_m5_ssl_write_hard_fail\n");
+}
+
+// ── Test M5-18: ssl_write WANT_WRITE → short-write path ───────────────────────
+// ssl_write always returns WANT_WRITE; after the bounded loop exhausts its
+// iterations, sent < len → "short write" WARNING_HI → tls_write_all returns false.
+// Verifies: REQ-6.3.4
+static void test_m5_ssl_write_want_write_short()
+{
+    static const uint16_t PORT = 19949U;
+
+    M5ServerArg srv_arg;
+    srv_arg.port             = PORT;
+    srv_arg.send_after_accept = false;
+    srv_arg.stay_alive_us    = 2000000U;
+    srv_arg.result           = Result::ERR_IO;
+    pthread_t srv_tid = create_thread_4mb(m5_tls_server_thread, &srv_arg);
+    usleep(100000U);
+
+    TlsMockOps tls_mock;
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    Result init_res = client.init(cfg);
+    assert(init_res == Result::OK);
+
+    // After handshake: make ssl_write always return WANT_WRITE.
+    tls_mock.ssl_write_want_write = true;
+
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.message_id        = 0xDEAD0002ULL;
+    env.source_id         = 2U;
+    env.destination_id    = 1U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    env.timestamp_us      = 1U;
+    env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+
+    // tls_write_all(header, 4): loop runs 4 times, sent=0 → short write → false.
+    Result send_res = client.send_message(env);
+    assert(send_res == Result::ERR_IO);
+
+    client.close();
+    (void)pthread_join(srv_tid, nullptr);
+    assert(srv_arg.result == Result::OK);
+
+    printf("PASS: test_m5_ssl_write_want_write_short\n");
+}
+
+// ── Test M5-19: ssl_read hard failure in read_tls_header ──────────────────────
+// Server sends a DATA frame so the client socket shows POLLIN.  The client's
+// ssl_read is mocked to return a hard error on the very first call (header read).
+// Verifies: REQ-6.3.4
+static void test_m5_ssl_read_header_hard_fail()
+{
+    static const uint16_t PORT = 19950U;
+
+    // Server sends one DATA frame after the handshake to trigger POLLIN.
+    M5ServerArg srv_arg;
+    srv_arg.port             = PORT;
+    srv_arg.send_after_accept = true;
+    srv_arg.stay_alive_us    = 2000000U;
+    srv_arg.result           = Result::ERR_IO;
+    pthread_t srv_tid = create_thread_4mb(m5_tls_server_thread, &srv_arg);
+    usleep(100000U);
+
+    TlsMockOps tls_mock;
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    Result init_res = client.init(cfg);
+    assert(init_res == Result::OK);
+
+    // Send HELLO so server's routing table is populated (enables broadcast send).
+    (void)client.register_local_id(2U);
+    usleep(100000U);  // 100 ms: let server process HELLO and send DATA
+
+    // Fail ssl_read from the first call (header read).
+    tls_mock.ssl_read_fail_on   = 0;
+    tls_mock.ssl_read_want_read = false;  // hard error
+
+    // Client receive: POLLIN fires → read_tls_header → ssl_read → hard error.
+    MessageEnvelope env;
+    Result recv_res = client.receive_message(env, 500U);
+    // Hard ssl_read error → recv_from_client returns ERR_IO internally;
+    // receive_message propagates the error or returns ERR_TIMEOUT after retries.
+    assert(recv_res == Result::ERR_IO || recv_res == Result::ERR_TIMEOUT);
+
+    client.close();
+    (void)pthread_join(srv_tid, nullptr);
+    assert(srv_arg.result == Result::OK);
+
+    printf("PASS: test_m5_ssl_read_header_hard_fail\n");
+}
+
+// ── Test M5-20: ssl_read WANT_READ + net_poll timeout in read_tls_header ──────
+// ssl_read returns WANT_READ; net_poll returns 0 (timeout) → read fails with
+// "timeout on header read" WARNING_LO.
+// Verifies: REQ-6.3.4
+static void test_m5_ssl_read_header_want_read_timeout()
+{
+    static const uint16_t PORT = 19951U;
+
+    M5ServerArg srv_arg;
+    srv_arg.port             = PORT;
+    srv_arg.send_after_accept = true;
+    srv_arg.stay_alive_us    = 2000000U;
+    srv_arg.result           = Result::ERR_IO;
+    pthread_t srv_tid = create_thread_4mb(m5_tls_server_thread, &srv_arg);
+    usleep(100000U);
+
+    TlsMockOps tls_mock;
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    Result init_res = client.init(cfg);
+    assert(init_res == Result::OK);
+
+    (void)client.register_local_id(2U);
+    usleep(100000U);
+
+    // WANT_READ on first ssl_read call + net_poll timeout.
+    tls_mock.ssl_read_fail_on   = 0;
+    tls_mock.ssl_read_want_read = true;
+    tls_mock.fail_net_poll      = true;
+
+    MessageEnvelope env;
+    Result recv_res = client.receive_message(env, 500U);
+    assert(recv_res == Result::ERR_IO || recv_res == Result::ERR_TIMEOUT);
+
+    client.close();
+    (void)pthread_join(srv_tid, nullptr);
+    assert(srv_arg.result == Result::OK);
+
+    printf("PASS: test_m5_ssl_read_header_want_read_timeout\n");
+}
+
+// ── Test M5-21: ssl_read hard failure in tls_read_payload ─────────────────────
+// The 4-byte header ssl_read succeeds (call 0 delegates to real impl); the
+// first payload ssl_read (call 1) returns a hard error.
+// Verifies: REQ-6.3.4
+static void test_m5_ssl_read_payload_hard_fail()
+{
+    static const uint16_t PORT = 19952U;
+
+    M5ServerArg srv_arg;
+    srv_arg.port             = PORT;
+    srv_arg.send_after_accept = true;
+    srv_arg.stay_alive_us    = 2000000U;
+    srv_arg.result           = Result::ERR_IO;
+    pthread_t srv_tid = create_thread_4mb(m5_tls_server_thread, &srv_arg);
+    usleep(100000U);
+
+    TlsMockOps tls_mock;
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    Result init_res = client.init(cfg);
+    assert(init_res == Result::OK);
+
+    (void)client.register_local_id(2U);
+    usleep(100000U);
+
+    // Call 0 (header) delegates to real impl; call 1+ returns hard error.
+    // In a loopback, read_tls_header typically completes in one ssl_read call.
+    tls_mock.ssl_read_fail_on   = 1;
+    tls_mock.ssl_read_want_read = false;  // hard error
+
+    MessageEnvelope env;
+    Result recv_res = client.receive_message(env, 500U);
+    assert(recv_res == Result::ERR_IO || recv_res == Result::ERR_TIMEOUT);
+
+    client.close();
+    (void)pthread_join(srv_tid, nullptr);
+    assert(srv_arg.result == Result::OK);
+
+    printf("PASS: test_m5_ssl_read_payload_hard_fail\n");
+}
+
+// ── Test M5-22: ssl_read WANT_READ + net_poll timeout in tls_read_payload ─────
+// Header read completes (call 0 real); payload ssl_read returns WANT_READ;
+// net_poll returns 0 (timeout) → "timeout waiting for data" WARNING_LO.
+// Verifies: REQ-6.3.4
+static void test_m5_ssl_read_payload_want_read_timeout()
+{
+    static const uint16_t PORT = 19953U;
+
+    M5ServerArg srv_arg;
+    srv_arg.port             = PORT;
+    srv_arg.send_after_accept = true;
+    srv_arg.stay_alive_us    = 2000000U;
+    srv_arg.result           = Result::ERR_IO;
+    pthread_t srv_tid = create_thread_4mb(m5_tls_server_thread, &srv_arg);
+    usleep(100000U);
+
+    TlsMockOps tls_mock;
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    Result init_res = client.init(cfg);
+    assert(init_res == Result::OK);
+
+    (void)client.register_local_id(2U);
+    usleep(100000U);
+
+    // Call 0 (header) delegates; call 1+ returns WANT_READ then net_poll timeouts.
+    tls_mock.ssl_read_fail_on   = 1;
+    tls_mock.ssl_read_want_read = true;
+    tls_mock.fail_net_poll      = true;
+
+    MessageEnvelope env;
+    Result recv_res = client.receive_message(env, 500U);
+    assert(recv_res == Result::ERR_IO || recv_res == Result::ERR_TIMEOUT);
+
+    client.close();
+    (void)pthread_join(srv_tid, nullptr);
+    assert(srv_arg.result == Result::OK);
+
+    printf("PASS: test_m5_ssl_read_payload_want_read_timeout\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -5065,6 +6193,30 @@ int main()
     test_tls_inbound_reorder_buffers_message();
     test_tls_send_to_slot_fail();
     test_tls_broadcast_send_fail();
+
+    // M5 fault-injection tests (VVP-001 §4.3 e-i — TlsMockOps via IMbedtlsOps):
+    test_m5_psa_crypto_init_fail();
+    test_m5_ssl_config_defaults_fail();
+    test_m5_ssl_conf_own_cert_fail();
+    test_m5_ssl_ticket_setup_fail();
+    test_m5_net_tcp_bind_fail();
+    test_m5_net_set_nonblock_listen_fail();
+    test_m5_net_tcp_connect_fail();
+    test_m5_net_set_block_client_fail();
+    test_m5_ssl_setup_client_fail();
+    test_m5_ssl_set_hostname_fail();
+    test_m5_ssl_handshake_client_fail();
+    test_m5_server_net_set_block_fail();
+    test_m5_server_ssl_setup_fail();
+    test_m5_server_ssl_handshake_fail();
+    test_m5_ssl_get_session_fail();
+    test_m5_ssl_set_session_fail();
+    test_m5_ssl_write_hard_fail();
+    test_m5_ssl_write_want_write_short();
+    test_m5_ssl_read_header_hard_fail();
+    test_m5_ssl_read_header_want_read_timeout();
+    test_m5_ssl_read_payload_hard_fail();
+    test_m5_ssl_read_payload_want_read_timeout();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);

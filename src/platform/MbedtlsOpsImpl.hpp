@@ -24,9 +24,10 @@
  * Power of 10 Rule 9: virtual dispatch (vtable) is the permitted exception
  *   for TransportInterface polymorphism; same exception applies here.
  *
- * Implements: REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6
+ * Implements: REQ-6.1.1, REQ-6.1.2, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2,
+ *             REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6
  */
-// Implements: REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6
+// Implements: REQ-6.1.1, REQ-6.1.2, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6
 
 #ifndef PLATFORM_MBEDTLS_OPS_IMPL_HPP
 #define PLATFORM_MBEDTLS_OPS_IMPL_HPP
@@ -73,6 +74,26 @@ public:
     int net_connect(int sockfd,
                     const struct sockaddr* addr, socklen_t addrlen) override;
     int inet_pton_ipv4(const char* src, void* dst) override;
+
+    // TCP network wrappers (TlsTcpBackend M5 coverage paths)
+    int net_tcp_connect(mbedtls_net_context* ctx,
+                        const char* host, const char* port) override;
+    int net_tcp_bind(mbedtls_net_context* ctx,
+                     const char* ip, const char* port) override;
+    int net_tcp_accept(mbedtls_net_context* listen_ctx,
+                       mbedtls_net_context* client_ctx) override;
+    int net_set_block(mbedtls_net_context* ctx) override;
+    int net_set_nonblock(mbedtls_net_context* ctx) override;
+    int net_poll(mbedtls_net_context* ctx,
+                 uint32_t rw, uint32_t timeout_ms) override;
+
+    // TLS session management wrappers (TlsTcpBackend M5 coverage paths)
+    int ssl_get_session(const mbedtls_ssl_context* ssl,
+                        mbedtls_ssl_session* dst) override;
+    int ssl_set_session(mbedtls_ssl_context* ssl,
+                        const mbedtls_ssl_session* session) override;
+    int ssl_ticket_setup(mbedtls_ssl_ticket_context* ctx,
+                         uint32_t lifetime_s) override;
 
 private:
     MbedtlsOpsImpl() = default;

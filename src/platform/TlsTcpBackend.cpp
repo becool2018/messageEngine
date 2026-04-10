@@ -37,6 +37,8 @@
 #include "platform/TlsSessionStore.hpp"
 #include "platform/ISocketOps.hpp"
 #include "platform/SocketOpsImpl.hpp"
+#include "platform/IMbedtlsOps.hpp"
+#include "platform/MbedtlsOpsImpl.hpp"
 #include "core/Assert.hpp"
 #include "core/Logger.hpp"
 #include "core/Serializer.hpp"
@@ -143,6 +145,7 @@ TlsTcpBackend::TlsTcpBackend()
       m_listen_net{}, m_client_net{}, m_ssl{},
       m_session_store_ptr(nullptr), m_fs_warning_logged(false), m_ticket_ctx{},
       m_sock_ops(&SocketOpsImpl::instance()),
+      m_tls_ops(&MbedtlsOpsImpl::instance()),
       m_client_count(0U), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false), m_tls_enabled(false),
       m_connections_opened(0U), m_connections_closed(0U),
@@ -174,6 +177,39 @@ TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops)
       m_listen_net{}, m_client_net{}, m_ssl{},
       m_session_store_ptr(nullptr), m_fs_warning_logged(false), m_ticket_ctx{},
       m_sock_ops(&sock_ops),
+      m_tls_ops(&MbedtlsOpsImpl::instance()),
+      m_client_count(0U), m_wire_buf{}, m_cfg{},
+      m_open(false), m_is_server(false), m_tls_enabled(false),
+      m_connections_opened(0U), m_connections_closed(0U),
+      m_client_node_ids{}, m_local_node_id(NODE_ID_INVALID),
+      m_client_hello_received{}, m_client_slot_active{}
+{
+    NEVER_COMPILED_OUT_ASSERT(MAX_TCP_CONNECTIONS > 0U);
+    mbedtls_ssl_config_init(&m_ssl_conf);
+    mbedtls_x509_crt_init(&m_cert);
+    mbedtls_x509_crt_init(&m_ca_cert);
+    mbedtls_pk_init(&m_pkey);
+    mbedtls_x509_crl_init(&m_crl);   // REQ-6.3.4: CRL context init
+    mbedtls_net_init(&m_listen_net);
+    mbedtls_ssl_ticket_init(&m_ticket_ctx);  // Fix 2: REQ-6.3.4
+    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
+        mbedtls_net_init(&m_client_net[i]);
+        mbedtls_ssl_init(&m_ssl[i]);
+        m_client_hello_received[i] = false;  // Fix 4: REQ-6.1.8
+        m_client_slot_active[i]    = false;  // Fix 5: no compaction
+        m_hello_queue[i]           = NODE_ID_INVALID;  // REQ-3.3.6
+    }
+    m_hello_queue_read  = 0U;  // REQ-3.3.6
+    m_hello_queue_write = 0U;  // REQ-3.3.6
+}
+
+TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops, IMbedtlsOps& tls_ops)
+    : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_pkey{},
+      m_crl{}, m_crl_loaded(false),
+      m_listen_net{}, m_client_net{}, m_ssl{},
+      m_session_store_ptr(nullptr), m_fs_warning_logged(false), m_ticket_ctx{},
+      m_sock_ops(&sock_ops),
+      m_tls_ops(&tls_ops),
       m_client_count(0U), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false), m_tls_enabled(false),
       m_connections_opened(0U), m_connections_closed(0U),
@@ -243,7 +279,7 @@ Result TlsTcpBackend::load_ca_and_crl(const TlsConfig& tls_cfg)
     if (!tls_path_is_regular_file(tls_cfg.ca_file, "TlsTcpBackend")) {
         return Result::ERR_IO;
     }
-    int ret = mbedtls_x509_crt_parse_file(&m_ca_cert, tls_cfg.ca_file);
+    int ret = m_tls_ops->x509_crt_parse_file(&m_ca_cert, tls_cfg.ca_file);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "x509_crt_parse_file (CA)", ret);
         return Result::ERR_IO;
@@ -314,13 +350,15 @@ Result TlsTcpBackend::load_crl_if_configured(const TlsConfig& tls_cfg)
 int TlsTcpBackend::run_tls_handshake_loop(mbedtls_ssl_context* ssl)
 {
     NEVER_COMPILED_OUT_ASSERT(ssl != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(m_tls_ops != nullptr);
 
     // Power of 10 Rule 2: bounded retry loop — max 32 iterations for WANT_READ/WANT_WRITE.
     // REQ-6.3.3: handles EINTR/EAGAIN on blocking socket.
+    // Non-static: routes through m_tls_ops for M5 fault injection (VVP-001 §4.3 e-i).
     int hs_ret = 0;
     uint32_t hs_iter = 0U;
     do {
-        hs_ret = mbedtls_ssl_handshake(ssl);
+        hs_ret = m_tls_ops->ssl_handshake(ssl);
         ++hs_iter;
     } while ((hs_ret == MBEDTLS_ERR_SSL_WANT_READ ||
               hs_ret == MBEDTLS_ERR_SSL_WANT_WRITE) &&
@@ -350,7 +388,7 @@ Result TlsTcpBackend::load_tls_certs(const TlsConfig& tls_cfg)
     if (!tls_path_is_regular_file(tls_cfg.cert_file, "TlsTcpBackend")) {
         return Result::ERR_IO;
     }
-    int ret = mbedtls_x509_crt_parse_file(&m_cert, tls_cfg.cert_file);
+    int ret = m_tls_ops->x509_crt_parse_file(&m_cert, tls_cfg.cert_file);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "x509_crt_parse_file (cert)", ret);
         return Result::ERR_IO;
@@ -360,13 +398,13 @@ Result TlsTcpBackend::load_tls_certs(const TlsConfig& tls_cfg)
     if (!tls_path_is_regular_file(tls_cfg.key_file, "TlsTcpBackend")) {
         return Result::ERR_IO;
     }
-    ret = mbedtls_pk_parse_keyfile(&m_pkey, tls_cfg.key_file, nullptr);
+    ret = m_tls_ops->pk_parse_keyfile(&m_pkey, tls_cfg.key_file, nullptr);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "pk_parse_keyfile", ret);
         return Result::ERR_IO;
     }
 
-    ret = mbedtls_ssl_conf_own_cert(&m_ssl_conf, &m_cert, &m_pkey);
+    ret = m_tls_ops->ssl_conf_own_cert(&m_ssl_conf, &m_cert, &m_pkey);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_conf_own_cert", ret);
         return Result::ERR_IO;
@@ -428,7 +466,7 @@ Result TlsTcpBackend::setup_tls_config(const TlsConfig& tls_cfg)
 
     // Init PSA Crypto (mbedTLS 4.0: replaces CTR-DRBG / entropy setup).
     // Power of 10 Rule 3 deviation — init-phase heap allocation inside PSA.
-    psa_status_t psa_ret = psa_crypto_init();
+    psa_status_t psa_ret = m_tls_ops->crypto_init();
     if (psa_ret != PSA_SUCCESS) {
         Logger::log(Severity::FATAL, "TlsTcpBackend",
                     "psa_crypto_init failed: %d", static_cast<int>(psa_ret));
@@ -439,10 +477,10 @@ Result TlsTcpBackend::setup_tls_config(const TlsConfig& tls_cfg)
                    ? MBEDTLS_SSL_IS_SERVER
                    : MBEDTLS_SSL_IS_CLIENT;
 
-    int ret = mbedtls_ssl_config_defaults(&m_ssl_conf,
-                                          endpoint,
-                                          MBEDTLS_SSL_TRANSPORT_STREAM,
-                                          MBEDTLS_SSL_PRESET_DEFAULT);
+    int ret = m_tls_ops->ssl_config_defaults(&m_ssl_conf,
+                                             endpoint,
+                                             MBEDTLS_SSL_TRANSPORT_STREAM,
+                                             MBEDTLS_SSL_PRESET_DEFAULT);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_config_defaults", ret);
         return Result::ERR_IO;
@@ -526,22 +564,8 @@ Result TlsTcpBackend::setup_session_tickets(uint32_t lifetime_s)
 
     // AES-256-GCM for ticket AEAD — FIPS-approved, 256-bit key.
     // Power of 10 Rule 3: no dynamic allocation; PSA manages the key internally.
-    // mbedTLS 4.0+: PSA-native API (alg, key_type, key_bits, lifetime).
-    // mbedTLS 2.x/3.x: legacy API (f_rng, p_rng, cipher_type, lifetime).
-#if MBEDTLS_VERSION_MAJOR >= 4
-    int ticket_ret = mbedtls_ssl_ticket_setup(
-        &m_ticket_ctx,
-        PSA_ALG_GCM,
-        PSA_KEY_TYPE_AES,
-        static_cast<psa_key_bits_t>(256U),
-        lifetime_s);
-#else
-    int ticket_ret = mbedtls_ssl_ticket_setup(
-        &m_ticket_ctx,
-        mbedtls_psa_get_random, MBEDTLS_PSA_RANDOM_STATE,
-        MBEDTLS_CIPHER_AES_256_GCM,
-        lifetime_s);
-#endif
+    // Version-specific API differences delegated to m_tls_ops->ssl_ticket_setup().
+    int ticket_ret = m_tls_ops->ssl_ticket_setup(&m_ticket_ctx, lifetime_s);
     if (ticket_ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_ticket_setup", ticket_ret);
         return Result::ERR_IO;
@@ -570,14 +594,14 @@ Result TlsTcpBackend::bind_and_listen(const char* ip, uint16_t port)
     char port_str[6];
     port_to_str(port, port_str);
 
-    int ret = mbedtls_net_bind(&m_listen_net, ip, port_str, MBEDTLS_NET_PROTO_TCP);
+    int ret = m_tls_ops->net_tcp_bind(&m_listen_net, ip, port_str);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "net_bind", ret);
         return Result::ERR_IO;
     }
 
     // Set non-blocking so accept() returns immediately when no client pending
-    ret = mbedtls_net_set_nonblock(&m_listen_net);
+    ret = m_tls_ops->net_set_nonblock(&m_listen_net);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "net_set_nonblock (listen)", ret);
         mbedtls_net_free(&m_listen_net);
@@ -693,7 +717,7 @@ void TlsTcpBackend::try_save_client_session()
     // Release any stale session before overwriting with the fresh one.
     m_session_store_ptr->zeroize();  // free + zeroize + re-init via TlsSessionStore
 
-    int ret = mbedtls_ssl_get_session(&m_ssl[0U], &m_session_store_ptr->session);
+    int ret = m_tls_ops->ssl_get_session(&m_ssl[0U], &m_session_store_ptr->session);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_get_session", ret);
         Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
@@ -725,7 +749,7 @@ void TlsTcpBackend::try_load_client_session()
 
 #if defined(MBEDTLS_SSL_SESSION_TICKETS)
     NEVER_COMPILED_OUT_ASSERT(m_session_store_ptr->session_valid.load());
-    int ret = mbedtls_ssl_set_session(&m_ssl[0U], &m_session_store_ptr->session);
+    int ret = m_tls_ops->ssl_set_session(&m_ssl[0U], &m_session_store_ptr->session);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_set_session", ret);
         Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
@@ -780,14 +804,14 @@ Result TlsTcpBackend::tls_connect_handshake()
     }
 
     // mbedtls_net_connect returns a blocking socket by default; set explicitly.
-    int ret = mbedtls_net_set_block(&m_client_net[0U]);
+    int ret = m_tls_ops->net_set_block(&m_client_net[0U]);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "net_set_block (client connect)", ret);
         mbedtls_net_free(&m_client_net[0U]);
         return Result::ERR_IO;
     }
 
-    ret = mbedtls_ssl_setup(&m_ssl[0U], &m_ssl_conf);
+    ret = m_tls_ops->ssl_setup(&m_ssl[0U], &m_ssl_conf);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_setup (client)", ret);
         mbedtls_net_free(&m_client_net[0U]);
@@ -800,7 +824,7 @@ Result TlsTcpBackend::tls_connect_handshake()
     const char* hostname = (m_cfg.tls.peer_hostname[0] != '\0')
                            ? m_cfg.tls.peer_hostname
                            : nullptr;
-    ret = mbedtls_ssl_set_hostname(&m_ssl[0U], hostname);
+    ret = m_tls_ops->ssl_set_hostname(&m_ssl[0U], hostname);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_set_hostname", ret);
         mbedtls_net_free(&m_client_net[0U]);
@@ -870,8 +894,7 @@ Result TlsTcpBackend::connect_to_server()
     char port_str[6];
     port_to_str(m_cfg.peer_port, port_str);
 
-    int ret = mbedtls_net_connect(&m_client_net[0U], m_cfg.peer_ip,
-                                  port_str, MBEDTLS_NET_PROTO_TCP);
+    int ret = m_tls_ops->net_tcp_connect(&m_client_net[0U], m_cfg.peer_ip, port_str);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "net_connect", ret);
         return Result::ERR_IO;
@@ -909,7 +932,7 @@ Result TlsTcpBackend::do_tls_server_handshake(uint32_t slot)
     NEVER_COMPILED_OUT_ASSERT(m_tls_enabled);
 
     // Blocking mode required for the handshake multi-round I/O sequence.
-    int ret = mbedtls_net_set_block(&m_client_net[slot]);
+    int ret = m_tls_ops->net_set_block(&m_client_net[slot]);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "net_set_block (client)", ret);
         mbedtls_net_free(&m_client_net[slot]);
@@ -917,7 +940,7 @@ Result TlsTcpBackend::do_tls_server_handshake(uint32_t slot)
         return Result::ERR_IO;
     }
 
-    ret = mbedtls_ssl_setup(&m_ssl[slot], &m_ssl_conf);
+    ret = m_tls_ops->ssl_setup(&m_ssl[slot], &m_ssl_conf);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_setup (accept)", ret);
         mbedtls_net_free(&m_client_net[slot]);
@@ -941,7 +964,7 @@ Result TlsTcpBackend::do_tls_server_handshake(uint32_t slot)
     }
 
     // Fix B-2b: restore non-blocking so the poll loop does not stall.
-    ret = mbedtls_net_set_nonblock(&m_client_net[slot]);
+    ret = m_tls_ops->net_set_nonblock(&m_client_net[slot]);
     if (ret != 0) {
         // Non-fatal: Fix B-2a poll guard prevents stall (defence-in-depth).
         Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
@@ -975,8 +998,7 @@ Result TlsTcpBackend::accept_and_handshake()
         return Result::OK;
     }
 
-    int ret = mbedtls_net_accept(&m_listen_net, &m_client_net[slot],
-                                 nullptr, 0U, nullptr);
+    int ret = m_tls_ops->net_tcp_accept(&m_listen_net, &m_client_net[slot]);
     if (ret != 0) {
         // MBEDTLS_ERR_SSL_WANT_READ means no pending connection — not an error
         return Result::OK;
@@ -1248,8 +1270,8 @@ bool TlsTcpBackend::tls_write_all(uint32_t idx, const uint8_t* buf, uint32_t len
     // Power of 10 Rule 2: bounded loop — at most len iterations total
     // (each successful iteration sends at least 1 byte, so sent advances).
     for (uint32_t iter = 0U; iter < len && sent < len; ++iter) {
-        int ret = mbedtls_ssl_write(&m_ssl[idx], buf + sent,
-                                    static_cast<size_t>(len - sent));
+        int ret = m_tls_ops->ssl_write(&m_ssl[idx], buf + sent,
+                                       static_cast<size_t>(len - sent));
         if (ret > 0) {
             sent += static_cast<uint32_t>(ret);
         } else if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
@@ -1315,17 +1337,17 @@ bool TlsTcpBackend::tls_read_payload(uint32_t idx, uint8_t* buf,
     uint32_t received = 0U;
     // Power of 10 Rule 2: bounded loop — at most payload_len iterations total
     for (uint32_t iter = 0U; iter < payload_len && received < payload_len; ++iter) {
-        int ret = mbedtls_ssl_read(&m_ssl[idx],
-                                   buf + received,
-                                   static_cast<size_t>(payload_len - received));
+        int ret = m_tls_ops->ssl_read(&m_ssl[idx],
+                                      buf + received,
+                                      static_cast<size_t>(payload_len - received));
         if (ret > 0) {
             received += static_cast<uint32_t>(ret);
         } else if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
             // Fix B-2c: enforce timeout — poll before retrying so a silent
             // client cannot block indefinitely on a non-blocking socket.
-            int poll_r = mbedtls_net_poll(&m_client_net[idx],
-                                          MBEDTLS_NET_POLL_READ,
-                                          timeout_ms);
+            int poll_r = m_tls_ops->net_poll(&m_client_net[idx],
+                                             MBEDTLS_NET_POLL_READ,
+                                             timeout_ms);
             if (poll_r <= 0) {
                 Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
                             "tls_read_payload: timeout waiting for data");
@@ -1365,15 +1387,15 @@ bool TlsTcpBackend::read_tls_header(uint32_t idx, uint8_t* hdr,
     uint32_t hdr_received = 0U;
     // Power of 10 Rule 2: bound = 8 — ≤4 byte-progress iters + ≤4 WANT_READ retries
     for (uint32_t iter = 0U; iter < 8U && hdr_received < 4U; ++iter) {
-        int ret = mbedtls_ssl_read(&m_ssl[idx], hdr + hdr_received,
-                                   static_cast<size_t>(4U - hdr_received));
+        int ret = m_tls_ops->ssl_read(&m_ssl[idx], hdr + hdr_received,
+                                      static_cast<size_t>(4U - hdr_received));
         if (ret > 0) {
             hdr_received += static_cast<uint32_t>(ret);
         } else if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
             // Poll with timeout before retrying (Fix B-2c).
-            int poll_r = mbedtls_net_poll(&m_client_net[idx],
-                                          MBEDTLS_NET_POLL_READ,
-                                          timeout_ms);
+            int poll_r = m_tls_ops->net_poll(&m_client_net[idx],
+                                             MBEDTLS_NET_POLL_READ,
+                                             timeout_ms);
             if (poll_r <= 0) {
                 Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
                             "tls_recv_frame: timeout on header read");
