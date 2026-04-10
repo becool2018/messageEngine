@@ -44,6 +44,7 @@
 #include "core/Assert.hpp"
 #include "core/Types.hpp"
 #include "core/Logger.hpp"
+#include "platform/IPosixSyscalls.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TCP Socket Functions
@@ -70,15 +71,33 @@ inline bool socket_is_ipv6(const char* ip)
 /// @return File descriptor (>= 0) on success, -1 on error.
 int socket_create_tcp(bool ipv6);
 
+/// Create a TCP socket with injectable syscalls (for fault-injection tests).
+/// @param[in] ipv6  true → AF_INET6; false → AF_INET.
+/// @param[in] sys   IPosixSyscalls implementation to use.
+/// @return File descriptor (>= 0) on success, -1 on error.
+int socket_create_tcp(bool ipv6, IPosixSyscalls& sys);
+
 /// Create a UDP socket (AF_INET or AF_INET6, SOCK_DGRAM, IPPROTO_UDP).
 /// @param[in] ipv6 true → AF_INET6; false → AF_INET.
 /// @return File descriptor (>= 0) on success, -1 on error.
 int socket_create_udp(bool ipv6);
 
+/// Create a UDP socket with injectable syscalls (for fault-injection tests).
+/// @param[in] ipv6  true → AF_INET6; false → AF_INET.
+/// @param[in] sys   IPosixSyscalls implementation to use.
+/// @return File descriptor (>= 0) on success, -1 on error.
+int socket_create_udp(bool ipv6, IPosixSyscalls& sys);
+
 /// Set a socket to non-blocking mode (O_NONBLOCK).
 /// @param[in] fd File descriptor.
 /// @return true on success, false on error.
 bool socket_set_nonblocking(int fd);
+
+/// Set a socket to non-blocking mode with injectable syscalls.
+/// @param[in] fd   File descriptor.
+/// @param[in] sys  IPosixSyscalls implementation to use.
+/// @return true on success, false on error.
+bool socket_set_nonblocking(int fd, IPosixSyscalls& sys);
 
 /// Enable SO_REUSEADDR on the socket (avoids TIME_WAIT issues).
 /// @param[in] fd File descriptor.
@@ -100,6 +119,16 @@ bool socket_bind(int fd, const char* ip, uint16_t port);
 /// @return true on success (connected), false on error or timeout.
 bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
                                   uint32_t timeout_ms);
+
+/// Connect with timeout using injectable syscalls (for fault-injection tests).
+/// @param[in] fd          File descriptor.
+/// @param[in] ip          IPv4 or IPv6 address string.
+/// @param[in] port        Port number (host byte order).
+/// @param[in] timeout_ms  Timeout in milliseconds.
+/// @param[in] sys         IPosixSyscalls implementation to use.
+/// @return true on success (connected), false on error or timeout.
+bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
+                                  uint32_t timeout_ms, IPosixSyscalls& sys);
 
 /// Put a socket in listening mode.
 /// @param[in] fd       File descriptor.
@@ -131,6 +160,16 @@ void socket_close(int fd);
 bool socket_send_all(int fd, const uint8_t* buf, uint32_t len,
                      uint32_t timeout_ms);
 
+/// Send all bytes with injectable syscalls (for fault-injection tests).
+/// @param[in] fd          File descriptor.
+/// @param[in] buf         Pointer to data to send.
+/// @param[in] len         Number of bytes to send.
+/// @param[in] timeout_ms  Timeout per write operation (milliseconds).
+/// @param[in] sys         IPosixSyscalls implementation to use.
+/// @return true if all bytes sent successfully, false on error or timeout.
+bool socket_send_all(int fd, const uint8_t* buf, uint32_t len,
+                     uint32_t timeout_ms, IPosixSyscalls& sys);
+
 /// Receive exactly len bytes on a TCP socket with timeout (handles partial reads).
 /// Power of 10: loop bound is len (fixed by input).
 ///
@@ -150,6 +189,16 @@ bool socket_recv_exact(int fd, uint8_t* buf, uint32_t len,
 /// @return true if frame sent completely, false on error.
 bool tcp_send_frame(int fd, const uint8_t* buf, uint32_t len,
                     uint32_t timeout_ms);
+
+/// Send a TCP frame with injectable syscalls (for fault-injection tests).
+/// @param[in] fd          File descriptor.
+/// @param[in] buf         Pointer to frame payload.
+/// @param[in] len         Length of payload (must be < 2^31).
+/// @param[in] timeout_ms  Timeout per write operation (milliseconds).
+/// @param[in] sys         IPosixSyscalls implementation to use.
+/// @return true if frame sent completely, false on error.
+bool tcp_send_frame(int fd, const uint8_t* buf, uint32_t len,
+                    uint32_t timeout_ms, IPosixSyscalls& sys);
 
 /// Receive a TCP frame: read 4-byte big-endian length prefix + payload.
 /// Validates that the received length is reasonable (≤ max message size).
@@ -177,6 +226,17 @@ bool tcp_recv_frame(int fd, uint8_t* buf, uint32_t buf_cap,
 bool socket_send_to(int fd, const uint8_t* buf, uint32_t len,
                     const char* ip, uint16_t port);
 
+/// Send a UDP datagram with injectable syscalls (for fault-injection tests).
+/// @param[in] fd    File descriptor of UDP socket.
+/// @param[in] buf   Pointer to data to send.
+/// @param[in] len   Number of bytes to send.
+/// @param[in] ip    Destination IPv4 or IPv6 address string.
+/// @param[in] port  Destination port (host byte order).
+/// @param[in] sys   IPosixSyscalls implementation to use.
+/// @return true on success, false on error.
+bool socket_send_to(int fd, const uint8_t* buf, uint32_t len,
+                    const char* ip, uint16_t port, IPosixSyscalls& sys);
+
 /// Receive a UDP datagram with timeout (IPv4 or IPv6).
 /// @param[in] fd          File descriptor of UDP socket.
 /// @param[out] buf        Pointer to receive buffer.
@@ -190,5 +250,19 @@ bool socket_send_to(int fd, const uint8_t* buf, uint32_t len,
 bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,
                       uint32_t timeout_ms, uint32_t* out_len,
                       char* out_ip, uint16_t* out_port);
+
+/// Receive a UDP datagram with injectable syscalls (for fault-injection tests).
+/// @param[in] fd          File descriptor of UDP socket.
+/// @param[out] buf        Pointer to receive buffer.
+/// @param[in] buf_cap     Capacity of receive buffer (max UDP packet size).
+/// @param[in] timeout_ms  Timeout in milliseconds.
+/// @param[out] out_len    Number of bytes received (datagram size).
+/// @param[out] out_ip     Source address string — caller provides 48-char buffer.
+/// @param[out] out_port   Source port (host byte order).
+/// @param[in] sys         IPosixSyscalls implementation to use.
+/// @return true on success (datagram received), false on error or timeout.
+bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,
+                      uint32_t timeout_ms, uint32_t* out_len,
+                      char* out_ip, uint16_t* out_port, IPosixSyscalls& sys);
 
 #endif // PLATFORM_SOCKET_UTILS_HPP

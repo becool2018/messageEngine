@@ -31,6 +31,7 @@
  */
 
 #include "SocketUtils.hpp"
+#include "platform/PosixSyscallsImpl.hpp"
 #include "core/Serializer.hpp"
 #include <cerrno>
 #include <climits>
@@ -130,11 +131,16 @@ static void log_socket_create_error(const char* proto, const char* family_str, i
 
 int socket_create_tcp(bool ipv6)
 {
+    return socket_create_tcp(ipv6, PosixSyscallsImpl::instance());
+}
+
+int socket_create_tcp(bool ipv6, IPosixSyscalls& sys)
+{
     const int family = ipv6 ? AF_INET6 : AF_INET;
     NEVER_COMPILED_OUT_ASSERT(family == AF_INET || family == AF_INET6);  // Pre-condition
 
     // Power of 10: check return value
-    int fd = socket(family, SOCK_STREAM, IPPROTO_TCP);
+    int fd = sys.sys_socket(family, SOCK_STREAM, IPPROTO_TCP);
     if (fd < 0) {
         log_socket_create_error("SOCK_STREAM", ipv6 ? "AF_INET6" : "AF_INET", errno);
         return -1;
@@ -152,11 +158,16 @@ int socket_create_tcp(bool ipv6)
 
 int socket_create_udp(bool ipv6)
 {
+    return socket_create_udp(ipv6, PosixSyscallsImpl::instance());
+}
+
+int socket_create_udp(bool ipv6, IPosixSyscalls& sys)
+{
     const int family = ipv6 ? AF_INET6 : AF_INET;
     NEVER_COMPILED_OUT_ASSERT(family == AF_INET || family == AF_INET6);  // Pre-condition
 
     // Power of 10: check return value
-    int fd = socket(family, SOCK_DGRAM, IPPROTO_UDP);
+    int fd = sys.sys_socket(family, SOCK_DGRAM, IPPROTO_UDP);
     if (fd < 0) {
         log_socket_create_error("SOCK_DGRAM", ipv6 ? "AF_INET6" : "AF_INET", errno);
         return -1;
@@ -174,11 +185,16 @@ int socket_create_udp(bool ipv6)
 
 bool socket_set_nonblocking(int fd)
 {
+    return socket_set_nonblocking(fd, PosixSyscallsImpl::instance());
+}
+
+bool socket_set_nonblocking(int fd, IPosixSyscalls& sys)
+{
     // Power of 10: precondition assertion
     NEVER_COMPILED_OUT_ASSERT(fd >= 0);
 
     // Get current flags
-    int flags = fcntl(fd, F_GETFL, 0);
+    int flags = sys.sys_fcntl(fd, F_GETFL, 0);
     if (flags < 0) {
         Logger::log(Severity::WARNING_LO, "SocketUtils",
                    "fcntl(F_GETFL) failed: %d", errno);
@@ -187,7 +203,7 @@ bool socket_set_nonblocking(int fd)
 
     // Set O_NONBLOCK
     flags |= O_NONBLOCK;
-    int result = fcntl(fd, F_SETFL, flags);
+    int result = sys.sys_fcntl(fd, F_SETFL, flags);
     if (result < 0) {
         Logger::log(Severity::WARNING_LO, "SocketUtils",
                    "fcntl(F_SETFL, O_NONBLOCK) failed: %d", errno);
@@ -259,6 +275,13 @@ bool socket_bind(int fd, const char* ip, uint16_t port)
 bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
                                   uint32_t timeout_ms)
 {
+    return socket_connect_with_timeout(fd, ip, port, timeout_ms,
+                                       PosixSyscallsImpl::instance());
+}
+
+bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
+                                  uint32_t timeout_ms, IPosixSyscalls& sys)
+{
     // Power of 10: precondition assertions
     NEVER_COMPILED_OUT_ASSERT(fd >= 0);
     NEVER_COMPILED_OUT_ASSERT(ip != nullptr);
@@ -271,7 +294,7 @@ bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
     NEVER_COMPILED_OUT_ASSERT(timeout_ms > 0U);  // SEC-022: must have positive timeout
 
     // Set socket to non-blocking before connecting
-    if (!socket_set_nonblocking(fd)) {
+    if (!socket_set_nonblocking(fd, sys)) {
         return false;
     }
 
@@ -284,8 +307,9 @@ bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
 
     // MISRA C++:2023 Rule 5.2.4: reinterpret_cast from sockaddr_storage* to
     // sockaddr* is the POSIX-standard socket API polymorphism idiom.
-    int conn_result = connect(fd, reinterpret_cast<struct sockaddr*>(&addr),
-                             addr_len);
+    int conn_result = sys.sys_connect(fd,
+                                      reinterpret_cast<struct sockaddr*>(&addr),
+                                      addr_len);
     if (conn_result == 0) {
         // Immediate success
         NEVER_COMPILED_OUT_ASSERT(conn_result == 0);
@@ -309,7 +333,7 @@ bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
     // Values > INT_MAX cast to negative, which POSIX defines as "block indefinitely".
     static const uint32_t k_poll_max_ms = static_cast<uint32_t>(INT_MAX);
     const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
-    int poll_result = poll(&pfd, 1, static_cast<int>(clamped_ms));
+    int poll_result = sys.sys_poll(&pfd, 1, static_cast<int>(clamped_ms));
     if (poll_result <= 0) {
         Logger::log(Severity::WARNING_LO, "SocketUtils",
                    "connect(%s:%u) timeout", ip, port);
@@ -401,6 +425,12 @@ void socket_close(int fd)
 bool socket_send_all(int fd, const uint8_t* buf, uint32_t len,
                      uint32_t timeout_ms)
 {
+    return socket_send_all(fd, buf, len, timeout_ms, PosixSyscallsImpl::instance());
+}
+
+bool socket_send_all(int fd, const uint8_t* buf, uint32_t len,
+                     uint32_t timeout_ms, IPosixSyscalls& sys)
+{
     // Power of 10: precondition assertions
     NEVER_COMPILED_OUT_ASSERT(fd >= 0);
     NEVER_COMPILED_OUT_ASSERT(buf != nullptr);
@@ -419,7 +449,7 @@ bool socket_send_all(int fd, const uint8_t* buf, uint32_t len,
         // CERT INT31-C: clamp before narrowing uint32_t → int for poll().
         static const uint32_t k_poll_max_ms = static_cast<uint32_t>(INT_MAX);
         const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
-        int poll_result = poll(&pfd, 1, static_cast<int>(clamped_ms));
+        int poll_result = sys.sys_poll(&pfd, 1, static_cast<int>(clamped_ms));
         if (poll_result <= 0) {
             Logger::log(Severity::WARNING_HI, "SocketUtils",
                        "send poll timeout (sent %u of %u bytes)", sent, len);
@@ -428,7 +458,7 @@ bool socket_send_all(int fd, const uint8_t* buf, uint32_t len,
 
         // Send remaining bytes
         uint32_t remaining = len - sent;
-        ssize_t send_result = send(fd, &buf[sent], remaining, 0);
+        ssize_t send_result = sys.sys_send(fd, &buf[sent], remaining, 0);
         if (send_result < 0) {
             Logger::log(Severity::WARNING_HI, "SocketUtils",
                        "send() failed: %d", errno);
@@ -516,6 +546,12 @@ bool socket_recv_exact(int fd, uint8_t* buf, uint32_t len,
 bool tcp_send_frame(int fd, const uint8_t* buf, uint32_t len,
                     uint32_t timeout_ms)
 {
+    return tcp_send_frame(fd, buf, len, timeout_ms, PosixSyscallsImpl::instance());
+}
+
+bool tcp_send_frame(int fd, const uint8_t* buf, uint32_t len,
+                    uint32_t timeout_ms, IPosixSyscalls& sys)
+{
     // Power of 10: precondition assertions
     NEVER_COMPILED_OUT_ASSERT(fd >= 0);
     NEVER_COMPILED_OUT_ASSERT(buf != nullptr);
@@ -528,7 +564,7 @@ bool tcp_send_frame(int fd, const uint8_t* buf, uint32_t len,
     header[3] = static_cast<uint8_t>(len & 0xFFU);
 
     // Send header
-    if (!socket_send_all(fd, header, 4U, timeout_ms)) {
+    if (!socket_send_all(fd, header, 4U, timeout_ms, sys)) {
         Logger::log(Severity::WARNING_HI, "SocketUtils",
                    "tcp_send_frame: failed to send header");
         return false;
@@ -536,7 +572,7 @@ bool tcp_send_frame(int fd, const uint8_t* buf, uint32_t len,
 
     // Send payload
     if (len > 0U) {
-        if (!socket_send_all(fd, buf, len, timeout_ms)) {
+        if (!socket_send_all(fd, buf, len, timeout_ms, sys)) {
             Logger::log(Severity::WARNING_HI, "SocketUtils",
                        "tcp_send_frame: failed to send payload (%u bytes)", len);
             return false;
@@ -609,6 +645,12 @@ bool tcp_recv_frame(int fd, uint8_t* buf, uint32_t buf_cap,
 bool socket_send_to(int fd, const uint8_t* buf, uint32_t len,
                     const char* ip, uint16_t port)
 {
+    return socket_send_to(fd, buf, len, ip, port, PosixSyscallsImpl::instance());
+}
+
+bool socket_send_to(int fd, const uint8_t* buf, uint32_t len,
+                    const char* ip, uint16_t port, IPosixSyscalls& sys)
+{
     // Power of 10: precondition assertions
     NEVER_COMPILED_OUT_ASSERT(fd >= 0);
     NEVER_COMPILED_OUT_ASSERT(buf != nullptr);
@@ -624,9 +666,9 @@ bool socket_send_to(int fd, const uint8_t* buf, uint32_t len,
 
     // MISRA C++:2023 Rule 5.2.4: reinterpret_cast from sockaddr_storage* to
     // sockaddr* is the POSIX-standard socket API polymorphism idiom.
-    ssize_t send_result = sendto(fd, buf, len, 0,
-                                reinterpret_cast<struct sockaddr*>(&addr),
-                                addr_len);
+    ssize_t send_result = sys.sys_sendto(fd, buf, len, 0,
+                                         reinterpret_cast<struct sockaddr*>(&addr),
+                                         addr_len);
     if (send_result < 0) {
         Logger::log(Severity::WARNING_LO, "SocketUtils",
                    "sendto(%s:%u) failed: %d", ip, port, errno);
@@ -653,6 +695,14 @@ bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,
                       uint32_t timeout_ms, uint32_t* out_len,
                       char* out_ip, uint16_t* out_port)
 {
+    return socket_recv_from(fd, buf, buf_cap, timeout_ms, out_len, out_ip,
+                            out_port, PosixSyscallsImpl::instance());
+}
+
+bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,
+                      uint32_t timeout_ms, uint32_t* out_len,
+                      char* out_ip, uint16_t* out_port, IPosixSyscalls& sys)
+{
     // Power of 10: precondition assertions
     NEVER_COMPILED_OUT_ASSERT(fd >= 0);
     NEVER_COMPILED_OUT_ASSERT(buf != nullptr);
@@ -670,7 +720,7 @@ bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,
     // CERT INT31-C: clamp before narrowing uint32_t → int for poll().
     static const uint32_t k_poll_max_ms = static_cast<uint32_t>(INT_MAX);
     const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
-    int poll_result = poll(&pfd, 1, static_cast<int>(clamped_ms));
+    int poll_result = sys.sys_poll(&pfd, 1, static_cast<int>(clamped_ms));
     if (poll_result <= 0) {
         Logger::log(Severity::WARNING_LO, "SocketUtils",
                    "recvfrom poll timeout");
@@ -684,9 +734,9 @@ bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,
 
     // MISRA C++:2023 Rule 5.2.4: reinterpret_cast from sockaddr_storage* to
     // sockaddr* is the POSIX-standard socket API polymorphism idiom.
-    ssize_t recv_result = recvfrom(fd, buf, buf_cap, 0,
-                                  reinterpret_cast<struct sockaddr*>(&src_addr),
-                                  &src_len);
+    ssize_t recv_result = sys.sys_recvfrom(fd, buf, buf_cap, 0,
+                                           reinterpret_cast<struct sockaddr*>(&src_addr),
+                                           &src_len);
     if (recv_result < 0) {
         Logger::log(Severity::WARNING_LO, "SocketUtils",
                    "recvfrom() failed: %d", errno);
@@ -706,14 +756,14 @@ bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,
         // sockaddr_in6* is the POSIX-standard address-family polymorphism idiom.
         const struct sockaddr_in6* a6 =
             reinterpret_cast<const struct sockaddr_in6*>(&src_addr);
-        ntop_result = inet_ntop(AF_INET6, &a6->sin6_addr, out_ip, 48);
+        ntop_result = sys.sys_inet_ntop(AF_INET6, &a6->sin6_addr, out_ip, 48);
         *out_port = ntohs(a6->sin6_port);
     } else {
         // MISRA C++:2023 Rule 5.2.4: reinterpret_cast from sockaddr_storage* to
         // sockaddr_in* is the POSIX-standard address-family polymorphism idiom.
         const struct sockaddr_in* a4 =
             reinterpret_cast<const struct sockaddr_in*>(&src_addr);
-        ntop_result = inet_ntop(AF_INET, &a4->sin_addr, out_ip, 48);
+        ntop_result = sys.sys_inet_ntop(AF_INET, &a4->sin_addr, out_ip, 48);
         *out_port = ntohs(a4->sin_port);
     }
 
