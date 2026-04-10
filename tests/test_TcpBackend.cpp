@@ -60,6 +60,7 @@
 #include "core/Types.hpp"
 #include "core/ChannelConfig.hpp"
 #include "core/MessageEnvelope.hpp"
+#include "core/Serializer.hpp"
 #include "platform/TcpBackend.hpp"
 #include "MockSocketOps.hpp"
 
@@ -1634,8 +1635,9 @@ static void test_register_local_id_server_no_hello()
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct HelloClientArg {
-    uint16_t port;
     NodeId   local_id;
+    uint32_t stay_alive_us = 0U;  // 0 → use default 200 000 µs
+    uint16_t port;
     Result   result;
 };
 
@@ -1655,7 +1657,8 @@ static void* hello_client_thread(void* raw)
     // Send HELLO to server; server routing table is populated.
     a->result = client.register_local_id(a->local_id);
 
-    usleep(200000U);  // 200 ms: let server receive the HELLO
+    uint32_t const stay = (a->stay_alive_us > 0U) ? a->stay_alive_us : 200000U;
+    usleep(stay);  // keep connection alive while server tests routing
     client.close();
     return nullptr;
 }
@@ -1762,6 +1765,158 @@ static void test_hello_frame_not_delivered_to_delivery_engine()
 
     assert(cli_arg.result == Result::OK);
     printf("PASS: test_hello_frame_not_delivered_to_delivery_engine\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: HELLO queue overflow — 8th HELLO silently dropped (REQ-3.3.6)
+//
+// The HELLO ring holds MAX_TCP_CONNECTIONS-1 = 7 entries (ring-full sentinel).
+// Connect all MAX_TCP_CONNECTIONS (8) clients without draining the queue.
+// After polling long enough for all 8 HELLOs to be processed:
+//   - pop_hello_peer() must return exactly 7 valid NodeIds.
+//   - The 8th call must return NODE_ID_INVALID (overflow guard fired).
+//
+// Covers: handle_hello_frame() False branch of
+//   "if (next_write != m_hello_queue_read)" — the queue-full drop path.
+//
+// Verifies: REQ-3.3.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 8 == MAX_TCP_CONNECTIONS; verified by static_assert in the test body.
+static const uint32_t HELLO_OVERFLOW_NUM_CLIENTS = 8U;
+
+// Verifies: REQ-3.3.6
+static void test_tcp_hello_queue_overflow()
+{
+    static const uint16_t PORT = 19756U;
+    // Enforce that the literal 8 matches the capacity constant.
+    static_assert(HELLO_OVERFLOW_NUM_CLIENTS == static_cast<uint32_t>(MAX_TCP_CONNECTIONS),
+                  "update HELLO_OVERFLOW_NUM_CLIENTS if MAX_TCP_CONNECTIONS changes");
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+
+    // Launch all 8 clients.  Each sleeps 80 ms then connects and sends HELLO.
+    // We do NOT call pop_hello_peer() while polling, so the ring fills to
+    // capacity (7 slots) and the 8th HELLO fires the overflow guard.
+    HelloClientArg cli_args[HELLO_OVERFLOW_NUM_CLIENTS];
+    pthread_t      cli_tids[HELLO_OVERFLOW_NUM_CLIENTS];
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+
+    // Power of 10: fixed loop bound (HELLO_OVERFLOW_NUM_CLIENTS = 8).
+    for (uint32_t i = 0U; i < HELLO_OVERFLOW_NUM_CLIENTS; ++i) {
+        cli_args[i].port         = PORT;
+        cli_args[i].local_id     = static_cast<NodeId>(i + 1U);  // NodeIds 1..8
+        // Stay alive 4 s so all 8 clients are still connected when the server
+        // finishes accepting them (one per ~100 ms poll iteration → ~800 ms total).
+        cli_args[i].stay_alive_us = 4000000U;
+        cli_args[i].result        = Result::ERR_IO;
+        (void)pthread_create(&cli_tids[i], &attr, hello_client_thread, &cli_args[i]);
+    }
+
+    // Poll long enough to accept all 8 connections and process all 8 HELLOs.
+    // Each receive_message() accepts at most one new connection; 8 connections
+    // + 8 HELLO reads ≤ 50 iterations × 100 ms = 5 s.
+    // Power of 10: fixed loop bound (50 iterations).
+    for (uint32_t i = 0U; i < 50U; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    // Drain the queue.  Exactly MAX_TCP_CONNECTIONS-1 = 7 entries were queued;
+    // the 8th was silently dropped by the overflow guard.
+    uint32_t valid_count = 0U;
+    // Power of 10: fixed loop bound (HELLO_OVERFLOW_NUM_CLIENTS = 8).
+    for (uint32_t i = 0U; i < HELLO_OVERFLOW_NUM_CLIENTS; ++i) {
+        NodeId const peer = server.pop_hello_peer();
+        if (peer != static_cast<NodeId>(NODE_ID_INVALID)) {
+            ++valid_count;
+        }
+    }
+    assert(valid_count == HELLO_OVERFLOW_NUM_CLIENTS - 1U);  // exactly 7
+
+    // One more pop confirms the queue is empty (not just that the 8th was late).
+    NodeId const tail = server.pop_hello_peer();
+    assert(tail == static_cast<NodeId>(NODE_ID_INVALID));
+
+    // Power of 10: fixed loop bound (HELLO_OVERFLOW_NUM_CLIENTS = 8).
+    for (uint32_t i = 0U; i < HELLO_OVERFLOW_NUM_CLIENTS; ++i) {
+        (void)pthread_join(cli_tids[i], nullptr);
+    }
+    (void)pthread_attr_destroy(&attr);
+    server.close();
+
+    // All 8 clients must have successfully sent HELLO; if any failed to connect
+    // the test would not prove the overflow path.
+    // Power of 10: fixed loop bound (HELLO_OVERFLOW_NUM_CLIENTS = 8).
+    for (uint32_t i = 0U; i < HELLO_OVERFLOW_NUM_CLIENTS; ++i) {
+        assert(cli_args[i].result == Result::OK);
+    }
+
+    printf("PASS: test_tcp_hello_queue_overflow\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: pop_hello_peer() drains the HELLO reconnect queue (REQ-3.3.6)
+//
+// Client connects and sends HELLO.  Server polls receive_message() until the
+// HELLO is processed (handle_hello_frame enqueues the NodeId).  Then:
+//   - First pop_hello_peer() returns the client's NodeId (non-empty path).
+//   - Second pop_hello_peer() returns NODE_ID_INVALID (empty path).
+//
+// Verifies: REQ-3.3.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-3.3.6
+static void test_tcp_pop_hello_peer()
+{
+    static const uint16_t PORT   = 19755U;
+    static const NodeId   CLI_ID = 42U;
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+
+    HelloClientArg cli_arg;
+    cli_arg.port     = PORT;
+    cli_arg.local_id = CLI_ID;
+    cli_arg.result   = Result::ERR_IO;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t cli_tid;
+    (void)pthread_create(&cli_tid, &attr, hello_client_thread, &cli_arg);
+
+    // Poll until the server has processed the HELLO frame (enqueues CLI_ID).
+    // Power of 10: fixed loop bound (10 iterations × 100 ms = 1 s max).
+    for (uint32_t i = 0U; i < 10U; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    // Non-empty path: HELLO was queued; pop returns CLI_ID.
+    NodeId const peer = server.pop_hello_peer();
+    assert(peer == CLI_ID);
+
+    // Empty path: queue now empty; pop returns NODE_ID_INVALID.
+    NodeId const empty = server.pop_hello_peer();
+    assert(empty == NODE_ID_INVALID);
+
+    (void)pthread_join(cli_tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+    server.close();
+
+    assert(cli_arg.result == Result::OK);
+    printf("PASS: test_tcp_pop_hello_peer\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2474,6 +2629,180 @@ static void test_mock_tcp_get_stats()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// test_tcp_handle_hello_duplicate_nodeid_evicts_impostor
+//
+// G-3 security fix: when a second client sends a HELLO with a NodeId that is
+// already registered by another slot, handle_hello_frame() calls
+// close_and_evict_slot() on the impostor.
+//
+// Two clients both claim local_id=77.  Client 1 connects first (60 ms delay)
+// and registers successfully.  Client 2 connects 60 ms later (120 ms total) and
+// sends the same NodeId.  The server evicts client 2.
+//
+// Assertions:
+//   - pop_hello_peer() returns 77 once (from client 1's HELLO).
+//   - pop_hello_peer() returns NODE_ID_INVALID on the second call (evicted
+//     impostor is not queued).
+//   - Server stays open throughout.
+//   - Client 1 result == OK.
+//
+// Verifies: REQ-6.1.9 (G-3 duplicate-NodeId eviction)
+// Verification: M4 + M5 (loopback; full call chain exercised)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.9
+static void test_tcp_handle_hello_duplicate_nodeid_evicts_impostor()
+{
+    static const uint16_t PORT    = 19755U;
+    static const NodeId   DUPL_ID = 77U;
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+    assert(server.is_open());
+
+    DualHelloCliArg cli1_arg;
+    cli1_arg.port             = PORT;
+    cli1_arg.local_id         = DUPL_ID;
+    cli1_arg.connect_delay_us = 60000U;   // 60 ms: connect first
+    cli1_arg.result           = Result::ERR_IO;
+
+    DualHelloCliArg cli2_arg;
+    cli2_arg.port             = PORT;
+    cli2_arg.local_id         = DUPL_ID;   // same NodeId: impostor
+    cli2_arg.connect_delay_us = 120000U;   // 120 ms: connect after cli1 registered
+    cli2_arg.result           = Result::ERR_IO;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t cli1_tid;
+    (void)pthread_create(&cli1_tid, &attr, dual_hello_client_thread, &cli1_arg);
+    pthread_t cli2_tid;
+    (void)pthread_create(&cli2_tid, &attr, dual_hello_client_thread, &cli2_arg);
+
+    // Drain: process both HELLOs.  Client 1 registers; client 2 is evicted.
+    // Power of 10: fixed bound, 25 × 100 ms = 2.5 s max.
+    for (uint32_t i = 0U; i < 25U; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    // Client 1's HELLO must be queued; evicted impostor must NOT be queued.
+    NodeId const peer1 = server.pop_hello_peer();
+    assert(peer1 == DUPL_ID);
+
+    NodeId const peer2 = server.pop_hello_peer();
+    assert(peer2 == NODE_ID_INVALID);
+
+    (void)pthread_join(cli1_tid, nullptr);
+    (void)pthread_join(cli2_tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+    server.close();
+
+    assert(cli1_arg.result == Result::OK);
+
+    printf("PASS: test_tcp_handle_hello_duplicate_nodeid_evicts_impostor\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// test_tcp_send_to_slot_failure_logs_warning
+//
+// Covers the failure branch of TcpBackend::send_to_slot() — the `if (!ok)`
+// True path that logs WARNING_HI and returns failed=true.
+//
+// Strategy (M5 fault injection via MockSocketOps + socketpair):
+//   1. Use socketpair fds as the listen fd (so poll() returns POLLIN → accept)
+//      and as the accepted client fd (so poll() returns POLLIN → recv).
+//   2. Pre-load a serialized HELLO for TARGET_ID into recv_frame_once_buf so
+//      recv_from_client() processes it and registers TARGET_ID in the routing
+//      table — without any real socket I/O in the mock.
+//   3. Inject fail_send_frame=true; call send_message(unicast to TARGET_ID).
+//      send_to_slot() calls send_frame() which fails → ERR_IO propagated.
+//
+// Verifies: REQ-6.1.9
+// Verification: M1 + M2 + M5 (fault injection via ISocketOps + socketpair)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.9
+static void test_tcp_send_to_slot_failure_logs_warning()
+{
+    static const NodeId TARGET_ID = 42U;
+
+    // Create real OS socketpairs so poll() fires POLLIN on them.
+    int sp_listen[2] = {-1, -1};
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sp_listen) == 0);
+
+    int sp_client[2] = {-1, -1};
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sp_client) == 0);
+
+    // Build a serialized HELLO frame for TARGET_ID.
+    MessageEnvelope hello_env;
+    envelope_init(hello_env);
+    hello_env.message_type = MessageType::HELLO;
+    hello_env.source_id    = TARGET_ID;
+    uint8_t  hello_buf[512U] = {};
+    uint32_t hello_len       = 0U;
+    Result ser_r = Serializer::serialize(hello_env, hello_buf,
+                                         static_cast<uint32_t>(sizeof(hello_buf)),
+                                         hello_len);
+    assert(ser_r == Result::OK);
+    assert(hello_len > 0U && hello_len <= 512U);
+
+    MockSocketOps mock;
+    // listen fd = sp_listen[0]: a real socket; poll() fires on it when sp_listen[1]
+    // is written to, triggering accept_clients().
+    mock.create_tcp_once_fd = sp_listen[0];
+    // accept returns sp_client[0] on the first call: a real client fd.
+    mock.accept_once_fd     = sp_client[0];
+    // One-shot HELLO bytes: recv_from_client() processes these on the first recv.
+    (void)memcpy(mock.recv_frame_once_buf, hello_buf, hello_len);
+    mock.recv_frame_once_len = hello_len;
+
+    TcpBackend backend(mock);
+    TransportConfig cfg;
+    make_tcp_server_cfg(cfg, 19765U);  // port irrelevant; no real bind in mock
+    Result r = backend.init(cfg);
+    assert(r == Result::OK);
+    assert(backend.is_open());
+
+    // Step 1: make listen fd readable → accept_clients() → sp_client[0] added.
+    char dummy = 'X';
+    ssize_t wn = write(sp_listen[1], &dummy, 1U);
+    assert(wn == 1);
+    MessageEnvelope env1;
+    (void)backend.receive_message(env1, 100U);  // accept fires; ERR_TIMEOUT expected
+
+    // Step 2: make client fd readable → recv_from_client() → HELLO processed.
+    wn = write(sp_client[1], &dummy, 1U);
+    assert(wn == 1);
+    MessageEnvelope env2;
+    (void)backend.receive_message(env2, 100U);  // HELLO consumed; ERR_TIMEOUT expected
+    // Routing table now has m_client_node_ids[0] = TARGET_ID.
+
+    // Step 3: inject send failure; send unicast to TARGET_ID.
+    // send_to_slot(0, ...) → send_frame() fails → WARNING_HI logged → ERR_IO.
+    mock.fail_send_frame = true;
+    MessageEnvelope data_env;
+    make_test_envelope(data_env, 0xDEAD3001ULL);
+    data_env.destination_id = TARGET_ID;
+    Result send_r = backend.send_message(data_env);
+    assert(send_r == Result::ERR_IO);
+    assert(backend.is_open());
+
+    // MockSocketOps::do_close() does not close real fds; clean up manually.
+    backend.close();
+    (void)close(sp_listen[0]);
+    (void)close(sp_listen[1]);
+    (void)close(sp_client[0]);
+    (void)close(sp_client[1]);
+
+    printf("PASS: test_tcp_send_to_slot_failure_logs_warning\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2531,6 +2860,12 @@ int main()
     test_unicast_routes_to_registered_slot();
     test_broadcast_when_destination_id_zero();
 
+    // pop_hello_peer() HELLO reconnect queue drain (REQ-3.3.6)
+    test_tcp_pop_hello_peer();
+
+    // HELLO queue overflow — 8th HELLO silently dropped (REQ-3.3.6)
+    test_tcp_hello_queue_overflow();
+
     // B-1 regression: drain_readable_clients gated on POLLIN revents
     test_idle_client_not_closed_during_poll();
     test_readable_client_still_serviced_after_fix();
@@ -2541,6 +2876,12 @@ int main()
 
     // SEC-025: client-mode NodeId rotation rejected (REQ-6.1.11)
     test_tcp_client_server_nodeid_rotation_rejected();
+
+    // G-3: duplicate NodeId HELLO triggers close_and_evict_slot (REQ-6.1.9)
+    test_tcp_handle_hello_duplicate_nodeid_evicts_impostor();
+
+    // send_to_slot() failure path — WARNING_HI log + ERR_IO (REQ-6.1.9, M5)
+    test_tcp_send_to_slot_failure_logs_warning();
 
     printf("=== ALL PASSED ===\n");
     return 0;

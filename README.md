@@ -514,7 +514,7 @@ make coverage_show
 
 Policy floor: 100% of all reachable branches for SC files (CLAUDE.md §14). Per-file ceilings below 100% are documented in `docs/COVERAGE_CEILINGS.md`; every missed branch is individually justified.
 
-> **Methodology note (2026-04-06 rebaseline):** LLVM source-based coverage counts each branch outcome (True and False) as a separate entry, roughly doubling the raw branch count relative to prior decision-level counts. All thresholds below reflect the current LLVM output. MC/DC tests 60–64 (added 2026-04-06) closed 10 previously-missed branches in `DeliveryEngine.cpp`. **2026-04-09:** 19 `MockSocketOps`/`DtlsMockOps` fault-injection tests (M5) added across all four transport backends, plus 4 targeted branch-coverage tests closing remaining reachable gaps (`transport_config_valid()` False path, `||` second sub-branch in `send_hello_datagram`, `tls_path_is_regular_file()` non-regular-file path in both TLS backends). All files are now at their architectural maxima.
+> **Methodology note (2026-04-06 rebaseline):** LLVM source-based coverage counts each branch outcome (True and False) as a separate entry, roughly doubling the raw branch count relative to prior decision-level counts. All thresholds below reflect the current LLVM output. MC/DC tests 60–64 (added 2026-04-06) closed 10 previously-missed branches in `DeliveryEngine.cpp`. **2026-04-09 (rounds 1–3):** 19 `MockSocketOps`/`DtlsMockOps` fault-injection tests (M5) added across all four transport backends, plus 4 targeted branch-coverage tests closing remaining reachable gaps. Phase-2 LRU eviction dead code removed from `OrderingBuffer.cpp`. **2026-04-09 (round 4 — REQ-3.3.6):** `pop_hello_peer()` and HELLO reconnect queue added to `TcpBackend.cpp` and `TlsTcpBackend.cpp`; `drain_hello_reconnects()` / `reset_peer_ordering()` added to `DeliveryEngine.cpp`; `reset_peer()` added to `OrderingBuffer.cpp`. Two new loopback tests cover both `pop_hello_peer()` branches in each backend. All files are at their architectural maxima (see `docs/COVERAGE_CEILINGS.md`).
 
 | File | Branch % | SC? | Status |
 |---|---|---|---|
@@ -522,15 +522,15 @@ Policy floor: 100% of all reachable branches for SC files (CLAUDE.md §14). Per-
 | `core/DuplicateFilter.cpp` | 73.13% | SC | Ceiling — assert `[[noreturn]]` branches |
 | `core/AckTracker.cpp` | 64.47% | SC | Ceiling — assert `[[noreturn]]` branches |
 | `core/RetryManager.cpp` | 73.25% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `core/DeliveryEngine.cpp` | 71.68% | SC | Ceiling — assert `[[noreturn]]` branches + init-guard paths |
-| `core/OrderingBuffer.cpp` | 68.18% | SC | Ceiling — Phase-2 LRU eviction structurally unreachable |
+| `core/DeliveryEngine.cpp` | 71.82% | SC | Ceiling — assert `[[noreturn]]` branches + init-guard paths |
+| `core/OrderingBuffer.cpp` | 79.33% | SC | Ceiling — assert `[[noreturn]]` branches |
 | `core/RequestReplyEngine.cpp` | 74.09% | SC | Ceiling — assert `[[noreturn]]` branches + payload-guard dead code |
 | `core/AssertState.cpp` | 50.00% | NSC-infra | Ceiling — abort() False branch untestable |
 | `platform/ImpairmentEngine.cpp` | 71.88% | SC | Ceiling — assert + unreachable branches |
 | `platform/ImpairmentConfigLoader.cpp` | 80.46% | SC | Ceiling — assert + unreachable branches |
-| `platform/TcpBackend.cpp` | 70.11% | SC | Ceiling — assert + unreachable branches |
+| `platform/TcpBackend.cpp` | 70.56% | SC | Ceiling — assert `[[noreturn]]` branches + hard mbedTLS/POSIX error paths |
 | `platform/UdpBackend.cpp` | 74.23% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `platform/TlsTcpBackend.cpp` | 71.16% | SC | Ceiling — assert + mbedTLS error paths |
+| `platform/TlsTcpBackend.cpp` | 71.29% | SC | Ceiling — assert + hard mbedTLS/POSIX error paths |
 | `platform/DtlsUdpBackend.cpp` | 76.59% | SC | Ceiling — assert + mbedTLS/POSIX error paths |
 | `platform/LocalSimHarness.cpp` | 70.49% | SC | Ceiling — assert + structurally-unreachable branches |
 | `platform/MbedtlsOpsImpl.cpp` | 70.33% | SC | Ceiling — assert `[[noreturn]]` branches |
@@ -1083,6 +1083,7 @@ All nine documents are validated simultaneously using three dependency-ordered w
 
 | Version | Highlights |
 |---|---|
+| **2.1.0** | Peer reconnect ordering state reset (REQ-3.3.6 / HAZ-016): `OrderingBuffer::reset_peer()`, `DeliveryEngine::reset_peer_ordering()`, `DeliveryEngine::drain_hello_reconnects()`, `TransportInterface::pop_hello_peer()` — prevents ordering gate permanent stall when a peer reconnects with a new session (seq starting at 1) |
 | **2.0.0** | Bounded fragmentation and reassembly (`Fragmentation`, `ReassemblyBuffer`); per-peer in-order delivery enforcement (`OrderingBuffer`); wire-format v2 (`WIRE_HEADER_SIZE` 44→52 bytes, `PROTO_VERSION` 1→2) |
 | **1.3.0** | `RequestReplyEngine` (correlated request/reply over `DeliveryEngine`); `drain_events()` bulk observability drain |
 

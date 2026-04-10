@@ -89,6 +89,13 @@ for the duration of a logical session. Changing node IDs mid-session bypasses:
 appear as a new peer, consuming new slots in all fixed-capacity tables and
 potentially exhausting them.
 
+**Reconnect handling (REQ-3.3.6):** A legitimate peer that disconnects and
+reconnects is treated as starting a new session. `DeliveryEngine::drain_hello_reconnects()`
+detects the reconnect via the HELLO frame queued by the backend's
+`pop_hello_peer()` and calls `reset_peer_ordering(src)`, which resets
+`next_expected_seq` to 1 and frees held slots for that peer. This is the only
+sanctioned path for a peer's sequence counter to move backward (HAZ-016 mitigation).
+
 ---
 
 ## 4. Transport-layer source address validation
@@ -180,6 +187,8 @@ NEVER_COMPILED_OUT_ASSERT(next_expected_seq <= 0x7FFFFFFFU)
 A session that exhausts 2^31 sequence numbers without a reset will trigger
 a FATAL. At 1,000,000 messages/second, this limit is reached in approximately
 35 minutes. Sessions are expected to reset (re-init) far sooner in practice.
+On peer reconnect, `reset_peer()` resets `next_expected_seq` to 1U, so the
+sequence counter restarts from scratch for the new session (REQ-3.3.6).
 
 **Action required if long-running sessions are needed:** Widen `sequence_num`
 to `uint64_t` and update the assertion ceiling before deploying to any context

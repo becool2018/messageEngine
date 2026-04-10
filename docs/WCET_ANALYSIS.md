@@ -107,9 +107,10 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 | Function | Worst-case operations | Bound | Notes |
 |----------|----------------------|-------|-------|
 | `DeliveryEngine::send()` | 1 monotonic guard (SEC-007) + serialize + process_outbound + track + schedule | O(P + I + A) | SEC-007 adds O(1) guard at entry: `if (now_us < m_last_now_us) return ERR_INVALID`. Dominated by serialize O(P). |
-| `DeliveryEngine::receive()` | 1 monotonic guard (SEC-007) + receive_message + is_duplicate + check_and_record | O(P + D) | SEC-007 adds O(1) guard at entry. Dominated by deserialize O(P) and dedup O(D). |
+| `DeliveryEngine::receive()` | 1 monotonic guard (SEC-007) + drain_hello_reconnects (O(N)) + receive_message + is_duplicate + check_and_record | O(P + D + N) | SEC-007 adds O(1) guard at entry. `drain_hello_reconnects()` adds O(N) = O(ORDERING_PEER_COUNT=16) per call (bounded poll loop). Dominated by deserialize O(P) and dedup O(D). |
 | `DeliveryEngine::pump_retries()` | 1 monotonic guard (SEC-007) + collect_due (O(A)) + per-due: send_via_transport → serialize (O(P)) + process_outbound + collect_deliverable (O(I)) | O(A × (P + I)) = O(32 × 4128) = O(132096) | **Worst case: all 32 slots due simultaneously; each retry traverses Serializer + ImpairmentEngine.** SEC-007 adds O(1) guard at entry. DEF-002-1 resolved: output buffer is now member `m_retry_buf` (init-phase allocated). |
 | `DeliveryEngine::sweep_ack_timeouts()` | 1 monotonic guard (SEC-007) + sweep_expired O(A) | O(A) = O(32) | SEC-007 adds O(1) guard at entry. DEF-002-1 resolved: output buffer is now member `m_timeout_buf` (init-phase allocated). |
+| `DeliveryEngine::reset_peer_ordering()` | 1 held_pending check (O(1)) + `reset_peer()` (O(N + H)) | O(N + H) = O(16 + 8) = O(24) | N = ORDERING_PEER_COUNT=16 (peer table scan in find_peer); H = ORDERING_HOLD_COUNT=8 (hold slot scan). SC: HAZ-001, HAZ-016. Called per HELLO event from drain_hello_reconnects(). |
 
 ### src/core/TransportInterface.hpp (concrete implementations)
 

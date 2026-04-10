@@ -240,7 +240,9 @@ ReassemblyBuffer.hpp / ReassemblyBuffer.cpp
 OrderingBuffer.hpp / OrderingBuffer.cpp
   Per-peer in-order delivery gate for ORDERED DATA messages; holds out-of-order
   fragments until the expected sequence_num arrives, then releases the run.
-  Implements: REQ-3.3.5.
+  reset_peer() resets per-peer sequence state on reconnect so new-session
+  messages starting from seq=1 are not stalled (HAZ-016 mitigation).
+  Implements: REQ-3.3.5, REQ-3.3.6.
 
 RequestReplyHeader.hpp
   Packed 12-byte prefix embedded in MessageEnvelope::payload for
@@ -473,9 +475,14 @@ test_ReassemblyBuffer.cpp
   reassembly_payload_too_large_rejected.
 
 test_OrderingBuffer.cpp
-  7 tests: ordering_in_sequence, ordering_out_of_sequence,
+  15 tests: ordering_in_sequence, ordering_out_of_sequence,
   ordering_unordered_passthrough, ordering_control_bypass, ordering_hold_full,
-  ordering_duplicate_seq_discarded, and ordering_sixteen_peers.
+  ordering_duplicate_seq_discarded, ordering_sixteen_peers,
+  ordering_ooo_duplicate_does_not_exhaust_hold,
+  advance_sequence_no_wraparound_normal,
+  try_release_next_unknown_peer, advance_sequence_unknown_peer,
+  reset_peer_clears_sequence, reset_peer_frees_holds,
+  reset_peer_idempotent, and reset_peer_unknown_src.
 
 test_RequestReplyEngine.cpp
   14 tests: rre_basic_request_response, rre_response_correlation,

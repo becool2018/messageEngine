@@ -77,12 +77,38 @@ struct MockSocketOps : public ISocketOps {
     // Must be ≥ 0 to satisfy preconditions in callers; not a real OS fd.
     static const int FAKE_FD = 100;
 
+    // ── One-shot overrides for socketpair-based tests ─────────────────────────
+    // These allow a real OS fd (from socketpair()) to be used as the listen or
+    // client fd so that poll() fires POLLIN and accept/recv paths execute.
+
+    /// If >= 0, returned by the first create_tcp() call; subsequent calls
+    /// return FAKE_FD as normal.  Lets a real socketpair fd become m_listen_fd
+    /// so poll() returns POLLIN when the paired end is written to.
+    int  create_tcp_once_fd   = -1;
+    bool create_tcp_once_done = false;
+
+    /// If >= 0, returned by the first do_accept() call; subsequent calls
+    /// return -1 (EAGAIN).  Lets a real socketpair fd be accepted as a client.
+    int  accept_once_fd   = -1;
+    bool accept_once_done = false;
+
+    /// When recv_frame_once_len > 0, the first recv_frame() call returns these
+    /// bytes and sets recv_frame_once_done = true.  Subsequent calls use the
+    /// normal fail_recv_frame / zero-len behaviour.
+    uint8_t  recv_frame_once_buf[512U] = {};
+    uint32_t recv_frame_once_len       = 0U;
+    bool     recv_frame_once_done      = false;
+
     ~MockSocketOps() override {}
 
     // ── Socket creation ───────────────────────────────────────────────────────
 
     int create_tcp(bool /*ipv6*/) override
     {
+        if (!create_tcp_once_done && (create_tcp_once_fd >= 0)) {
+            create_tcp_once_done = true;
+            return create_tcp_once_fd;
+        }
         return fail_create_tcp ? -1 : FAKE_FD;
     }
 
@@ -115,10 +141,14 @@ struct MockSocketOps : public ISocketOps {
         return !fail_do_listen;
     }
 
-    /// Always returns -1 (EAGAIN equivalent: no pending connection).
+    /// Returns accept_once_fd on the first call (if configured); then -1.
     /// accept_clients() treats -1 as "no connection yet" and returns OK.
     int do_accept(int /*fd*/) override
     {
+        if (!accept_once_done && (accept_once_fd >= 0)) {
+            accept_once_done = true;
+            return accept_once_fd;
+        }
         return -1;
     }
 
@@ -149,9 +179,21 @@ struct MockSocketOps : public ISocketOps {
         return false;
     }
 
-    bool recv_frame(int /*fd*/, uint8_t* /*buf*/, uint32_t /*buf_cap*/,
+    bool recv_frame(int /*fd*/, uint8_t* buf, uint32_t buf_cap,
                     uint32_t /*ms*/, uint32_t* out_len) override
     {
+        // One-shot: return pre-loaded bytes on first call (e.g. a serialized HELLO).
+        if (!recv_frame_once_done && (recv_frame_once_len > 0U)) {
+            recv_frame_once_done = true;
+            uint32_t n = (recv_frame_once_len < buf_cap) ? recv_frame_once_len : buf_cap;
+            if (buf != nullptr) {
+                (void)memcpy(buf, recv_frame_once_buf, static_cast<size_t>(n));
+            }
+            if (out_len != nullptr) {
+                *out_len = n;
+            }
+            return true;
+        }
         if (out_len != nullptr) {
             *out_len = 0U;
         }
