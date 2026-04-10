@@ -187,6 +187,16 @@ The system must support multiple delivery semantics, including:
 - [REQ-3.3.5] Ordered vs unordered:
   - Support channels where ordering must be preserved.
   - Support channels where ordering does not matter and may be relaxed for performance.
+- [REQ-3.3.6] Peer reconnect — ordering state reset:
+  - When a peer reconnects (detected via a HELLO frame on an already-known channel),
+    the per-peer sequence tracking state in the ordering gate must be reset so that
+    messages from the new connection session are not stalled or discarded because
+    `next_expected_seq` retains the value from the prior session.
+  - All held out-of-order messages belonging to the reconnecting peer must be freed.
+  - The staged `m_held_pending` buffer in DeliveryEngine must be discarded if it
+    belongs to the reconnecting peer.
+  - Implemented by: `OrderingBuffer::reset_peer()`, `DeliveryEngine::reset_peer_ordering()`,
+    `DeliveryEngine::drain_hello_reconnects()`, and `TransportInterface::pop_hello_peer()`.
 
 4. Transport abstraction API
 

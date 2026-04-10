@@ -2704,9 +2704,10 @@ static void test_tls_register_local_id_server_no_hello()
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct TlsHelloClientArg {
-    uint16_t port;
     NodeId   local_id;
     uint32_t connect_delay_us;
+    uint32_t stay_alive_us = 0U;  // 0 → use default 300 000 µs
+    uint16_t port;
     bool     tls_on;
     Result   result;
 };
@@ -2727,7 +2728,8 @@ static void* tls_hello_client_thread(void* raw)
     // Send HELLO to server; server routing table is populated.
     a->result = client.register_local_id(a->local_id);
 
-    usleep(300000U);  // 300 ms: keep connection alive while server tests routing
+    uint32_t const stay = (a->stay_alive_us > 0U) ? a->stay_alive_us : 300000U;
+    usleep(stay);  // keep connection alive while server tests routing
     client.close();
     return nullptr;
 }
@@ -2830,6 +2832,141 @@ static void test_tls_hello_frame_not_delivered_to_delivery_engine()
 
     assert(cli_arg.result == Result::OK);
     printf("PASS: test_tls_hello_frame_not_delivered_to_delivery_engine\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test tls_: pop_hello_peer() drains the HELLO reconnect queue (REQ-3.3.6)
+//
+// Plaintext client connects and sends HELLO.  Server polls receive_message()
+// until the HELLO is processed.  Then:
+//   - First pop_hello_peer() returns the client's NodeId (non-empty path).
+//   - Second pop_hello_peer() returns NODE_ID_INVALID (empty path).
+//
+// Verifies: REQ-3.3.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-3.3.6
+static void test_tls_pop_hello_peer()
+{
+    static const uint16_t PORT   = 19913U;
+    static const NodeId   CLI_ID = 42U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+
+    TlsHelloClientArg cli_arg;
+    cli_arg.port             = PORT;
+    cli_arg.local_id         = CLI_ID;
+    cli_arg.connect_delay_us = 80000U;
+    cli_arg.tls_on           = false;
+    cli_arg.result           = Result::ERR_IO;
+
+    pthread_t cli_tid = create_thread_4mb(tls_hello_client_thread, &cli_arg);
+
+    // Poll until the server has processed the HELLO frame (enqueues CLI_ID).
+    // Power of 10: fixed loop bound (10 iterations × 100 ms = 1 s max).
+    for (uint32_t i = 0U; i < 10U; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    // Non-empty path: HELLO was queued; pop returns CLI_ID.
+    NodeId const peer = server.pop_hello_peer();
+    assert(peer == CLI_ID);
+
+    // Empty path: queue now empty; pop returns NODE_ID_INVALID.
+    NodeId const empty = server.pop_hello_peer();
+    assert(empty == NODE_ID_INVALID);
+
+    (void)pthread_join(cli_tid, nullptr);
+    server.close();
+
+    assert(cli_arg.result == Result::OK);
+    printf("PASS: test_tls_pop_hello_peer\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test tls_: HELLO queue overflow — 8th HELLO silently dropped (REQ-3.3.6)
+//
+// Same logic as test_tcp_hello_queue_overflow but through TlsTcpBackend
+// (plaintext mode).  Covers handle_hello_frame() False branch of
+// "if (next_write != m_hello_queue_read)" in TlsTcpBackend.cpp.
+//
+// Verifies: REQ-3.3.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 8 == MAX_TCP_CONNECTIONS.
+static const uint32_t TLS_HELLO_OVERFLOW_NUM_CLIENTS = 8U;
+
+// Verifies: REQ-3.3.6
+static void test_tls_hello_queue_overflow()
+{
+    static const uint16_t PORT = 19914U;
+    static_assert(TLS_HELLO_OVERFLOW_NUM_CLIENTS == static_cast<uint32_t>(MAX_TCP_CONNECTIONS),
+                  "update TLS_HELLO_OVERFLOW_NUM_CLIENTS if MAX_TCP_CONNECTIONS changes");
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+
+    TlsHelloClientArg cli_args[TLS_HELLO_OVERFLOW_NUM_CLIENTS];
+    pthread_t         cli_tids[TLS_HELLO_OVERFLOW_NUM_CLIENTS];
+
+    // Power of 10: fixed loop bound (TLS_HELLO_OVERFLOW_NUM_CLIENTS = 8).
+    for (uint32_t i = 0U; i < TLS_HELLO_OVERFLOW_NUM_CLIENTS; ++i) {
+        cli_args[i].port             = PORT;
+        cli_args[i].local_id         = static_cast<NodeId>(i + 1U);  // NodeIds 1..8
+        cli_args[i].connect_delay_us = 80000U;
+        // Stay alive 4 s so all 8 clients are still connected when the server
+        // finishes accepting them (one per ~100 ms poll iteration → ~800 ms total).
+        cli_args[i].stay_alive_us    = 4000000U;
+        cli_args[i].tls_on           = false;
+        cli_args[i].result           = Result::ERR_IO;
+        cli_tids[i] = create_thread_4mb(tls_hello_client_thread, &cli_args[i]);
+    }
+
+    // Poll long enough to accept all 8 connections and process all 8 HELLOs.
+    // Power of 10: fixed loop bound (50 iterations × 100 ms = 5 s max).
+    for (uint32_t i = 0U; i < 50U; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    // Exactly MAX_TCP_CONNECTIONS-1 = 7 entries were queued; the 8th was
+    // silently dropped by the overflow guard.
+    uint32_t valid_count = 0U;
+    // Power of 10: fixed loop bound (TLS_HELLO_OVERFLOW_NUM_CLIENTS = 8).
+    for (uint32_t i = 0U; i < TLS_HELLO_OVERFLOW_NUM_CLIENTS; ++i) {
+        NodeId const peer = server.pop_hello_peer();
+        if (peer != static_cast<NodeId>(NODE_ID_INVALID)) {
+            ++valid_count;
+        }
+    }
+    assert(valid_count == TLS_HELLO_OVERFLOW_NUM_CLIENTS - 1U);  // exactly 7
+
+    // Confirm queue is empty — 8th was dropped, not just delayed.
+    NodeId const tail = server.pop_hello_peer();
+    assert(tail == static_cast<NodeId>(NODE_ID_INVALID));
+
+    // Power of 10: fixed loop bound (TLS_HELLO_OVERFLOW_NUM_CLIENTS = 8).
+    for (uint32_t i = 0U; i < TLS_HELLO_OVERFLOW_NUM_CLIENTS; ++i) {
+        (void)pthread_join(cli_tids[i], nullptr);
+    }
+    server.close();
+
+    // All 8 clients must have successfully sent HELLO; if any failed to connect
+    // the test would not prove the overflow path.
+    // Power of 10: fixed loop bound (TLS_HELLO_OVERFLOW_NUM_CLIENTS = 8).
+    for (uint32_t i = 0U; i < TLS_HELLO_OVERFLOW_NUM_CLIENTS; ++i) {
+        assert(cli_args[i].result == Result::OK);
+    }
+
+    printf("PASS: test_tls_hello_queue_overflow\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3347,6 +3484,12 @@ int main()
     test_tls_hello_frame_not_delivered_to_delivery_engine();
     test_tls_unicast_routes_to_registered_slot();
     test_tls_broadcast_when_destination_id_zero();
+
+    // pop_hello_peer() HELLO reconnect queue drain (REQ-3.3.6)
+    test_tls_pop_hello_peer();
+
+    // HELLO queue overflow — 8th HELLO silently dropped (REQ-3.3.6)
+    test_tls_hello_queue_overflow();
 
     // Source address validation tests (REQ-6.1.11)
     test_tls_source_id_mismatch_dropped();

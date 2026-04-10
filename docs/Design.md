@@ -411,6 +411,8 @@ Per-peer sequencing gate for `ORDERED` delivery channels. Each peer has a `next_
 
 If the hold queue fills before the expected sequence arrives, the oldest held envelope is dropped and a gap is declared (logged at `WARNING_HI`). This bounds memory use while providing useful in-order delivery under moderate reordering.
 
+**Peer reconnect handling (REQ-3.3.6):** When a peer reconnects, `reset_peer(src)` resets `next_expected_seq` to 1 and frees all held slots for that peer so the new session's messages (starting from seq=1) are not stalled or discarded. Called via `DeliveryEngine::reset_peer_ordering()`, triggered by `drain_hello_reconnects()` at the top of every `receive()` call after polling `TransportInterface::pop_hello_peer()` (HAZ-016 mitigation).
+
 ---
 
 #### 8.1.16 RequestReplyEngine (`RequestReplyEngine.hpp / .cpp`)
@@ -830,10 +832,10 @@ The project has 24 test binaries. The stress test (`test_stress_capacity`) is ru
 | `test_DuplicateFilter` | `DuplicateFilter` | 5 |
 | `test_AckTracker` | `AckTracker` | 14 |
 | `test_RetryManager` | `RetryManager` | 21 |
-| `test_DeliveryEngine` | `DeliveryEngine` | 57 |
+| `test_DeliveryEngine` | `DeliveryEngine` | 65 |
 | `test_Fragmentation` | `Fragmentation` helpers | 6 |
 | `test_ReassemblyBuffer` | `ReassemblyBuffer` | 7 |
-| `test_OrderingBuffer` | `OrderingBuffer` | 7 |
+| `test_OrderingBuffer` | `OrderingBuffer` | 15 |
 | `test_RequestReplyEngine` | `RequestReplyEngine` | 14 |
 | `test_AssertState` | `AssertState` / `NEVER_COMPILED_OUT_ASSERT` | 8 |
 | `test_PrngEngine` | `PrngEngine` xorshift64 | 6 |

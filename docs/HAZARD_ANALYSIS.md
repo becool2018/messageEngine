@@ -26,6 +26,7 @@
 | HAZ-013 | PRNG divide-by-zero UB crashes process — PrngEngine::next_range(0, UINT32_MAX) computed range as uint32_t, wrapping to 0; raw % 0 is undefined behavior and typically a CPU trap. Denial of service. | Cat II | next_range() computed hi - lo + 1U as uint32_t; hi=UINT32_MAX wraps result to 0 | range computed as uint64_t (range64 = (uint64_t)hi - (uint64_t)lo + 1ULL), always ≥1; CERT INT33-C guard asserted (DEF-016-1). |
 | HAZ-014 | Ordering gate permanent stall via UINT32_MAX sequence number — sweep_expired_holds() computed sequence_num + 1U as uint32_t; UINT32_MAX+1 wraps to 0 (the UNORDERED sentinel), advance_sequence() no-ops, and the gate never unblocks. | Cat II | Unsigned overflow in sweep_expired_holds() on sequence_num == UINT32_MAX | seq_next_guarded() helper wraps to 1 (not 0) on UINT32_MAX overflow, consistent with advance_next_expected(); CERT INT30-C (DEF-016-5). |
 | HAZ-015 | **Source_id rotation via plaintext UDP — capacity exhaustion** — a peer at the correct IP:port sends envelopes with arbitrary `source_id` values; each novel `source_id` opens a fresh `DuplicateFilter` slot and `OrderingBuffer` peer table entry, exhausting both fixed-capacity tables and causing `ERR_FULL` drops for legitimate traffic. Prior to this fix, `UdpBackend::validate_source()` checked IP:port only and never enforced HELLO-before-data or source_id binding (same class as HAZ-011 but on the plaintext UDP path — no DTLS MAC to bound the attacker). | Cat I | `UdpBackend::recv_one_datagram()` passed envelopes with arbitrary `source_id` to `DeliveryEngine`; no HELLO registration step on the plaintext path | `UdpBackend::process_hello_or_validate()` added (mirrors `DtlsUdpBackend::process_hello_or_validate()`): first HELLO locks `m_peer_node_id`; data frames before HELLO are discarded with WARNING_HI; data frames whose `source_id` != `m_peer_node_id` are discarded with WARNING_HI. Duplicate HELLO frames are also rejected. `m_peer_node_id` and `m_peer_hello_received` reset on `close()`. Verified by `test_udp_data_before_hello_dropped`, `test_udp_source_id_rotation_rejected`, `test_udp_duplicate_hello_dropped`, `test_udp_hello_registration` (REQ-6.2.4 / REQ-6.1.8). |
+| HAZ-016 | **Ordering gate permanent stall on peer reconnect** — when a peer disconnects and reconnects, `OrderingBuffer` retains the old `next_expected_seq` (e.g., 847) for that peer's slot. The new connection starts sending from seq=1; every message is discarded as `seq < next_expected`, permanently stalling the ordered delivery channel for that peer for the lifetime of the new session. | Cat II | `OrderingBuffer::ingest()` discards `seq < next_expected_seq` as a duplicate; on reconnect the new session's messages start from seq=1, which is always below the retained value from the prior session | `OrderingBuffer::reset_peer(src)` resets `next_expected_seq` to 1 and frees all held slots for `src`. `DeliveryEngine::reset_peer_ordering(src)` additionally discards any staged `m_held_pending` message belonging to `src`. `DeliveryEngine::drain_hello_reconnects()` polls `TransportInterface::pop_hello_peer()` at the top of every `receive()` call and triggers `reset_peer_ordering()` for each reconnecting peer (REQ-3.3.6). |
 
 ---
 
@@ -60,6 +61,13 @@
 | `on_ack()` source_id mismatch — **fixed (DEF-003-1)**: `DeliveryEngine::receive()` previously passed `env.source_id` (remote ACK sender) to `on_ack()` instead of `env.destination_id` (local sender, matching the stored slot). ACKs now correctly clear tracker slots via the PENDING→ACKED transition. | Fixed: AckTracker slot now transitions PENDING→ACKED on receipt of matching ACK; slot freed on next sweep. Retry cancelled before expiry. | Cat II HAZ-002 (resolved) | `on_ack()` now returns `OK` for valid ACKs; `ERR_INVALID` returned only for genuinely unmatched ACKs | `destination_id` used as lookup key in `DeliveryEngine::receive()` |
 | `cancel()` fails to free PENDING slot on send-rollback path | Slot persists; `sweep_expired()` later fires a false expired-message event, generating a spurious retry/timeout signal | Cat II HAZ-002 | `cancel()` returns `ERR_INVALID` on mismatch; `DeliveryEngine::send()` checks return value and logs at `WARNING_HI` | `cancel()` now SC (HAZ-002); `DeliveryEngine::send()` must check `cancel()` return; Power of 10 Rule 7 mandates all returns checked |
 | `sweep_expired()` misses slot | Slot leaks; capacity decreases | Cat II HAZ-006 | `sweep_one_slot()` checks all states per sweep | All `ACK_TRACKER_CAPACITY` slots swept each call |
+
+### OrderingBuffer
+
+| Failure Mode | System Effect | Severity | Detection | Mitigation |
+|---|---|---|---|---|
+| `reset_peer()` not called on peer reconnect | New session's seq=1 messages discarded as `seq < next_expected`; ordered channel permanently stalled for that peer | Cat II HAZ-016 | `DeliveryEngine::drain_hello_reconnects()` calls `reset_peer_ordering()` on every HELLO event | `TransportInterface::pop_hello_peer()` queues HELLO events; `drain_hello_reconnects()` drains the queue at the top of every `receive()` call; `reset_peer()` resets `next_expected_seq` to 1 and frees held slots |
+| `m_held_pending` not discarded on reset | Stale staged message from prior session delivered to caller on next `receive()` call | Cat II HAZ-001 | `reset_peer_ordering()` checks `m_held_pending.source_id == src` before clearing | `reset_peer_ordering()` invalidates `m_held_pending_valid` and logs WARNING_LO when the staged message belongs to the reconnecting peer |
 
 ### DuplicateFilter
 
@@ -246,7 +254,9 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `init()` | `OrderingBuffer` | NSC | — |
 | `ingest()` | `OrderingBuffer` | SC | HAZ-001, HAZ-006 |
 | `try_release_next()` | `OrderingBuffer` | SC | HAZ-001 |
+| `reset_peer()` | `OrderingBuffer` | SC | HAZ-001, HAZ-016 |
 | `advance_sequence()` | `OrderingBuffer` | NSC | — |
+| `sweep_expired_holds()` | `OrderingBuffer` | SC | HAZ-001, HAZ-014 |
 
 ### src/core/DeliveryEngine.hpp
 
@@ -257,6 +267,8 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `receive()` | `DeliveryEngine` | SC | HAZ-001, HAZ-003, HAZ-004, HAZ-005 |
 | `pump_retries()` | `DeliveryEngine` | SC | HAZ-002 |
 | `sweep_ack_timeouts()` | `DeliveryEngine` | SC | HAZ-002, HAZ-006 |
+| `reset_peer_ordering()` | `DeliveryEngine` | SC | HAZ-001, HAZ-016 |
+| `drain_hello_reconnects()` | `DeliveryEngine` | NSC | — |
 | `get_stats()` | `DeliveryEngine` | NSC | — |
 
 ### src/core/TransportInterface.hpp
@@ -267,6 +279,7 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `send_message()` | `TransportInterface` | SC | HAZ-001, HAZ-005, HAZ-006 |
 | `receive_message()` | `TransportInterface` | SC | HAZ-001, HAZ-004, HAZ-005 |
 | `register_local_id()` | `TransportInterface` | NSC | — |
+| `pop_hello_peer()` | `TransportInterface` | NSC | — |
 | `close()` | `TransportInterface` | NSC | — |
 | `is_open()` | `TransportInterface` | NSC | — |
 | `get_transport_stats()` | `TransportInterface` | NSC | — |

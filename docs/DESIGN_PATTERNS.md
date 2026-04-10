@@ -220,6 +220,18 @@ The base class provides a no-op default that returns `OK`. Backends override it 
 
 Called automatically by `DeliveryEngine::init()` immediately after the transport is initialised (REQ-6.1.10).
 
+`src/core/TransportInterface.hpp` — `virtual NodeId pop_hello_peer()`
+
+The base class provides a no-op default that returns `NODE_ID_INVALID`. Only TCP and TLS backends override it — they maintain a bounded FIFO of NodeIds for peers that sent a HELLO reconnect frame, populated by `handle_hello_frame()`. `DeliveryEngine::drain_hello_reconnects()` polls this method in a bounded loop at the top of every `receive()` call and calls `reset_peer_ordering()` for each reconnecting peer (REQ-3.3.6 / HAZ-016 mitigation):
+
+| Backend | Override behaviour |
+|---|---|
+| `TcpBackend` | Drains `m_hello_queue[MAX_TCP_CONNECTIONS]` FIFO; returns next reconnecting NodeId or NODE_ID_INVALID when empty |
+| `TlsTcpBackend` | Same |
+| `UdpBackend`, `DtlsUdpBackend`, `LocalSimHarness` | Inherit the no-op default |
+
+**Why:** `src/core` cannot call `src/platform` directly (layering rule). NVI lets `DeliveryEngine` poll for reconnect events through the abstract `TransportInterface` without any platform dependency.
+
 **Why:** `LocalSimHarness` has no HELLO concept; forcing it to implement `register_local_id()` would be meaningless. NVI avoids empty overrides while still allowing the delivery engine to call a single uniform method on any transport.
 
 ---

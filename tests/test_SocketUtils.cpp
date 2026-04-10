@@ -58,6 +58,7 @@
 #include <cstdint>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <poll.h>
@@ -1250,6 +1251,52 @@ static void test_recv_from_zero_datagram()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// test_socket_create_tcp_fail_resource_error
+//
+// Covers log_socket_create_error() WARNING_HI branch — triggered when socket()
+// fails with EMFILE (fd exhaustion, a resource/permission error).
+//
+// Strategy: probe the next fd number the OS would assign, close it, then set
+// RLIMIT_NOFILE to that number (so max open fd = probe_fd - 1). socket_create_tcp()
+// calls socket() which needs the probed fd but finds it out of range → EMFILE →
+// log_socket_create_error logs at WARNING_HI. Limit is restored immediately.
+//
+// Power of 10: ≥2 assertions (fd probe assertion + fd < 0 assertion).
+// NSC: SocketUtils is an OS adapter; no message-delivery policy.
+// Verifies: REQ-6.3.2 (error classification)
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_socket_create_tcp_fail_resource_error()
+{
+    // Probe: find the fd number the next socket() would receive.
+    int probe_fd = socket(AF_INET, SOCK_STREAM, 0);
+    assert(probe_fd >= 0);
+    (void)close(probe_fd);  // free it; next socket() will get this number again
+
+    // Tighten the limit so fd == probe_fd is forbidden (max fd = probe_fd - 1).
+    struct rlimit old_rl;
+    (void)getrlimit(RLIMIT_NOFILE, &old_rl);
+    struct rlimit tight_rl;
+    tight_rl.rlim_cur = static_cast<rlim_t>(probe_fd);
+    tight_rl.rlim_max = old_rl.rlim_max;
+    int sr = setrlimit(RLIMIT_NOFILE, &tight_rl);
+    assert(sr == 0);
+
+    // socket_create_tcp() calls socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    // socket() tries to return probe_fd which exceeds the new limit → EMFILE.
+    // log_socket_create_error() logs at WARNING_HI (EMFILE is a resource error).
+    int new_fd = socket_create_tcp(false);
+
+    // Restore the limit immediately before any further assertions.
+    (void)setrlimit(RLIMIT_NOFILE, &old_rl);
+
+    // Verify socket_create_tcp() returned the error sentinel.
+    assert(new_fd < 0);
+
+    printf("PASS: test_socket_create_tcp_fail_resource_error\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main — run all tests in sequence
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1298,6 +1345,9 @@ int main()
     test_recv_frame_payload_fails();
     test_send_to_closed_fd();
     test_recv_from_zero_datagram();
+
+    // log_socket_create_error() WARNING_HI branch (EMFILE via setrlimit)
+    test_socket_create_tcp_fail_resource_error();
 
     printf("=== ALL PASSED ===\n");
     return 0;

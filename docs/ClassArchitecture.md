@@ -128,6 +128,7 @@ Pure-virtual abstract base class defining the single transport API. All concrete
 | | `virtual void close()` |
 | | `virtual bool is_open() const` |
 | | `virtual Result register_local_id(NodeId id)` — default returns OK; overridden by TCP/UDP/DTLS backends to send HELLO frame (REQ-6.1.10) |
+| | `virtual NodeId pop_hello_peer()` — default returns NODE_ID_INVALID (no-op); overridden by TcpBackend and TlsTcpBackend to drain a bounded HELLO reconnect FIFO; polled by `DeliveryEngine::drain_hello_reconnects()` on every `receive()` call (REQ-3.3.6) |
 | | `virtual void get_transport_stats(TransportStats&) const` — default no-op; overridden by all backends (REQ-7.2.4) |
 | **Depends on** | `Types.hpp`, `MessageEnvelope.hpp`, `ChannelConfig.hpp`, `DeliveryStats.hpp` |
 | **Used by** | `DeliveryEngine`, `TcpBackend`, `UdpBackend`, `TlsTcpBackend`, `DtlsUdpBackend`, `LocalSimHarness` |
@@ -340,10 +341,12 @@ Per-peer in-order delivery gate. Holds out-of-sequence DATA envelopes until the 
 
 | | |
 |---|---|
-| **Key API** | `void init()` |
-| | `Result add(const MessageEnvelope&)` |
-| | `bool has_next(NodeId src) const` |
-| | `Result pop_next(NodeId src, MessageEnvelope&)` |
+| **Key API** | `void init(NodeId local_node)` |
+| | `Result ingest(const MessageEnvelope&, MessageEnvelope& out, uint64_t now_us)` |
+| | `Result try_release_next(NodeId src, MessageEnvelope& out)` |
+| | `void reset_peer(NodeId src)` — resets `next_expected_seq` to 1 and frees held slots on peer reconnect (REQ-3.3.6) |
+| | `void advance_sequence(NodeId src, uint32_t up_to_seq)` |
+| | `uint32_t sweep_expired_holds(uint64_t now_us, MessageEnvelope* out_freed, uint32_t out_cap)` |
 | **Depends on** | `Types.hpp`, `MessageEnvelope.hpp` |
 | **Used by** | `DeliveryEngine` (receive path for ordered channels) |
 

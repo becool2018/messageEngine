@@ -30,7 +30,7 @@
  *   - F-Prime style: assert() for test verification.
  */
 
-// Verifies: REQ-3.3.5
+// Verifies: REQ-3.3.5, REQ-3.3.6
 // Verification: M1 + M2 + M4
 
 #include <cstdio>
@@ -759,6 +759,131 @@ static bool test_advance_sequence_unknown_peer()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// REQ-3.3.6: reset_peer() clears stale next_expected_seq so reconnecting peer
+// starts delivering from seq=1 again.
+// Verifies: REQ-3.3.6 — M4 branch: peer found; next_expected reset; seq=1 accepted
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_reset_peer_clears_sequence()
+{
+    // Verifies: REQ-3.3.6
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    const NodeId SRC = 20U;
+    MessageEnvelope out;
+    MessageEnvelope m;
+
+    // Deliver seq=1 and seq=2 so next_expected advances to 3.
+    make_ordered(m, SRC, 1U, 0xA0U);
+    Result r1 = buf.ingest(m, out, 1000ULL);
+    assert(r1 == Result::OK);        // Assert: seq=1 delivered
+    assert(out.sequence_num == 1U);  // Assert: correct sequence
+
+    make_ordered(m, SRC, 2U, 0xA1U);
+    Result r2 = buf.ingest(m, out, 1001ULL);
+    assert(r2 == Result::OK);        // Assert: seq=2 delivered
+
+    // Peer reconnects: reset ordering state.
+    buf.reset_peer(SRC);
+
+    // New connection restarts at seq=1; must be accepted (not discarded as dup).
+    make_ordered(m, SRC, 1U, 0xB0U);
+    Result r3 = buf.ingest(m, out, 2000ULL);
+    assert(r3 == Result::OK);        // Assert: seq=1 accepted after reset
+    assert(out.sequence_num == 1U);  // Assert: correct sequence returned
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REQ-3.3.6: reset_peer() frees all held (out-of-order) messages for the peer.
+// Verifies: REQ-3.3.6 — M4 branch: hold slots freed; no ERR_FULL on fresh ingest
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_reset_peer_frees_holds()
+{
+    // Verifies: REQ-3.3.6
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    const NodeId SRC = 21U;
+    MessageEnvelope out;
+    MessageEnvelope m;
+
+    // Hold two out-of-order messages (seq 2 and 3 arrive before seq 1).
+    make_ordered(m, SRC, 2U, 0xC0U);
+    Result r2 = buf.ingest(m, out, 1000ULL);
+    assert(r2 == Result::ERR_AGAIN);  // Assert: held (seq 2 > expected 1)
+
+    make_ordered(m, SRC, 3U, 0xC1U);
+    Result r3 = buf.ingest(m, out, 1001ULL);
+    assert(r3 == Result::ERR_AGAIN);  // Assert: held (seq 3 > expected 1)
+
+    // Peer reconnects: all held slots for SRC must be freed.
+    buf.reset_peer(SRC);
+
+    // After reset, try_release_next returns ERR_AGAIN (no stale held messages).
+    Result rel = buf.try_release_next(SRC, out);
+    assert(rel == Result::ERR_AGAIN);  // Assert: no stale held messages remain
+
+    // Fresh seq=1 is in-order.
+    make_ordered(m, SRC, 1U, 0xD0U);
+    Result r1 = buf.ingest(m, out, 2000ULL);
+    assert(r1 == Result::OK);        // Assert: seq=1 accepted after reset
+    assert(out.sequence_num == 1U);  // Assert: correct sequence
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REQ-3.3.6: reset_peer() is idempotent — calling it twice must not crash.
+// Verifies: REQ-3.3.6 — M4 branch: idempotent double-reset
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_reset_peer_idempotent()
+{
+    // Verifies: REQ-3.3.6
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    const NodeId SRC = 22U;
+    MessageEnvelope out;
+    MessageEnvelope m;
+
+    // Deliver seq=1 to create peer state.
+    make_ordered(m, SRC, 1U, 0xE0U);
+    Result r1 = buf.ingest(m, out, 1000ULL);
+    assert(r1 == Result::OK);  // Assert: seq=1 delivered
+
+    buf.reset_peer(SRC);
+    buf.reset_peer(SRC);  // second reset — must not crash
+
+    make_ordered(m, SRC, 1U, 0xE1U);
+    Result r2 = buf.ingest(m, out, 2000ULL);
+    assert(r2 == Result::OK);        // Assert: seq=1 accepted after double reset
+    assert(out.sequence_num == 1U);  // Assert: correct sequence
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REQ-3.3.6: reset_peer() is a no-op for an unknown src (peer never seen).
+// Verifies: REQ-3.3.6 — M4 branch: peer_idx == ORDERING_PEER_COUNT (early return)
+// ─────────────────────────────────────────────────────────────────────────────
+static bool test_reset_peer_unknown_src()
+{
+    // Verifies: REQ-3.3.6
+    OrderingBuffer buf;
+    buf.init(1U);
+
+    buf.reset_peer(static_cast<NodeId>(99U));  // unknown src — must be no-op
+
+    // A different peer still works normally afterwards.
+    MessageEnvelope out;
+    MessageEnvelope m;
+    make_ordered(m, static_cast<NodeId>(33U), 1U, 0xF0U);
+    Result r = buf.ingest(m, out, 1000ULL);
+    assert(r == Result::OK);        // Assert: unrelated peer unaffected
+    assert(out.sequence_num == 1U); // Assert: correct sequence
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -828,6 +953,22 @@ int main()
     if (!test_advance_sequence_unknown_peer()) {
         printf("FAIL: test_advance_sequence_unknown_peer\n"); ++failed;
     } else { printf("PASS: test_advance_sequence_unknown_peer\n"); }
+
+    if (!test_reset_peer_clears_sequence()) {
+        printf("FAIL: test_reset_peer_clears_sequence\n"); ++failed;
+    } else { printf("PASS: test_reset_peer_clears_sequence\n"); }
+
+    if (!test_reset_peer_frees_holds()) {
+        printf("FAIL: test_reset_peer_frees_holds\n"); ++failed;
+    } else { printf("PASS: test_reset_peer_frees_holds\n"); }
+
+    if (!test_reset_peer_idempotent()) {
+        printf("FAIL: test_reset_peer_idempotent\n"); ++failed;
+    } else { printf("PASS: test_reset_peer_idempotent\n"); }
+
+    if (!test_reset_peer_unknown_src()) {
+        printf("FAIL: test_reset_peer_unknown_src\n"); ++failed;
+    } else { printf("PASS: test_reset_peer_unknown_src\n"); }
 
     return (failed > 0) ? 1 : 0;
 }

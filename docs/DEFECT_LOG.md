@@ -1060,3 +1060,71 @@ All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-04-09. All 7 defects (DEF-019-1 through DEF-019-7) resolved in commits 681cedd and 0b6918e. All entry and exit criteria satisfied. Inspection INSP-019 closed PASS.
+
+---
+
+### INSP-020 — REQ-3.3.6: ordering gate reset on peer reconnect (HAZ-016) (2026-04-09)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-09 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | CLOSED — 0 defects found; all entry and exit criteria satisfied |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `src/core/OrderingBuffer.hpp` | Added `reset_peer(NodeId src)` SC declaration; added `// Safety-critical (SC): HAZ-001, HAZ-016` annotation |
+| `src/core/OrderingBuffer.cpp` | Implemented `reset_peer()`: resets `next_expected_seq = 1`, frees all HoldSlots for `src`, logs WARNING_HI; updated `// Implements:` to include REQ-3.3.6 |
+| `src/core/DeliveryEngine.hpp` | Added `reset_peer_ordering(NodeId src)` public SC method; added `drain_hello_reconnects()` private NSC method; updated `// Implements:` to include REQ-3.3.6 |
+| `src/core/DeliveryEngine.cpp` | Implemented `reset_peer_ordering()` (clears `m_held_pending` + calls `m_ordering.reset_peer()`); implemented `drain_hello_reconnects()` (polls `m_transport->pop_hello_peer()`, bounded loop); added `drain_hello_reconnects()` call at top of `receive()` |
+| `src/core/TransportInterface.hpp` | Added `virtual NodeId pop_hello_peer()` default no-op (returns `NODE_ID_INVALID`); overridden by TCP/TLS backends |
+| `src/platform/TcpBackend.hpp`, `TcpBackend.cpp` | Added bounded HELLO FIFO queue (`m_hello_queue`, `m_hello_queue_read`, `m_hello_queue_write`); push on `handle_hello_frame()`; `pop_hello_peer()` drains FIFO |
+| `src/platform/TlsTcpBackend.hpp`, `TlsTcpBackend.cpp` | Same HELLO queue pattern as TcpBackend |
+| `tests/MockTransportInterface.hpp` | Added `m_hello_queue[8]`, `push_hello_peer()`, `pop_hello_peer() override` |
+| `tests/test_OrderingBuffer.cpp` | Added 4 M4 branch-coverage tests for `reset_peer()`: `test_reset_peer_clears_sequence`, `test_reset_peer_frees_holds`, `test_reset_peer_idempotent`, `test_reset_peer_unknown_src`; updated `// Verifies:` to include REQ-3.3.6 |
+| `tests/test_DeliveryEngine.cpp` | Added `test_de_reset_peer_ordering_clears_stale_sequence`, `test_de_drain_hello_reconnects_via_transport`; updated `// Verifies:` to include REQ-3.3.6 |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations (CC ≤ 10 enforced) | PASS |
+| `make run_tests` all tests green | PASS |
+| `make check_traceability` — REQ-3.3.6 now appears in both `src/` and `tests/` | PASS |
+| All new/modified `src/` files carry `// Implements: REQ-3.3.6` tags | PASS |
+| All new/modified `tests/` files carry `// Verifies: REQ-3.3.6` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Defects found
+
+| ID | File : line | Description | Severity | Disposition | Resolution |
+|----|-------------|-------------|----------|-------------|------------|
+| — | — | No defects found during inspection | — | — | — |
+
+#### Checklist reference
+
+All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
+- `reset_peer()` SC annotation (HAZ-001, HAZ-016) matches HAZARD_ANALYSIS.md §3 entry. ✓
+- `drain_hello_reconnects()` classified NSC — polling adapter; no message-delivery policy encoded. ✓
+- `pop_hello_peer()` classified NSC — transport polling hook; no delivery semantics. ✓
+- Power of 10 Rule 2: `drain_hello_reconnects()` loop bounded at ORDERING_PEER_COUNT=16. ✓
+- Power of 10 Rule 2: `reset_peer()` hold-scan loop bounded at ORDERING_HOLD_COUNT=8. ✓
+- Power of 10 Rule 3: HELLO queue is a fixed-size member array (init-phase allocated); no heap. ✓
+- Power of 10 Rule 5: `reset_peer()` carries 2 assertions (`m_initialized`, `src != 0U`) + postcondition assert. ✓
+- HAZARD_ANALYSIS.md §1: HAZ-016 added; FMEA §2 OrderingBuffer section added. ✓
+- HAZARD_ANALYSIS.md §3: `reset_peer()`, `reset_peer_ordering()`, `sweep_expired_holds()` classified SC. ✓
+- TRACEABILITY_MATRIX.md: REQ-3.3.6 row added with all `Implements:` and `Verifies:` pointers. ✓
+- WCET_ANALYSIS.md: `reset_peer_ordering()` row added; `receive()` row updated for drain_hello_reconnects O(N). ✓
+- STATE_MACHINES.md §5: `reset_peer` transition table added; hazards mitigated updated to include HAZ-016. ✓
+- Layering: `pop_hello_peer()` virtual on `TransportInterface` (core) prevents core→platform dependency; DeliveryEngine polls through the abstract interface. ✓
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-09. No defects found. All entry and exit criteria satisfied. Inspection INSP-020 closed PASS.

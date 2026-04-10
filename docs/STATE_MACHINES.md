@@ -273,7 +273,7 @@ as the lightweight formal specification required for Class C review.
 
 **Source:** src/core/OrderingBuffer.hpp / OrderingBuffer.cpp
 **Purpose:** Per-peer in-order delivery gate; holds out-of-order messages until gaps are filled.
-**Hazards mitigated:** HAZ-001 (misordered delivery), HAZ-006 (hold buffer exhaustion)
+**Hazards mitigated:** HAZ-001 (misordered delivery), HAZ-006 (hold buffer exhaustion), HAZ-016 (ordering gate stall on peer reconnect)
 
 ### States (per HoldSlot)
 
@@ -314,13 +314,24 @@ as the lightweight formal specification required for Class C review.
 | `advance_sequence(src, up_to_seq)` | `up_to_seq > next_expected` | Advance next_expected to up_to_seq (gap-skip on timeout) |
 | `advance_sequence(src, up_to_seq)` | `up_to_seq <= next_expected` | No-op |
 
+### Transition Table (reset_peer — REQ-3.3.6)
+
+Called by `DeliveryEngine::reset_peer_ordering()` when a peer reconnect is detected
+(HELLO frame received via `TransportInterface::pop_hello_peer()`).
+
+| Event | Guard | Action |
+|-------|-------|--------|
+| `reset_peer(src)` | Peer slot found (active, src matches) | Set `next_expected_seq = 1`; free all HoldSlots where `env.source_id == src`; log WARNING_HI |
+| `reset_peer(src)` | No active peer slot for src | No-op (idempotent; not an error) |
+
 ### Invariants
 
 - At most ORDERING_HOLD_COUNT messages can be HELD simultaneously (across all peers).
-- At most REASSEMBLY_SLOT_COUNT peers can be tracked simultaneously.
+- At most ORDERING_PEER_COUNT peers can be tracked simultaneously.
 - Control messages and UNORDERED messages (sequence_num == 0) are never held.
-- next_expected_seq is monotonically non-decreasing for each peer.
+- next_expected_seq is monotonically non-decreasing for each peer **within a session**; `reset_peer()` resets it to 1 at reconnect to start a new session.
 - A held message is released at most once (HoldSlot freed immediately on release).
+- After `reset_peer(src)`, no HoldSlot with `env.source_id == src` remains active.
 
 ---
 
