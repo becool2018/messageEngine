@@ -3682,6 +3682,1288 @@ static void test_log_fs_warning_tls13_ver()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test G-1: init() with num_channels > MAX_CHANNELS returns ERR_INVALID
+//
+// Covers: TlsTcpBackend::init() transport_config_valid() False branch
+//         (lines ~1805-1809).
+//
+// Verifies: REQ-4.1.1
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-4.1.1
+static void test_tls_init_channels_exceed_max()
+{
+    TlsTcpBackend backend;
+    TransportConfig cfg;
+    transport_config_default(cfg);
+    cfg.is_server    = true;
+    cfg.bind_port    = 19920U;
+    cfg.tls.tls_enabled = false;
+    // Set num_channels beyond the allowed maximum (MAX_CHANNELS = 8).
+    // transport_config_valid() returns false → init() returns ERR_INVALID.
+    cfg.num_channels = static_cast<uint32_t>(MAX_CHANNELS) + 1U;
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_INVALID);
+    assert(backend.is_open() == false);
+
+    printf("PASS: test_tls_init_channels_exceed_max\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test G-2: load_ca_and_crl() parse failure — garbage PEM content in CA file
+//
+// Covers: lines ~247-250 (x509_crt_parse_file(CA) returns non-zero for
+//         garbage content that passes the regular-file check).
+//
+// Strategy: write a regular file with non-PEM content; set ca_file to it;
+// set verify_peer=true and ca_file non-empty so load_ca_and_crl() is called.
+//
+// Verifies: REQ-6.3.4
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.3.4
+static void test_tls_bad_ca_file_content()
+{
+    static const char* BAD_CA_FILE = "/tmp/me_test_bad_ca.pem";
+
+    // Write garbage content that is not valid PEM.
+    FILE* fp = fopen(BAD_CA_FILE, "w");
+    assert(fp != nullptr);
+    int wret = fputs("not a valid PEM certificate\n", fp);
+    assert(wret >= 0);
+    int cret = fclose(fp);
+    assert(cret == 0);
+
+    TlsTcpBackend client;
+    TransportConfig cfg;
+    make_transport_config(cfg, false, 0U, true);  // TLS client; no connect yet
+    cfg.tls.verify_peer = true;
+
+    uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.ca_file)) - 1U;
+    (void)strncpy(cfg.tls.ca_file, BAD_CA_FILE, path_max);
+    cfg.tls.ca_file[path_max] = '\0';
+
+    // setup_tls_config → load_tls_certs → load_ca_and_crl → x509_crt_parse_file
+    // returns non-zero (bad content) → ERR_IO
+    Result res = client.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(client.is_open() == false);
+
+    (void)remove(BAD_CA_FILE);
+    printf("PASS: test_tls_bad_ca_file_content\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test G-3: load_tls_certs() parse failure — garbage content in cert file
+//
+// Covers: lines ~354-357 (x509_crt_parse_file(cert) returns non-zero for
+//         garbage content that passes the regular-file check).
+//
+// Strategy: write garbage to /tmp/me_test_bad_cert.pem; set cert_file to it.
+// The regular-file check passes; mbedtls_x509_crt_parse_file fails → ERR_IO.
+//
+// Verifies: REQ-6.3.4
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.3.4
+static void test_tls_bad_cert_file_content()
+{
+    static const char* BAD_CERT_FILE = "/tmp/me_test_bad_cert.pem";
+
+    FILE* fp = fopen(BAD_CERT_FILE, "w");
+    assert(fp != nullptr);
+    int wret = fputs("not a valid PEM certificate\n", fp);
+    assert(wret >= 0);
+    int cret = fclose(fp);
+    assert(cret == 0);
+
+    TlsTcpBackend backend;
+    TransportConfig cfg;
+    // Use server mode so we do not trigger net_connect (which would fail immediately).
+    make_transport_config(cfg, true, 0U, true);
+
+    uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.cert_file)) - 1U;
+    (void)strncpy(cfg.tls.cert_file, BAD_CERT_FILE, path_max);
+    cfg.tls.cert_file[path_max] = '\0';
+
+    // cert_file is non-empty and regular; x509_crt_parse_file returns non-zero → ERR_IO
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(backend.is_open() == false);
+
+    (void)remove(BAD_CERT_FILE);
+    printf("PASS: test_tls_bad_cert_file_content\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test G-4: load_tls_certs() key parse failure — garbage content in key file
+//
+// Covers: lines ~363-366 (mbedtls_pk_parse_keyfile returns non-zero for
+//         garbage content that passes the regular-file check).
+//
+// Strategy: use the valid cert file (TEST_CERT_FILE) so the cert parse
+// succeeds, but point key_file at a garbage file so pk_parse_keyfile fails.
+//
+// Verifies: REQ-6.3.4
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.3.4
+static void test_tls_bad_key_file_content()
+{
+    static const char* BAD_KEY_FILE = "/tmp/me_test_bad_key.pem";
+
+    FILE* fp = fopen(BAD_KEY_FILE, "w");
+    assert(fp != nullptr);
+    int wret = fputs("not a valid PEM key\n", fp);
+    assert(wret >= 0);
+    int cret = fclose(fp);
+    assert(cret == 0);
+
+    TlsTcpBackend backend;
+    TransportConfig cfg;
+    make_transport_config(cfg, true, 0U, true);  // TLS server; valid cert
+
+    // Valid cert, garbage key → cert parse succeeds, pk_parse_keyfile fails.
+    uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.key_file)) - 1U;
+    (void)strncpy(cfg.tls.key_file, BAD_KEY_FILE, path_max);
+    cfg.tls.key_file[path_max] = '\0';
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(backend.is_open() == false);
+
+    (void)remove(BAD_KEY_FILE);
+    printf("PASS: test_tls_bad_key_file_content\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test G-5: load_crl_if_configured() — CRL file is a symlink → ERR_IO
+//
+// Covers: lines ~290-292 (tls_path_is_regular_file returns false for symlink).
+//
+// Strategy: create a symlink /tmp/me_test_crl_symlink.pem → TEST_CERT_FILE;
+// set crl_file to the symlink path. The symlink check fires → ERR_IO.
+// verify_peer=true and ca_file=TEST_CERT_FILE so load_ca_and_crl() is entered.
+//
+// Verifies: REQ-6.3.4
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.3.4
+static void test_tls_crl_symlink_rejected()
+{
+    static const char* CRL_SYMLINK = "/tmp/me_test_crl_symlink.pem";
+
+    // Remove any existing symlink (ignore errors — may not exist).
+    (void)remove(CRL_SYMLINK);
+
+    // Create a symlink pointing to the test cert file.
+    int sym_ret = symlink(TEST_CERT_FILE, CRL_SYMLINK);
+    assert(sym_ret == 0);
+
+    TlsTcpBackend backend;
+    TransportConfig cfg;
+    make_transport_config(cfg, true, 0U, true);  // TLS server
+    cfg.tls.verify_peer = true;
+
+    // Set ca_file to the real cert file so CA parse succeeds.
+    uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.ca_file)) - 1U;
+    (void)strncpy(cfg.tls.ca_file, TEST_CERT_FILE, path_max);
+    cfg.tls.ca_file[path_max] = '\0';
+
+    // Set crl_file to the symlink — tls_path_is_regular_file rejects it.
+    path_max = static_cast<uint32_t>(sizeof(cfg.tls.crl_file)) - 1U;
+    (void)strncpy(cfg.tls.crl_file, CRL_SYMLINK, path_max);
+    cfg.tls.crl_file[path_max] = '\0';
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(backend.is_open() == false);
+
+    (void)remove(CRL_SYMLINK);
+    printf("PASS: test_tls_crl_symlink_rejected\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test G-6: load_crl_if_configured() — CRL parse fails (bad content)
+//
+// Covers: lines ~293-297 (x509_crl_parse_file returns non-zero for garbage
+//         content that passes the regular-file and symlink checks).
+//
+// Strategy: write garbage to /tmp/me_test_bad_crl.pem; set crl_file to it.
+// verify_peer=true and ca_file=TEST_CERT_FILE so CA parse succeeds; CRL
+// parse then fails.
+//
+// Verifies: REQ-6.3.4
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.3.4
+static void test_tls_crl_bad_content()
+{
+    static const char* BAD_CRL_FILE = "/tmp/me_test_bad_crl.pem";
+
+    FILE* fp = fopen(BAD_CRL_FILE, "w");
+    assert(fp != nullptr);
+    int wret = fputs("not a valid PEM CRL\n", fp);
+    assert(wret >= 0);
+    int cret = fclose(fp);
+    assert(cret == 0);
+
+    TlsTcpBackend backend;
+    TransportConfig cfg;
+    make_transport_config(cfg, true, 0U, true);  // TLS server
+    cfg.tls.verify_peer = true;
+
+    uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.ca_file)) - 1U;
+    (void)strncpy(cfg.tls.ca_file, TEST_CERT_FILE, path_max);
+    cfg.tls.ca_file[path_max] = '\0';
+
+    path_max = static_cast<uint32_t>(sizeof(cfg.tls.crl_file)) - 1U;
+    (void)strncpy(cfg.tls.crl_file, BAD_CRL_FILE, path_max);
+    cfg.tls.crl_file[path_max] = '\0';
+
+    // CA parse succeeds; x509_crl_parse_file fails (garbage content) → ERR_IO
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_IO);
+    assert(backend.is_open() == false);
+
+    (void)remove(BAD_CRL_FILE);
+    printf("PASS: test_tls_crl_bad_content\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test G-7: SEC-021 — verify_peer=true with empty peer_hostname → ERR_INVALID
+//
+// Covers: lines ~775-779 (tls_connect_handshake() SEC-021 guard).
+//
+// Strategy: start a TLS server on loopback; launch a client thread configured
+// with tls_enabled=true, verify_peer=true, peer_hostname="".
+// tls_connect_handshake() fires the SEC-021 guard and returns ERR_INVALID,
+// which propagates from connect_to_server() → init().
+//
+// Verifies: REQ-6.4.6
+// Verification: M1 + M2 + M4 (loopback; SEC-021 guard exercised on client)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Thread argument for the SEC-021 client.
+struct Sec021ClientArg {
+    uint16_t port;
+    Result   result;
+};
+
+static void* sec021_client_func(void* raw_arg)
+{
+    Sec021ClientArg* a = static_cast<Sec021ClientArg*>(raw_arg);
+    assert(a != nullptr);
+
+    usleep(80000U);  // 80 ms: wait for server to bind and listen
+
+    TlsTcpBackend client;
+    TransportConfig cfg;
+    make_transport_config(cfg, false, a->port, true);  // TLS client
+    cfg.tls.verify_peer = true;
+    // Leave peer_hostname empty ('\0') — SEC-021 guard must fire.
+    cfg.tls.peer_hostname[0] = '\0';
+
+    a->result = client.init(cfg);
+    // init() should fail with ERR_INVALID (SEC-021 fires in tls_connect_handshake)
+    if (a->result == Result::OK) {
+        client.close();
+    }
+    return nullptr;
+}
+
+// Verifies: REQ-6.4.6
+static void test_tls_verify_peer_empty_hostname_rejected()
+{
+    static const uint16_t PORT = 19921U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, true);  // TLS server
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    Sec021ClientArg args;
+    args.port   = PORT;
+    args.result = Result::OK;  // expect ERR_INVALID
+
+    pthread_t tid = create_thread_4mb(sec021_client_func, &args);
+
+    // Server polls but client init() fails before the handshake completes.
+    MessageEnvelope env;
+    Result recv_res = server.receive_message(env, 2000U);
+    assert(recv_res == Result::ERR_TIMEOUT);  // no message from the failed client
+
+    (void)pthread_join(tid, nullptr);
+    server.close();
+
+    // Client must have received ERR_INVALID from the SEC-021 guard.
+    assert(args.result == Result::ERR_INVALID);
+
+    printf("PASS: test_tls_verify_peer_empty_hostname_rejected\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test G-8: SEC-012 — duplicate NodeId eviction
+//
+// Covers: lines ~1113-1124 (handle_hello_frame duplicate-NodeId eviction).
+//
+// Strategy: start a plaintext server; connect two clients both registering
+// the same NodeId (99). The server receives the first HELLO (slot 0, NodeId=99).
+// When the second client sends HELLO with NodeId=99, handle_hello_frame()
+// detects the duplicate and evicts the new slot (SEC-012).
+// The second client's slot is removed; subsequent receive_message returns
+// ERR_TIMEOUT because no DATA was sent.
+//
+// Verifies: REQ-6.1.9
+// Verification: M1 + M2 + M4 (loopback; duplicate-NodeId eviction exercised)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Thread arg for the duplicate-NodeId test client.
+struct Sec012ClientArg {
+    uint16_t port;
+    NodeId   local_id;
+    uint32_t connect_delay_us;
+    uint32_t stay_alive_us;
+    Result   result;
+};
+
+static void* sec012_client_thread(void* raw_arg)
+{
+    Sec012ClientArg* a = static_cast<Sec012ClientArg*>(raw_arg);
+    assert(a != nullptr);
+
+    usleep(a->connect_delay_us);
+
+    TlsTcpBackend client;
+    TransportConfig cfg;
+    make_transport_config(cfg, false, a->port, false);  // plaintext client
+    a->result = client.init(cfg);
+    if (a->result != Result::OK) { return nullptr; }
+
+    // Send HELLO with local_id — may be duplicate (SEC-012 test).
+    a->result = client.register_local_id(a->local_id);
+
+    usleep(a->stay_alive_us);
+    client.close();
+    return nullptr;
+}
+
+// Verifies: REQ-6.1.9
+static void test_tls_sec012_duplicate_node_id()
+{
+    static const uint16_t PORT         = 19922U;
+    static const NodeId   DUP_NODE_ID  = 99U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    // Client A: connects first with NodeId=99; server registers it on slot 0.
+    Sec012ClientArg arg_a;
+    arg_a.port             = PORT;
+    arg_a.local_id         = DUP_NODE_ID;
+    arg_a.connect_delay_us = 80000U;   // 80 ms: wait for server
+    arg_a.stay_alive_us    = 1000000U; // 1 s: stay alive through the test
+    arg_a.result           = Result::ERR_IO;
+
+    // Client B: connects slightly later with the SAME NodeId=99 (SEC-012).
+    Sec012ClientArg arg_b;
+    arg_b.port             = PORT;
+    arg_b.local_id         = DUP_NODE_ID;
+    arg_b.connect_delay_us = 200000U;  // 200 ms: after A has registered
+    arg_b.stay_alive_us    = 500000U;
+    arg_b.result           = Result::ERR_IO;
+
+    pthread_t tid_a = create_thread_4mb(sec012_client_thread, &arg_a);
+    pthread_t tid_b = create_thread_4mb(sec012_client_thread, &arg_b);
+
+    // Server polls: accept A (slot 0); A sends HELLO NodeId=99 → registered.
+    // Then accept B (slot 1); B sends HELLO NodeId=99 → SEC-012 fires:
+    // handle_hello_frame evicts slot 1 (the new one) via remove_client(1).
+    // Power of 10 Rule 2: bounded loop (40 iterations × 100 ms = 4 s max).
+    for (uint32_t i = 0U; i < 40U; ++i) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    (void)pthread_join(tid_a, nullptr);
+    (void)pthread_join(tid_b, nullptr);
+    server.close();
+
+    // Both clients connected at the TCP level (kernel backlog accepts all).
+    // Client A's register_local_id must have succeeded.
+    assert(arg_a.result == Result::OK);
+    // Client B's register_local_id sent HELLO; the SEC-012 eviction path was
+    // exercised (server evicted slot 1). Client B's TCP send succeeded; only
+    // the server-side slot was removed. The client side sees OK from send.
+    assert(arg_b.result == Result::OK);
+
+    printf("PASS: test_tls_sec012_duplicate_node_id\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test G-9: SEC-013 — duplicate HELLO on the same slot → slot eviction
+//
+// Covers: lines ~1503-1510 (classify_inbound_frame: m_client_hello_received
+//         already true → evict slot → return ERR_INVALID).
+//
+// Strategy: plaintext server on loopback; one raw-POSIX-socket client sends
+// a HELLO frame twice on the same connection. The second HELLO fires the
+// SEC-013 path: remove_client(idx); return ERR_INVALID.
+// receive_message() returns ERR_TIMEOUT (no DATA delivered).
+//
+// Verifies: REQ-6.1.8
+// Verification: M1 + M2 + M4 (loopback; duplicate HELLO eviction exercised)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Thread: raw POSIX socket that sends two HELLO frames on the same connection.
+struct Sec013ClientArg {
+    uint16_t port;
+    Result   result;
+};
+
+static void* sec013_raw_client_func(void* raw_arg)
+{
+    Sec013ClientArg* a = static_cast<Sec013ClientArg*>(raw_arg);
+    assert(a != nullptr);
+
+    usleep(80000U);  // 80 ms: wait for server to bind and listen
+
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { a->result = Result::ERR_IO; return nullptr; }
+
+    struct sockaddr_in addr;
+    (void)memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(a->port);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    int ret = ::connect(fd,
+                        reinterpret_cast<struct sockaddr*>(&addr),
+                        static_cast<socklen_t>(sizeof(addr)));
+    if (ret < 0) {
+        (void)::close(fd);
+        a->result = Result::ERR_IO;
+        return nullptr;
+    }
+
+    // Build a valid HELLO frame with source_id = 77.
+    MessageEnvelope hello_env;
+    envelope_init(hello_env);
+    hello_env.message_type   = MessageType::HELLO;
+    hello_env.source_id      = 77U;
+    hello_env.destination_id = NODE_ID_INVALID;
+    hello_env.payload_length = 0U;
+
+    // Send first HELLO — server registers NodeId=77 on this slot.
+    bool ok = src_val_send_frame(fd, hello_env);
+    if (!ok) {
+        (void)::close(fd);
+        a->result = Result::ERR_IO;
+        return nullptr;
+    }
+
+    usleep(100000U);  // 100 ms: let server process first HELLO
+
+    // Send second HELLO on the SAME connection — SEC-013 must fire.
+    hello_env.source_id = 78U;  // different source_id; still HELLO type
+    ok = src_val_send_frame(fd, hello_env);
+
+    usleep(300000U);  // 300 ms: let server detect and evict
+    (void)::close(fd);
+
+    a->result = ok ? Result::OK : Result::ERR_IO;
+    return nullptr;
+}
+
+// Verifies: REQ-6.1.8
+static void test_tls_sec013_duplicate_hello()
+{
+    static const uint16_t PORT = 19923U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    Sec013ClientArg args;
+    args.port   = PORT;
+    args.result = Result::ERR_IO;
+
+    pthread_t tid = create_thread_4mb(sec013_raw_client_func, &args);
+
+    // Server polls: accept client (slot 0); first HELLO → registered.
+    // Second HELLO on same slot → SEC-013 → remove_client → ERR_INVALID.
+    // receive_message returns ERR_TIMEOUT (no DATA ever queued).
+    MessageEnvelope env;
+    Result recv_res = server.receive_message(env, 2000U);
+    assert(recv_res == Result::ERR_TIMEOUT);
+
+    (void)pthread_join(tid, nullptr);
+    server.close();
+
+    // Client sent both frames without socket-level error.
+    assert(args.result == Result::OK);
+
+    printf("PASS: test_tls_sec013_duplicate_hello\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test G-10: delay buffer full → send_message returns ERR_FULL
+//
+// Covers: lines ~1878-1879 (process_outbound returns non-OK, non-ERR_IO:
+//         ERR_FULL propagates to caller of send_message).
+//
+// Strategy: configure a server with fixed_latency_ms=60000 (60 s) so messages
+// accumulate in the delay buffer without being flushed. Send IMPAIR_DELAY_BUF_SIZE+1
+// messages; the (IMPAIR_DELAY_BUF_SIZE+1)th send must return ERR_FULL.
+//
+// Verifies: REQ-5.1.1
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-5.1.1
+static void test_tls_delay_buffer_full()
+{
+    static const uint16_t PORT = 19924U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);
+    // Enable impairment with a very large fixed latency so delayed messages
+    // never become deliverable during this test (60 s >> test duration).
+    srv_cfg.channels[0U].impairment.enabled          = true;
+    srv_cfg.channels[0U].impairment.fixed_latency_ms = 60000U;  // 60 s
+
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    // Fill the delay buffer to capacity; IMPAIR_DELAY_BUF_SIZE = 32.
+    // Power of 10 Rule 2: fixed loop bound (IMPAIR_DELAY_BUF_SIZE + 2 iterations).
+    Result last_res = Result::OK;
+    // The first IMPAIR_DELAY_BUF_SIZE sends fill the buffer; the next returns ERR_FULL.
+    static const uint32_t N_SENDS = static_cast<uint32_t>(IMPAIR_DELAY_BUF_SIZE) + 2U;
+    for (uint32_t m = 0U; m < N_SENDS; ++m) {
+        MessageEnvelope env;
+        envelope_init(env);
+        env.message_type      = MessageType::DATA;
+        env.message_id        = 0x9000ULL + static_cast<uint64_t>(m);
+        env.source_id         = 1U;
+        env.destination_id    = 2U;
+        env.reliability_class = ReliabilityClass::BEST_EFFORT;
+        env.timestamp_us      = 1U;
+        env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+        last_res = server.send_message(env);
+        if (last_res != Result::OK) {
+            break;
+        }
+    }
+
+    server.close();
+
+    // At least one send must have returned ERR_FULL once the buffer overflowed.
+    assert(last_res == Result::ERR_FULL);
+
+    printf("PASS: test_tls_delay_buffer_full\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// H-series coverage gap tests (lines 1230-1232, 1451-1454, 1472-1473,
+//                               1478-1480, 1553-1557, 1615-1618)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test H-1: full-size garbage frame → Serializer::deserialize fail
+//
+// The existing test_garbage_frame_deserialize_fail sends a 5-byte frame; the
+// tcp_recv_frame size check (frame_len < WIRE_HEADER_SIZE=52) rejects it before
+// deserialization.  This test sends a frame whose length-prefix equals exactly
+// WIRE_HEADER_SIZE (52) so the size check passes, then the all-zero payload
+// fails Serializer::deserialize at the proto-version check (byte 3 = 0 ≠
+// PROTO_VERSION).  Lines 1553-1557 in recv_from_client() are covered.
+//
+// Verifies: REQ-6.3.2
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct FullGarbageFrameArg {
+    uint16_t port;
+    Result   result;
+};
+
+static void* full_garbage_frame_thread(void* raw_arg)
+{
+    FullGarbageFrameArg* a = static_cast<FullGarbageFrameArg*>(raw_arg);
+    assert(a != nullptr);
+    usleep(80000U);  // 80 ms: wait for server to bind and listen
+
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { a->result = Result::ERR_IO; return nullptr; }
+
+    struct sockaddr_in addr;
+    (void)memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(a->port);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    int ret = ::connect(fd,
+                        reinterpret_cast<struct sockaddr*>(&addr),
+                        static_cast<socklen_t>(sizeof(addr)));
+    if (ret < 0) { (void)::close(fd); a->result = Result::ERR_IO; return nullptr; }
+
+    // Send 4-byte big-endian length = 52 (0x00000034) + 52 zero bytes.
+    // tcp_recv_frame passes the size check (52 >= WIRE_HEADER_SIZE=52).
+    // Serializer::deserialize fails: proto version byte (buf[3]) = 0.
+    static const uint32_t FRAME_LEN = static_cast<uint32_t>(Serializer::WIRE_HEADER_SIZE);
+    static const uint32_t BUF_SIZE  = 4U + FRAME_LEN;
+    uint8_t buf[4U + 52U];
+    buf[0U] = static_cast<uint8_t>((FRAME_LEN >> 24U) & 0xFFU);
+    buf[1U] = static_cast<uint8_t>((FRAME_LEN >> 16U) & 0xFFU);
+    buf[2U] = static_cast<uint8_t>((FRAME_LEN >>  8U) & 0xFFU);
+    buf[3U] = static_cast<uint8_t>( FRAME_LEN         & 0xFFU);
+    (void)memset(buf + 4U, 0, FRAME_LEN);
+    (void)::write(fd, buf, static_cast<size_t>(BUF_SIZE));
+    usleep(300000U);  // 300 ms: let server read and attempt deserialize
+    (void)::close(fd);
+    a->result = Result::OK;
+    return nullptr;
+}
+
+// Verifies: REQ-6.3.2
+static void test_tls_full_frame_deserialize_fail()
+{
+    static const uint16_t PORT = 19930U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    FullGarbageFrameArg args;
+    args.port   = PORT;
+    args.result = Result::ERR_IO;
+
+    pthread_t tid = create_thread_4mb(full_garbage_frame_thread, &args);
+
+    // Server: size check passes (52 >= 52), deserialize fails → ERR_INVALID from
+    // recv_from_client → poll loop exhausted → ERR_TIMEOUT.
+    MessageEnvelope env;
+    Result recv_res = server.receive_message(env, 1500U);
+    assert(recv_res == Result::ERR_TIMEOUT);
+
+    (void)pthread_join(tid, nullptr);
+    server.close();
+    assert(args.result == Result::OK);
+
+    printf("PASS: test_tls_full_frame_deserialize_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test H-2: inbound partition drop with registered HELLO
+//
+// The existing test_tls_inbound_partition_drops_received sends DATA without a
+// prior HELLO, so classify_inbound_frame rejects it (ERR_INVALID) before
+// reaching apply_inbound_impairment.  This test sends HELLO first (registering
+// the client's NodeId) then two DATA frames.
+//
+// Partition timer priming strategy (2-DATA approach):
+//   is_partition_active is only called from apply_inbound_impairment (inbound
+//   path) and process_outbound; collect_deliverable / flush_delayed_to_clients
+//   do NOT call it.  Therefore receive_message without inbound data cannot prime
+//   the timer.
+//
+//   Solution: client sends HELLO → prime DATA → sleep(50ms) → victim DATA.
+//   1. Server receives prime DATA: apply_inbound_impairment calls
+//      is_partition_active for the FIRST time → initializes timer, returns false
+//      (not yet active) → prime DATA is pushed to the recv queue → server
+//      receive_message returns OK.
+//   2. After 50ms >> partition_gap_ms (5ms) the partition window activates.
+//   3. Server's second receive_message processes victim DATA:
+//      apply_inbound_impairment → is_partition_active returns true → drop
+//      → lines 1451-1454 covered → receive_message returns ERR_TIMEOUT.
+//
+// Verifies: REQ-5.1.6
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct TlsHelloDataClientArg {
+    NodeId   local_id;
+    uint16_t port;
+    uint32_t connect_delay_us;  // delay before connecting
+    uint32_t data_delay_us;     // delay between HELLO and DATA
+    uint32_t stay_alive_us;     // total stay-alive after DATA
+    Result   result;
+};
+
+static void* tls_hello_data_client_thread(void* raw_arg)
+{
+    TlsHelloDataClientArg* a = static_cast<TlsHelloDataClientArg*>(raw_arg);
+    assert(a != nullptr);
+    assert(a->local_id != NODE_ID_INVALID);
+
+    usleep(a->connect_delay_us);
+
+    TlsTcpBackend client;
+    TransportConfig cfg;
+    make_transport_config(cfg, false, a->port, false);  // plaintext client
+    a->result = client.init(cfg);
+    if (a->result != Result::OK) { return nullptr; }
+
+    // REQ-6.1.8: register NodeId via HELLO before sending DATA.
+    a->result = client.register_local_id(a->local_id);
+    if (a->result != Result::OK) { client.close(); return nullptr; }
+
+    usleep(a->data_delay_us);  // let server process HELLO before DATA arrives
+
+    MessageEnvelope env;
+    envelope_init(env);
+    env.message_type      = MessageType::DATA;
+    env.message_id        = 0xAB000001ULL;
+    env.source_id         = a->local_id;
+    env.destination_id    = 1U;
+    env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    env.timestamp_us      = 1U;
+    env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+    (void)client.send_message(env);
+
+    usleep(a->stay_alive_us);
+    client.close();
+    return nullptr;
+}
+
+// ── Partition-prime client: HELLO → prime DATA → sleep → victim DATA ─────────
+
+struct TlsPartitionClientArg {
+    NodeId   local_id;
+    uint16_t port;
+    uint32_t connect_delay_us;   // delay before connecting
+    uint32_t hello_to_prime_us;  // delay between HELLO and prime DATA
+    uint32_t prime_to_victim_us; // delay between prime DATA and victim DATA
+    uint32_t stay_alive_us;      // stay-alive after victim DATA
+    Result   result;
+};
+
+// Power of 10 Rule 9 exception: virtual dispatch via ISocketOps vtable only.
+static void* tls_partition_client_thread(void* raw_arg)
+{
+    TlsPartitionClientArg* a = static_cast<TlsPartitionClientArg*>(raw_arg);
+    assert(a != nullptr);
+    assert(a->local_id != NODE_ID_INVALID);
+
+    usleep(a->connect_delay_us);
+
+    TlsTcpBackend client;
+    TransportConfig cfg;
+    make_transport_config(cfg, false, a->port, false);  // plaintext client
+    a->result = client.init(cfg);
+    if (a->result != Result::OK) { return nullptr; }
+
+    // REQ-6.1.8: HELLO registers slot on server side.
+    a->result = client.register_local_id(a->local_id);
+    if (a->result != Result::OK) { client.close(); return nullptr; }
+
+    usleep(a->hello_to_prime_us);
+
+    // Prime DATA: causes the first call to is_partition_active on the server,
+    // initializing the timer.  Partition is NOT yet active → DATA delivered.
+    MessageEnvelope prime;
+    envelope_init(prime);
+    prime.message_type      = MessageType::DATA;
+    prime.message_id        = 0xAB000001ULL;
+    prime.source_id         = a->local_id;
+    prime.destination_id    = 1U;
+    prime.reliability_class = ReliabilityClass::BEST_EFFORT;
+    prime.timestamp_us      = 1U;
+    prime.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+    (void)client.send_message(prime);
+
+    // Wait >> partition_gap_ms so the partition window opens.
+    usleep(a->prime_to_victim_us);
+
+    // Victim DATA: is_partition_active now returns true → dropped by
+    // apply_inbound_impairment → lines 1451-1454 covered.
+    MessageEnvelope victim;
+    envelope_init(victim);
+    victim.message_type      = MessageType::DATA;
+    victim.message_id        = 0xAB000002ULL;
+    victim.source_id         = a->local_id;
+    victim.destination_id    = 1U;
+    victim.reliability_class = ReliabilityClass::BEST_EFFORT;
+    victim.timestamp_us      = 2U;
+    victim.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+    (void)client.send_message(victim);
+
+    usleep(a->stay_alive_us);
+    client.close();
+    a->result = Result::OK;
+    return nullptr;
+}
+
+// Verifies: REQ-5.1.6
+static void test_tls_inbound_partition_with_hello()
+{
+    static const uint16_t PORT   = 19931U;
+    static const NodeId   CLI_ID = 77U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
+    srv_cfg.channels[0U].impairment.enabled               = true;
+    srv_cfg.channels[0U].impairment.partition_enabled      = true;
+    srv_cfg.channels[0U].impairment.partition_gap_ms       = 5U;      // 5 ms gap
+    srv_cfg.channels[0U].impairment.partition_duration_ms  = 30000U;  // 30 s
+
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    // Client timeline:
+    //   T=0     : server init complete
+    //   T=50ms  : client connects
+    //   T=70ms  : HELLO sent (50+20ms)
+    //   T=120ms : prime DATA sent (70+50ms); timer initializes, partition NOT active
+    //   T=220ms : victim DATA sent (120+100ms >> gap 5ms); partition active → drop
+    TlsPartitionClientArg cli_arg;
+    cli_arg.port              = PORT;
+    cli_arg.local_id          = CLI_ID;
+    cli_arg.connect_delay_us  = 50000U;   // 50 ms
+    cli_arg.hello_to_prime_us = 50000U;   // 50 ms: let HELLO be processed
+    cli_arg.prime_to_victim_us = 100000U; // 100 ms >> gap 5 ms
+    cli_arg.stay_alive_us     = 500000U;  // 500 ms: stay alive during server drain
+    cli_arg.result            = Result::ERR_IO;
+
+    pthread_t cli_tid = create_thread_4mb(tls_partition_client_thread, &cli_arg);
+
+    // First receive: gets prime DATA.
+    // apply_inbound_impairment → is_partition_active (first call, initializes
+    // timer, returns false) → DATA pushed to queue → OK.
+    MessageEnvelope prime_recv;
+    Result prime_res = server.receive_message(prime_recv, 1000U);
+    assert(prime_res == Result::OK);
+
+    // Second receive: gets victim DATA.
+    // apply_inbound_impairment → is_partition_active (timer elapsed, active)
+    // → drop → lines 1451-1454 → ERR_TIMEOUT.
+    MessageEnvelope env;
+    Result recv_res = server.receive_message(env, 1000U);
+
+    (void)pthread_join(cli_tid, nullptr);
+    server.close();
+
+    assert(recv_res == Result::ERR_TIMEOUT);
+    assert(cli_arg.result == Result::OK);
+
+    printf("PASS: test_tls_inbound_partition_with_hello\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test H-3: recv queue overflow after HELLO registration
+//
+// The existing test_recv_queue_overflow uses heavy_sender_func which does NOT
+// call register_local_id.  Consequently DATA frames are rejected by
+// classify_inbound_frame (ERR_INVALID — slot not registered), so the recv queue
+// is never filled through apply_inbound_impairment.  This test uses
+// hello_heavy_sender_func which registers the NodeId via HELLO first, letting
+// DATA frames pass classify_inbound_frame → apply_inbound_impairment → push to
+// m_recv_queue.  With 8 clients × 20 DATAs and one receive_message pop per
+// iteration, the queue overflows (capacity MSG_RING_CAPACITY = 64) at the 65th
+// push → WARNING_HI at lines 1478-1480.
+//
+// Verifies: REQ-4.1.3
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct HelloHeavySenderArg {
+    uint32_t num_msgs;       // DATA messages to send after HELLO
+    uint32_t stay_alive_us;  // how long to stay alive after sending
+    NodeId   node_id;        // unique per client (SEC-012)
+    uint16_t port;
+    Result   result;
+};
+
+static void* hello_heavy_sender_func(void* raw_arg)
+{
+    HelloHeavySenderArg* a = static_cast<HelloHeavySenderArg*>(raw_arg);
+    assert(a != nullptr);
+    assert(a->num_msgs > 0U);
+    assert(a->node_id != NODE_ID_INVALID);
+
+    usleep(80000U);  // 80 ms: wait for server
+
+    TlsTcpBackend client;
+    TransportConfig cfg;
+    make_transport_config(cfg, false, a->port, false);  // plaintext client
+    a->result = client.init(cfg);
+    if (a->result != Result::OK) { return nullptr; }
+
+    // REQ-6.1.8: register NodeId via HELLO before sending DATA.
+    a->result = client.register_local_id(a->node_id);
+    if (a->result != Result::OK) { client.close(); return nullptr; }
+    usleep(20000U);  // 20 ms: let server process HELLO before DATA flood
+
+    // Power of 10 Rule 2 deviation (test loop): bounded by a->num_msgs;
+    // runtime count controlled by test fixture.
+    for (uint32_t m = 0U; m < a->num_msgs; ++m) {
+        MessageEnvelope env;
+        envelope_init(env);
+        env.message_type      = MessageType::DATA;
+        env.message_id        = (static_cast<uint64_t>(a->node_id) << 16U)
+                                 + static_cast<uint64_t>(m);
+        env.source_id         = a->node_id;
+        env.destination_id    = 1U;
+        env.reliability_class = ReliabilityClass::BEST_EFFORT;
+        env.timestamp_us      = 1U;
+        env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+        (void)client.send_message(env);
+    }
+
+    usleep(a->stay_alive_us);
+    client.close();
+    return nullptr;
+}
+
+// Verifies: REQ-4.1.3
+static void test_tls_recv_queue_overflow_with_hello()
+{
+    static const uint16_t PORT      = 19932U;
+    static const uint32_t N_CLIENTS = 8U;
+    static const uint32_t N_MSGS    = 20U;  // 8×20=160 DATAs; overflows queue at 65th
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    HelloHeavySenderArg args[N_CLIENTS];
+    pthread_t           tids[N_CLIENTS];
+
+    for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
+        args[k].port          = PORT;
+        args[k].num_msgs      = N_MSGS;
+        args[k].stay_alive_us = 2000000U;  // 2 s — stay alive during drain
+        args[k].node_id       = static_cast<NodeId>(100U + k);  // unique ids
+        args[k].result        = Result::ERR_IO;
+        tids[k] = create_thread_4mb(hello_heavy_sender_func, &args[k]);
+    }
+
+    usleep(300000U);  // 300 ms: give clients time to connect, HELLO, and flood
+
+    // Each poll_clients_once call reads up to N_CLIENTS frames (one per slot).
+    // receive_message pops 1 per iteration → net queue growth ≈ +7 per iteration.
+    // At ~10 iterations the 65th push fires the overflow path (lines 1478-1480).
+    // Power of 10 Rule 2 deviation (test loop): bounded by 400 iterations;
+    // runtime termination after all messages consumed.
+    for (uint32_t k = 0U; k < 400U; ++k) {
+        MessageEnvelope env;
+        (void)server.receive_message(env, 100U);
+    }
+
+    server.close();
+
+    for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
+        (void)pthread_join(tids[k], nullptr);
+    }
+    for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
+        assert(args[k].result == Result::OK);
+    }
+
+    printf("PASS: test_tls_recv_queue_overflow_with_hello\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test H-4: inbound reorder engine buffers first DATA frame (count < window)
+//
+// Configure the server with reorder_enabled=true, reorder_window_size=4.
+// The client sends HELLO (registers slot), then ONE DATA frame.  Inside
+// process_inbound() the window is empty (m_reorder_count=0 < 4), so the frame
+// is buffered (m_reorder_count → 1) and out_count=0 is returned to
+// apply_inbound_impairment().  The inbound_count==0 branch (lines 1472-1473)
+// is executed: the frame is not pushed to m_recv_queue and apply_inbound_
+// impairment returns false.  receive_message() returns ERR_TIMEOUT.
+//
+// Verifies: REQ-5.1.5
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-5.1.5
+static void test_tls_inbound_reorder_buffers_message()
+{
+    static const uint16_t PORT    = 19933U;
+    static const NodeId   CLI_ID  = 88U;
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);  // plaintext
+    srv_cfg.channels[0U].impairment.enabled           = true;
+    srv_cfg.channels[0U].impairment.reorder_enabled   = true;
+    srv_cfg.channels[0U].impairment.reorder_window_size = 4U;   // buffer up to 4 frames
+
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    // Client: connect, HELLO, then exactly one DATA frame.
+    // reuse TlsHelloDataClientArg / tls_hello_data_client_thread.
+    TlsHelloDataClientArg cli_arg;
+    cli_arg.port             = PORT;
+    cli_arg.local_id         = CLI_ID;
+    cli_arg.connect_delay_us = 80000U;   // 80 ms: after server is ready
+    cli_arg.data_delay_us    = 20000U;   // 20 ms: let HELLO be processed first
+    cli_arg.stay_alive_us    = 500000U;  // 500 ms: stay alive during server drain
+    cli_arg.result           = Result::ERR_IO;
+
+    pthread_t cli_tid = create_thread_4mb(tls_hello_data_client_thread, &cli_arg);
+
+    // Server: HELLO registered; DATA arrives → process_inbound buffers it
+    // (count=1 < window=4, out_count=0) → lines 1472-1473 → not pushed →
+    // receive_message returns ERR_TIMEOUT.
+    MessageEnvelope env;
+    Result recv_res = server.receive_message(env, 1000U);
+
+    (void)pthread_join(cli_tid, nullptr);
+    server.close();
+
+    assert(recv_res == Result::ERR_TIMEOUT);
+    assert(cli_arg.result == Result::OK);
+
+    printf("PASS: test_tls_inbound_reorder_buffers_message\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test H-5: send_to_slot() fails — tls_send_frame returns false
+//
+// Uses MockSocketOps to inject a serialized HELLO into the server's recv path
+// (one-shot recv_frame_once_buf) then sets fail_send_frame=true so that the
+// subsequent server-side unicast send fails at tls_send_frame, triggering the
+// WARNING_HI log at lines 1230-1232.
+//
+// A dummy raw TCP client connects and writes 1 byte to make the accepted socket
+// readable (POLLIN) so poll_clients_once → recv_from_client executes.  The
+// mock's recv_frame_once_buf returns the pre-serialized HELLO instead of the
+// real byte; the HELLO registers TARGET_ID in the routing table.
+// receive_message(100ms) runs exactly 1 poll iteration (poll_count=1), so the
+// second call to recv_from_client (which would hit the unsafe 0-byte default)
+// never occurs.
+//
+// Verifies: REQ-6.1.9
+// Verification: M1 + M2 + M5 (fault injection via ISocketOps)
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct DummyRawClientArg {
+    uint16_t port;
+    uint32_t stay_alive_us;  // how long to keep the socket open after connecting
+    Result   result;
+};
+
+static void* dummy_raw_client_thread(void* raw_arg)
+{
+    DummyRawClientArg* a = static_cast<DummyRawClientArg*>(raw_arg);
+    assert(a != nullptr);
+    usleep(20000U);  // 20 ms: allow server to bind and listen
+
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { a->result = Result::ERR_IO; return nullptr; }
+
+    struct sockaddr_in addr;
+    (void)memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(a->port);
+    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    int ret = ::connect(fd,
+                        reinterpret_cast<struct sockaddr*>(&addr),
+                        static_cast<socklen_t>(sizeof(addr)));
+    if (ret < 0) { (void)::close(fd); a->result = Result::ERR_IO; return nullptr; }
+
+    // Write 1 byte to make the accepted socket readable (POLLIN fires).
+    // The server's MockSocketOps::recv_frame ignores the real byte and returns
+    // recv_frame_once_buf (the pre-loaded HELLO) instead.
+    uint8_t dummy = 0xAAU;
+    (void)::write(fd, &dummy, 1U);
+
+    usleep(a->stay_alive_us);  // keep connection alive while server tests routing
+    (void)::close(fd);
+    a->result = Result::OK;
+    return nullptr;
+}
+
+// Verifies: REQ-6.1.9
+static void test_tls_send_to_slot_fail()
+{
+    static const uint16_t PORT      = 19934U;
+    static const NodeId   TARGET_ID = 55U;
+
+    // Build a serialized HELLO frame for TARGET_ID.
+    MessageEnvelope hello_env;
+    envelope_init(hello_env);
+    hello_env.message_type = MessageType::HELLO;
+    hello_env.source_id    = TARGET_ID;
+    uint8_t  hello_buf[512U] = {};
+    uint32_t hello_len       = 0U;
+    Result ser_r = Serializer::serialize(hello_env, hello_buf,
+                                         static_cast<uint32_t>(sizeof(hello_buf)),
+                                         hello_len);
+    assert(ser_r == Result::OK);
+    assert(hello_len > 0U && hello_len <= 512U);
+
+    MockSocketOps mock;
+    (void)memcpy(mock.recv_frame_once_buf, hello_buf, hello_len);
+    mock.recv_frame_once_len = hello_len;
+    // fail_recv_frame stays false — after one-shot, the 0-byte default would
+    // crash; but receive_message(100ms) = 1 poll iteration so recv_from_client
+    // is never called a second time.
+
+    TlsTcpBackend server(mock);
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    // Dummy client: connect → write 1 byte → stay alive 2 s.
+    DummyRawClientArg cli_arg;
+    cli_arg.port          = PORT;
+    cli_arg.stay_alive_us = 2000000U;
+    cli_arg.result        = Result::ERR_IO;
+
+    pthread_t cli_tid = create_thread_4mb(dummy_raw_client_thread, &cli_arg);
+
+    // receive_message(100ms) → poll_count=1 → ONE poll_clients_once(100ms):
+    //   accept_and_handshake → slot 0 active
+    //   poll fires POLLIN (1 byte in buffer)
+    //   recv_from_client → tls_recv_frame → mock.recv_frame one-shot → HELLO
+    //   classify_inbound_frame: HELLO → register TARGET_ID in routing table
+    // ERR_TIMEOUT (HELLO consumed, not queued as a message).
+    MessageEnvelope env;
+    Result recv_res = server.receive_message(env, 100U);
+    assert(recv_res == Result::ERR_TIMEOUT);
+
+    // Inject send failure; send unicast to TARGET_ID.
+    // send_to_slot(0, ...) → tls_send_frame → mock.send_frame → fail → lines 1230-1232.
+    mock.fail_send_frame = true;
+
+    MessageEnvelope data_env;
+    envelope_init(data_env);
+    data_env.message_type      = MessageType::DATA;
+    data_env.message_id        = 0xDEAD0001ULL;
+    data_env.source_id         = 1U;
+    data_env.destination_id    = TARGET_ID;
+    data_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    data_env.timestamp_us      = 1U;
+    data_env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+
+    Result send_res = server.send_message(data_env);
+    assert(send_res == Result::ERR_IO);  // send_to_slot failed → ERR_IO
+
+    (void)pthread_join(cli_tid, nullptr);
+    server.close();
+
+    assert(cli_arg.result == Result::OK);
+
+    printf("PASS: test_tls_send_to_slot_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test H-6: send_to_all_clients() fails — broadcast tls_send_frame returns false
+//
+// Same setup as H-5 (MockSocketOps + dummy raw client + HELLO one-shot) but
+// the envelope has destination_id = NODE_ID_INVALID (0) so route_one_delayed
+// calls send_to_all_clients().  For each active slot, tls_send_frame returns
+// false (fail_send_frame=true) → WARNING_LO at lines 1615-1618.
+//
+// Verifies: REQ-6.1.7
+// Verification: M1 + M2 + M5 (fault injection via ISocketOps)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.7
+static void test_tls_broadcast_send_fail()
+{
+    static const uint16_t PORT      = 19935U;
+    static const NodeId   TARGET_ID = 66U;
+
+    // Pre-load HELLO for TARGET_ID so the routing table is populated and
+    // m_client_count > 0 when send_message is called.
+    MessageEnvelope hello_env;
+    envelope_init(hello_env);
+    hello_env.message_type = MessageType::HELLO;
+    hello_env.source_id    = TARGET_ID;
+    uint8_t  hello_buf[512U] = {};
+    uint32_t hello_len       = 0U;
+    Result ser_r = Serializer::serialize(hello_env, hello_buf,
+                                         static_cast<uint32_t>(sizeof(hello_buf)),
+                                         hello_len);
+    assert(ser_r == Result::OK);
+    assert(hello_len > 0U && hello_len <= 512U);
+
+    MockSocketOps mock;
+    (void)memcpy(mock.recv_frame_once_buf, hello_buf, hello_len);
+    mock.recv_frame_once_len = hello_len;
+
+    TlsTcpBackend server(mock);
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
+    Result init_res = server.init(srv_cfg);
+    assert(init_res == Result::OK);
+    assert(server.is_open() == true);
+
+    DummyRawClientArg cli_arg;
+    cli_arg.port          = PORT;
+    cli_arg.stay_alive_us = 2000000U;
+    cli_arg.result        = Result::ERR_IO;
+
+    pthread_t cli_tid = create_thread_4mb(dummy_raw_client_thread, &cli_arg);
+
+    // One iteration: accept client, read HELLO one-shot, register TARGET_ID.
+    MessageEnvelope env;
+    Result recv_res = server.receive_message(env, 100U);
+    assert(recv_res == Result::ERR_TIMEOUT);
+
+    // Inject send failure; broadcast (destination_id = NODE_ID_INVALID = 0).
+    // route_one_delayed → send_to_all_clients → tls_send_frame → mock → false →
+    // lines 1615-1618.
+    mock.fail_send_frame = true;
+
+    MessageEnvelope bcast_env;
+    envelope_init(bcast_env);
+    bcast_env.message_type      = MessageType::DATA;
+    bcast_env.message_id        = 0xBCAD0001ULL;
+    bcast_env.source_id         = 1U;
+    bcast_env.destination_id    = static_cast<NodeId>(NODE_ID_INVALID);  // broadcast
+    bcast_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    bcast_env.timestamp_us      = 1U;
+    bcast_env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
+
+    Result send_res = server.send_message(bcast_env);
+    assert(send_res == Result::ERR_IO);  // send_to_all_clients failed → ERR_IO
+
+    (void)pthread_join(cli_tid, nullptr);
+    server.close();
+
+    assert(cli_arg.result == Result::OK);
+
+    printf("PASS: test_tls_broadcast_send_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3762,6 +5044,27 @@ int main()
     test_log_fs_warning_nullptr_ver();
     test_log_fs_warning_tls12_ver();
     test_log_fs_warning_tls13_ver();
+
+    // G-series coverage gap tests:
+    test_tls_init_channels_exceed_max();
+    test_tls_bad_ca_file_content();
+    test_tls_bad_cert_file_content();
+    test_tls_bad_key_file_content();
+    test_tls_crl_symlink_rejected();
+    test_tls_crl_bad_content();
+    test_tls_verify_peer_empty_hostname_rejected();
+    test_tls_sec012_duplicate_node_id();
+    test_tls_sec013_duplicate_hello();
+    test_tls_delay_buffer_full();
+
+    // H-series coverage gap tests (lines 1230-1232, 1451-1454, 1472-1473,
+    //                               1478-1480, 1553-1557, 1615-1618):
+    test_tls_full_frame_deserialize_fail();
+    test_tls_inbound_partition_with_hello();
+    test_tls_recv_queue_overflow_with_hello();
+    test_tls_inbound_reorder_buffers_message();
+    test_tls_send_to_slot_fail();
+    test_tls_broadcast_send_fail();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);
