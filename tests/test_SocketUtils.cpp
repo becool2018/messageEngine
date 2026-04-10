@@ -1274,9 +1274,10 @@ static void test_socket_create_tcp_fail_resource_error()
     (void)close(probe_fd);  // free it; next socket() will get this number again
 
     // Tighten the limit so fd == probe_fd is forbidden (max fd = probe_fd - 1).
-    struct rlimit old_rl;
-    (void)getrlimit(RLIMIT_NOFILE, &old_rl);
-    struct rlimit tight_rl;
+    struct rlimit old_rl = {};                           // §7b: init at declaration
+    int gr = getrlimit(RLIMIT_NOFILE, &old_rl);         // Rule 7: check return value
+    assert(gr == 0);
+    struct rlimit tight_rl = {};                         // §7b: init at declaration
     tight_rl.rlim_cur = static_cast<rlim_t>(probe_fd);
     tight_rl.rlim_max = old_rl.rlim_max;
     int sr = setrlimit(RLIMIT_NOFILE, &tight_rl);
@@ -1346,7 +1347,9 @@ int main()
     test_send_to_closed_fd();
     test_recv_from_zero_datagram();
 
-    // log_socket_create_error() WARNING_HI branch (EMFILE via setrlimit)
+    // MUST remain last: transiently modifies process-wide RLIMIT_NOFILE.
+    // Restore happens inside the function before any assert fires, but placement
+    // last is a second safety layer — no test that follows can be starved of fds.
     test_socket_create_tcp_fail_resource_error();
 
     printf("=== ALL PASSED ===\n");
