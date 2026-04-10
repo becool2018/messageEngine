@@ -171,6 +171,7 @@ PLATFORM_SRC := \
     src/platform/SocketUtils.cpp \
     src/platform/TcpBackend.cpp \
     src/platform/TlsTcpBackend.cpp \
+    src/platform/TlsSessionStore.cpp \
     src/platform/UdpBackend.cpp \
     src/platform/DtlsUdpBackend.cpp \
     src/platform/LocalSimHarness.cpp \

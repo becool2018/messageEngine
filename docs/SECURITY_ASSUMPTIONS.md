@@ -321,6 +321,63 @@ guide. Re-evaluate if the system is deployed on a low-latency plaintext transpor
 
 ---
 
+## §13 TLS session store lifetime contract (HAZ-017)
+
+`TlsSessionStore` is a caller-owned value type that holds a TLS session snapshot
+(including master-secret-derived material) between a `TlsTcpBackend::close()` call
+and the next `init()` call on the same backend instance.  This design allows
+abbreviated TLS session resumption (RFC 5077) across reconnect cycles without
+requiring dynamic allocation on the critical path (Power of 10 Rule 3).
+
+**Caller responsibilities:**
+
+1. **Call `store.zeroize()` before scope exit** — The store retains active session
+   material (including master-secret-derived ticket key data) from the moment
+   `try_save_client_session()` sets `session_valid = true` until `zeroize()` is
+   explicitly invoked.  The caller must call `zeroize()` before:
+   - The `TlsSessionStore` goes out of scope (stack frame or heap free).
+   - The process terminates normally.
+   - Any point where the memory may be read externally (core dump, swap file,
+     hibernation image, heap-spray read).
+
+2. **Do not serialize or pass the store across process boundaries** — The
+   `mbedtls_ssl_session` struct contains internal pointers that are valid only
+   within the originating process.  Copying the raw bytes to another process or
+   persisting them to disk is undefined behaviour and may expose key material.
+
+3. **Do not copy or move the store** — The copy and move constructors and
+   assignment operators are `= delete`.  Any attempt to copy or move a
+   `TlsSessionStore` is a compile-time error.  This enforces the mbedTLS
+   constraint that `mbedtls_ssl_session` cannot be bitwise-copied (it may hold
+   internal heap allocations that cannot be aliased).
+
+**Library-provided safety nets (informational — not a substitute for rule 1):**
+
+- `TlsSessionStore::~TlsSessionStore()` calls `zeroize()` automatically.  This
+  provides a last-resort cleanup if the caller forgets the explicit call, but
+  relies on the destructor running before the memory is read externally.  Do not
+  rely on this as the primary cleanup path.
+- `TlsTcpBackend::close()` logs `WARNING_LO` when `store.session_valid == true`
+  after close, reminding the caller that session material is still live.
+- `TlsSessionStore::zeroize()` uses `mbedtls_platform_zeroize()` (not `memset`)
+  to guarantee the compiler cannot elide the zeroing operation (CWE-14,
+  CLAUDE.md §7c).
+
+**TLS 1.2 forward-secrecy limitation:**
+When a TLS 1.2 session is resumed via this store, the abbreviated handshake reuses
+the original session's key material; no new ephemeral Diffie-Hellman exchange
+occurs.  This means that if the original session's key material is compromised, all
+traffic from the resumed session is also compromised (no forward secrecy for
+resumed sessions under TLS 1.2 — RFC 5077 §5).  `try_save_client_session()` logs
+a one-time `WARNING_LO` on the first TLS 1.2 session save to alert the operator.
+TLS 1.3 session resumption uses PSK-based 0-RTT or 1-RTT mechanisms that preserve
+forward secrecy; this limitation does not apply when TLS 1.3 is negotiated.
+
+**Hazard coverage:** HAZ-017 (CWE-316 — session material in caller memory after
+close); extension of HAZ-012 (CWE-14 — private key in freed memory).
+
+---
+
 ## References
 
 - `docs/HAZARD_ANALYSIS.md` — hazard catalogue and SC function classification

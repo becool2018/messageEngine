@@ -29,12 +29,15 @@
  *   - Message framing (4-byte big-endian length prefix) is preserved.
  *
  * When config.tls.session_resumption_enabled is true (requires tls_enabled):
- *   - Client: saves the negotiated session after the first handshake and
- *     presents it on reconnect to attempt abbreviated resumption (RFC 5077).
+ *   - Client: saves the negotiated session into a caller-injected TlsSessionStore
+ *     after the first handshake and presents it on reconnect to attempt
+ *     abbreviated resumption (RFC 5077).  Call set_session_store() before init().
  *   - Server: enables session ticket support via
  *     mbedtls_ssl_conf_session_tickets() so connecting clients may resume.
- *   - Session state is stored in fixed-size mbedtls_ssl_session m_saved_session
- *     (no dynamic allocation on the critical path — Power of 10 Rule 3).
+ *   - Session state is stored in caller-owned TlsSessionStore (no dynamic
+ *     allocation on the critical path — Power of 10 Rule 3).
+ *   - Caller must call store.zeroize() when session material is no longer needed
+ *     (SECURITY_ASSUMPTIONS.md §13, CLAUDE.md §7c).
  *
  * Encryption library: mbedTLS 4.0 (PSA Crypto backend).
  *   RNG: PSA Crypto internal DRBG (psa_crypto_init() called in init()).
@@ -78,7 +81,8 @@
 #include "core/RingBuffer.hpp"
 #include "platform/ImpairmentEngine.hpp"
 
-class ISocketOps;   // forward declaration — see platform/ISocketOps.hpp
+class ISocketOps;      // forward declaration — see platform/ISocketOps.hpp
+struct TlsSessionStore; // forward declaration — see platform/TlsSessionStore.hpp
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TlsTcpBackend
@@ -116,6 +120,18 @@ public:
     // Called by DeliveryEngine::drain_hello_reconnects() to reset stale ordering state.
     NodeId pop_hello_peer() override;
 
+    /// Inject an external TlsSessionStore for session resumption across
+    /// close() → init() cycles (REQ-6.3.4).  Must be called before init().
+    /// The store is not owned by this backend; the caller controls its lifetime
+    /// and must call store.zeroize() when session material is no longer needed.
+    ///
+    /// Preconditions: backend must not be open (m_open == false).
+    /// The pointer must either be null or equal to the previously-injected pointer
+    /// (prevents accidental re-injection of a different store after session save).
+    ///
+    /// NSC: lifecycle configuration only; no runtime message-delivery policy.
+    void set_session_store(TlsSessionStore* store);
+
 private:
     // ── mbedTLS contexts (fixed static allocation — Power of 10 Rule 3) ─────
     mbedtls_ssl_config  m_ssl_conf;                        ///< Shared TLS config
@@ -129,12 +145,14 @@ private:
     mbedtls_ssl_context m_ssl[MAX_TCP_CONNECTIONS];        ///< Per-client TLS sessions
 
     // ── TLS session resumption state (REQ-6.3.4) ─────────────────────────────
-    /// Saved TLS session for client-side resumption (session tickets, RFC 5077).
-    /// Fixed-size mbedTLS struct — no dynamic allocation (Power of 10 Rule 3).
-    /// Initialized in both constructors; freed in close() and destructor.
-    mbedtls_ssl_session    m_saved_session;
-    /// true when m_saved_session contains a valid, resumable TLS session.
-    bool                   m_session_saved;
+    /// Caller-injected session store for client-side resumption across close() → init().
+    /// Non-owning pointer; caller controls lifetime and must call store.zeroize() when done.
+    /// Null means no session resumption attempted even if session_resumption_enabled=true.
+    /// Injected via set_session_store() before init(); checked in tls_connect_handshake().
+    TlsSessionStore*       m_session_store_ptr;
+    /// One-time forward-secrecy warning guard — set on first TLS 1.2 session save to
+    /// prevent repetitive WARNING_LO spam across multiple reconnect cycles (NSC).
+    bool                   m_fs_warning_logged;
     /// Fix 2: session ticket key context — holds ticket encryption key and lifetime.
     /// Initialized in both constructors; setup in setup_tls_config(); freed in
     /// close() and destructor. Server-side only (REQ-6.3.4).
@@ -239,19 +257,30 @@ private:
     /// tls_enabled is true. Extracted to reduce connect_to_server() CC.
     Result tls_connect_handshake();
 
+    /// Return true when the injected TlsSessionStore has a valid session that
+    /// can be presented to the server for abbreviated resumption (RFC 5077).
+    /// Used in tls_connect_handshake() to keep its CC ≤ 10 by moving the
+    /// three-part boolean guard into this separate helper.
+    /// NSC: pure boolean predicate with no side effects.
+    bool has_resumable_session() const;
+
 #if defined(MBEDTLS_SSL_SESSION_TICKETS)
-    /// Save the TLS session from slot 0 into m_saved_session after a successful
-    /// client handshake.  Called only when session_resumption_enabled is true.
-    /// Failure is non-fatal: logs WARNING_LO and leaves m_session_saved false.
+    /// Save the TLS session from slot 0 into *m_session_store_ptr after a
+    /// successful client handshake.  Called only when session_resumption_enabled
+    /// is true and m_session_store_ptr is non-null.
+    /// Failure is non-fatal: logs WARNING_LO and leaves store.session_valid false.
+    /// Also logs a one-time WARNING_LO if TLS 1.2 is negotiated (no forward secrecy
+    /// for resumed sessions — RFC 5077, SECURITY_ASSUMPTIONS.md §13).
     /// Extracted from tls_connect_handshake() to keep its CC ≤ 10 (REQ-6.3.4).
     void try_save_client_session();
 #endif /* MBEDTLS_SSL_SESSION_TICKETS */
 
-    /// Attempt to load m_saved_session into m_ssl[0] before the TLS handshake
+    /// Attempt to load *m_session_store_ptr into m_ssl[0] before the TLS handshake
     /// to enable abbreviated session resumption (RFC 5077, REQ-6.3.4).
-    /// Called only when session_resumption_enabled is true and m_session_saved
-    /// is true.  Failure is non-fatal: logs WARNING_LO and full handshake
-    /// proceeds.  Extracted from tls_connect_handshake() to reduce its CC.
+    /// Called only when session_resumption_enabled is true, m_session_store_ptr is
+    /// non-null, and m_session_store_ptr->session_valid is true.
+    /// Failure is non-fatal: logs WARNING_LO and full handshake proceeds.
+    /// Extracted from tls_connect_handshake() to reduce its CC.
     void try_load_client_session();
 
     /// Accept one pending connection and optionally perform TLS handshake.

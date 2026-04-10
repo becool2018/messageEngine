@@ -407,6 +407,9 @@ The global security rules §7c and §7d apply to the following project component
   Applies to: all key-loading paths in TlsTcpBackend (src/platform/TlsTcpBackend.cpp) and
   DtlsUdpBackend (src/platform/DtlsUdpBackend.cpp), and any future code that handles
   TLS/DTLS credentials or session tokens.
+  Also applies to: TlsSessionStore::zeroize() (src/platform/TlsSessionStore.cpp) —
+  zeroizes TLS session material (master-secret-derived data) before the
+  TlsSessionStore struct goes out of scope or is reused (HAZ-017, CWE-316).
 
 §7d — Timing-safe comparisons:
   Currently applies to: the DTLS cookie exchange path in DtlsUdpBackend (REQ-6.4.2,
