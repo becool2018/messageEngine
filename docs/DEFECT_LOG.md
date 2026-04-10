@@ -1128,3 +1128,81 @@ All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-04-09. No defects found. All entry and exit criteria satisfied. Inspection INSP-020 closed PASS.
+
+---
+
+### INSP-021 — G-series security hardening round 2: HAZ-017 CWE-316 notifications, TlsSessionStore, assertion quality, tautology checklist (2026-04-09)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-09 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author acting as senior security engineer); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | PASS — 1 MAJOR pre-existing defect (DEF-021-1) found and fixed; all other findings resolved in-session |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `src/platform/TlsSessionStore.cpp` / `.hpp` | New caller-owned value type for TLS session resumption material; `zeroize()` uses `mbedtls_platform_zeroize` (§7c / CWE-14); `session_valid` is `std::atomic<bool>` (HAZ-017) |
+| `src/platform/TlsTcpBackend.cpp` | Replaced inline session fields with `TlsSessionStore*`; added `log_stale_ticket_warning()` and `log_live_session_material_warning()` static helpers; `close()` made idempotent (`if (!m_open) return;`); `try_save_client_session()` severity upgraded to WARNING_HI (CWE-316); `log_fs_warning_if_tls12()` post-condition assertion replaced (tautology fix) |
+| `src/platform/TlsTcpBackend.hpp` | `try_save_client_session()` doc comment updated to WARNING_HI; `set_session_store()` declaration |
+| `tests/test_TlsTcpBackend.cpp` | Added `test_tls_session_resumption_load_path`; added `test_log_fs_warning_*` tests with two independently-falsifiable assertions each; `#if defined(MBEDTLS_SSL_SESSION_TICKETS)` guard on HAZ-017 core invariant assert |
+| `docs/INSPECTION_CHECKLIST.md` | Added C9a row: independently-falsifiable assertion requirement with tautology failure modes and named-ceiling policy |
+| `docs/SECURITY_ASSUMPTIONS.md` | WARNING_LO → WARNING_HI for CWE-316 and TLS 1.2 FS advisory; static storage duration caveat; RFC 5077 new-ticket overwrite note |
+| `docs/HAZARD_ANALYSIS.md` | WARNING_LO → WARNING_HI in HAZ-017 three places; Cat II rationale note added |
+| `docs/COVERAGE_CEILINGS.md` | Build-configuration coverage note for `MBEDTLS_SSL_SESSION_TICKETS`; TlsSessionStore.cpp section added (assertion-ceiling note for logically-equivalent dual-assertion pattern) |
+| `src/.clang-tidy` | Added `cppcoreguidelines-owning-memory` check |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations (CC ≤ 10 enforced) | PASS |
+| `make run_tests` all tests green | PASS |
+| All new/modified `src/` files carry `// Implements: REQ-x.x` tags | PASS |
+| All new/modified `tests/` files carry `// Verifies: REQ-x.x` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Defects found
+
+| ID | File : function | Description | Severity | Status | Disposition | Assignee | Target |
+|----|----------------|-------------|----------|--------|-------------|----------|--------|
+| DEF-021-1 | `src/platform/TlsTcpBackend.cpp` : `close()` | **NF-6: `m_open` plain `bool` — non-atomic check-then-act sequence admits concurrent double-free (CWE-416, pre-existing).** `close()` guarded teardown with `if (!m_open) return;` and cleared with `m_open = false`. Both operations were on a plain (non-atomic) `bool` member. Concurrent `close()` calls could both pass the guard and double-free mbedTLS objects (CWE-416). | MAJOR | **CLOSED** | FIX | `m_open` changed to `std::atomic<bool>`; `close()` now uses `compare_exchange_strong(expected=true, false, acq_rel, acquire)` — exactly one concurrent caller proceeds to teardown. `m_open = false` assignment removed (CAS clears it). `TlsTcpBackend.hpp` THREAD-SAFETY comment updated; `SECURITY_ASSUMPTIONS.md §14` documents remaining non-thread-safe methods. |
+
+#### Resolution path for DEF-021-1
+
+Two acceptable dispositions before merge:
+
+**Option A — WAIVE (contract restriction):**
+Add a `// THREAD-SAFETY: close() is not re-entrant; callers must serialize concurrent calls` doc comment to `TlsTcpBackend.hpp` and document in `docs/SECURITY_ASSUMPTIONS.md §14`. Rationale: the existing tests, demos, and production usage pattern are all single-threaded at the transport layer; no caller today issues concurrent `close()`. This matches the thread-safety contract of all other `TlsTcpBackend` mutating methods (`send_message`, `receive_message`, etc.), none of which are synchronized either.
+
+**Option B — FIX (atomic conversion):**
+Change `bool m_open` to `std::atomic<bool> m_open{false}` and replace the idempotent check+clear with:
+```cpp
+bool expected = true;
+if (!m_open.compare_exchange_strong(expected, false)) { return; }
+```
+This is a lock-free single-entry guarantee. No other changes required. `std::atomic<bool>` is permitted by CLAUDE.md §1d.
+
+Moderator recommendation: Option A for this PR (no callers issue concurrent close), with a REQ ID assigned for Option B before the first multi-threaded embedding integration.
+
+#### Checklist reference
+
+All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
+- `TlsSessionStore`: SC annotation (HAZ-012, HAZ-017) present on `zeroize()`. ✓
+- `mbedtls_platform_zeroize` used throughout; no raw `memset` on crypto material (§7c). ✓
+- `session_valid` is `std::atomic<bool>` per CLAUDE.md §1d carve-out; no GCC `__atomic` built-ins. ✓
+- `log_live_session_material_warning()` returns `bool`; Assert 2 at call site uses `m_tls_enabled` (context not available inside helper) — TOCTOU-free (no reload of `session_valid.load()` after snapshot). ✓
+- `close()` CC = 10 (at ceiling); helpers extracted to stay within budget. ✓
+- C9a tautology check: all assertions verified independently falsifiable; logically-equivalent dual-assertion in `TlsSessionStore` documented as named ceiling in `COVERAGE_CEILINGS.md`. ✓
+- `cppcoreguidelines-owning-memory` added to `src/.clang-tidy`; all `new`/`delete` uses in `src/` confirmed absent. ✓
+- DEF-021-1 (MAJOR pre-existing): logged DEFER with two explicit resolution paths; moderator recommends Option A for this PR. ✓
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-09. DEF-021-1 resolved FIX — `m_open` converted to `std::atomic<bool>`; `close()` uses `compare_exchange_strong` for lock-free single-entry guarantee (CWE-416 eliminated). `SECURITY_ASSUMPTIONS.md §14` updated to reflect the fix and document remaining non-thread-safe methods. All entry and exit criteria satisfied. `make lint` and `make run_tests` PASS. Inspection INSP-021 closed PASS.

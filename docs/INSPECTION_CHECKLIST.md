@@ -63,7 +63,8 @@ every item is checked PASS.
 | C6  | Rule 4 | All functions fit on one printed page | |
 | C7  | Rule 4 | Cyclomatic complexity ≤ 10 per function | |
 | C8  | Rule 5 | No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used instead | |
-| C9  | Rule 5 | Average ≥ 2 `NEVER_COMPILED_OUT_ASSERT` calls per non-trivial function | |
+| C9  | Rule 5 | ≥ 2 `NEVER_COMPILED_OUT_ASSERT` calls per non-trivial function | |
+| C9a | Rule 5 | Each assertion is independently falsifiable — not logically implied by any prior guard, early return, or variable definition in the same scope. Tautology test: ask "can this condition be false given what has already executed to reach this point?" Common failure modes: (1) `!X \|\| condition_that_is_a_conjunct_of_X` — always true by De Morgan; (2) asserting a value unconditionally set on the immediately preceding line with no intervening branching code; (3) placing `ASSERT(m_flag)` immediately after `if (!m_flag) return;`. When no two independent runtime-falsifiable assertions exist for a small helper (e.g., a single-snapshot conditional log), place the second assertion at the call site using context not available inside the helper, or document the limitation as a named ceiling in `docs/COVERAGE_CEILINGS.md`. | |
 | C10 | Rule 6 | Variables declared in the smallest possible scope | |
 | C11 | Rule 7 | Every non-void return value is explicitly checked by the caller | |
 | C12 | Rule 8 | No macros used for control flow or to obscure structure | |

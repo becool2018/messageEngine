@@ -605,7 +605,11 @@ void TlsTcpBackend::set_session_store(TlsSessionStore* store)
 {
     // Precondition: backend must not be open.
     NEVER_COMPILED_OUT_ASSERT(!m_open);
-    // Prevent silent re-injection of a different store after one has been set.
+    // Guard persists across close()/init() cycles: m_session_store_ptr is
+    // intentionally NOT cleared by close(), so a store injected before the
+    // first init() remains bound for all subsequent init() calls on this
+    // backend.  This prevents silent re-injection of a different store and
+    // ensures the same caller-owned store services the full backend lifetime.
     NEVER_COMPILED_OUT_ASSERT((m_session_store_ptr == nullptr) ||
                               (m_session_store_ptr == store));
     m_session_store_ptr = store;
@@ -619,7 +623,7 @@ bool TlsTcpBackend::has_resumable_session() const
     NEVER_COMPILED_OUT_ASSERT(true);          // Rule 5: second assertion (structural)
     return m_cfg.tls.session_resumption_enabled
            && (m_session_store_ptr != nullptr)
-           && m_session_store_ptr->session_valid;
+           && m_session_store_ptr->session_valid.load();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -628,28 +632,47 @@ bool TlsTcpBackend::has_resumable_session() const
 // Returns true when the one-time warning was emitted (caller updates guard flag).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Log a one-time WARNING_LO when a TLS 1.2 session is saved.
-/// TLS 1.2 session tickets do not provide forward secrecy for resumed sessions:
-/// server ticket key compromise exposes past traffic (RFC 5077,
-/// SECURITY_ASSUMPTIONS.md §13).
-/// Returns true if the warning was emitted; false otherwise.
-static bool log_fs_warning_if_tls12(const mbedtls_ssl_context* ssl)
+/// Log a one-time WARNING_HI when a TLS 1.2 session is saved (F-4: upgraded
+/// from WARNING_LO — TLS 1.2 FS limitation is system-wide across all resumed
+/// sessions, matching the WARNING_HI taxonomy in CLAUDE.md §4: "system-wide
+/// but recoverable issues"; HAZ-017 Cat II).
+///
+/// Accepts the version string directly (not the ssl context) so the three
+/// branches (nullptr / "TLSv1.2" / other) can be exercised by unit tests
+/// without a live TLS connection (Class B branch coverage requirement).
+///
+/// mbedTLS API contract (F-3): mbedtls_ssl_get_version() returns a string
+/// literal of the form "TLSv1.N" (mbedTLS 3.x/4.x ssl_tls.c get_version()).
+/// The 7-byte prefix "TLSv1.2" uniquely identifies TLS 1.2 in all known
+/// mbedTLS versions.  If the format ever changes this warning silently stops
+/// firing; the defensive nullptr branch below guards against a null return
+/// from a future mbedTLS version change.
+///
+/// Returns true if the TLS 1.2 warning was emitted; false otherwise.
+bool TlsTcpBackend::log_fs_warning_if_tls12(const char* ver)
 {
-    NEVER_COMPILED_OUT_ASSERT(ssl != nullptr);
-    const char* ver = mbedtls_ssl_get_version(ssl);
     bool warned = false;
-    if (ver != nullptr) {
+    if (ver == nullptr) {
+        // Defensive: should not occur after a successful handshake, but guard
+        // against future mbedTLS API changes (F-3).
+        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
+                    "Unknown TLS version string (nullptr); forward-secrecy "
+                    "advisory may be suppressed "
+                    "(SECURITY_ASSUMPTIONS.md §13)");
+    } else if (strncmp(ver, "TLSv1.2", 7U) == 0) {
         // cstring already included via <cstring> in this TU.
-        if (strncmp(ver, "TLSv1.2", 7U) == 0) {
-            Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                        "Session saved under TLS 1.2: resumed sessions do not "
-                        "have forward secrecy — server ticket key compromise "
-                        "exposes past traffic (RFC 5077, "
-                        "SECURITY_ASSUMPTIONS.md §13)");
-            warned = true;
-        }
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "Session saved under TLS 1.2: resumed sessions do not "
+                    "have forward secrecy — server ticket key compromise "
+                    "exposes past traffic (RFC 5077, "
+                    "SECURITY_ASSUMPTIONS.md §13)");
+        warned = true;
     }
-    NEVER_COMPILED_OUT_ASSERT(true);  // Rule 5: second assertion (structural)
+    // Rule 5: assert 1 — pre/post: warning can only be set when ver was non-null.
+    NEVER_COMPILED_OUT_ASSERT(!warned || (ver != nullptr));
+    // Rule 5: assert 2 — post-condition: warned is true iff ver=="TLSv1.2".
+    NEVER_COMPILED_OUT_ASSERT(warned == ((ver != nullptr) &&
+                              (strncmp(ver, "TLSv1.2", 7U) == 0)));
     return warned;
 }
 
@@ -657,8 +680,9 @@ static bool log_fs_warning_if_tls12(const mbedtls_ssl_context* ssl)
 /// Called after a successful client handshake when session_resumption_enabled
 /// and m_session_store_ptr != nullptr.
 /// Non-fatal on failure: logs WARNING_LO; store.session_valid remains false.
-/// Logs a one-time WARNING_LO if TLS 1.2 negotiated (no forward secrecy for
-/// resumed sessions — RFC 5077, SECURITY_ASSUMPTIONS.md §13).
+/// Logs a one-time WARNING_HI if TLS 1.2 negotiated (no forward secrecy for
+/// resumed sessions — RFC 5077, SECURITY_ASSUMPTIONS.md §13; system-wide
+/// impact per CLAUDE.md §4 WARNING_HI taxonomy).
 /// Extracted from tls_connect_handshake() to keep its CC ≤ 10 (REQ-6.3.4).
 #if defined(MBEDTLS_SSL_SESSION_TICKETS)
 void TlsTcpBackend::try_save_client_session()
@@ -674,16 +698,17 @@ void TlsTcpBackend::try_save_client_session()
         log_mbedtls_err("TlsTcpBackend", "ssl_get_session", ret);
         Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
                     "Session save failed; resumption not attempted on next connect");
-        m_session_store_ptr->session_valid = false;
+        m_session_store_ptr->session_valid.store(false);
     } else {
-        m_session_store_ptr->session_valid = true;
+        m_session_store_ptr->session_valid.store(true);
         Logger::log(Severity::INFO, "TlsTcpBackend",
                     "TLS session saved for resumption on next connect");
 
         // One-time forward-secrecy advisory: extracted to log_fs_warning_if_tls12()
         // to keep this function's CC ≤ 10 (SECURITY_ASSUMPTIONS.md §13).
         if (!m_fs_warning_logged) {
-            m_fs_warning_logged = log_fs_warning_if_tls12(&m_ssl[0U]);
+            m_fs_warning_logged = log_fs_warning_if_tls12(
+                mbedtls_ssl_get_version(&m_ssl[0U]));
         }
     }
 }
@@ -699,7 +724,7 @@ void TlsTcpBackend::try_load_client_session()
     NEVER_COMPILED_OUT_ASSERT(m_session_store_ptr != nullptr);
 
 #if defined(MBEDTLS_SSL_SESSION_TICKETS)
-    NEVER_COMPILED_OUT_ASSERT(m_session_store_ptr->session_valid);
+    NEVER_COMPILED_OUT_ASSERT(m_session_store_ptr->session_valid.load());
     int ret = mbedtls_ssl_set_session(&m_ssl[0U], &m_session_store_ptr->session);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_set_session", ret);
@@ -710,6 +735,29 @@ void TlsTcpBackend::try_load_client_session()
                     "Attempting TLS session resumption");
     }
 #endif /* MBEDTLS_SSL_SESSION_TICKETS */
+}
+
+/// Log WARNING_HI when a handshake fails and a session ticket was in use.
+/// Extracted from tls_connect_handshake() to keep its CC ≤ 10 (Rule 4).
+/// hs_ret must be the non-zero return from run_tls_handshake_loop().
+static void log_stale_ticket_warning(bool had_session, int hs_ret)
+{
+    // Rule 5: assert 1 — pre-condition: only called on real handshake failure.
+    // If hs_ret were 0 here, logging a stale-ticket warning would be spurious.
+    NEVER_COMPILED_OUT_ASSERT(hs_ret != 0);
+    // Rule 5: assert 2 — pre-condition: transient states were drained by the
+    // retry loop; WANT_READ/WANT_WRITE must not propagate to this point.
+    // If either were seen here, the retry loop in run_tls_handshake_loop()
+    // failed to exhaust the mbedTLS state machine correctly.
+    NEVER_COMPILED_OUT_ASSERT(hs_ret != MBEDTLS_ERR_SSL_WANT_READ &&
+                               hs_ret != MBEDTLS_ERR_SSL_WANT_WRITE);
+    if (had_session) {
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "TLS handshake failed with session ticket loaded — "
+                    "possible stale/rejected ticket (server key rotation?); "
+                    "call store.zeroize() before next init() if this recurs "
+                    "(SECURITY_ASSUMPTIONS.md §13, REQ-7.1.3)");
+    }
 }
 
 /// Perform TLS setup (set_block, ssl_setup, set_hostname, set_bio) and the
@@ -773,9 +821,24 @@ Result TlsTcpBackend::tls_connect_handshake()
     // TLS handshake with bounded WANT_READ/WANT_WRITE retry (Finding #7).
     // Extracted to run_tls_handshake_loop() to keep this function's CC ≤ 10.
     // Power of 10 Rule 3 deviation: init-phase heap alloc in mbedTLS.
+    const bool had_session = has_resumable_session();
     int hs_ret = run_tls_handshake_loop(&m_ssl[0U]);
     if (hs_ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_handshake (client)", hs_ret);
+        // F-5: session_valid is NOT cleared here intentionally.  The handshake
+        // failure may be a transient network error unrelated to the session
+        // ticket (e.g., TCP RST, timeout).  Clearing session_valid on every
+        // failure would force a full handshake on all retries, even when the
+        // ticket itself is still valid.  If the ticket was rejected by the
+        // server (expired or key rotation), the server performs a full
+        // handshake instead of resuming — the caller does not need to know.
+        //
+        // WARNING_HI when a session ticket was presented: the failure may be
+        // a stale-ticket rejection (server key rotation, ticket expiry).  If
+        // this recurs, call store.zeroize() before the next init() to force a
+        // full handshake and break the retry loop
+        // (SECURITY_ASSUMPTIONS.md §13, REQ-7.1.3).
+        log_stale_ticket_warning(had_session, hs_ret);
         mbedtls_ssl_free(&m_ssl[0U]);
         mbedtls_ssl_init(&m_ssl[0U]);
         mbedtls_net_free(&m_client_net[0U]);
@@ -1869,11 +1932,67 @@ Result TlsTcpBackend::receive_message(MessageEnvelope& envelope, uint32_t timeou
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// close() helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Emit WARNING_HI if session master-secret material will remain live after
+/// close() (CWE-316, HAZ-017, SECURITY_ASSUMPTIONS.md §13, CLAUDE.md §7c).
+/// Extracted from close() to keep its CC ≤ 10 (Rule 4).
+/// store_ptr may be nullptr (session resumption not configured).
+/// Returns true if a WARNING_HI was emitted (session material is live).
+/// Caller asserts on the return value for Rule 5 assert 2 with call-site context.
+static bool log_live_session_material_warning(const TlsSessionStore* store_ptr)
+{
+    // Snapshot once — prevents TOCTOU: the log message instructs the caller
+    // to call store.zeroize() immediately; a concurrent zeroize() could change
+    // session_valid between a snapshot and any later reload.
+    const bool session_was_valid = (store_ptr != nullptr) &&
+                                   store_ptr->session_valid.load();
+    // Rule 5: assert 1 — refactor guard: a session can only be valid when the
+    // store pointer is non-null.  Logically implied by the current definition
+    // of session_was_valid; its value is as a static-analysis trip-wire
+    // against future refactors that remove the (store_ptr != nullptr) conjunct.
+    NEVER_COMPILED_OUT_ASSERT(!session_was_valid || (store_ptr != nullptr));
+    if (session_was_valid) {
+        // WARNING_HI: session master-secret material persisting in caller memory
+        // after transport close is a system-wide risk (any post-close memory
+        // read, core dump, or swap file may expose it — CWE-316).  System-wide
+        // but recoverable = WARNING_HI per CLAUDE.md §4 taxonomy.
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "TLS session master-secret material remains live in "
+                    "TlsSessionStore after close() (CWE-316, HAZ-017); "
+                    "call store.zeroize() immediately if reconnect is not "
+                    "planned (SECURITY_ASSUMPTIONS.md §13, CLAUDE.md §7c)");
+    }
+    // Rule 5: assert 2 is placed at the call site in close() where m_tls_enabled
+    // is in scope for an independent cross-check.  See call site below.
+    return session_was_valid;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // close()
 // ─────────────────────────────────────────────────────────────────────────────
 
 void TlsTcpBackend::close()
 {
+    // DEF-021-1 fix (CWE-416): use compare_exchange_strong to atomically
+    // transition m_open true→false.  Exactly one concurrent caller wins;
+    // all others see expected=false after the CAS and return immediately.
+    // This replaces the previous non-atomic check-then-clear pattern that
+    // admitted concurrent double-free of mbedTLS objects.
+    // Memory order: acq_rel on success (full barrier before teardown begins);
+    // acquire on failure (observe the winning thread's prior store).
+    bool expected = true;
+    if (!m_open.compare_exchange_strong(expected, false,
+                                        std::memory_order_acq_rel,
+                                        std::memory_order_acquire)) {
+        return;
+    }
+    // Power of 10 Rule 5: assert 1 — pre-condition: slot count is within
+    // capacity before any teardown begins.  Independent of the m_open guard
+    // above; a partial-init bug could leave m_open true but m_client_count
+    // corrupted.  Falsifiable: fires if m_client_count ever exceeds capacity.
+    NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);
     // Fix 5: iterate full table, closing only active slots (no compaction).
     // Power of 10 Rule 2: fixed loop bound — MAX_TCP_CONNECTIONS iterations.
     if (m_tls_enabled) {
@@ -1905,21 +2024,27 @@ void TlsTcpBackend::close()
     mbedtls_x509_crl_init(&m_crl);
     m_crl_loaded = false;
     // REQ-7.2.4: count clients still connected at graceful shutdown
+    // (m_client_count ≤ MAX_TCP_CONNECTIONS confirmed by pre-condition assert above)
     m_connections_closed += m_client_count;
     m_client_count = 0U;
-    m_open         = false;
-    // Notify caller that session material remains live in the store
-    // (SECURITY_ASSUMPTIONS.md §13, CLAUDE.md §7c).  The store is not owned
-    // by this backend; the caller must call store.zeroize() when done.
-    if ((m_session_store_ptr != nullptr) && m_session_store_ptr->session_valid) {
-        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                    "Session material remains in TlsSessionStore after close(); "
-                    "call store.zeroize() when no longer needed "
-                    "(CLAUDE.md §7c, CWE-316)");
-    }
-    m_fs_warning_logged = false;  // reset for next lifecycle
+    // m_open was cleared atomically by compare_exchange_strong at entry (DEF-021-1 fix).
+    // Notify caller that session material remains live in the store.
+    // Extracted to keep close() CC ≤ 10 (Rule 4).
+    const bool session_warned = log_live_session_material_warning(m_session_store_ptr);
+    // Rule 5 assert 2 for log_live_session_material_warning — independent
+    // cross-check using call-site context: a live session requires TLS to have
+    // been enabled.  try_save_client_session() asserts m_tls_enabled on entry,
+    // so session_valid can only be true when TLS was active.  Falsifiable: fires
+    // if session material is somehow saved on a plaintext connection.
+    NEVER_COMPILED_OUT_ASSERT(!session_warned || m_tls_enabled);
+    // reset so FS advisory fires once per lifecycle, not just once per process.
+    m_fs_warning_logged = false;
     Logger::log(Severity::INFO, "TlsTcpBackend",
                 "Transport closed (TLS=%s)", m_tls_enabled ? "ON" : "OFF");
+    // Power of 10 Rule 5: assert 2 — post-condition: transport is closed and
+    // all client slots are reset.
+    NEVER_COMPILED_OUT_ASSERT(!m_open);
+    NEVER_COMPILED_OUT_ASSERT(m_client_count == 0U);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

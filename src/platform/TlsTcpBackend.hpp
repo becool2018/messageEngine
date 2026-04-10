@@ -48,6 +48,14 @@
  *   certificate parsing). This occurs only during init()/accept() — not on the
  *   send/receive critical path. This is documented as an init-phase deviation.
  *
+ * THREAD-SAFETY (DEF-021-1 fixed — SECURITY_ASSUMPTIONS.md §14):
+ *   close() is safe to call concurrently from multiple threads.  m_open is
+ *   std::atomic<bool>; close() uses compare_exchange_strong to guarantee
+ *   exactly one caller executes teardown even under data races (CWE-416 fixed).
+ *   All other mutating methods (init, send_message, receive_message,
+ *   register_local_id) are NOT thread-safe with respect to each other and
+ *   require external serialization by the caller.
+ *
  * Rules applied:
  *   - Power of 10: fixed loop bounds, ≥2 assertions per function,
  *     all return values checked, fixed stack buffers.
@@ -64,6 +72,7 @@
 #ifndef PLATFORM_TLS_TCP_BACKEND_HPP
 #define PLATFORM_TLS_TCP_BACKEND_HPP
 
+#include <atomic>          // std::atomic<bool> for m_open (DEF-021-1 / CWE-416 fix)
 #include <cstdint>
 #include <poll.h>          // struct pollfd — used in build_poll_fds() helper
 #include <mbedtls/ssl.h>
@@ -132,6 +141,14 @@ public:
     /// NSC: lifecycle configuration only; no runtime message-delivery policy.
     void set_session_store(TlsSessionStore* store);
 
+    /// Visible for unit testing — logs the TLS 1.2 forward-secrecy advisory.
+    /// Production code calls this through try_save_client_session() which
+    /// passes mbedtls_ssl_get_version(); exposed here so all three branches
+    /// (nullptr / "TLSv1.2" / other) can be exercised without a live TLS
+    /// connection (Class B branch coverage, REQ-6.3.4).
+    /// NSC: logging helper only; no message-delivery policy.
+    static bool log_fs_warning_if_tls12(const char* ver);
+
 private:
     // ── mbedTLS contexts (fixed static allocation — Power of 10 Rule 3) ─────
     mbedtls_ssl_config  m_ssl_conf;                        ///< Shared TLS config
@@ -167,7 +184,7 @@ private:
     TransportConfig   m_cfg;
     ImpairmentEngine  m_impairment;
     RingBuffer        m_recv_queue;
-    bool              m_open;
+    std::atomic<bool> m_open;  // DEF-021-1: atomic for re-entrant-safe close() (CWE-416)
     bool              m_is_server;
     bool              m_tls_enabled;              ///< From config.tls.tls_enabled
     uint32_t          m_connections_opened;       ///< REQ-7.2.4: successful connect/accept events
@@ -269,8 +286,9 @@ private:
     /// successful client handshake.  Called only when session_resumption_enabled
     /// is true and m_session_store_ptr is non-null.
     /// Failure is non-fatal: logs WARNING_LO and leaves store.session_valid false.
-    /// Also logs a one-time WARNING_LO if TLS 1.2 is negotiated (no forward secrecy
-    /// for resumed sessions — RFC 5077, SECURITY_ASSUMPTIONS.md §13).
+    /// Also logs a one-time WARNING_HI if TLS 1.2 is negotiated (no forward secrecy
+    /// for resumed sessions — RFC 5077, SECURITY_ASSUMPTIONS.md §13; system-wide
+    /// impact per CLAUDE.md §4 WARNING_HI taxonomy).
     /// Extracted from tls_connect_handshake() to keep its CC ≤ 10 (REQ-6.3.4).
     void try_save_client_session();
 #endif /* MBEDTLS_SSL_SESSION_TICKETS */

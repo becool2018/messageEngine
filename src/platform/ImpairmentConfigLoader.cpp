@@ -290,7 +290,13 @@ Result impairment_config_load(const char* path, ImpairmentConfig& cfg)
     // Always start from safe defaults so missing keys are well-defined.
     impairment_config_default(cfg);
 
-    FILE* fp = fopen(path, "r");
+    // MISRA C++:2023 deviation — fopen/fclose (C file I/O):
+    // Rationale: no C++ RAII file wrapper is available without STL (prohibited
+    // by CLAUDE.md §4).  fopen is called once per config load, which occurs
+    // only during the init phase; this is not a runtime allocation path.
+    // FILE* lifetime is bounded to this function scope; fclose is always called
+    // before return.  Power of 10 Rule 3 is satisfied (init-phase only).
+    FILE* fp = fopen(path, "r"); // NOLINT(cppcoreguidelines-owning-memory)
     if (fp == nullptr) {
         Logger::log(Severity::WARNING_LO, "ConfigLoader",
                     "Cannot open impairment config file: %s", path);
@@ -324,7 +330,7 @@ Result impairment_config_load(const char* path, ImpairmentConfig& cfg)
     }
 
     // Power of 10 Rule 7: check fclose() return value.
-    int close_res = fclose(fp);
+    int close_res = fclose(fp); // NOLINT(cppcoreguidelines-owning-memory)
     if (close_res != 0) {
         Logger::log(Severity::WARNING_LO, "ConfigLoader",
                     "fclose() returned non-zero for: %s", path);

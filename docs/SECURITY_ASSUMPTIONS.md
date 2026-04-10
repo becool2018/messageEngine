@@ -351,14 +351,39 @@ requiring dynamic allocation on the critical path (Power of 10 Rule 3).
    constraint that `mbedtls_ssl_session` cannot be bitwise-copied (it may hold
    internal heap allocations that cannot be aliased).
 
+4. **`TlsSessionStore` must outlive all `TlsTcpBackend` instances that received
+   it via `set_session_store()`** — `close()` dereferences `m_session_store_ptr`
+   to check `session_valid`; if the store has been destroyed first the pointer
+   is dangling (CWE-416).  Under Power of 10 Rule 3 (no `new`/`delete` after
+   init) both objects are always stack- or statically-allocated.  Declaring
+   `store` before `backend` in the same or an enclosing scope makes C++
+   reverse-destruction order enforce the lifetime automatically — the language
+   destroys `backend` before `store`.  Do not invert the declaration order.
+   **Caveat — static storage duration:** when either object has static storage
+   duration (file-scope or `static` local), C++ does not guarantee
+   reverse-destruction order relative to objects with different storage classes.
+   In that case the caller must ensure `backend.close()` is called explicitly
+   before the store could be destroyed (e.g., at program exit or shared-library
+   unload), rather than relying on the language to order destruction.
+
+5. **The store is overwritten on every successful handshake (including resumed
+   ones)** — `try_save_client_session()` runs after every successful TLS
+   handshake, whether full or abbreviated.  The store always holds the most
+   recently issued session ticket, not the original.  Callers must not assume
+   the store reflects the session from the first connection only (RFC 5077 §3.4
+   — the server may issue a new ticket on every resumption).
+
 **Library-provided safety nets (informational — not a substitute for rule 1):**
 
 - `TlsSessionStore::~TlsSessionStore()` calls `zeroize()` automatically.  This
   provides a last-resort cleanup if the caller forgets the explicit call, but
   relies on the destructor running before the memory is read externally.  Do not
   rely on this as the primary cleanup path.
-- `TlsTcpBackend::close()` logs `WARNING_LO` when `store.session_valid == true`
-  after close, reminding the caller that session material is still live.
+- `TlsTcpBackend::close()` logs `WARNING_HI` when `store.session_valid == true`
+  after close, naming CWE-316 and requesting immediate `zeroize()` if
+  reconnect is not planned.  `WARNING_HI` is used because session master-secret
+  material persisting in memory after close is a system-wide risk (any post-close
+  core dump, swap file, or memory read may expose it — CLAUDE.md §4 taxonomy).
 - `TlsSessionStore::zeroize()` uses `mbedtls_platform_zeroize()` (not `memset`)
   to guarantee the compiler cannot elide the zeroing operation (CWE-14,
   CLAUDE.md §7c).
@@ -369,12 +394,36 @@ the original session's key material; no new ephemeral Diffie-Hellman exchange
 occurs.  This means that if the original session's key material is compromised, all
 traffic from the resumed session is also compromised (no forward secrecy for
 resumed sessions under TLS 1.2 — RFC 5077 §5).  `try_save_client_session()` logs
-a one-time `WARNING_LO` on the first TLS 1.2 session save to alert the operator.
+a one-time `WARNING_HI` on the first TLS 1.2 session save to alert the operator
+(system-wide impact — CLAUDE.md §4 WARNING_HI taxonomy; HAZ-017 Cat II).
 TLS 1.3 session resumption uses PSK-based 0-RTT or 1-RTT mechanisms that preserve
 forward secrecy; this limitation does not apply when TLS 1.3 is negotiated.
 
 **Hazard coverage:** HAZ-017 (CWE-316 — session material in caller memory after
 close); extension of HAZ-012 (CWE-14 — private key in freed memory).
+
+---
+
+## §14 TlsTcpBackend thread-safety (DEF-021-1 — FIXED)
+
+**`close()` is now thread-safe (DEF-021-1 / CWE-416 fix, INSP-021).**
+
+`m_open` was converted from `bool` to `std::atomic<bool>`. `close()` uses
+`compare_exchange_strong(expected=true, false, acq_rel, acquire)` to atomically
+transition `m_open` from true to false. Only one concurrent caller can win the CAS
+and proceed to teardown; all others return immediately. This eliminates the previous
+non-atomic check-then-act sequence that admitted double-free of `m_ssl[]` and
+`m_ticket_ctx` (CWE-416, undefined behavior).
+
+**Remaining contract (all other mutating methods):** `init`, `send_message`,
+`receive_message`, and `register_local_id` are still **not thread-safe** with respect
+to each other. Callers that invoke these methods from multiple threads on the same
+instance must serialize externally (mutex or equivalent). The typical single-threaded
+transport loop satisfies this constraint without modification.
+
+**Applies equally to:** `TcpBackend`, `UdpBackend`, and `DtlsUdpBackend` share the
+same `m_open` pattern and have the same remaining non-thread-safe contract. They have
+not been converted (no concurrent `close()` path exists for those classes today).
 
 ---
 

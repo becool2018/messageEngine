@@ -108,29 +108,36 @@ static bool write_pem_files(void)
     NEVER_COMPILED_OUT_ASSERT(CERT_FILE != nullptr);  // Assert: cert path constant valid
     NEVER_COMPILED_OUT_ASSERT(KEY_FILE  != nullptr);  // Assert: key path constant valid
 
-    FILE* fp = fopen(CERT_FILE, "w");
+    // MISRA C++:2023 deviation — fopen/fclose (C file I/O):
+    // Rationale: write_pem_files() is called once at process startup to
+    // materialise embedded PEM constants as on-disk files for mbedTLS.
+    // This is an init-phase operation; FILE* lifetime is bounded to this
+    // function scope with fclose on every return path.  No C++ RAII
+    // alternative is available without STL (prohibited by CLAUDE.md §4).
+    // Power of 10 Rule 3 is satisfied (init-phase only).
+    FILE* fp = fopen(CERT_FILE, "w"); // NOLINT(cppcoreguidelines-owning-memory)
     if (fp == nullptr) {
         (void)fprintf(stderr, "ERROR: cannot write %s\n", CERT_FILE);
         return false;
     }
     if (fputs(DEMO_CERT_PEM, fp) < 0) {
-        (void)fclose(fp);
+        (void)fclose(fp); // NOLINT(cppcoreguidelines-owning-memory)
         return false;
     }
-    if (fclose(fp) != 0) {
+    if (fclose(fp) != 0) { // NOLINT(cppcoreguidelines-owning-memory)
         return false;
     }
 
-    fp = fopen(KEY_FILE, "w");
+    fp = fopen(KEY_FILE, "w"); // NOLINT(cppcoreguidelines-owning-memory)
     if (fp == nullptr) {
         (void)fprintf(stderr, "ERROR: cannot write %s\n", KEY_FILE);
         return false;
     }
     if (fputs(DEMO_KEY_PEM, fp) < 0) {
-        (void)fclose(fp);
+        (void)fclose(fp); // NOLINT(cppcoreguidelines-owning-memory)
         return false;
     }
-    return fclose(fp) == 0;
+    return fclose(fp) == 0; // NOLINT(cppcoreguidelines-owning-memory)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
