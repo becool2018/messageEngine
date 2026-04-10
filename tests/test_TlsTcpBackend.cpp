@@ -6092,6 +6092,48 @@ static void test_m5_ssl_read_payload_want_read_timeout()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MbedtlsOpsImpl direct coverage — net_poll()
+// Verifies: REQ-6.3.4
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Call MbedtlsOpsImpl::net_poll() directly so that the function and its lines
+// are counted by LLVM coverage.  A real TCP listen socket is created so the
+// ctx->fd >= 0 pre-condition holds; a 1-ms timeout means the call returns
+// immediately with 0 (no incoming connection) without blocking.
+static void test_mbedtls_ops_impl_net_poll_direct()
+{
+    // Verifies: REQ-6.3.4
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    assert(fd >= 0);
+
+    int opt = 1;
+    assert(setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+                      &opt, static_cast<socklen_t>(sizeof(opt))) == 0);
+
+    struct sockaddr_in addr{};
+    addr.sin_family      = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port        = 0U;   // ephemeral port
+
+    // MISRA C++:2023 Rule 5.2.4: cast required by POSIX bind() C-API.
+    assert(bind(fd,
+                reinterpret_cast<struct sockaddr*>(&addr),   // NOLINT
+                static_cast<socklen_t>(sizeof(addr))) == 0);
+    assert(listen(fd, 1) == 0);
+
+    mbedtls_net_context ctx{};
+    ctx.fd = fd;
+
+    // 1-ms poll; no client connects so the call returns 0 (no event ready).
+    int ret = MbedtlsOpsImpl::instance().net_poll(
+                  &ctx, MBEDTLS_NET_POLL_READ, 1U);
+    assert(ret >= 0);
+
+    (void)close(fd);
+    printf("PASS: test_mbedtls_ops_impl_net_poll_direct\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -6217,6 +6259,9 @@ int main()
     test_m5_ssl_read_header_want_read_timeout();
     test_m5_ssl_read_payload_hard_fail();
     test_m5_ssl_read_payload_want_read_timeout();
+
+    // MbedtlsOpsImpl direct coverage (100% line + function for MbedtlsOpsImpl.cpp):
+    test_mbedtls_ops_impl_net_poll_direct();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);
