@@ -57,6 +57,7 @@
 #include <cassert>
 #include <cstdint>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/resource.h>
 #include <netinet/in.h>
@@ -1298,6 +1299,77 @@ static void test_socket_create_tcp_fail_resource_error()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 42: socket_send_all() poll timeout — write buffer full, 1 ms timeout.
+// Exercises SocketUtils.cpp line ~423-427: poll_result <= 0 True path.
+// Strategy: socketpair, make writer non-blocking, flood until EAGAIN (buffer
+// full), restore blocking, call socket_send_all(timeout=1ms) → poll times out.
+// Verifies: REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.3
+static void test_send_all_poll_timeout()
+{
+    int sv[2] = {-1, -1};
+    int sr = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(sr == 0);                 // Assert: socketpair created
+
+    // Save flags and set sv[0] non-blocking so flood-writes return EAGAIN
+    // when the kernel write buffer fills (sv[1] is never drained).
+    int fl = fcntl(sv[0], F_GETFL, 0);
+    assert(fl >= 0);                 // Assert: F_GETFL succeeded
+    (void)fcntl(sv[0], F_SETFL, fl | O_NONBLOCK);
+
+    // Flood-write until EAGAIN/EWOULDBLOCK: the kernel buffer is now full.
+    // Power of 10: fixed bound — buffer fills in well under 1 000 iterations.
+    static const uint8_t flood[4096] = {};
+    for (uint32_t i = 0U; i < 1000U; ++i) {
+        ssize_t n = send(sv[0], flood, sizeof(flood), 0);
+        if (n < 0) {
+            break;  // EAGAIN: buffer is full; exit loop
+        }
+    }
+
+    // Restore blocking mode; buffer is still full (sv[1] is still not drained).
+    (void)fcntl(sv[0], F_SETFL, fl);
+
+    // socket_send_all polls for POLLOUT with a 1 ms timeout.
+    // The buffer is full so poll() returns 0 (timeout) → function returns false.
+    static const uint8_t data[1] = {0x42U};
+    bool ok = socket_send_all(sv[0], data, 1U, 1U);
+    assert(!ok);  // Assert: poll timeout → returns false
+
+    (void)close(sv[0]);
+    (void)close(sv[1]);
+    printf("PASS: test_send_all_poll_timeout\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 43: socket_send_all() CERT INT31-C timeout clamp — timeout_ms = UINT32_MAX
+// exceeds INT_MAX; the branch at SocketUtils.cpp line ~421 clamps it to INT_MAX
+// before passing to poll().  The socket is writable so poll() returns immediately.
+// Exercises SocketUtils.cpp line ~421 True path: (timeout_ms > k_poll_max_ms).
+// Verifies: REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.3
+static void test_send_all_timeout_ms_clamped()
+{
+    // Socketpair with write buffer space available (not flooded).
+    int sv[2] = {-1, -1};
+    int sr = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(sr == 0);  // Assert: socketpair created
+
+    static const uint8_t data[1] = {0x55U};
+    // UINT32_MAX > INT_MAX → clamping branch fires; poll() returns 1 immediately
+    // (socket is writable) → send() succeeds → function returns true.
+    bool ok = socket_send_all(sv[0], data, 1U,
+                              static_cast<uint32_t>(0xFFFFFFFFU));
+    assert(ok);  // Assert: send succeeds (socket had buffer space)
+
+    (void)close(sv[0]);
+    (void)close(sv[1]);
+    printf("PASS: test_send_all_timeout_ms_clamped\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main — run all tests in sequence
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1346,6 +1418,9 @@ int main()
     test_recv_frame_payload_fails();
     test_send_to_closed_fd();
     test_recv_from_zero_datagram();
+
+    test_send_all_poll_timeout();
+    test_send_all_timeout_ms_clamped();
 
     // MUST remain last: transiently modifies process-wide RLIMIT_NOFILE.
     // Restore happens inside the function before any assert fires, but placement

@@ -941,6 +941,112 @@ static bool test_stats_duplicate()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test N+1: compute_jitter_us() overflow guard — jitter_variance_ms so large
+// that jitter_mean_ms + jitter_variance_ms overflows uint32_t.
+// Exercises ImpairmentEngine.cpp line ~272-276: the WARNING_HI log and hi_ms
+// clamp to UINT32_MAX-1.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.1.2
+static bool test_compute_jitter_overflow()
+{
+    // Verifies: REQ-5.1.2
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled            = true;
+    cfg.fixed_latency_ms   = 0U;
+    cfg.jitter_mean_ms     = 2U;
+    // variance > UINT32_MAX - mean (4294967294 > 4294967293) → overflow branch True
+    cfg.jitter_variance_ms = static_cast<uint32_t>(0xFFFFFFFFU) - 1U;
+    cfg.prng_seed          = 1ULL;  // deterministic seed
+    engine.init(cfg);
+
+    MessageEnvelope env;
+    create_test_envelope(env, 1U, 2U, 9900ULL);
+
+    // process_outbound calls compute_jitter_us(); overflow guard fires → WARNING_HI
+    // logged, hi_ms clamped to UINT32_MAX-1.  Message must still be queued (OK).
+    uint64_t const now_us = 1000000ULL;
+    Result r = engine.process_outbound(env, now_us);
+    assert(r == Result::OK);  // Assert: message queued despite jitter overflow
+
+    // Drain at a far-future time (jitter could produce a huge release_us).
+    // UINT64_MAX/2 is safely past any uint32-based delay.
+    MessageEnvelope out[2];
+    uint32_t n = engine.collect_deliverable(UINT64_MAX / 2ULL, out, 2U);
+    assert(n == 1U);  // Assert: exactly one message delivered
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test N+2: compute_release_us() now_us overflow — now_us so close to UINT64_MAX
+// that now_us + delay_total_us wraps.
+// Exercises ImpairmentEngine.cpp line ~314-319: release_us clamped to UINT64_MAX.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.1.1
+static bool test_compute_release_now_overflow()
+{
+    // Verifies: REQ-5.1.1
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled            = true;
+    cfg.fixed_latency_ms   = 1U;   // base_delay_us = 1 000 µs
+    cfg.jitter_mean_ms     = 0U;   // no jitter — delay_total_us = 1 000
+    cfg.loss_probability   = 0.0;
+    cfg.partition_enabled  = false;
+    cfg.prng_seed          = 1ULL;
+    engine.init(cfg);
+
+    MessageEnvelope env;
+    create_test_envelope(env, 1U, 2U, 9901ULL);
+
+    // now_us = UINT64_MAX-500: UINT64_MAX-500 > UINT64_MAX-1000 → True → clamp
+    static const uint64_t k_near_max = static_cast<uint64_t>(0xFFFFFFFFFFFFFFFFULL) - 500ULL;
+    Result r = engine.process_outbound(env, k_near_max);
+    assert(r == Result::OK);  // Assert: message queued with clamped release_us
+
+    // release_us was clamped to UINT64_MAX; collect at UINT64_MAX drains it.
+    MessageEnvelope out[2];
+    uint32_t n = engine.collect_deliverable(static_cast<uint64_t>(0xFFFFFFFFFFFFFFFFULL),
+                                            out, 2U);
+    assert(n == 1U);  // Assert: one message returned
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test N+3: sat_add_us() overflow — now_us so close to UINT64_MAX that
+// now_us + delta_ms*1000 overflows; result saturates to UINT64_MAX.
+// Exercises ImpairmentEngine.cpp line ~547: sat_add_us True path.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-5.1.6
+static bool test_sat_add_us_overflow()
+{
+    // Verifies: REQ-5.1.6
+    ImpairmentEngine engine;
+    ImpairmentConfig cfg;
+    impairment_config_default(cfg);
+    cfg.enabled               = true;
+    cfg.partition_enabled     = true;
+    cfg.partition_gap_ms      = 1U;   // gap = 1 ms = 1 000 µs; must be > 0
+    cfg.partition_duration_ms = 1U;
+    cfg.loss_probability      = 0.0;
+    cfg.prng_seed             = 1ULL;
+    engine.init(cfg);
+
+    // First call: m_next_partition_event_us == 0 → initialises via sat_add_us.
+    // now_us = UINT64_MAX - 500: delta = 1 000, UINT64_MAX-500 > UINT64_MAX-1000 → True
+    // → sat_add_us returns UINT64_MAX (overflow clamped).
+    static const uint64_t k_near_max = static_cast<uint64_t>(0xFFFFFFFFFFFFFFFFULL) - 500ULL;
+    bool const active = engine.is_partition_active(k_near_max);
+    assert(!active);  // Assert: partition not yet active on first call (gap phase)
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test N: process_inbound() drops message when partition is active
 // Verifies REQ-5.1.6: partition applies to inbound path.
 // Strategy: call process_outbound() at now1 to initialise the partition timer,
@@ -1251,6 +1357,27 @@ int main()
         ++failed;
     } else {
         printf("PASS: test_process_outbound_full_returns_err_full\n");
+    }
+
+    if (!test_compute_jitter_overflow()) {
+        printf("FAIL: test_compute_jitter_overflow\n");
+        ++failed;
+    } else {
+        printf("PASS: test_compute_jitter_overflow\n");
+    }
+
+    if (!test_compute_release_now_overflow()) {
+        printf("FAIL: test_compute_release_now_overflow\n");
+        ++failed;
+    } else {
+        printf("PASS: test_compute_release_now_overflow\n");
+    }
+
+    if (!test_sat_add_us_overflow()) {
+        printf("FAIL: test_sat_add_us_overflow\n");
+        ++failed;
+    } else {
+        printf("PASS: test_sat_add_us_overflow\n");
     }
 
     return (failed > 0) ? 1 : 0;
