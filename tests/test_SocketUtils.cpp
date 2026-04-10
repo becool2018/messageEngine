@@ -41,6 +41,7 @@
  * inet_ntop failure, UDP partial send).
  *
  * Port range 19200-19250 is reserved for SocketUtils tests.
+ * Port range 19251-19260 is reserved for MockPosixSyscalls tests.
  *
  * Rules applied:
  *   - Power of 10: fixed buffers, bounded loops, ≥2 assertions per test.
@@ -52,11 +53,13 @@
 // Verifies: REQ-6.1.5, REQ-6.1.6, REQ-6.3.1, REQ-6.3.2, REQ-6.3.3
 // Verification: M1 + M2 + M3 (NSC — raw POSIX adapter; no message-delivery policy)
 
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <cassert>
 #include <cstdint>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/resource.h>
 #include <netinet/in.h>
@@ -66,6 +69,8 @@
 #include "core/Types.hpp"
 #include "core/Serializer.hpp"
 #include "platform/SocketUtils.hpp"
+#include "platform/IPosixSyscalls.hpp"
+#include "platform/PosixSyscallsImpl.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Loopback address and base port
@@ -1251,6 +1256,445 @@ static void test_recv_from_zero_datagram()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MockPosixSyscalls — fault-injection mock for IPosixSyscalls
+//
+// Each syscall has a corresponding fail flag and errno value. When the fail
+// flag is false (default), the call delegates to the real POSIX syscall.
+// Special controls allow per-call-number failure (fcntl, poll) and return-
+// value overrides (connect, send, sendto, recvfrom, inet_ntop).
+//
+// Test-only class; STL not used; plain arrays and flags only.
+// Power of 10 Rule 9 exemption: function pointers in test frameworks are
+// permitted per CLAUDE.md §9 table.
+// ─────────────────────────────────────────────────────────────────────────────
+
+class MockPosixSyscalls : public IPosixSyscalls {
+public:
+    // ── socket ───────────────────────────────────────────────────────────────
+    bool fail_socket      = false;
+    int  socket_err       = EINVAL;
+
+    // ── fcntl ────────────────────────────────────────────────────────────────
+    int  fcntl_fail_call  = -1;   // fail on call N (0-based); -1 = never
+    int  fcntl_fail_err   = EBADF;
+    int  fcntl_call_n     = 0;    // call counter (reset to 0 on construction)
+
+    // ── connect ───────────────────────────────────────────────────────────────
+    bool connect_override = false;
+    int  connect_ret      = 0;
+    int  connect_err      = 0;
+
+    // ── poll ─────────────────────────────────────────────────────────────────
+    int  poll_fail_call   = -1;   // fail on call N (0-based); -1 = never
+    int  poll_fail_ret    = 0;    // return value when failing (0 = timeout)
+    int  poll_call_n      = 0;    // call counter
+
+    // ── send ─────────────────────────────────────────────────────────────────
+    bool send_return_zero = false; // return 0 instead of delegating
+
+    // ── sendto ───────────────────────────────────────────────────────────────
+    bool    sendto_partial     = false;
+    ssize_t sendto_partial_ret = 0;
+
+    // ── recvfrom ─────────────────────────────────────────────────────────────
+    bool    fail_recvfrom         = false;
+    int     recvfrom_err          = EBADF;
+    bool    recvfrom_succeed      = false; // return canned success bytes
+    ssize_t recvfrom_succeed_ret  = 5;
+
+    // ── inet_ntop ────────────────────────────────────────────────────────────
+    bool fail_inet_ntop  = false;
+    int  inet_ntop_err   = ENOSPC;
+
+    // ─────────────────────────────────────────────────────────────────────────
+
+    int sys_socket(int domain, int type, int protocol) override
+    {
+        assert(domain == AF_INET || domain == AF_INET6);
+        assert(type == SOCK_STREAM || type == SOCK_DGRAM);
+        if (fail_socket) {
+            errno = socket_err;
+            return -1;
+        }
+        return ::socket(domain, type, protocol);
+    }
+
+    int sys_fcntl(int fd, int cmd, int arg) override
+    {
+        assert(fd >= 0);
+        assert(cmd == F_GETFL || cmd == F_SETFL);
+        int cur_call = fcntl_call_n;
+        ++fcntl_call_n;
+        if (fcntl_fail_call >= 0 && cur_call == fcntl_fail_call) {
+            errno = fcntl_fail_err;
+            return -1;
+        }
+        return ::fcntl(fd, cmd, arg);
+    }
+
+    int sys_connect(int fd, const struct sockaddr* addr, socklen_t addrlen) override
+    {
+        assert(fd >= 0);
+        assert(addr != nullptr);
+        if (connect_override) {
+            errno = connect_err;
+            return connect_ret;
+        }
+        return ::connect(fd, addr, addrlen);
+    }
+
+    int sys_poll(struct pollfd* fds, nfds_t nfds, int timeout_ms) override
+    {
+        assert(fds != nullptr);
+        assert(static_cast<uint32_t>(nfds) > 0U);
+        int cur_call = poll_call_n;
+        ++poll_call_n;
+        if (poll_fail_call >= 0 && cur_call == poll_fail_call) {
+            return poll_fail_ret;
+        }
+        return ::poll(fds, nfds, timeout_ms);
+    }
+
+    ssize_t sys_send(int fd, const void* buf, size_t len, int flags) override
+    {
+        assert(fd >= 0);
+        assert(buf != nullptr);
+        if (send_return_zero) {
+            return 0;
+        }
+        return ::send(fd, buf, len, flags);
+    }
+
+    ssize_t sys_sendto(int fd, const void* buf, size_t len, int flags,
+                       const struct sockaddr* dest_addr, socklen_t addrlen) override
+    {
+        assert(fd >= 0);
+        assert(buf != nullptr);
+        if (sendto_partial) {
+            return sendto_partial_ret;
+        }
+        return ::sendto(fd, buf, len, flags, dest_addr, addrlen);
+    }
+
+    ssize_t sys_recvfrom(int fd, void* buf, size_t len, int flags,
+                          struct sockaddr* src_addr, socklen_t* addrlen) override
+    {
+        assert(fd >= 0);
+        assert(buf != nullptr);
+        if (fail_recvfrom) {
+            errno = recvfrom_err;
+            return -1;
+        }
+        if (recvfrom_succeed) {
+            // Fill buf with dummy bytes so the caller has data to process
+            static const uint8_t dummy[5] = {0x01U, 0x02U, 0x03U, 0x04U, 0x05U};
+            (void)memcpy(buf, dummy,
+                         (static_cast<size_t>(recvfrom_succeed_ret) < len)
+                             ? static_cast<size_t>(recvfrom_succeed_ret) : len);
+            // Leave src_addr zeroed (ss_family == 0 → treated as AF_INET path)
+            if (src_addr != nullptr) {
+                (void)memset(src_addr, 0, static_cast<size_t>(*addrlen));
+            }
+            return recvfrom_succeed_ret;
+        }
+        return ::recvfrom(fd, buf, len, flags, src_addr, addrlen);
+    }
+
+    const char* sys_inet_ntop(int af, const void* src, char* dst,
+                               socklen_t size) override
+    {
+        assert(src != nullptr);
+        assert(dst != nullptr);
+        if (fail_inet_ntop) {
+            errno = inet_ntop_err;
+            return nullptr;
+        }
+        return ::inet_ntop(af, src, dst, size);
+    }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock Test 1: socket_create_tcp() WARNING_LO path — socket() fails EINVAL
+// Exercises log_socket_create_error() WARNING_LO branch (lines 121–124).
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_socket_create_tcp_warning_lo_errno()
+{
+    MockPosixSyscalls mock;
+    mock.fail_socket = true;
+    mock.socket_err  = EINVAL;  // not EMFILE/ENFILE/EACCES/EPERM → WARNING_LO
+
+    int fd = socket_create_tcp(false, mock);
+    assert(fd < 0);  // Assert: socket() failure returns -1
+
+    printf("PASS: test_socket_create_tcp_warning_lo_errno\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock Test 2: socket_set_nonblocking() F_SETFL failure
+// F_GETFL succeeds (call 0); F_SETFL fails (call 1) → WARNING_LO lines 192–195.
+// Uses socketpair to provide a valid fd for the successful F_GETFL call.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_set_nonblocking_setfl_fails()
+{
+    int sv[2] = {-1, -1};
+    int sr = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(sr == 0);  // Assert: socketpair created
+
+    MockPosixSyscalls mock;
+    mock.fcntl_fail_call = 1;  // call 0 = F_GETFL (succeeds), call 1 = F_SETFL (fails)
+    mock.fcntl_fail_err  = EBADF;
+
+    bool ok = socket_set_nonblocking(sv[0], mock);
+    assert(!ok);  // Assert: F_SETFL failure returns false
+
+    (void)close(sv[0]);
+    (void)close(sv[1]);
+    printf("PASS: test_set_nonblocking_setfl_fails\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock Test 3: socket_connect_with_timeout() immediate success (conn_result == 0)
+// Mock overrides connect() to return 0 immediately — exercises lines 291–293.
+// Verifies: REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.3
+static void test_connect_immediate_success()
+{
+    int sv[2] = {-1, -1};
+    int sr = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(sr == 0);  // Assert: socketpair created
+
+    MockPosixSyscalls mock;
+    mock.connect_override = true;
+    mock.connect_ret      = 0;   // immediate success
+    mock.connect_err      = 0;
+
+    bool ok = socket_connect_with_timeout(sv[0], "127.0.0.1", 19251U, 100U, mock);
+    assert(ok);  // Assert: immediate success returns true
+
+    (void)close(sv[0]);
+    (void)close(sv[1]);
+    printf("PASS: test_connect_immediate_success\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock Test 4: socket_connect_with_timeout() poll() timeout after EINPROGRESS
+// Mock returns EINPROGRESS from connect(), then poll() returns 0 (timeout).
+// Exercises lines 314–317.
+// Verifies: REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.3
+static void test_connect_poll_timeout_mock()
+{
+    int sv[2] = {-1, -1};
+    int sr = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(sr == 0);  // Assert: socketpair created
+
+    MockPosixSyscalls mock;
+    mock.connect_override = true;
+    mock.connect_ret      = -1;
+    mock.connect_err      = EINPROGRESS;  // → proceeds to poll
+    mock.poll_fail_call   = 0;            // first poll call (for connect wait) returns 0
+    mock.poll_fail_ret    = 0;            // 0 = timeout
+
+    bool ok = socket_connect_with_timeout(sv[0], "127.0.0.1", 19252U, 100U, mock);
+    assert(!ok);  // Assert: poll timeout returns false
+
+    (void)close(sv[0]);
+    (void)close(sv[1]);
+    printf("PASS: test_connect_poll_timeout_mock\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock Test 5: socket_send_all() send() returns 0 (peer closed path)
+// Mock returns 0 from sys_send(); real poll succeeds (sv[0] is writable).
+// Exercises lines 440–444.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_send_all_send_returns_zero_mock()
+{
+    int sv[2] = {-1, -1};
+    int sr = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(sr == 0);  // Assert: socketpair created
+
+    MockPosixSyscalls mock;
+    mock.send_return_zero = true;  // sys_send returns 0
+
+    static const uint8_t data[1U] = {0x42U};
+    bool ok = socket_send_all(sv[0], data, 1U, 100U, mock);
+    assert(!ok);  // Assert: send() returns 0 → returns false (lines 440-444)
+
+    (void)close(sv[0]);
+    (void)close(sv[1]);
+    printf("PASS: test_send_all_send_returns_zero_mock\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock Test 6: socket_send_to() partial sendto() return
+// Mock returns sendto_partial_ret = 3 for a 10-byte payload → partial send.
+// Exercises lines 638–641.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_sendto_partial_mock()
+{
+    int fd = socket_create_udp(false);
+    assert(fd >= 0);  // Assert: UDP socket created
+
+    MockPosixSyscalls mock;
+    mock.sendto_partial     = true;
+    mock.sendto_partial_ret = 3;  // partial send: 3 of 10 bytes
+
+    static const uint8_t data[10U] = {
+        0x01U, 0x02U, 0x03U, 0x04U, 0x05U,
+        0x06U, 0x07U, 0x08U, 0x09U, 0x0AU
+    };
+    bool ok = socket_send_to(fd, data, 10U, "127.0.0.1", 19253U, mock);
+    assert(!ok);  // Assert: partial sendto() returns false (lines 638-641)
+
+    socket_close(fd);
+    printf("PASS: test_sendto_partial_mock\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Mock Test 7: socket_recv_from() inet_ntop() failure
+// Uses socketpair(AF_UNIX, SOCK_DGRAM). Sends 5 bytes from sv[1] to sv[0].
+// Real poll + recvfrom succeed; mock inet_ntop returns nullptr.
+// Exercises lines 721–724.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_recv_from_inet_ntop_fails_mock()
+{
+    int sv[2] = {-1, -1};
+    int sr = socketpair(AF_UNIX, SOCK_DGRAM, 0, sv);
+    assert(sr == 0);  // Assert: socketpair created
+
+    static const uint8_t payload[5U] = {0x10U, 0x20U, 0x30U, 0x40U, 0x50U};
+    ssize_t ns = send(sv[1], payload, sizeof(payload), 0);
+    assert(ns == 5);  // Assert: 5 bytes sent into sv[0]'s receive queue
+
+    MockPosixSyscalls mock;
+    mock.fail_inet_ntop = true;
+    mock.inet_ntop_err  = ENOSPC;
+
+    uint8_t  recv_buf[256U];
+    uint32_t out_len  = 0U;
+    char     out_ip[48U];
+    uint16_t out_port = 0U;
+    (void)memset(recv_buf, 0, sizeof(recv_buf));
+    (void)memset(out_ip,   0, sizeof(out_ip));
+
+    // poll + recvfrom succeed (real syscalls); inet_ntop fails via mock
+    bool ok = socket_recv_from(sv[0], recv_buf, static_cast<uint32_t>(sizeof(recv_buf)),
+                                100U, &out_len, out_ip, &out_port, mock);
+    assert(!ok);  // Assert: inet_ntop failure returns false (lines 721-724)
+
+    (void)close(sv[0]);
+    (void)close(sv[1]);
+    printf("PASS: test_recv_from_inet_ntop_fails_mock\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Practical Test A2: socket_recv_from() recvfrom() returns -1 on closed fd
+// Creates a UDP socket, closes it, then calls socket_recv_from() with timeout=1ms.
+// poll(closed_fd) returns 1 with POLLNVAL (fd is closed but numeric value ≥ 0),
+// recvfrom() then fails with EBADF → lines 691-694.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_recv_from_closed_fd()
+{
+    int fd = socket_create_udp(false);
+    assert(fd >= 0);  // Assert: valid fd obtained
+    socket_close(fd);
+
+    uint8_t  recv_buf[256U];
+    uint32_t out_len  = 0U;
+    char     out_ip[48U];
+    uint16_t out_port = 0U;
+    (void)memset(recv_buf, 0, sizeof(recv_buf));
+    (void)memset(out_ip,   0, sizeof(out_ip));
+
+    // poll() on a closed fd returns POLLNVAL (poll_result=1, but POLLNVAL set).
+    // The poll_result <= 0 check is False so we proceed to recvfrom().
+    // recvfrom() on a closed fd returns -1/EBADF → lines 691-694.
+    bool ok = socket_recv_from(fd, recv_buf,
+                                static_cast<uint32_t>(sizeof(recv_buf)),
+                                1U, &out_len, out_ip, &out_port);
+    assert(!ok);  // Assert: recvfrom fails with EBADF → returns false
+
+    printf("PASS: test_recv_from_closed_fd\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Practical Test A3: socket_connect_with_timeout() non-EINPROGRESS error
+// Creates an AF_INET TCP socket; connects with IPv6 address "::1" (port 9980).
+// fill_addr("::1") fills a sockaddr_in6; connect() on an AF_INET socket with
+// an AF_INET6 address fails synchronously with EAFNOSUPPORT (not EINPROGRESS).
+// Exercises lines 297–300.
+// Verifies: REQ-6.3.2, REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2, REQ-6.3.3
+static void test_connect_family_mismatch()
+{
+    // Create an AF_INET TCP socket
+    int fd = socket_create_tcp(false);
+    assert(fd >= 0);  // Assert: valid fd obtained
+
+    // "::1" is IPv6 — fill_addr builds a sockaddr_in6; connect() on an AF_INET
+    // socket rejects it with EAFNOSUPPORT, not EINPROGRESS → lines 297-300.
+    bool ok = socket_connect_with_timeout(fd, "::1", 9980U, 1U);
+    assert(!ok);  // Assert: family mismatch → connect fails with non-EINPROGRESS
+
+    socket_close(fd);
+    printf("PASS: test_connect_family_mismatch\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Practical Test A4: tcp_send_frame() payload send fails (buffer full)
+// Creates socketpair, floods sv[0] until kernel send buffer is full, drains
+// a large block from sv[1] (so sv[0]'s poll becomes writable for the header),
+// then calls tcp_send_frame(sv[0], payload, 8, 1ms) with a MockPosixSyscalls
+// that lets the header poll + send succeed but makes the payload poll time out
+// by returning 0 on the second poll call.
+// Exercises lines 540–543.
+// Verifies: REQ-6.1.5, REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.1.5, REQ-6.3.2
+static void test_send_frame_payload_fails_buffer_full()
+{
+    int sv[2] = {-1, -1};
+    int r = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(r == 0);  // Assert: socketpair created
+
+    // Use MockPosixSyscalls to control exactly which poll call fails.
+    // poll call 0: for the 4-byte header (socket_send_all) — real poll, writable.
+    // poll call 1: for the 8-byte payload (socket_send_all) — returns 0 (timeout).
+    // send call: real ::send for the header; not reached for payload.
+    MockPosixSyscalls mock;
+    mock.poll_fail_call = 1;   // fail second poll call (payload wait)
+    mock.poll_fail_ret  = 0;   // return 0 = timeout
+
+    static const uint8_t payload[8U] = {
+        0x01U, 0x02U, 0x03U, 0x04U, 0x05U, 0x06U, 0x07U, 0x08U
+    };
+    // Header (4 bytes) poll succeeds (real), send succeeds; payload poll returns
+    // 0 (timeout) → tcp_send_frame lines 540–543 executes → returns false.
+    bool ok = tcp_send_frame(sv[0], payload, 8U, 1U, mock);
+    assert(!ok);  // Assert: payload poll timeout → returns false (lines 540-543)
+
+    (void)close(sv[0]);
+    (void)close(sv[1]);
+    printf("PASS: test_send_frame_payload_fails_buffer_full\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // test_socket_create_tcp_fail_resource_error
 //
 // Covers log_socket_create_error() WARNING_HI branch — triggered when socket()
@@ -1295,6 +1739,120 @@ static void test_socket_create_tcp_fail_resource_error()
     assert(new_fd < 0);
 
     printf("PASS: test_socket_create_tcp_fail_resource_error\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Practical Test A1: socket_create_udp() resource-error path (RLIMIT)
+//
+// Covers log_socket_create_error() WARNING_HI branch via socket_create_udp() —
+// same technique as test_socket_create_tcp_fail_resource_error above.
+// socket_create_udp() calls socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP); with
+// RLIMIT_NOFILE clamped to probe_fd the call fails with EMFILE → WARNING_HI.
+// Covers lines 161–163.
+//
+// MUST remain in the "last" group: transiently modifies RLIMIT_NOFILE.
+// Verifies: REQ-6.3.2
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.2
+static void test_socket_create_udp_fail_resource_error()
+{
+    // Probe: find the fd number the next socket() call would receive.
+    int probe_fd = socket(AF_INET, SOCK_DGRAM, 0);
+    assert(probe_fd >= 0);  // Assert: probe socket opened
+    (void)close(probe_fd);  // free it; next call will get this number again
+
+    // Tighten the limit so fd == probe_fd is forbidden.
+    struct rlimit old_rl = {};                            // §7b: init at declaration
+    int gr = getrlimit(RLIMIT_NOFILE, &old_rl);          // Rule 7: check return value
+    assert(gr == 0);
+    struct rlimit tight_rl = {};                          // §7b: init at declaration
+    tight_rl.rlim_cur = static_cast<rlim_t>(probe_fd);
+    tight_rl.rlim_max = old_rl.rlim_max;
+    int sr = setrlimit(RLIMIT_NOFILE, &tight_rl);
+    assert(sr == 0);
+
+    // socket_create_udp() calls socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    // socket() tries to return probe_fd which is now out of range → EMFILE.
+    int new_fd = socket_create_udp(false);
+
+    // Restore the limit immediately before any further assertions.
+    (void)setrlimit(RLIMIT_NOFILE, &old_rl);
+
+    // Verify socket_create_udp() returned the error sentinel.
+    assert(new_fd < 0);  // Assert: udp creation fails with EMFILE → -1
+
+    printf("PASS: test_socket_create_udp_fail_resource_error\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 42: socket_send_all() poll timeout — write buffer full, 1 ms timeout.
+// Exercises SocketUtils.cpp line ~423-427: poll_result <= 0 True path.
+// Strategy: socketpair, make writer non-blocking, flood until EAGAIN (buffer
+// full), restore blocking, call socket_send_all(timeout=1ms) → poll times out.
+// Verifies: REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.3
+static void test_send_all_poll_timeout()
+{
+    int sv[2] = {-1, -1};
+    int sr = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(sr == 0);                 // Assert: socketpair created
+
+    // Save flags and set sv[0] non-blocking so flood-writes return EAGAIN
+    // when the kernel write buffer fills (sv[1] is never drained).
+    int fl = fcntl(sv[0], F_GETFL, 0);
+    assert(fl >= 0);                 // Assert: F_GETFL succeeded
+    (void)fcntl(sv[0], F_SETFL, fl | O_NONBLOCK);
+
+    // Flood-write until EAGAIN/EWOULDBLOCK: the kernel buffer is now full.
+    // Power of 10: fixed bound — buffer fills in well under 1 000 iterations.
+    static const uint8_t flood[4096] = {};
+    for (uint32_t i = 0U; i < 1000U; ++i) {
+        ssize_t n = send(sv[0], flood, sizeof(flood), 0);
+        if (n < 0) {
+            break;  // EAGAIN: buffer is full; exit loop
+        }
+    }
+
+    // Restore blocking mode; buffer is still full (sv[1] is still not drained).
+    (void)fcntl(sv[0], F_SETFL, fl);
+
+    // socket_send_all polls for POLLOUT with a 1 ms timeout.
+    // The buffer is full so poll() returns 0 (timeout) → function returns false.
+    static const uint8_t data[1] = {0x42U};
+    bool ok = socket_send_all(sv[0], data, 1U, 1U);
+    assert(!ok);  // Assert: poll timeout → returns false
+
+    (void)close(sv[0]);
+    (void)close(sv[1]);
+    printf("PASS: test_send_all_poll_timeout\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 43: socket_send_all() CERT INT31-C timeout clamp — timeout_ms = UINT32_MAX
+// exceeds INT_MAX; the branch at SocketUtils.cpp line ~421 clamps it to INT_MAX
+// before passing to poll().  The socket is writable so poll() returns immediately.
+// Exercises SocketUtils.cpp line ~421 True path: (timeout_ms > k_poll_max_ms).
+// Verifies: REQ-6.3.3
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-6.3.3
+static void test_send_all_timeout_ms_clamped()
+{
+    // Socketpair with write buffer space available (not flooded).
+    int sv[2] = {-1, -1};
+    int sr = socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    assert(sr == 0);  // Assert: socketpair created
+
+    static const uint8_t data[1] = {0x55U};
+    // UINT32_MAX > INT_MAX → clamping branch fires; poll() returns 1 immediately
+    // (socket is writable) → send() succeeds → function returns true.
+    bool ok = socket_send_all(sv[0], data, 1U,
+                              static_cast<uint32_t>(0xFFFFFFFFU));
+    assert(ok);  // Assert: send succeeds (socket had buffer space)
+
+    (void)close(sv[0]);
+    (void)close(sv[1]);
+    printf("PASS: test_send_all_timeout_ms_clamped\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1347,10 +1905,28 @@ int main()
     test_send_to_closed_fd();
     test_recv_from_zero_datagram();
 
+    test_send_all_poll_timeout();
+    test_send_all_timeout_ms_clamped();
+
+    // ── Mock syscall tests (IPosixSyscalls fault injection) ──────────────────
+    test_socket_create_tcp_warning_lo_errno();
+    test_set_nonblocking_setfl_fails();
+    test_connect_immediate_success();
+    test_connect_poll_timeout_mock();
+    test_send_all_send_returns_zero_mock();
+    test_sendto_partial_mock();
+    test_recv_from_inet_ntop_fails_mock();
+
+    // ── Practical OS-based tests (no mock) ───────────────────────────────────
+    test_recv_from_closed_fd();
+    test_connect_family_mismatch();
+    test_send_frame_payload_fails_buffer_full();
+
     // MUST remain last: transiently modifies process-wide RLIMIT_NOFILE.
     // Restore happens inside the function before any assert fires, but placement
     // last is a second safety layer — no test that follows can be starved of fds.
     test_socket_create_tcp_fail_resource_error();
+    test_socket_create_udp_fail_resource_error();
 
     printf("=== ALL PASSED ===\n");
     return 0;

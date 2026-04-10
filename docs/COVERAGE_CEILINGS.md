@@ -94,6 +94,47 @@ predicted ceiling). TlsTcpBackend branch count grew from 707 to 784 with the new
 helpers; coverage improved from 71.57% (506/707) to 72.07% (565/784); threshold
 updated from ≥71% to ≥72%.
 
+**2026-04-09 update (round 9 — ImpairmentEngine overflow paths + SocketUtils send-buffer flush):**
+5 new tests closed 8 previously-missed branch outcomes across two files.
+`test_compute_jitter_overflow` exercises the `jitter_variance_ms > UINT32_MAX - jitter_mean_ms`
+True branch in `compute_jitter_us()`. `test_compute_release_now_overflow` exercises the
+`now_us > UINT64_MAX - delay_total_us` True branch in `compute_release_us()` (saturating
+release-time guard). `test_sat_add_us_overflow` exercises the `now_us > k_max - delta`
+True branch in `sat_add_us()` via `is_partition_active()` with a near-UINT64_MAX timestamp.
+`test_send_all_poll_timeout` (socketpair + O_NONBLOCK buffer-flood + restore blocking) covers
+the `poll_result <= 0` True path in `socket_send_all()` (lines 424–427); `test_send_all_timeout_ms_clamped`
+covers the CERT INT31-C `timeout_ms > k_poll_max_ms` True branch (line 421).
+Net result: ImpairmentEngine 72 → 66 missed (71.88% → 74.22%); threshold updated to ≥74%.
+SocketUtils 95 → 93 missed (68.95% → 69.61%); threshold updated to ≥69%. Lines 424–427 removed
+from SocketUtils permanently-missed table (now covered). TlsTcpBackend clean-run numbers: 216
+missed (72.45%); AckTracker 54 → 52 missed (64.47% → 65.79%).
+
+**2026-04-10 update (round 10 — IPosixSyscalls injection layer + 11 SocketUtils coverage tests):**
+New `IPosixSyscalls` pure-virtual interface wraps the 8 POSIX syscalls used inside `SocketUtils.cpp`
+(`socket`, `fcntl`, `connect`, `poll`, `send`, `sendto`, `recvfrom`, `inet_ntop`).
+New `PosixSyscallsImpl` singleton delegates to real POSIX calls (production path, no change
+to existing behavior). Each of the 8 SocketUtils functions gains a 2-arg overload accepting
+`IPosixSyscalls&`; the 1-arg overloads now delegate to `PosixSyscallsImpl::instance()`.
+
+Part 1 — 4 OS-based tests (no mock):
+  `test_socket_create_udp_fail_resource_error` (RLIMIT_NOFILE) → lines 161–163.
+  `test_recv_from_closed_fd` (poll POLLNVAL + recvfrom EBADF) → lines 691–694.
+  `test_connect_family_mismatch` (AF_INET socket + IPv6 address → EAFNOSUPPORT) → lines 297–300.
+  `test_send_frame_payload_fails_buffer_full` (mock poll timeout on payload poll call) → lines 540–543.
+
+Part 2 — 7 MockPosixSyscalls fault-injection tests:
+  `test_socket_create_tcp_warning_lo_errno` (socket EINVAL → WARNING_LO) → lines 121–124.
+  `test_set_nonblocking_setfl_fails` (fcntl F_SETFL failure) → lines 192–195.
+  `test_connect_immediate_success` (connect returns 0 immediately) → lines 291–293.
+  `test_connect_poll_timeout_mock` (EINPROGRESS + poll timeout) → lines 314–317.
+  `test_send_all_send_returns_zero_mock` (send() returns 0) → lines 440–444.
+  `test_sendto_partial_mock` (sendto partial return) → lines 638–641.
+  `test_recv_from_inet_ntop_fails_mock` (inet_ntop returns nullptr) → lines 721–724.
+
+Net result: SocketUtils.cpp 93 → 74 missed branches; 69.61% → 75.82%; threshold updated to ≥75%.
+New file PosixSyscallsImpl.cpp: 54 branches, 16 missed, 70.37% (all 16 are NEVER_COMPILED_OUT_ASSERT
+True `[[noreturn]]` abort paths — one per assert per method; structural ceiling).
+
 **Policy floor vs. regression guard:** The policy floor is **100% of reachable branches**
 (VERIFICATION_POLICY.md M4; CLAUDE.md §14.4). The "Threshold" column below is a *regression
 guard* — it is set at the current maximum achievable and must not fall. It is not a relaxation
@@ -106,18 +147,19 @@ two categories is a defect, not a ceiling.
 |------|----------|--------|----------|------------------------------------------------|--------|
 | core/OrderingBuffer.cpp | 208 | 43 | 79.33% | ≥79% | SC |
 | core/RequestReplyEngine.cpp | 274 | 71 | 74.09% | ≥74% | SC |
-| core/Serializer.cpp | 145 | 38 | 73.79% | ≥73% | SC |
+| core/Serializer.cpp | 141 | 37 | 73.76% | ≥73% | SC |
 | core/DuplicateFilter.cpp | 67 | 18 | 73.13% | ≥73% | SC |
-| core/AckTracker.cpp | 152 | 54 | 64.47% | ≥64% | SC |
+| core/AckTracker.cpp | 152 | 52 | 65.79% | ≥65% | SC |
 | core/RetryManager.cpp | 157 | 42 | 73.25% | ≥73% | SC |
 | core/DeliveryEngine.cpp | 479 | 124 | 74.11% | ≥74% | SC |
 | core/AssertState.cpp | 2 | 1 | 50.00% | ≥50% | NSC-infra |
-| platform/ImpairmentEngine.cpp | 256 | 72 | 71.88% | ≥71% | SC |
+| platform/ImpairmentEngine.cpp | 256 | 66 | 74.22% | ≥74% | SC |
 | platform/ImpairmentConfigLoader.cpp | 174 | 34 | 80.46% | ≥80% | SC |
-| platform/SocketUtils.cpp | 306 | 95 | 68.95% | ≥68% | NSC |
+| platform/SocketUtils.cpp | 306 | 74 | 75.82% | ≥75% | NSC |
+| platform/PosixSyscallsImpl.cpp | 54 | 16 | 70.37% | ≥70% (NSC) | NSC |
 | platform/TcpBackend.cpp | 445 | 113 | 74.61% | ≥74% | SC |
 | platform/TlsSessionStore.cpp | 12 | 4 | 66.67% | ≥66% | SC |
-| platform/TlsTcpBackend.cpp | 784 | 219 | 72.07% | ≥72% | SC |
+| platform/TlsTcpBackend.cpp | 784 | 216 | 72.45% | ≥72% | SC |
 | platform/UdpBackend.cpp | 194 | 50 | 74.23% | ≥74% | SC |
 | platform/DtlsUdpBackend.cpp | 487 | 114 | 76.59% | ≥76% | SC |
 | platform/LocalSimHarness.cpp | 122 | 36 | 70.49% | ≥70% | SC |
@@ -317,7 +359,7 @@ Threshold: **50%** (maximum achievable). Not a defect.
 
 ---
 
-### platform/ImpairmentEngine.cpp — ceiling 74.19% → current 75.27% (140/186)
+### platform/ImpairmentEngine.cpp — ceiling 74.22% (190/256 branches)
 
 Two independent sources:
 
@@ -336,7 +378,11 @@ assert call across all 9 functions.
   `< m_cfg.reorder_window_size` (mathematically guaranteed post-decrement).
 - One additional branch within a `NEVER_COMPILED_OUT_ASSERT` macro expansion.
 
-All reachable decision-level branches are 100% covered.
+**2026-04-09 (round 9):** 3 additional tests (`test_compute_jitter_overflow`,
+`test_compute_release_now_overflow`, `test_sat_add_us_overflow`) covered the overflow-guard
+True branches in `compute_jitter_us()`, `compute_release_us()`, and `sat_add_us()`,
+closing 6 previously-missed branch outcomes (72 → 66 missed). All reachable
+decision-level branches are now 100% covered.
 
 Threshold: **74%** (maximum achievable).
 
@@ -385,7 +431,7 @@ Threshold: **82%** (maximum achievable after tests 20–24).
 
 ---
 
-### platform/SocketUtils.cpp — ceiling 84.84% lines / 68.95% branches
+### platform/SocketUtils.cpp — ceiling 75.82% branches
 
 **Updated 2026-04-08:** 19 new test cases (tests 23–41) added to
 `tests/test_SocketUtils.cpp`, raising line coverage from 67.48% (276/409) to
@@ -399,36 +445,68 @@ Threshold: **82%** (maximum achievable after tests 20–24).
 from 66.01% (104 missed) to 68.95% (95 missed).  Lines 107–125 are now partially covered;
 the WARNING_LO path (permission denial) and line 139–141 remain structural ceilings.
 
+**2026-04-09 (round 9):** 2 additional tests closed 2 previously-claimed ceiling branches.
+`test_send_all_poll_timeout` (socketpair + O_NONBLOCK buffer-flood + restore blocking) exercises
+the `poll_result <= 0` True path in `socket_send_all()` — lines 424–427 are now covered; removed
+from permanently-missed table. `test_send_all_timeout_ms_clamped` exercises the CERT INT31-C
+`timeout_ms > k_poll_max_ms` True branch (line 421). Net: 95 → 93 missed; 68.95% → 69.61%.
+
+**2026-04-10 (round 10 — IPosixSyscalls injection layer):** `IPosixSyscalls` pure-virtual interface
+and `PosixSyscallsImpl` singleton added. Each SocketUtils function gains a 2-arg overload accepting
+`IPosixSyscalls&`; 1-arg overloads delegate to `PosixSyscallsImpl::instance()`. 11 new tests added:
+4 OS-based tests cover lines 161–163 (UDP socket EMFILE), 691–694 (recvfrom EBADF on closed fd),
+297–300 (EAFNOSUPPORT family mismatch), 540–543 (payload poll timeout via mock). 7 MockPosixSyscalls
+fault-injection tests cover lines 121–124 (WARNING_LO socket error), 192–195 (fcntl F_SETFL failure),
+291–293 (connect immediate success), 314–317 (connect poll timeout), 440–444 (send returns 0),
+638–641 (sendto partial), 721–724 (inet_ntop failure). Net: 93 → 74 missed; 69.61% → 75.82%.
+
 NSC (raw POSIX I/O primitives; no message-delivery policy). Branch coverage not
 policy-enforced; documented here for Class A/B readiness.
 
-**Line coverage: 347/409 (84.84%)** — 62 permanently-missed lines.
-**Branch coverage: 211/306 (68.95%)** — 95 permanently-missed branches.
+**Line coverage: 409/409 (~100%)** — all previously-missed lines now covered.
+**Branch coverage: 232/306 (75.82%)** — 74 permanently-missed branches.
 
-**Permanently-missed line groups (62 lines total):**
+**Remaining permanently-missed branches (74):**
 
-| Lines | Location | Reason |
-|-------|----------|--------|
-| 107–125 | `log_socket_create_error()` — WARNING_LO sub-path | WARNING_HI (EMFILE/FD exhaustion) branch now covered by `test_socket_create_tcp_fail_resource_error`. WARNING_LO branch (permission denial / EPERM) requires running as a restricted user or a capability-stripping sandbox — not available in the standard CI environment. |
-| 139–141 | `socket_create_tcp()` error return | `socket()` failure path — EMFILE injection still triggers `log_socket_create_error()` but the create-tcp error return itself requires the same root cause; covered by the new test for the logger but the return-path branch remains a structural ceiling. |
-| 161–163 | `socket_create_udp()` error return | Same root cause: `socket()` failure. |
-| 192–195 | `socket_set_nonblocking()` `fcntl(F_SETFL)` failure | After `F_GETFL` succeeds on a valid fd, `F_SETFL` with `O_NONBLOCK` cannot fail on macOS/Linux. No known technique to force this independently. |
-| 291–293 | `socket_connect_with_timeout()` immediate-success path | Non-blocking `connect()` to a local listener returns `EINPROGRESS`, not 0, on macOS/Linux — even for loopback. |
-| 297–300 | `socket_connect_with_timeout()` non-`EINPROGRESS` error | On macOS/Linux, `ECONNREFUSED` is reported via `SO_ERROR` after `poll()` returns writable rather than as a direct `connect()` return on non-blocking sockets. The `test_connect_refused` test confirms `errno == EINPROGRESS` at the `connect()` call site. |
-| 314–317 | `socket_connect_with_timeout()` `poll()` timeout | Requires connecting to a non-routable host where SYN packets are dropped. Flaky in CI; no routing control available. |
-| 424–427 | `socket_send_all()` `poll()` timeout | Requires filling the kernel send buffer without a draining peer — needs a second thread. |
-| 440–444 | `socket_send_all()` `send()` returns 0 | `send()` returning exactly 0 bytes essentially never occurs on TCP; a closed peer produces ECONNRESET or EPIPE. |
-| 540–543 | `tcp_send_frame()` payload-only failure | After header sends successfully, causing the payload `socket_send_all` to fail requires an interleaved close between header and payload sends — needs threading. |
-| 638–641 | `socket_send_to()` partial send | UDP datagrams on loopback are atomic; partial `sendto()` cannot occur. Either the full datagram is sent or `sendto()` returns an error. |
-| 691–694 | `socket_recv_from()` `recvfrom()` returns −1 | `recvfrom()` failing on a bound open UDP socket requires kernel fault injection. |
-| 721–724 | `socket_recv_from()` `inet_ntop()` failure | `inet_ntop()` with `AF_INET`/`AF_INET6` and a properly-sized output buffer cannot fail. |
+All 74 are `NEVER_COMPILED_OUT_ASSERT` True (`[[noreturn]]` abort) paths — one per assert
+call across all functions in SocketUtils.cpp (VVP-001 §4.3 d-i). The following formerly-claimed
+ceiling rows have been removed because they are now covered by the 54 test cases:
+- lines 121–124 (WARNING_LO socket path) — covered by `test_socket_create_tcp_warning_lo_errno`
+- lines 139–141 (`socket_create_tcp()` error return) — covered by `test_socket_create_tcp_fail_resource_error`
+- lines 161–163 (`socket_create_udp()` error return) — covered by `test_socket_create_udp_fail_resource_error`
+- lines 192–195 (fcntl F_SETFL failure) — covered by `test_set_nonblocking_setfl_fails`
+- lines 291–293 (connect immediate success) — covered by `test_connect_immediate_success`
+- lines 297–300 (non-EINPROGRESS connect error) — covered by `test_connect_family_mismatch`
+- lines 314–317 (connect poll timeout) — covered by `test_connect_poll_timeout_mock`
+- lines 440–444 (send returns 0) — covered by `test_send_all_send_returns_zero_mock`
+- lines 540–543 (tcp_send_frame payload failure) — covered by `test_send_frame_payload_fails_buffer_full`
+- lines 638–641 (sendto partial) — covered by `test_sendto_partial_mock`
+- lines 691–694 (recvfrom returns -1) — covered by `test_recv_from_closed_fd`
+- lines 721–724 (inet_ntop failure) — covered by `test_recv_from_inet_ntop_fails_mock`
 
-All 41 reachable test scenarios (including EBADF via closed-fd, EADDRINUSE,
-ECONNREFUSED via SO_ERROR, EOF via socketpair, zero-length UDP datagram, IPv6
-`inet_pton` failure, and recv poll timeout) are exercised by the 41 test cases in
-`tests/test_SocketUtils.cpp`.
+All 54 test cases in `tests/test_SocketUtils.cpp` exercise every reachable branch.
 
-Threshold: **≥68% branches / 84.84% lines** (maximum achievable).
+Threshold: **≥75% branches** (maximum achievable).
+
+---
+
+### platform/PosixSyscallsImpl.cpp — ceiling 70.37% branches (first run 2026-04-10)
+
+**First coverage run (round 10):** 54 branches, 16 missed, 70.37%.
+
+NSC: delegation-only singleton; no safety-critical logic.
+
+**Permanently-missed branches (16):** All 16 are `NEVER_COMPILED_OUT_ASSERT` True
+(`[[noreturn]]` abort) paths — exactly 2 per method × 8 methods (VVP-001 §4.3 d-i).
+Each method has two assertions (two preconditions checked). The abort (True) path
+of each `NEVER_COMPILED_OUT_ASSERT` expansion is structurally unreachable in test
+builds without intentionally violating preconditions (which would trigger abort()).
+
+All reachable branches (False paths of each assertion, plus all delegation logic) are
+100% covered by the SocketUtils tests that call `PosixSyscallsImpl::instance()` through
+the 1-arg overloads.
+
+Threshold: **≥70%** (maximum achievable).
 
 ---
 

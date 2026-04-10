@@ -176,7 +176,8 @@ PLATFORM_SRC := \
     src/platform/DtlsUdpBackend.cpp \
     src/platform/LocalSimHarness.cpp \
     src/platform/MbedtlsOpsImpl.cpp \
-    src/platform/SocketOpsImpl.cpp
+    src/platform/SocketOpsImpl.cpp \
+    src/platform/PosixSyscallsImpl.cpp
 
 ALL_LIB_SRC := $(CORE_SRC) $(PLATFORM_SRC)
 
