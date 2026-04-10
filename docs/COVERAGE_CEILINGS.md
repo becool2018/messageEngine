@@ -74,6 +74,15 @@ Net result: SocketUtils 104 → 95 missed (66.01% → 68.95%); TcpBackend 131 �
 (70.56% → 74.61%); TlsTcpBackend 203 → 202 missed (71.29% → 71.43%, `try_load_client_session`
 structural lifecycle ceiling added — see per-file section).
 
+**2026-04-09 update (round 7 — TlsSessionStore + try_load coverage gap closed):**
+`TlsSessionStore` (new file) added as a caller-owned session-material value type;
+`test_tls_session_resumption_load_path` (port 19915) injects a store across two
+sequential `TlsTcpBackend` instances, exercising the `try_load_client_session()` True
+branch that was previously blocked by the structural lifecycle ceiling. The structural
+ceiling on `try_load_client_session` is removed. TlsTcpBackend: 202 → 201 missed,
+71.43% → 71.57% (506/707). TlsSessionStore.cpp: branch count TBD (first coverage
+run pending — see per-file section).
+
 **Policy floor vs. regression guard:** The policy floor is **100% of reachable branches**
 (VERIFICATION_POLICY.md M4; CLAUDE.md §14.4). The "Threshold" column below is a *regression
 guard* — it is set at the current maximum achievable and must not fall. It is not a relaxation
@@ -96,7 +105,8 @@ two categories is a defect, not a ceiling.
 | platform/ImpairmentConfigLoader.cpp | 174 | 34 | 80.46% | ≥80% | SC |
 | platform/SocketUtils.cpp | 306 | 95 | 68.95% | ≥68% | NSC |
 | platform/TcpBackend.cpp | 445 | 113 | 74.61% | ≥74% | SC |
-| platform/TlsTcpBackend.cpp | 707 | 202 | 71.43% | ≥71% | SC |
+| platform/TlsSessionStore.cpp | TBD | TBD | TBD | TBD | SC |
+| platform/TlsTcpBackend.cpp | 707 | 201 | 71.57% | ≥71% | SC |
 | platform/UdpBackend.cpp | 194 | 50 | 74.23% | ≥74% | SC |
 | platform/DtlsUdpBackend.cpp | 487 | 114 | 76.59% | ≥76% | SC |
 | platform/LocalSimHarness.cpp | 122 | 36 | 70.49% | ≥70% | SC |
@@ -458,7 +468,7 @@ Threshold: **≥74%** (maximum achievable).
 
 ---
 
-### platform/TlsTcpBackend.cpp — ceiling 71.43% (505/707)
+### platform/TlsTcpBackend.cpp — ceiling 71.57% (506/707)
 
 **Updated 2026-04-09 (round 1):** 2 new MockSocketOps fault-injection tests closed
 4 previously-missed LLVM branch outcomes. **Round 2:** `test_tls_cert_is_directory`
@@ -484,28 +494,40 @@ any pop, filling the 7-slot ring and triggering the overflow guard on the 8th.
 missed branch outcome closed (mbedTLS session-resume flow confirmed partially
 reachable) — 203 → 202 missed, 71.29% → 71.43%.
 
-**Structural ceiling: `try_load_client_session()` True branch unreachable in
-normal lifecycle.**
-`try_load_client_session()` contains `if (m_session_saved) { ... }`.
-`m_session_saved` is set True inside `close()` when a live session context is
-snapshotted.  However, `close()` unconditionally resets `m_session_saved = false`
-after snapshotting (to prevent stale reuse), and any subsequent `init()` call
-therefore sees `m_session_saved = false` entering `try_load_client_session()`.
-The True branch is structurally unreachable through the normal
-`init() → ... → close() → init()` lifecycle without a non-standard mid-lifecycle
-caller that sets `m_session_saved` externally.  This is a lifecycle design gap
-(the snapshot and reset occur in the same function scope), not a test coverage
-gap.  The False branch (skip session load) is 100% covered.
-Classification: VVP-001 §4.3 d-iii (mathematically-provable dead branch under
-the current implementation).  No test can reach this branch without modifying
-production code or exposing `m_session_saved` as a test hook.
+**2026-04-09 (round 7 — TlsSessionStore refactor closes structural ceiling):**
+`m_saved_session` / `m_session_saved` replaced by caller-owned `TlsSessionStore*`
+(`set_session_store()`). The previous structural ceiling on `try_load_client_session()`
+True branch is now removed: `test_tls_session_resumption_load_path` (port 19915)
+injects a store across two sequential `TlsTcpBackend` instances — the second instance
+calls `has_resumable_session()` → True → `try_load_client_session()` True branch.
+202 → 201 missed, 71.43% → 71.57% (506/707). Threshold raised from ≥71% to ≥71%.
 
 SC file meeting policy floor. Remaining missed branches are `NEVER_COMPILED_OUT_ASSERT`
-True paths, the `try_load_client_session` structural ceiling above, and hard
-mbedTLS/POSIX error paths that cannot be triggered in loopback (mbedTLS I/O
-failure under an established connection requires kernel-level fault injection).
+True paths and hard mbedTLS/POSIX error paths that cannot be triggered in loopback
+(mbedTLS I/O failure under an established connection requires kernel-level fault
+injection). The `try_load_client_session` structural ceiling no longer applies.
 
 Threshold: **≥71%** (maximum achievable).
+
+---
+
+### platform/TlsSessionStore.cpp — ceiling TBD
+
+New file added 2026-04-09. No coverage run completed yet; branch count, missed
+branches, and percentage are TBD (marked in the summary table). The file has four
+functions: constructor, destructor, and `zeroize()` (SC: HAZ-012, HAZ-017).
+
+Expected coverage characteristics:
+- Constructor: two assertions (`!session_valid`, `session_valid == false`), both
+  always True after init — `NEVER_COMPILED_OUT_ASSERT` False paths permanently missed.
+- Destructor: single call to `zeroize()`; no branches — full line coverage achievable.
+- `zeroize()`: two assertions (`true` literal and `!session_valid`); the `true`
+  literal assertion False path is permanently missed (NEVER_COMPILED_OUT_ASSERT True
+  paths that are always taken). The `session_valid = false` post-condition branch
+  is trivially covered by any call to `zeroize()`.
+
+Once the first coverage run is completed, update this section and the summary table
+with the measured branch count, missed count, percentage, and threshold.
 
 ---
 

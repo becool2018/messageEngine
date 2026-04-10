@@ -34,6 +34,7 @@
 // Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #include "platform/TlsTcpBackend.hpp"
+#include "platform/TlsSessionStore.hpp"
 #include "platform/ISocketOps.hpp"
 #include "platform/SocketOpsImpl.hpp"
 #include "core/Assert.hpp"
@@ -140,7 +141,7 @@ TlsTcpBackend::TlsTcpBackend()
     : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_pkey{},
       m_crl{}, m_crl_loaded(false),
       m_listen_net{}, m_client_net{}, m_ssl{},
-      m_saved_session{}, m_session_saved(false), m_ticket_ctx{},
+      m_session_store_ptr(nullptr), m_fs_warning_logged(false), m_ticket_ctx{},
       m_sock_ops(&SocketOpsImpl::instance()),
       m_client_count(0U), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false), m_tls_enabled(false),
@@ -155,7 +156,6 @@ TlsTcpBackend::TlsTcpBackend()
     mbedtls_pk_init(&m_pkey);
     mbedtls_x509_crl_init(&m_crl);   // REQ-6.3.4: CRL context init
     mbedtls_net_init(&m_listen_net);
-    mbedtls_ssl_session_init(&m_saved_session);
     mbedtls_ssl_ticket_init(&m_ticket_ctx);  // Fix 2: REQ-6.3.4
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         mbedtls_net_init(&m_client_net[i]);
@@ -172,7 +172,7 @@ TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops)
     : m_ssl_conf{}, m_cert{}, m_ca_cert{}, m_pkey{},
       m_crl{}, m_crl_loaded(false),
       m_listen_net{}, m_client_net{}, m_ssl{},
-      m_saved_session{}, m_session_saved(false), m_ticket_ctx{},
+      m_session_store_ptr(nullptr), m_fs_warning_logged(false), m_ticket_ctx{},
       m_sock_ops(&sock_ops),
       m_client_count(0U), m_wire_buf{}, m_cfg{},
       m_open(false), m_is_server(false), m_tls_enabled(false),
@@ -187,7 +187,6 @@ TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops)
     mbedtls_pk_init(&m_pkey);
     mbedtls_x509_crl_init(&m_crl);   // REQ-6.3.4: CRL context init
     mbedtls_net_init(&m_listen_net);
-    mbedtls_ssl_session_init(&m_saved_session);
     mbedtls_ssl_ticket_init(&m_ticket_ctx);  // Fix 2: REQ-6.3.4
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         mbedtls_net_init(&m_client_net[i]);
@@ -203,7 +202,8 @@ TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops)
 TlsTcpBackend::~TlsTcpBackend()
 {
     TlsTcpBackend::close();
-    mbedtls_ssl_session_free(&m_saved_session);
+    // m_session_store_ptr is non-owning; caller is responsible for store lifetime.
+    // The TlsSessionStore destructor calls zeroize() as a safety net (§7c).
     mbedtls_ssl_ticket_free(&m_ticket_ctx);   // Fix 2: REQ-6.3.4
     mbedtls_ssl_config_free(&m_ssl_conf);
     mbedtls_x509_crt_free(&m_cert);
@@ -597,45 +597,110 @@ Result TlsTcpBackend::bind_and_listen(const char* ip, uint16_t port)
 // connect_to_server() — client mode
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Save the current TLS session from slot 0 into m_saved_session.
-/// Called after a successful client handshake when session_resumption_enabled.
-/// Non-fatal on failure: logs WARNING_LO; m_session_saved remains false.
+// ─────────────────────────────────────────────────────────────────────────────
+// set_session_store() — inject caller-owned TlsSessionStore before init()
+// ─────────────────────────────────────────────────────────────────────────────
+
+void TlsTcpBackend::set_session_store(TlsSessionStore* store)
+{
+    // Precondition: backend must not be open.
+    NEVER_COMPILED_OUT_ASSERT(!m_open);
+    // Prevent silent re-injection of a different store after one has been set.
+    NEVER_COMPILED_OUT_ASSERT((m_session_store_ptr == nullptr) ||
+                              (m_session_store_ptr == store));
+    m_session_store_ptr = store;
+}
+
+bool TlsTcpBackend::has_resumable_session() const
+{
+    // NSC: pure predicate — combines three guard conditions into one bool so
+    // callers avoid a three-part && expression that would raise their CC.
+    NEVER_COMPILED_OUT_ASSERT(!m_is_server);  // session resumption is client-only
+    NEVER_COMPILED_OUT_ASSERT(true);          // Rule 5: second assertion (structural)
+    return m_cfg.tls.session_resumption_enabled
+           && (m_session_store_ptr != nullptr)
+           && m_session_store_ptr->session_valid;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// File-local helper — TLS 1.2 forward-secrecy advisory (one-time per lifecycle)
+// Extracted from try_save_client_session() to keep its CC ≤ 10.
+// Returns true when the one-time warning was emitted (caller updates guard flag).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Log a one-time WARNING_LO when a TLS 1.2 session is saved.
+/// TLS 1.2 session tickets do not provide forward secrecy for resumed sessions:
+/// server ticket key compromise exposes past traffic (RFC 5077,
+/// SECURITY_ASSUMPTIONS.md §13).
+/// Returns true if the warning was emitted; false otherwise.
+static bool log_fs_warning_if_tls12(const mbedtls_ssl_context* ssl)
+{
+    NEVER_COMPILED_OUT_ASSERT(ssl != nullptr);
+    const char* ver = mbedtls_ssl_get_version(ssl);
+    bool warned = false;
+    if (ver != nullptr) {
+        // cstring already included via <cstring> in this TU.
+        if (strncmp(ver, "TLSv1.2", 7U) == 0) {
+            Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
+                        "Session saved under TLS 1.2: resumed sessions do not "
+                        "have forward secrecy — server ticket key compromise "
+                        "exposes past traffic (RFC 5077, "
+                        "SECURITY_ASSUMPTIONS.md §13)");
+            warned = true;
+        }
+    }
+    NEVER_COMPILED_OUT_ASSERT(true);  // Rule 5: second assertion (structural)
+    return warned;
+}
+
+/// Save the current TLS session from slot 0 into *m_session_store_ptr.
+/// Called after a successful client handshake when session_resumption_enabled
+/// and m_session_store_ptr != nullptr.
+/// Non-fatal on failure: logs WARNING_LO; store.session_valid remains false.
+/// Logs a one-time WARNING_LO if TLS 1.2 negotiated (no forward secrecy for
+/// resumed sessions — RFC 5077, SECURITY_ASSUMPTIONS.md §13).
 /// Extracted from tls_connect_handshake() to keep its CC ≤ 10 (REQ-6.3.4).
 #if defined(MBEDTLS_SSL_SESSION_TICKETS)
 void TlsTcpBackend::try_save_client_session()
 {
     NEVER_COMPILED_OUT_ASSERT(m_tls_enabled);
-    NEVER_COMPILED_OUT_ASSERT(m_cfg.tls.session_resumption_enabled);
+    NEVER_COMPILED_OUT_ASSERT(m_session_store_ptr != nullptr);
 
     // Release any stale session before overwriting with the fresh one.
-    mbedtls_ssl_session_free(&m_saved_session);
-    mbedtls_ssl_session_init(&m_saved_session);
+    m_session_store_ptr->zeroize();  // free + zeroize + re-init via TlsSessionStore
 
-    int ret = mbedtls_ssl_get_session(&m_ssl[0U], &m_saved_session);
+    int ret = mbedtls_ssl_get_session(&m_ssl[0U], &m_session_store_ptr->session);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_get_session", ret);
         Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
                     "Session save failed; resumption not attempted on next connect");
-        m_session_saved = false;
+        m_session_store_ptr->session_valid = false;
     } else {
-        m_session_saved = true;
+        m_session_store_ptr->session_valid = true;
         Logger::log(Severity::INFO, "TlsTcpBackend",
                     "TLS session saved for resumption on next connect");
+
+        // One-time forward-secrecy advisory: extracted to log_fs_warning_if_tls12()
+        // to keep this function's CC ≤ 10 (SECURITY_ASSUMPTIONS.md §13).
+        if (!m_fs_warning_logged) {
+            m_fs_warning_logged = log_fs_warning_if_tls12(&m_ssl[0U]);
+        }
     }
 }
 #endif /* MBEDTLS_SSL_SESSION_TICKETS */
 
-/// Attempt to load m_saved_session into m_ssl[0] before the TLS handshake
+/// Attempt to load *m_session_store_ptr into m_ssl[0] before the TLS handshake
 /// to enable abbreviated session resumption (RFC 5077, REQ-6.3.4).
 /// Non-fatal on failure: logs WARNING_LO and full handshake proceeds.
 /// Extracted from tls_connect_handshake() to reduce its CC.
 void TlsTcpBackend::try_load_client_session()
 {
     NEVER_COMPILED_OUT_ASSERT(m_tls_enabled);
-    NEVER_COMPILED_OUT_ASSERT(m_session_saved);
+    NEVER_COMPILED_OUT_ASSERT(m_session_store_ptr != nullptr);
 
 #if defined(MBEDTLS_SSL_SESSION_TICKETS)
-    int ret = mbedtls_ssl_set_session(&m_ssl[0U], &m_saved_session);
+    NEVER_COMPILED_OUT_ASSERT(m_session_store_ptr->session_valid);
+    int ret = mbedtls_ssl_set_session(&m_ssl[0U], &m_session_store_ptr->session);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_set_session", ret);
         Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
@@ -696,8 +761,9 @@ Result TlsTcpBackend::tls_connect_handshake()
 
     // Load saved session to attempt abbreviated resumption (REQ-6.3.4).
     // Non-fatal: if set_session fails, full handshake proceeds normally.
-    // Extracted to try_load_client_session() to keep this function's CC ≤ 10.
-    if (m_cfg.tls.session_resumption_enabled && m_session_saved) {
+    // Extracted to try_load_client_session() + has_resumable_session() to keep
+    // this function's CC ≤ 10 (guards moved into helpers).
+    if (has_resumable_session()) {
         try_load_client_session();
     }
 
@@ -722,8 +788,9 @@ Result TlsTcpBackend::tls_connect_handshake()
                 mbedtls_ssl_get_ciphersuite(&m_ssl[0U]));
 
     // Save session for future resumption (REQ-6.3.4). Non-fatal if unavailable.
+    // Only attempted when a caller-owned TlsSessionStore was injected.
 #if defined(MBEDTLS_SSL_SESSION_TICKETS)
-    if (m_cfg.tls.session_resumption_enabled) {
+    if (m_cfg.tls.session_resumption_enabled && (m_session_store_ptr != nullptr)) {
         try_save_client_session();
     }
 #endif /* MBEDTLS_SSL_SESSION_TICKETS */
@@ -1841,15 +1908,16 @@ void TlsTcpBackend::close()
     m_connections_closed += m_client_count;
     m_client_count = 0U;
     m_open         = false;
-    // SEC-002: Free then zeroize the saved TLS session to prevent master-secret
-    // recovery from memory forensics between uses (CLAUDE.md §7c, CWE-316).
-    // Order: session_free() first (frees internal ticket allocation if any);
-    // zeroize after (clears all key bytes still embedded in the struct);
-    // session_init() to reset to a known safe state.
-    mbedtls_ssl_session_free(&m_saved_session);
-    mbedtls_platform_zeroize(static_cast<void*>(&m_saved_session), sizeof(m_saved_session));
-    mbedtls_ssl_session_init(&m_saved_session);
-    m_session_saved = false;
+    // Notify caller that session material remains live in the store
+    // (SECURITY_ASSUMPTIONS.md §13, CLAUDE.md §7c).  The store is not owned
+    // by this backend; the caller must call store.zeroize() when done.
+    if ((m_session_store_ptr != nullptr) && m_session_store_ptr->session_valid) {
+        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
+                    "Session material remains in TlsSessionStore after close(); "
+                    "call store.zeroize() when no longer needed "
+                    "(CLAUDE.md §7c, CWE-316)");
+    }
+    m_fs_warning_logged = false;  // reset for next lifecycle
     Logger::log(Severity::INFO, "TlsTcpBackend",
                 "Transport closed (TLS=%s)", m_tls_enabled ? "ON" : "OFF");
 }

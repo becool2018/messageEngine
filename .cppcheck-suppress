@@ -210,3 +210,9 @@ unusedFunction:src/core/RequestReplyEngine.cpp
 # Deviation: cppcheck false positive on u32 arithmetic wraparound detection.
 # Logged: DEFECT_LOG.md (pending INSP-009).
 knownConditionTrueFalse:src/core/OrderingBuffer.cpp
+
+# Justification: TlsTcpBackend::set_session_store() is a public API method called from
+# tests/test_TlsTcpBackend.cpp (lines 3484, 3522), which is outside the src/ directory
+# that cppcheck analyses. Not dead code.
+# Deviation: false positive -- cppcheck does not see test callers.
+unusedFunction:src/platform/TlsTcpBackend.cpp
