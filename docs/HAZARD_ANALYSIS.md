@@ -519,6 +519,20 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 
 All functions in this header are **NSC** — they are plain zero-initialisation helpers for the stats structs (`delivery_stats_init()`, `impairment_stats_init()`, `retry_stats_init()`, `ack_tracker_stats_init()`, `transport_stats_init()`). No message-delivery policy is encoded here.
 
+### src/core/RequestReplyEngine.hpp
+
+| Function | Class | SC/NSC | HAZ IDs |
+|---|---|---|---|
+| `init()` | `RequestReplyEngine` | SC | HAZ-001, HAZ-002 |
+| `send_request()` | `RequestReplyEngine` | SC | HAZ-001, HAZ-002 |
+| `receive_request()` | `RequestReplyEngine` | SC | HAZ-001, HAZ-003 |
+| `send_response()` | `RequestReplyEngine` | SC | HAZ-001, HAZ-002 |
+| `receive_response()` | `RequestReplyEngine` | SC | HAZ-001, HAZ-002 |
+| `sweep_timeouts()` | `RequestReplyEngine` | SC | HAZ-001, HAZ-002 |
+| `receive_non_rr()` | `RequestReplyEngine` | NSC | — |
+
+`RequestReplyEngine` provides bounded request/response correlation on top of `DeliveryEngine` (REQ-3.2.4). The six public SC functions are classified because: `send_request()` and `receive_response()` / `sweep_timeouts()` manage pending-request slots — exhaustion of those slots (HAZ-002: resource saturation) or a missed timeout sweep directly blocks message delivery (HAZ-001: wrong-node or failed delivery). `receive_request()` deduplicates inbound requests via `pump_inbound()` which calls `DeliveryEngine::receive()` — it sits on the HAZ-003 (duplicate delivery) path. `send_response()` and `init()` affect the same HAZ-001/HAZ-002 hazard set. `receive_non_rr()` is NSC: it is a passthrough stash accessor that retrieves non-RR DATA envelopes and has no reliability or delivery-decision policy. All private helpers (`pump_inbound`, `dispatch_inbound_envelope`, `handle_inbound_response`, `handle_inbound_request`, `find_pending`, `find_free_pending`, `build_wire_payload`, `parse_rr_header`, `stash_non_rr_data`) are private implementation details; their SC/NSC status is determined by the public function that calls them.
+
 ### HAZ-010, HAZ-012, HAZ-014, HAZ-017 — init-phase and teardown mitigations (no SC annotation required)
 
 The following hazards are mitigated exclusively in init-phase initialisation or object teardown code, not in runtime SC functions. No `// Safety-critical (SC): HAZ-NNN` annotation is required on the mitigating code; the classification note below explains why each is NSC. Note: HAZ-017 is also mitigated by `TlsSessionStore::zeroize()` (SC — see `src/platform/TlsSessionStore.hpp` table above); the destructor safety-net entry here is the additional teardown-only path.

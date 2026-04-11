@@ -335,7 +335,7 @@ All items in `docs/INSPECTION_CHECKLIST.md` verified for the integration commit.
 
 #### Moderator sign-off
 
-Moderator: Claude Sonnet 4.6 — 2026-04-04. No CRITICAL or MAJOR defects. All entry and exit criteria satisfied. Inspection INSP-005 closed PASS.
+Moderator: Don Jessup — 2026-04-04. No CRITICAL or MAJOR defects. All entry and exit criteria satisfied. Inspection INSP-005 closed PASS.
 
 ---
 
@@ -657,16 +657,16 @@ Moderator: Don Jessup — 2026-04-05. DEF-011-1 resolved. All entry and exit cri
 | Author      | Don Jessup |
 | Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
 | Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
-| Outcome     | CLOSED — 5 security defects found and fixed (commits 9224683b, e31492ec, d1f805f5) |
+| Outcome     | CLOSED — 5 security defects found and fixed (commits 9224683b, e31492ec, d1f805f5, 6086474) |
 
 #### Scope of change
 
 | File(s) | Change summary |
 |---------|---------------|
 | `src/platform/DtlsUdpBackend.cpp` | Fix 1: `setup_dtls_config()` now calls `mbedtls_ssl_conf_ciphersuites()` with AEAD-only allowlist and enforces TLS 1.2 minimum via `mbedtls_ssl_conf_min_tls_version()`; prohibits CBC, RSA key exchange, and NULL ciphers |
-| `src/platform/TlsTcpBackend.cpp` | Fix 1: `setup_tls_config()` same cipher suite restriction and TLS 1.2 minimum enforcement; Fix 2: `setup_session_tickets()` helper calls `mbedtls_ssl_ticket_setup()` with configured `session_ticket_lifetime_s`; ticket context freed/re-inited in `close()` and destructor; Fix 3: `recv_from_client()` rejects non-HELLO frames from slots where `m_client_node_ids[slot] == NODE_ID_INVALID`; Fix 4: second HELLO from same slot rejected with WARNING_HI; Fix 5: `m_client_slot_active[]` flag array replaces ssl context array compaction in `remove_client()`, eliminating UB bitwise copy of opaque mbedTLS structs |
+| `src/platform/TlsTcpBackend.cpp` (commit 9224683b, e31492ec) | Fix 1: `setup_tls_config()` same cipher suite restriction and TLS 1.2 minimum enforcement; Fix 2: `setup_session_tickets()` helper calls `mbedtls_ssl_ticket_setup()` with configured `session_ticket_lifetime_s`; ticket context freed/re-inited in `close()` and destructor; Fix 3: `recv_from_client()` rejects non-HELLO frames from slots where `m_client_node_ids[slot] == NODE_ID_INVALID`; Fix 4: second HELLO from same slot rejected with WARNING_HI; Fix 5: `m_client_slot_active[]` flag array replaces ssl context array compaction in `remove_client()`, eliminating UB bitwise copy of opaque mbedTLS structs |
 | `src/platform/TlsTcpBackend.hpp` | Fix 2: added `mbedtls_ssl_ticket_context m_ticket_ctx`; Fix 4: added `m_client_hello_received[MAX_TCP_CONNECTIONS]`; Fix 5: added `m_client_slot_active[MAX_TCP_CONNECTIONS]` |
-| `src/platform/TcpBackend.cpp` | Fix 3: `recv_from_client()` rejects non-HELLO frames from unregistered slots; Fix 4: second HELLO from same slot rejected with WARNING_HI |
+| `src/platform/TcpBackend.cpp` (commit 6086474) | Fix 3: `recv_from_client()` rejects non-HELLO frames from unregistered slots; Fix 4: second HELLO from same slot rejected with WARNING_HI |
 | `src/platform/TcpBackend.hpp` | Fix 4: added `m_client_hello_received[MAX_TCP_CONNECTIONS]` |
 
 #### Entry criteria verification
@@ -704,7 +704,7 @@ All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
 
 #### Moderator sign-off
 
-Moderator: Don Jessup — 2026-04-06. All five defects (DEF-013-1 through DEF-013-5) resolved in commits 9224683b, e31492ec, d1f805f5. All entry and exit criteria satisfied. Inspection INSP-013 closed PASS.
+Moderator: Don Jessup — 2026-04-06. All five defects (DEF-013-1 through DEF-013-5) resolved in commits 9224683b, e31492ec, d1f805f5, 6086474. All entry and exit criteria satisfied. Inspection INSP-013 closed PASS.
 
 ---
 
@@ -843,11 +843,11 @@ Moderator: Don Jessup — 2026-04-06. All six defects (DEF-016-1 through DEF-016
 
 | ID | File | Description | Severity | Disposition |
 |----|------|-------------|----------|-------------|
-| DEF-014-1 | `src/platform/ImpairmentEngine.cpp` | CERT INT30-C: jitter hi_ms = mean + variance computed with no overflow guard; if sum wraps to a small number, the jitter range collapses or inverts and the downstream assertion no longer catches it. | HIGH | Fixed: overflow guard added; hi_ms clamped to UINT32_MAX-1 on overflow to also prevent PrngEngine range=0 division. |
-| DEF-014-2 | `src/core/DeliveryEngine.cpp` | MessageIdGen seeded from local_id only (a small uint32_t); the entire message ID sequence is trivially predictable, enabling forged ACKs that silently clear AckTracker/RetryManager slots (HAZ-010). | HIGH | Fixed: seed XORs local_id<<32 with timestamp_now_us() to add runtime entropy. |
-| DEF-014-3 | `src/platform/LocalSimHarness.cpp` | inject() pushed envelopes into the receive queue with no envelope_valid() check, allowing malformed envelopes (INVALID message_type, payload_length > MSG_MAX_PAYLOAD_BYTES, source_id == NODE_ID_INVALID) to reach DeliveryEngine::receive(). | MEDIUM | Fixed: envelope_valid() guard added at top of inject(). |
-| DEF-014-4 | `src/core/Serializer.cpp` | required_len = WIRE_HEADER_SIZE + payload_length relied on envelope_valid() having been called first; a direct call or future constant change could silently wrap the uint32_t and cause memcpy to write past the buffer. | MEDIUM | Fixed: direct CERT INT30-C overflow guard added in serialize() before the addition. |
-| DEF-014-5 | `src/core/ChannelConfig.hpp` + 4 backends | TransportConfig::num_channels never validated against MAX_CHANNELS before channels[] array iteration; a misconfigured config silently causes out-of-bounds stack reads. | MEDIUM | Fixed: transport_config_valid() added to ChannelConfig.hpp; called in all four backend init() functions. |
+| DEF-014-1 | `src/platform/ImpairmentEngine.cpp` | CERT INT30-C: jitter hi_ms = mean + variance computed with no overflow guard; if sum wraps to a small number, the jitter range collapses or inverts and the downstream assertion no longer catches it. | CRITICAL | Fixed: overflow guard added; hi_ms clamped to UINT32_MAX-1 on overflow to also prevent PrngEngine range=0 division. |
+| DEF-014-2 | `src/core/DeliveryEngine.cpp` | MessageIdGen seeded from local_id only (a small uint32_t); the entire message ID sequence is trivially predictable, enabling forged ACKs that silently clear AckTracker/RetryManager slots (HAZ-010). | CRITICAL | Fixed: seed XORs local_id<<32 with timestamp_now_us() to add runtime entropy. |
+| DEF-014-3 | `src/platform/LocalSimHarness.cpp` | inject() pushed envelopes into the receive queue with no envelope_valid() check, allowing malformed envelopes (INVALID message_type, payload_length > MSG_MAX_PAYLOAD_BYTES, source_id == NODE_ID_INVALID) to reach DeliveryEngine::receive(). | MAJOR | Fixed: envelope_valid() guard added at top of inject(). |
+| DEF-014-4 | `src/core/Serializer.cpp` | required_len = WIRE_HEADER_SIZE + payload_length relied on envelope_valid() having been called first; a direct call or future constant change could silently wrap the uint32_t and cause memcpy to write past the buffer. | MAJOR | Fixed: direct CERT INT30-C overflow guard added in serialize() before the addition. |
+| DEF-014-5 | `src/core/ChannelConfig.hpp` + 4 backends | TransportConfig::num_channels never validated against MAX_CHANNELS before channels[] array iteration; a misconfigured config silently causes out-of-bounds stack reads. | MAJOR | Fixed: transport_config_valid() added to ChannelConfig.hpp; called in all four backend init() functions. |
 
 #### Moderator sign-off
 
@@ -904,7 +904,7 @@ Moderator: Don Jessup — 2026-04-06. All five defects (DEF-014-1 through DEF-01
 | DEF-017-4 | `src/core/DuplicateFilter.cpp` : eviction logic | **G-4: DuplicateFilter eviction silently defaulted to slot 0 before first evaluation.** `find_evict_idx()` was inlined in `check_and_record()` with `evict_idx = 0` as pre-loop default; if the very first slot was newer than all others (impossible but structurally hidden), slot 0 was always evicted. Correct sentinel value is `DEDUP_WINDOW_SIZE` (no slot selected yet). | MINOR | FIX | `find_evict_idx()` extracted as private helper; initialized with `DEDUP_WINDOW_SIZE` sentinel; valid slots preferred over invalid slots; always selects the globally oldest valid entry. |
 | DEF-017-5 | `src/app/Server.cpp` : `send_echo_reply()` | **G-5: Echo reply source_id set from attacker-controlled destination_id field.** `reply.source_id = received.destination_id` allowed a malicious client to inject an arbitrary source_id into the echo reply, bypassing source-address consistency checks in the receiver. | CRITICAL | FIX | `reply.source_id = LOCAL_SERVER_NODE_ID`; reply source is always the local server identity, not the received envelope's destination. |
 | DEF-017-6 | `src/platform/SocketUtils.cpp` : `socket_accept()` | **G-6: `socket_accept()` postcondition allowed fd=0,1,2 (stdin/stdout/stderr).** The postcondition `NEVER_COMPILED_OUT_ASSERT(client_fd >= 0)` admitted stdin/stdout/stderr file descriptors as valid socket fds, which would cause all reads/writes on those "sockets" to corrupt standard I/O. | MAJOR | FIX | Postcondition tightened to `NEVER_COMPILED_OUT_ASSERT(client_fd > 2)`. |
-| DEF-017-7 | `src/core/OrderingBuffer.cpp` : `find_lru_peer_idx()` | **G-7: LRU eviction scan silently selected inactive peer slots.** `find_lru_peer_idx()` iterated all slots without skipping inactive ones; an inactive slot with a stale `last_used_us` field could be selected as the eviction candidate, evicting the wrong peer and corrupting ordering state. | MAJOR | FIX | Scan skips `!active` slots; uses `ORDERING_PEER_COUNT` as sentinel; only active slots are candidates. |
+| DEF-017-7 | `src/core/OrderingBuffer.cpp` : `find_lru_peer_idx()` | **G-7: LRU eviction scan silently selected inactive peer slots.** `find_lru_peer_idx()` iterated all slots without skipping inactive ones; an inactive slot with a stale `last_used_us` field could be selected as the eviction candidate, evicting the wrong peer and corrupting ordering state. | MAJOR | FIX | Initial fix: scan skips `!active` slots; uses `ORDERING_PEER_COUNT` as sentinel. Subsequent refactor: `find_lru_peer_idx()` was later removed entirely when `static_assert(ORDERING_HOLD_COUNT < ORDERING_PEER_COUNT)` made LRU eviction structurally unreachable; the `static_assert` now guards the invariant that was the root cause of G-7. |
 | DEF-017-8 | `src/platform/TcpBackend.cpp` : `send_hello_frame()` | **G-8: HELLO frame sent on fd=-1 when connection not yet established.** `send_hello_frame()` passed `m_client_fds[0]` to `send_frame()` without checking if it was -1; passing -1 to the underlying `send()` syscall is UB and typically results in EBADF, with the error return silently discarded. | MAJOR | FIX | Guard added: if `m_client_fds[0U] < 0`, log WARNING_HI and return `ERR_IO` before calling `send_frame()`. |
 | DEF-017-9 | `src/platform/DtlsUdpBackend.cpp` : `validate_source()` | **SEC-005: Source mismatch in plaintext mode logged at WARNING_LO instead of WARNING_HI.** REQ-6.3.2 requires source-address mismatch (a potential spoofing indicator) to be logged at WARNING_HI. Using WARNING_LO suppressed the event in environments filtering below WARNING_HI. | MINOR | FIX | Severity upgraded to WARNING_HI per REQ-6.3.2. |
 | DEF-017-10 | `src/platform/DtlsUdpBackend.cpp`, `src/platform/TlsTcpBackend.cpp` : destructors | **SEC-006: Private key not zeroed before mbedtls_pk_free() — duplicate of DEF-016-2/3 pattern confirmed to cover both backends.** Additional zeroize call added to cover `m_pkey` in TlsTcpBackend destructor path that had not been addressed in DEF-016-2. (CLAUDE.md §7c / CWE-14.) | CRITICAL | FIX | `mbedtls_platform_zeroize(static_cast<void*>(&m_pkey), sizeof(m_pkey))` added after `mbedtls_pk_free()` in both backends. |
@@ -1189,7 +1189,7 @@ if (!m_open.compare_exchange_strong(expected, false)) { return; }
 ```
 This is a lock-free single-entry guarantee. No other changes required. `std::atomic<bool>` is permitted by CLAUDE.md §1d.
 
-Moderator recommendation: Option A for this PR (no callers issue concurrent close), with a REQ ID assigned for Option B before the first multi-threaded embedding integration.
+Resolution implemented: Option B (FIX) — `m_open` converted to `std::atomic<bool>`; `close()` uses `compare_exchange_strong` for lock-free single-entry guarantee (CWE-416 eliminated). Option A was considered but Option B was chosen as the more robust long-term fix.
 
 #### Checklist reference
 
@@ -1201,7 +1201,7 @@ All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
 - `close()` CC = 10 (at ceiling); helpers extracted to stay within budget. ✓
 - C9a tautology check: all assertions verified independently falsifiable; logically-equivalent dual-assertion in `TlsSessionStore` documented as named ceiling in `COVERAGE_CEILINGS.md`. ✓
 - `cppcoreguidelines-owning-memory` added to `src/.clang-tidy`; all `new`/`delete` uses in `src/` confirmed absent. ✓
-- DEF-021-1 (MAJOR pre-existing): logged DEFER with two explicit resolution paths; moderator recommends Option A for this PR. ✓
+- DEF-021-1 (MAJOR pre-existing): resolved FIX via Option B — `m_open` atomic conversion; `compare_exchange_strong` guarantees single-entry teardown. ✓
 
 #### Moderator sign-off
 

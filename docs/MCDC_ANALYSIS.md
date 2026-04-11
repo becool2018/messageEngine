@@ -33,9 +33,9 @@ outcomes are exercised.
 ## Architectural Ceiling Note
 
 Both `DeliveryEngine::send()` and `DeliveryEngine::receive()` contain a defensive
-`if (!m_initialized) { return ERR_INVALID; }` guard (L700 and L855 respectively).
+`if (!m_initialized) { return ERR_INVALID; }` guard (L700 and L902 respectively).
 In both cases, a `NEVER_COMPILED_OUT_ASSERT(m_initialized)` immediately precedes
-the guard (L697 / L852). In any build where assertions are active (all builds per
+the guard (L697 / L899). In any build where assertions are active (all builds per
 CLAUDE.md §10), the assert fires and aborts before the False-outcome path of the
 guard can be reached. The True-outcome branch (`!m_initialized == true`) is
 therefore architecturally unreachable and is excluded from MC/DC demonstration,
@@ -112,7 +112,7 @@ Note: S-D10 is only reached when S-D9 is False (res != ERR_IO_PARTIAL).
 ## 2. `DeliveryEngine::receive()` — HAZ-001, HAZ-003, HAZ-004, HAZ-005
 
 **File:** `src/core/DeliveryEngine.cpp`
-- `DeliveryEngine::receive()`: lines 848–928
+- `DeliveryEngine::receive()`: lines 895–979
 - `handle_control_message()` (NSC helper): lines 790–805
 - `handle_data_dedup()` (SC: HAZ-003 helper): lines 813–843
 
@@ -122,11 +122,11 @@ Decisions in helper functions are analysed here as part of `receive()`'s MC/DC a
 
 | ID | Function | Source line | Decision expression | Conditions | MC/DC pair — True outcome | MC/DC pair — False outcome | Test(s) |
 |----|----------|-------------|--------------------|-----------|--------------------------|-----------------------------|---------|
-| R-D1 | `receive()` | L855 | `!m_initialized` | A = `m_initialized` | *Architecturally unreachable* — `NEVER_COMPILED_OUT_ASSERT` fires first | `test_receive_data_best_effort` (A=T) | See ceiling note |
-| R-D2 | `receive()` | L860 | `(m_last_now_us > 0ULL) && (now_us < m_last_now_us)` | A = `m_last_now_us > 0ULL`; B = `now_us < m_last_now_us` | A=T, B=T (backward timestamp) → ERR_INVALID | A=F or B=F → continue | T: `test_mcdc_receive_backward_timestamp`; F(A): `test_receive_data_best_effort` (first call); F(B): `test_receive_data_best_effort` (monotonic) |
-| R-D3 | `receive()` | L887 | `res != Result::OK` | A = `res != OK` | A=T: receive timeout → return | A=F: message received → continue | T: `test_receive_timeout`; F: `test_receive_data_best_effort` |
-| R-D4 | `receive()` | L913 | `routing_res != Result::OK` | A = routing/expiry check failed | A=T → return routing error (expiry or misroute) | A=F → continue | T: `test_receive_expired`; F: `test_receive_data_best_effort` |
-| R-D5 | `receive()` | L920 | `envelope_is_control(env)` | A = is control type | A=T → handle control | A=F → handle data | T: `test_receive_ack_cancels_retry`; F: `test_receive_data_best_effort` |
+| R-D1 | `receive()` | L902 | `!m_initialized` | A = `m_initialized` | *Architecturally unreachable* — `NEVER_COMPILED_OUT_ASSERT` fires first | `test_receive_data_best_effort` (A=T) | See ceiling note |
+| R-D2 | `receive()` | L907 | `(m_last_now_us > 0ULL) && (now_us < m_last_now_us)` | A = `m_last_now_us > 0ULL`; B = `now_us < m_last_now_us` | A=T, B=T (backward timestamp) → ERR_INVALID | A=F or B=F → continue | T: `test_mcdc_receive_backward_timestamp`; F(A): `test_receive_data_best_effort` (first call); F(B): `test_receive_data_best_effort` (monotonic) |
+| R-D3 | `receive()` | L938 | `res != Result::OK` | A = `res != OK` | A=T: receive timeout → return | A=F: message received → continue | T: `test_receive_timeout`; F: `test_receive_data_best_effort` |
+| R-D4 | `receive()` | L964 | `routing_res != Result::OK` | A = routing/expiry check failed | A=T → return routing error (expiry or misroute) | A=F → continue | T: `test_receive_expired`; F: `test_receive_data_best_effort` |
+| R-D5 | `receive()` | L971 | `envelope_is_control(env)` | A = is control type | A=T → handle control | A=F → handle data | T: `test_receive_ack_cancels_retry`; F: `test_receive_data_best_effort` |
 | R-D6 | `handle_control_message()` | L795 | `env.message_type == ACK` | A = `type == ACK` | A=T → process ACK (on_ack, retry cancel) | A=F → pass through (NAK/HEARTBEAT) | T: `test_receive_ack_cancels_retry`; F: `test_receive_nak_control`, `test_receive_heartbeat_control` |
 | R-D7 | `handle_data_dedup()` | L818 | `rel != RELIABLE_RETRY` | A = `rel != RELIABLE_RETRY` | A=T → skip dedup; return OK | A=F → apply dedup | T: `test_receive_data_best_effort`; F: `test_receive_duplicate` |
 | R-D8 | `handle_data_dedup()` | L824 | `dedup_res != ERR_DUPLICATE` | A = not duplicate | A=T → deliver | A=F → return ERR_DUPLICATE | T: `test_receive_duplicate` (first receive of that id); F: `test_receive_duplicate` (second receive of same id) |
@@ -222,7 +222,7 @@ payload-range checks; its internal decisions are analysed here as DS-D5/DS-D6.
 | Function | Decisions | Conditions | Compound decisions | MC/DC status | New tests required |
 |---|---|---|---|---|---|
 | `DeliveryEngine::send` | 9 (1 unreachable) | 13 | 3 (`A&&B` at L706; `A&&B` at L553–554; `A\|\|B` at L684–685) | **DEMONSTRATED** | 0 |
-| `DeliveryEngine::receive` | 8 (1 unreachable) | 9 | 1 (`A&&B` at L860) | **DEMONSTRATED** | 0 |
+| `DeliveryEngine::receive` | 8 (1 unreachable) | 9 | 1 (`A&&B` at L907) | **DEMONSTRATED** | 0 |
 | `DuplicateFilter::check_and_record` | 3 | 5 | 1 (`A&&B&&C` at L73) | **DEMONSTRATED** | 0 |
 | `Serializer::serialize` | 3 | 3 | 0 | **DEMONSTRATED** | 0 |
 | `Serializer::deserialize` | 6 | 6 | 0 | **DEMONSTRATED** | 0 |
