@@ -477,10 +477,10 @@ lint:
 #       On Linux: apt install cppcheck
 cppcheck:
 	@echo "=== Cppcheck: src/ ==="
-	@grep -v '^#' .cppcheck-suppress | grep -v '^$$' > /tmp/.cppcheck-supp.tmp
+	@grep -v '^#' .cppcheck-suppress | grep -v '^$$' > /tmp/.cppcheck-supp.$$$$.tmp
 	@cppcheck --enable=all --error-exitcode=1 \
 	    --suppress=checkersReport \
-	    --suppressions-list=/tmp/.cppcheck-supp.tmp \
+	    --suppressions-list=/tmp/.cppcheck-supp.$$$$.tmp \
 	    --std=c++17 -I src \
 	    src/ 2>&1
 	@echo "=== Cppcheck: PASS ==="
