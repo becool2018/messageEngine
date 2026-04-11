@@ -137,7 +137,7 @@ every item is checked PASS.
 
 | # | Item | Pass / Fail |
 |---|------|-------------|
-| I1 | All CRITICAL and MAJOR defects in DEFECT_LOG.md are dispositioned (FIX or WAIVE) | |
+| I1 | All CRITICAL and MAJOR defects in DEFECT_LOG.md are dispositioned (FIX or WAIVE); MINOR defects may remain DEFER if accompanied by a tracked note | |
 | I2 | `make`, `make run_tests`, `make check_traceability` all pass after fixes | |
 | I3 | All checklist items above are filled in (no blanks) | |
 

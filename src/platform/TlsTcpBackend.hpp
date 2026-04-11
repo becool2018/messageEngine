@@ -281,6 +281,8 @@ private:
     /// Perform TLS setup (set_block, ssl_setup, set_hostname, BIO, handshake)
     /// for the client socket at slot 0. Called by connect_to_server() when
     /// tls_enabled is true. Extracted to reduce connect_to_server() CC.
+    // Safety-critical (SC): HAZ-008 — enforces verify_peer+hostname before handshake;
+    // failure allows server impersonation (CWE-297, SECURITY_ASSUMPTIONS.md §6).
     Result tls_connect_handshake();
 
     /// Return true when the injected TlsSessionStore has a valid session that
@@ -299,6 +301,8 @@ private:
     /// for resumed sessions — RFC 5077, SECURITY_ASSUMPTIONS.md §13; system-wide
     /// impact per CLAUDE.md §4 WARNING_HI taxonomy).
     /// Extracted from tls_connect_handshake() to keep its CC ≤ 10 (REQ-6.3.4).
+    // Safety-critical (SC): HAZ-012, HAZ-017 — stores TLS session material; must
+    // zeroize prior session before saving; session_valid set atomically on success only.
     void try_save_client_session();
 #endif /* MBEDTLS_SSL_SESSION_TICKETS */
 
@@ -308,6 +312,8 @@ private:
     /// non-null, and m_session_store_ptr->session_valid is true.
     /// Failure is non-fatal: logs WARNING_LO and full handshake proceeds.
     /// Extracted from tls_connect_handshake() to reduce its CC.
+    // Safety-critical (SC): HAZ-017 — loads session material into mbedTLS context;
+    // a stale/compromised ticket bypasses forward-secrecy (RFC 5077 limitation).
     void try_load_client_session();
 
     /// Accept one pending connection and optionally perform TLS handshake.
@@ -344,6 +350,8 @@ private:
     /// REQ-6.1.9: server stores client NodeId for unicast routing.
     /// @param[in] idx     Slot index that sent the HELLO.
     /// @param[in] src_id  NodeId extracted from the HELLO envelope.
+    // Safety-critical (SC): HAZ-009 — performs cross-slot scan for duplicate NodeId;
+    // failure allows a second connection to hijack an active peer's routing entry.
     void handle_hello_frame(uint32_t idx, NodeId src_id);
 
     /// REQ-6.1.11 / HAZ-009: verify envelope source_id matches the NodeId

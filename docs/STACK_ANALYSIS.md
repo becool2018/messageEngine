@@ -16,10 +16,33 @@ enumerated statically without instrumentation.
 
 ---
 
+## Critical Warning — Large Stack Allocations in flush_delayed_to_clients / flush_delayed_to_wire
+
+**All four backends** (`TcpBackend`, `TlsTcpBackend`, `DtlsUdpBackend`, `UdpBackend`) contain
+`flush_delayed_to_clients()` / `flush_delayed_to_wire()` helpers that declare a local array:
+
+```cpp
+MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];  // IMPAIR_DELAY_BUF_SIZE = 32
+```
+
+`sizeof(MessageEnvelope)` = **4,144 bytes** (MSG_MAX_PAYLOAD_BYTES 4096 + header fields).
+Total per-call stack allocation: **32 × 4,144 = 132,608 bytes (~130 KB)**.
+
+This is the actual worst-case stack allocation. The "~764 B" figure quoted below in the
+per-chain estimates is the worst-case **excluding** this flush path.
+
+**For embedded porting:** platforms with per-thread stacks ≤ 256 KB must either:
+(a) restructure these helpers to use a single-element iteration rather than a local array, or
+(b) allocate the delay buffer as a member array (pre-allocated at init time, not on the stack).
+Validation with a stack-analysis tool (avstack, StackAnalyzer) is mandatory before deployment
+on any target with < 1 MB stack headroom.
+
+---
+
 ## Worst-Case Call Chains
 
-Four independent worst-case paths are identified: send, receive, retry, and
-impairment-internal.
+Five independent worst-case paths are identified: send, receive, retry, ACK sweep, and
+DTLS outbound — plus the impairment flush path documented above.
 
 ### Chain 1 — Outbound message send
 
@@ -68,13 +91,14 @@ main()  [~64 B]
                  └─ RetryManager::collect_due()  [~48 B]
                       └─ DeliveryEngine::send_via_transport()  [~48 B]
                            └─ TcpBackend::send_message()  [~48 B]
-                                └─ Serializer::serialize()  [~32 B]
-                                     └─ ImpairmentEngine::process_outbound()  [~80 B]
-                                          └─ ImpairmentEngine::queue_to_delay_buf()  [~32 B]
+                                └─ TcpBackend::flush_delayed_to_clients()  [~132,608 B]  ← MessageEnvelope delayed[32]
+                                     └─ Serializer::serialize()  [~32 B]
+                                          └─ ImpairmentEngine::process_outbound()  [~80 B]
+                                               └─ ImpairmentEngine::queue_to_delay_buf()  [~32 B]
 ```
 
-**Depth:** 10 frames  ← **worst-case frame depth across all chains**
-**Estimated peak stack:** ~668 B
+**Depth:** 11 frames  ← **worst-case frame depth across all chains**
+**Estimated peak stack:** ~132,608 B (~130 KB — dominated by `delayed[IMPAIR_DELAY_BUF_SIZE]`)
 
 ---
 
@@ -175,38 +199,51 @@ main()  [~64 B]
 |-------|---------------|---------------------|
 | 1 — Outbound send (TCP/UDP) | 9 | ~748 B |
 | 2 — Inbound receive (TCP/UDP) | 8 | ~480 B |
-| 3 — Retry pump | **10** | ~668 B |
+| 3 — Retry pump (with flush) | **11** | **~132,608 B (~130 KB)** |
 | 4 — ACK timeout sweep | 6 | ~352 B |
-| 5 — DTLS outbound send | **10** | ~764 B |
+| 5 — DTLS outbound send (with flush) | **11** | **~132,624 B (~130 KB)** |
 | 6 — DTLS inbound receive | 8 | ~504 B |
 | 7 — HELLO registration (init-phase only) | 5–6 | ~256 B |
-| **Worst case** | **10 (Chains 3 and 5)** | **~764 B (Chain 5, dominated by payload_buf[256])** |
+| **Worst case** | **11 (Chains 3 and 5)** | **~132,608 B (all backends with flush_delayed_to_clients / flush_delayed_to_wire)** |
 
-The worst-case **frame depth** is **10 frames** (Chains 3 and 5). The worst-case **stack
-size** is **~764 B** (Chain 5), dominated by `payload_buf[256]` in `send_test_message()`.
+The worst-case **frame depth** is **11 frames** (Chains 3 and 5 when impairment flush is
+active). The worst-case **stack size** is **~130 KB**, dominated by
+`MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]` in `flush_delayed_to_clients()` /
+`flush_delayed_to_wire()` across all four backends.
 
 DEF-002-1 resolved (2026-04-02): `m_retry_buf` and `m_timeout_buf` moved from stack-local
 arrays to private member arrays in `DeliveryEngine`, zero-initialized in `init()`. Chains 3
-and 4 no longer carry oversized stack allocations.
+and 4 no longer carry those oversized stack allocations — but the `delayed[]` array in the
+flush helpers remains the dominant stack consumer.
 
 ---
 
 ## Platform Stack Budget
 
-| Platform | Default per-thread stack | Headroom vs. worst case |
-|----------|--------------------------|-------------------------|
-| macOS | 8 MB (main), 512 KB (pthreads) | > 10 000× |
-| Linux | 8 MB (main), 8 MB (pthreads) | > 10 000× |
+| Platform | Default per-thread stack | Headroom vs. worst case (~130 KB) |
+|----------|--------------------------|-----------------------------------|
+| macOS | 8 MB (main), 512 KB (pthreads) | ~62× (main) / ~4× (pthreads) |
+| Linux | 8 MB (main), 8 MB (pthreads) | ~62× |
 
-No stack overflow risk exists on either supported platform at current code structure.
+No stack overflow risk exists on macOS/Linux at the default stack sizes. However, the
+~130 KB worst-case makes this codebase **unsuitable for embedded targets with ≤ 256 KB
+stack without first restructuring `flush_delayed_to_clients()` / `flush_delayed_to_wire()`
+to iterate one envelope at a time rather than declaring a full `delayed[32]` local array.**
+
+pthreads on macOS default to 512 KB; the flush path leaves only ~4× headroom on that
+configuration — borderline for safe deployment with deep call stacks from the thread entry
+point. Consider calling `pthread_attr_setstacksize()` with ≥ 2 MB for application threads
+that invoke the message send path.
 
 ---
 
 ## Update Trigger
 
 This document must be updated when:
-- A new function is added that creates a larger on-stack buffer than `payload_buf[256]`.
-- A new call chain adds frames beyond depth 10.
+- A new function is added that creates a larger on-stack buffer than `delayed[IMPAIR_DELAY_BUF_SIZE]` (~130 KB).
+- `IMPAIR_DELAY_BUF_SIZE` or `sizeof(MessageEnvelope)` changes (both affect the flush-path worst case).
+- `flush_delayed_to_clients()` / `flush_delayed_to_wire()` is restructured to use a member buffer (worst case drops).
+- A new call chain adds frames beyond depth 11.
 - A new thread entry point is added (start a new chain analysis from that entry point).
 
 Frame size estimates are conservative upper bounds; actual sizes depend on compiler
