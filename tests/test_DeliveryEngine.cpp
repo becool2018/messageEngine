@@ -24,7 +24,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: simple test framework using assert() and printf().
  *
- * Verifies: REQ-3.2.3, REQ-3.2.4, REQ-3.2.5, REQ-3.2.6, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.5, REQ-3.3.6, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+ * Verifies: REQ-3.2.3, REQ-3.2.4, REQ-3.2.5, REQ-3.2.6, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.5, REQ-3.3.6, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
  */
 // Verification: M1 + M2 + M4 + M5
 // M4: all reachable branches exercised via LocalSimHarness loopback (tests 1–23).
@@ -3567,6 +3567,451 @@ static void test_de_reset_peer_ordering_discards_held_pending()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Coverage Test 73: init() register_local_id() failure path (non-fatal WARNING_HI).
+//
+// The `if (!result_ok(reg_res))` True branch at DeliveryEngine.cpp:334 is missed
+// because LocalSimHarness and MockTransportInterface (before this fix) both inherit
+// the default register_local_id() which always returns OK.  Adding
+// fail_register_local_id to MockTransportInterface makes this branch reachable.
+//
+// The path is explicitly non-fatal: the engine completes init() and remains
+// operational; routing may be degraded for TCP/TLS unicast but send() must
+// still work for best-effort traffic.
+//
+// Verifies: REQ-6.1.10
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_mock_init_register_local_id_failure()
+{
+    // Verifies: REQ-6.1.10
+    MockTransportInterface mock;
+    ChannelConfig cfg;
+    make_mock_channel_config(cfg);
+
+    mock.fail_register_local_id = true;
+
+    DeliveryEngine engine;
+    engine.init(&mock, cfg, 1U);
+
+    // register_local_id() must have been called exactly once during init()
+    assert(mock.n_register_local_id == 1);  // Assert: registration was attempted
+
+    // Engine must still be operational despite the non-fatal WARNING_HI
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
+    Result r = engine.send(env, NOW_US);
+    assert(r == Result::OK);  // Assert: engine usable after non-fatal init warning
+
+    printf("PASS: test_mock_init_register_local_id_failure\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Coverage Test 74: update_latency_stats() multi-sample path — else block.
+//
+// The existing test_stats_latency sends exactly ONE RELIABLE_ACK and receives
+// ONE ACK, so latency_sample_count reaches 1 and the `if (sample_count == 1U)`
+// True branch is taken.  The else clause (lines 1219–1226) — which updates the
+// running min and max — is never entered.
+//
+// This test sends THREE RELIABLE_ACK messages and receives all three ACKs with
+// deliberately varied RTTs to cover all five missed branch outcomes:
+//   Sample 1 (RTT=3000): line 1215 True — first sample, init min/max.
+//   Sample 2 (RTT=1000): line 1215 False (else entered); 1220 True (new min);
+//                        1223 False (max unchanged).
+//   Sample 3 (RTT=5000): line 1215 False (else entered); 1220 False (min unchanged);
+//                        1223 True (new max).
+//
+// Verifies: REQ-7.2.1
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_stats_latency_multi_sample()
+{
+    // Verifies: REQ-7.2.1
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // ── Sample 1: send at NOW_US, ACK at NOW_US+3000 → RTT=3000 ─────────────
+    // Exercises line 1215 True (first sample: init min=max=3000).
+    MessageEnvelope env1;
+    make_data_envelope(env1, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+    Result s1 = engine.send(env1, NOW_US);
+    assert(s1 == Result::OK);
+    const uint64_t msg_id1 = env1.message_id;
+
+    // Drain the DATA frame from harness_b to keep its queue clear.
+    MessageEnvelope drain1;
+    (void)harness_b.receive_message(drain1, 0U);
+
+    MessageEnvelope ack1;
+    make_ack_envelope(ack1, 2U, 1U, msg_id1);
+    Result inj1 = harness_b.send_message(ack1);
+    assert(inj1 == Result::OK);
+
+    MessageEnvelope out1;
+    Result r1 = engine.receive(out1, 100U, NOW_US + 3000ULL);  // RTT = 3000 us
+    assert(r1 == Result::OK);
+
+    DeliveryStats s1_stats;
+    engine.get_stats(s1_stats);
+    assert(s1_stats.latency_sample_count == 1U);     // Assert: first sample counted
+    assert(s1_stats.latency_min_us == 3000ULL);       // Assert: min initialised to RTT1
+    assert(s1_stats.latency_max_us == 3000ULL);       // Assert: max initialised to RTT1
+
+    // ── Sample 2: send at NOW_US+5000, ACK at NOW_US+6000 → RTT=1000 ────────
+    // RTT2 < min (3000): exercises line 1215 False (else entered),
+    //                    line 1220 True (min updated), line 1223 False (max kept).
+    MessageEnvelope env2;
+    make_data_envelope(env2, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+    Result s2 = engine.send(env2, NOW_US + 5000ULL);
+    assert(s2 == Result::OK);
+    const uint64_t msg_id2 = env2.message_id;
+
+    MessageEnvelope drain2;
+    (void)harness_b.receive_message(drain2, 0U);
+
+    MessageEnvelope ack2;
+    make_ack_envelope(ack2, 2U, 1U, msg_id2);
+    Result inj2 = harness_b.send_message(ack2);
+    assert(inj2 == Result::OK);
+
+    MessageEnvelope out2;
+    Result r2 = engine.receive(out2, 100U, NOW_US + 6000ULL);  // RTT = 1000 us
+    assert(r2 == Result::OK);
+
+    DeliveryStats s2_stats;
+    engine.get_stats(s2_stats);
+    assert(s2_stats.latency_sample_count == 2U);     // Assert: second sample counted
+    assert(s2_stats.latency_min_us == 1000ULL);       // Assert: min lowered to RTT2
+    assert(s2_stats.latency_max_us == 3000ULL);       // Assert: max unchanged
+
+    // ── Sample 3: send at NOW_US+8000, ACK at NOW_US+13000 → RTT=5000 ───────
+    // RTT3 > max (3000): exercises line 1215 False (else entered),
+    //                    line 1220 False (min kept), line 1223 True (max updated).
+    MessageEnvelope env3;
+    make_data_envelope(env3, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+    Result s3 = engine.send(env3, NOW_US + 8000ULL);
+    assert(s3 == Result::OK);
+    const uint64_t msg_id3 = env3.message_id;
+
+    MessageEnvelope drain3;
+    (void)harness_b.receive_message(drain3, 0U);
+
+    MessageEnvelope ack3;
+    make_ack_envelope(ack3, 2U, 1U, msg_id3);
+    Result inj3 = harness_b.send_message(ack3);
+    assert(inj3 == Result::OK);
+
+    MessageEnvelope out3;
+    Result r3 = engine.receive(out3, 100U, NOW_US + 13000ULL);  // RTT = 5000 us
+    assert(r3 == Result::OK);
+
+    DeliveryStats s3_stats;
+    engine.get_stats(s3_stats);
+    assert(s3_stats.latency_sample_count == 3U);     // Assert: third sample counted
+    assert(s3_stats.latency_min_us == 1000ULL);       // Assert: min unchanged (RTT3 > min)
+    assert(s3_stats.latency_max_us == 5000ULL);       // Assert: max raised to RTT3
+    assert(s3_stats.latency_sum_us  == 9000ULL);       // Assert: sum = 3000+1000+5000
+
+    harness_a.close();
+    harness_b.close();
+    printf("PASS: test_stats_latency_multi_sample\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Coverage Test 75: deliver_held_pending() try_release_next True branch — normal path.
+//
+// The `if (rel_res == Result::OK)` guard at DeliveryEngine.cpp:1502 is taken when
+// there is a further consecutive held message to stage after delivering the current
+// held one.  All existing tests hold at most one message (e.g. seq=3 with seq=4
+// absent), so try_release_next() always returns ERR_AGAIN and the True branch is
+// never exercised.
+//
+// Scenario: seq=1 received; seq=3 AND seq=4 both held out-of-order; seq=2
+// injected to fill the gap.  After seq=2 is processed:
+//   - handle_data_path() stages seq=3 in m_held_pending via try_release_next (L1021).
+//   - seq=4 remains in the ordering hold buffer.
+// On the next receive():
+//   - deliver_held_pending(seq=3) is called.
+//   - try_release_next at L1501 finds seq=4 → OK → True branch taken → seq=4 staged.
+// The following receive() delivers seq=4 from the newly staged held_pending.
+//
+// Verifies: REQ-3.3.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_ordered_chain_drain()
+{
+    // Verifies: REQ-3.3.5
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_ordered_engines(ha, hb, engine_a, engine_b);
+
+    static const NodeId   SRC        = 1U;
+    static const NodeId   DST        = 2U;
+    static const uint64_t FAR_EXPIRY = NOW_US + 5000000ULL;
+
+    // Step 1: inject seq=1 — delivers immediately; next_expected → 2.
+    {
+        MessageEnvelope e1;
+        envelope_init(e1);
+        e1.message_type      = MessageType::DATA;
+        e1.message_id        = 7001ULL;
+        e1.source_id         = SRC;
+        e1.destination_id    = DST;
+        e1.timestamp_us      = NOW_US;
+        e1.expiry_time_us    = FAR_EXPIRY;
+        e1.priority          = 0U;
+        e1.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e1.sequence_num      = 1U;
+        e1.payload_length    = 1U;
+        e1.payload[0]        = 0x01U;
+        Result inj = hb.inject(e1);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out1;
+    Result r1 = engine_b.receive(out1, 100U, NOW_US + 1ULL);
+    assert(r1 == Result::OK);
+    assert(out1.sequence_num == 1U);  // Assert: seq=1 delivered; next_expected → 2
+
+    // Step 2: inject seq=3 (gap at seq=2) — held out-of-order.
+    {
+        MessageEnvelope e3;
+        envelope_init(e3);
+        e3.message_type      = MessageType::DATA;
+        e3.message_id        = 7003ULL;
+        e3.source_id         = SRC;
+        e3.destination_id    = DST;
+        e3.timestamp_us      = NOW_US;
+        e3.expiry_time_us    = FAR_EXPIRY;
+        e3.priority          = 0U;
+        e3.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e3.sequence_num      = 3U;
+        e3.payload_length    = 1U;
+        e3.payload[0]        = 0x03U;
+        Result inj = hb.inject(e3);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope hold3;
+    Result r3 = engine_b.receive(hold3, 0U, NOW_US + 2ULL);
+    assert(r3 == Result::ERR_AGAIN);  // Assert: seq=3 held (out of order)
+
+    // Step 3: inject seq=4 (still waiting for seq=2) — also held out-of-order.
+    {
+        MessageEnvelope e4;
+        envelope_init(e4);
+        e4.message_type      = MessageType::DATA;
+        e4.message_id        = 7004ULL;
+        e4.source_id         = SRC;
+        e4.destination_id    = DST;
+        e4.timestamp_us      = NOW_US;
+        e4.expiry_time_us    = FAR_EXPIRY;
+        e4.priority          = 0U;
+        e4.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e4.sequence_num      = 4U;
+        e4.payload_length    = 1U;
+        e4.payload[0]        = 0x04U;
+        Result inj = hb.inject(e4);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope hold4;
+    Result r4 = engine_b.receive(hold4, 0U, NOW_US + 3ULL);
+    assert(r4 == Result::ERR_AGAIN);  // Assert: seq=4 also held
+
+    // Step 4: inject seq=2 — fills the gap.
+    // handle_data_path delivers seq=2 and calls try_release_next which finds seq=3
+    // (next_expected=3) and stages it in m_held_pending.  seq=4 remains held.
+    {
+        MessageEnvelope e2;
+        envelope_init(e2);
+        e2.message_type      = MessageType::DATA;
+        e2.message_id        = 7002ULL;
+        e2.source_id         = SRC;
+        e2.destination_id    = DST;
+        e2.timestamp_us      = NOW_US;
+        e2.expiry_time_us    = FAR_EXPIRY;
+        e2.priority          = 0U;
+        e2.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e2.sequence_num      = 2U;
+        e2.payload_length    = 1U;
+        e2.payload[0]        = 0x02U;
+        Result inj = hb.inject(e2);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out2;
+    Result r2 = engine_b.receive(out2, 0U, NOW_US + 4ULL);
+    assert(r2 == Result::OK);
+    assert(out2.sequence_num == 2U);  // Assert: seq=2 delivered; seq=3 now in m_held_pending
+
+    // Step 5: receive() drains m_held_pending(seq=3).
+    // deliver_held_pending calls try_release_next which finds seq=4 → OK →
+    // True branch at L1502 taken: seq=4 staged in m_held_pending.
+    MessageEnvelope out_seq3;
+    Result r_seq3 = engine_b.receive(out_seq3, 0U, NOW_US + 5ULL);
+    assert(r_seq3 == Result::OK);
+    assert(out_seq3.sequence_num == 3U);  // Assert: seq=3 delivered from held_pending
+
+    // Step 6: receive() drains m_held_pending(seq=4) staged in step 5.
+    MessageEnvelope out_seq4;
+    Result r_seq4 = engine_b.receive(out_seq4, 0U, NOW_US + 6ULL);
+    assert(r_seq4 == Result::OK);
+    assert(out_seq4.sequence_num == 4U);  // Assert: seq=4 delivered from held_pending
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_de_ordered_chain_drain\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Coverage Test 76: deliver_held_pending() try_release_next True branch — expiry path.
+//
+// The `if (rel_res == Result::OK)` guard at DeliveryEngine.cpp:1487 (inside the
+// expiry arm of deliver_held_pending) is taken when there is a further consecutive
+// held message after the expired one.  No existing test combines held-message
+// expiry with a second held message in the buffer.
+//
+// Scenario mirrors test_de_ordered_chain_drain but seq=3 is given a SHORT_EXPIRY
+// so it expires before the step-5 receive().  seq=4 is still in the hold buffer.
+// When deliver_held_pending detects seq=3 has expired:
+//   - try_release_next at L1486 finds seq=4 (next_expected=4 after seq=3 was
+//     staged) → OK → True branch taken → seq=4 staged in m_held_pending.
+// The following receive() delivers seq=4 from the newly staged slot.
+//
+// Verifies: REQ-3.3.5, REQ-3.2.7
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_ordered_chain_drain_with_expiry()
+{
+    // Verifies: REQ-3.3.5, REQ-3.2.7
+    LocalSimHarness ha, hb;
+    DeliveryEngine  engine_a, engine_b;
+    setup_two_ordered_engines(ha, hb, engine_a, engine_b);
+
+    static const NodeId   SRC          = 1U;
+    static const NodeId   DST          = 2U;
+    static const uint64_t FAR_EXPIRY   = NOW_US + 5000000ULL;
+    static const uint64_t SHORT_EXPIRY = NOW_US + 10ULL;
+    static const uint64_t AFTER_EXPIRY = NOW_US + 100ULL;  // > SHORT_EXPIRY
+
+    // Step 1: inject seq=1 — delivers immediately; next_expected → 2.
+    {
+        MessageEnvelope e1;
+        envelope_init(e1);
+        e1.message_type      = MessageType::DATA;
+        e1.message_id        = 8001ULL;
+        e1.source_id         = SRC;
+        e1.destination_id    = DST;
+        e1.timestamp_us      = NOW_US;
+        e1.expiry_time_us    = FAR_EXPIRY;
+        e1.priority          = 0U;
+        e1.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e1.sequence_num      = 1U;
+        e1.payload_length    = 1U;
+        e1.payload[0]        = 0x01U;
+        Result inj = hb.inject(e1);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out1;
+    Result r1 = engine_b.receive(out1, 100U, NOW_US + 1ULL);
+    assert(r1 == Result::OK);
+    assert(out1.sequence_num == 1U);  // Assert: seq=1 delivered
+
+    // Step 2: inject seq=3 with SHORT_EXPIRY (gap at seq=2) — held out-of-order.
+    {
+        MessageEnvelope e3;
+        envelope_init(e3);
+        e3.message_type      = MessageType::DATA;
+        e3.message_id        = 8003ULL;
+        e3.source_id         = SRC;
+        e3.destination_id    = DST;
+        e3.timestamp_us      = NOW_US;
+        e3.expiry_time_us    = SHORT_EXPIRY;
+        e3.priority          = 0U;
+        e3.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e3.sequence_num      = 3U;
+        e3.payload_length    = 1U;
+        e3.payload[0]        = 0x03U;
+        Result inj = hb.inject(e3);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope hold3;
+    Result r3 = engine_b.receive(hold3, 0U, NOW_US + 2ULL);
+    assert(r3 == Result::ERR_AGAIN);  // Assert: seq=3 held (out of order)
+
+    // Step 3: inject seq=4 with FAR_EXPIRY — also held out-of-order.
+    {
+        MessageEnvelope e4;
+        envelope_init(e4);
+        e4.message_type      = MessageType::DATA;
+        e4.message_id        = 8004ULL;
+        e4.source_id         = SRC;
+        e4.destination_id    = DST;
+        e4.timestamp_us      = NOW_US;
+        e4.expiry_time_us    = FAR_EXPIRY;
+        e4.priority          = 0U;
+        e4.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e4.sequence_num      = 4U;
+        e4.payload_length    = 1U;
+        e4.payload[0]        = 0x04U;
+        Result inj = hb.inject(e4);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope hold4;
+    Result r4 = engine_b.receive(hold4, 0U, NOW_US + 3ULL);
+    assert(r4 == Result::ERR_AGAIN);  // Assert: seq=4 also held
+
+    // Step 4: inject seq=2 — fills the gap.
+    // handle_data_path delivers seq=2; try_release_next at L1021 finds seq=3
+    // (next_expected=3) and stages it in m_held_pending; seq=4 remains held.
+    // next_expected advances to 4 when seq=3 is released.
+    {
+        MessageEnvelope e2;
+        envelope_init(e2);
+        e2.message_type      = MessageType::DATA;
+        e2.message_id        = 8002ULL;
+        e2.source_id         = SRC;
+        e2.destination_id    = DST;
+        e2.timestamp_us      = NOW_US;
+        e2.expiry_time_us    = FAR_EXPIRY;
+        e2.priority          = 0U;
+        e2.reliability_class = ReliabilityClass::BEST_EFFORT;
+        e2.sequence_num      = 2U;
+        e2.payload_length    = 1U;
+        e2.payload[0]        = 0x02U;
+        Result inj = hb.inject(e2);
+        assert(inj == Result::OK);
+    }
+    MessageEnvelope out2;
+    Result r2 = engine_b.receive(out2, 0U, NOW_US + 4ULL);
+    assert(r2 == Result::OK);
+    assert(out2.sequence_num == 2U);  // Assert: seq=2 delivered; seq=3 in m_held_pending
+
+    // Capture expiry-drop baseline before the expired deliver.
+    DeliveryStats stats_before;
+    engine_b.get_stats(stats_before);
+
+    // Step 5: receive() at AFTER_EXPIRY — seq=3 (SHORT_EXPIRY=NOW_US+10) has expired.
+    // deliver_held_pending detects expiry; try_release_next at L1486 finds seq=4
+    // (next_expected=4 set when seq=3 was staged) → OK → True branch taken →
+    // seq=4 staged in m_held_pending.  receive() falls through to transport
+    // (no live frame in queue) → ERR_TIMEOUT.
+    MessageEnvelope out_exp;
+    Result r_exp = engine_b.receive(out_exp, 0U, AFTER_EXPIRY);
+    assert(r_exp == Result::ERR_TIMEOUT);  // Assert: expired seq=3 dropped; no live frame
+
+    DeliveryStats stats_after;
+    engine_b.get_stats(stats_after);
+    assert(stats_after.msgs_dropped_expired ==
+           stats_before.msgs_dropped_expired + 1U);  // Assert: expiry counted
+
+    // Step 6: receive() — deliver_held_pending(seq=4) staged in step 5.
+    MessageEnvelope out_seq4;
+    Result r_seq4 = engine_b.receive(out_seq4, 0U, AFTER_EXPIRY + 1ULL);
+    assert(r_seq4 == Result::OK);
+    assert(out_seq4.sequence_num == 4U);  // Assert: seq=4 delivered from held_pending
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_de_ordered_chain_drain_with_expiry\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test 71: Forge-ACK discard — process_ack() FORGE-ACK True branch (L131)
 //
 // Exercises the F-7 forge-ACK guard: an ACK whose source_id does not match the
@@ -3865,6 +4310,10 @@ int main()
     test_de_reassembly_per_source_cap_drops_fragment();
     test_de_reassembly_invalid_fragment_drops();
     test_de_reset_peer_ordering_discards_held_pending();
+    test_mock_init_register_local_id_failure();
+    test_stats_latency_multi_sample();
+    test_de_ordered_chain_drain();
+    test_de_ordered_chain_drain_with_expiry();
     test_de_forge_ack_discarded();
     test_de_latency_min_max_updates();
     test_de_sequence_state_exhaustion();

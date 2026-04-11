@@ -232,7 +232,7 @@ two categories is a defect, not a ceiling.
 | core/DuplicateFilter.cpp | 67 | 18 | 73.13% | ≥73% | SC |
 | core/AckTracker.cpp | 152 | 35 | 76.97% | ≥76% | SC |
 | core/RetryManager.cpp | 157 | 36 | 77.07% | ≥77% | SC |
-| core/DeliveryEngine.cpp | 479 | ~121 | ~74.74% | ≥74% | SC |
+| core/DeliveryEngine.cpp | 479 | ~114 | ~76.2% | ≥75% | SC |
 | core/AssertState.cpp | 2 | 1 | 50.00% | ≥50% | NSC-infra |
 | platform/ImpairmentEngine.cpp | 256 | 66 | 74.22% | ≥74% | SC |
 | platform/ImpairmentConfigLoader.cpp | 174 | 28 | 83.91% | ≥83% | SC |
@@ -514,7 +514,7 @@ Threshold: **≥77%** (maximum achievable, merged profdata).
 
 ---
 
-### core/DeliveryEngine.cpp — ceiling ~74.8% (≈358/479)
+### core/DeliveryEngine.cpp — ceiling ~76.2% (≈365/479)
 
 **Updated 2026-04-06:** MC/DC tests 60–64 closed 10 previously-missed branches
 (backward-timestamp True cases in `send()` and `receive()`, sequence-assignment
@@ -578,7 +578,33 @@ This guard is **structurally unreachable** through the public API.
 - LLVM branch count contribution: 2 additional missed outcomes (True branch of the
   guard and the associated sub-condition in the backward-timestamp `if`).
 
-Approximate new result: 479 branches, ~121 missed, ~74.74%.
+Result after round 14: 479 branches, ~121 missed, ~74.74%.
+
+**2026-04-11 (round 6 — latency, chain-drain, register coverage):** 4 new tests
+closed 8 previously-missed branch outcomes that code inspection showed were
+reachable but untested; the round-5 ceiling claim of "all reachable branches 100%
+covered" was incorrect for these paths:
+
+- `test_mock_init_register_local_id_failure`: `if (!result_ok(reg_res))` True branch
+  in `init()` (L334). MockTransportInterface previously inherited the default
+  `register_local_id()` which always returns OK; added `fail_register_local_id` flag
+  and override to make the WARNING_HI non-fatal path reachable. 1 branch.
+- `test_stats_latency_multi_sample`: `update_latency_stats()` else clause (L1219–1226):
+  5 branch outcomes — `if (latency_sample_count == 1U)` False; `if (rtt < min)` True
+  and False; `if (rtt > max)` True and False. Three RELIABLE_ACK round-trips with RTTs
+  3000/1000/5000 µs exercise all combinations. Overlaps with round-14's
+  `test_de_latency_min_max_updates`; both cover the same branches (no double-count).
+- `test_de_ordered_chain_drain`: `if (rel_res == Result::OK)` True at `deliver_held_
+  pending()` L1502 (normal path). Requires seq=3 AND seq=4 both held simultaneously;
+  when seq=2 fills the gap, seq=3 is staged and deliver_held_pending for seq=3 finds
+  seq=4 via try_release_next. 1 branch.
+- `test_de_ordered_chain_drain_with_expiry`: `if (rel_res == Result::OK)` True at
+  `deliver_held_pending()` L1487 (expiry path). Same chain scenario but seq=3 carries
+  SHORT_EXPIRY; after time advances past expiry the expired-branch try_release_next
+  finds seq=4. 1 branch.
+
+Combined unique branches closed by rounds 14+6: ~10 coverable branches.
+Approximate new result: 479 branches, ~114 missed, ~76.2%.
 
 Two independent sources of permanently-missed branches:
 
@@ -602,10 +628,10 @@ API in a correctly-configured harness. Key examples:
   `send()` calls (structurally impossible in any single-threaded test harness).
 
 All branches reachable through the public API in a correctly-configured test harness
-are 100% covered. The ~121 remaining missed branches are entirely accounted for by
+are 100% covered. The ~114 remaining missed branches are entirely accounted for by
 category (a) and category (b) above.
 
-Threshold: **≥74%** (maximum achievable; CI run will confirm exact post-round-14 figure).
+Threshold: **≥75%** (maximum achievable; CI run will confirm exact post-rounds-14+6 figure).
 
 ---
 
