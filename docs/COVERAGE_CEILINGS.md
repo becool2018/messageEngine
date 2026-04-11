@@ -18,7 +18,7 @@ branch. This mechanism is identical across all files and is not re-explained bel
 
 ---
 
-## Thresholds (current run: 2026-04-09)
+## Thresholds (current run: 2026-04-10)
 
 **Methodology note (2026-04-06 re-baseline):** LLVM source-based coverage now
 counts each branch outcome (True and False) as a separate branch entry, doubling
@@ -123,6 +123,37 @@ updated from ≥71% to ≥72%.
 New threshold: **≥75%** (maximum achievable). The remaining 192 missed branches are documented
 below in the per-file ceiling justification section.
 
+**2026-04-10 update (round 12 — ReassemblyBuffer, Fragmentation, AssertState, RequestReplyEngine coverage push):**
+17 new tests added across four test files to drive coverage to maximum achievable:
+- `test_ReassemblyBuffer.cpp` (+10 tests): covers `validate_fragment` total-length mismatch
+  (line 168 True), `validate_metadata` fragment-index OOR (313:9 True), ternary True path for
+  `fragment_count == 0U` (313:33 True), fragment-count too large (316 True), `record_fragment`
+  overrun (204 True), `received_bytes` overflow (216 True), `assemble_and_free` mismatch (259 True),
+  zero-payload two-fragment assembly (202 False, 285 False), and two `sweep_stale` False paths
+  (473 False, 474 False). ReassemblyBuffer.cpp: 84.00%→98.18% lines; merged branch coverage **81.59%**
+  (201 branches, 37 missed; previously blocked by test_TlsTcpBackend abort — now measured correctly).
+- `test_Fragmentation.cpp` (+1 test): `test_frag_zero_payload` covers zero-payload True path
+  (line 67 True — `frag_count = 1U`) and memcpy-skip False path (line 97 False). 92.86%→95.24%
+  lines; merged branch coverage **78.12%** (32 branches, 7 missed).
+- `test_AssertState.cpp` (+1 test): `test_get_fatal_count_nonzero_after_trigger` covers
+  `get_fatal_count()` body (lines 85–88, previously uncovered). 80.77%→92.31% lines.
+- `test_RequestReplyEngine.cpp` (+6 tests): zero-payload round-trip (6 branch outcomes across
+  build/dispatch/receive helpers), pad-byte[1] non-zero (207:36 True), pad-byte[2] non-zero
+  (207:63 True), timeout saturation (line 541 True), response-expiry saturation (677 True),
+  sweep not-yet-expired (781 False). Merged branches: 74.09%→**78.10%** (274 branches, 60 missed).
+
+*Methodology note (2026-04-10):* Prior round-12 entries showed per-binary branch counts
+(246/40/326 branches for ReassemblyBuffer/Fragmentation/RequestReplyEngine) because
+`test_TlsTcpBackend` was aborting and preventing a clean merged-profdata run.
+The `TestPortAllocator` fix (merged from origin/main 2026-04-10) resolved the abort;
+all numbers above and in the table below now reflect the authoritative merged-profdata measurement.
+
+New threshold: `core/ReassemblyBuffer.cpp` **≥81%** (maximum achievable, merged).
+New threshold: `core/Fragmentation.cpp` **≥78%** (maximum achievable, merged).
+`core/AssertState.cpp` branch ceiling unchanged at **≥50%**; line coverage updated to 92.31%.
+`core/RequestReplyEngine.cpp` merged threshold updated to **≥78%** (was ≥74%; 6 new tests
+  closed 11 additional branch outcomes: 203/274 → 214/274).
+
 **2026-04-09 update (round 9 — ImpairmentEngine overflow paths + SocketUtils send-buffer flush):**
 5 new tests closed 8 previously-missed branch outcomes across two files.
 `test_compute_jitter_overflow` exercises the `jitter_variance_ms > UINT32_MAX - jitter_mean_ms`
@@ -175,7 +206,9 @@ two categories is a defect, not a ceiling.
 | File | Branches | Missed | Coverage | Threshold (regression guard, not policy floor) | Source |
 |------|----------|--------|----------|------------------------------------------------|--------|
 | core/OrderingBuffer.cpp | 208 | 43 | 79.33% | ≥79% | SC |
-| core/RequestReplyEngine.cpp | 274 | 71 | 74.09% | ≥74% | SC |
+| core/ReassemblyBuffer.cpp | 201 | 37 | 81.59% | ≥81% | SC |
+| core/RequestReplyEngine.cpp | 274 | 60 | 78.10% | ≥78% | SC |
+| core/Fragmentation.cpp | 32 | 7 | 78.12% | ≥78% | SC |
 | core/Serializer.cpp | 141 | 37 | 73.76% | ≥73% | SC |
 | core/DuplicateFilter.cpp | 67 | 18 | 73.13% | ≥73% | SC |
 | core/AckTracker.cpp | 152 | 52 | 65.79% | ≥65% | SC |
@@ -233,10 +266,18 @@ Threshold: **≥79%** (maximum achievable).
 
 ---
 
-### core/RequestReplyEngine.cpp — ceiling 96.15% lines / 74.09% branches
+### core/RequestReplyEngine.cpp — ceiling 96.15% lines / 78.10% branches
 
-**Line coverage: 424/441 (96.15%)** — 17 permanently-missed lines.
-**Branch coverage: 203/274 (74.09%)** — 71 permanently-missed branches.
+**Line coverage: 424/441 (96.15%)** — 17 permanently-missed lines (unchanged).
+**Branch coverage (merged profdata, 2026-04-10):** 214/274 (78.10%) — 60 missed.
+
+*Methodology note:* Prior round-12 entries reported a per-binary measurement (326 branches,
+65.64%) because `test_TlsTcpBackend` was aborting and preventing a clean merged-profdata run.
+The `TestPortAllocator` fix resolved the abort; the merged-profdata measurement (274 branches)
+is now authoritative. Merged coverage includes branches contributed by `test_DeliveryEngine`
+and other binaries that also link against `RequestReplyEngine.cpp`. The 6 new round-12 tests
+closed 11 additional branch outcomes (203/274 → 214/274), raising merged coverage from 74.09%
+to 78.10%.
 
 **Permanently-missed lines (17):**
 
@@ -259,18 +300,110 @@ by `MSG_MAX_PAYLOAD_BYTES` by the Serializer (REQ-3.2.3), `app_len` can never ex
 `APP_PAYLOAD_CAP`.  These guards are retained as defense-in-depth but are unreachable
 through any valid deserialization path.
 
-**Branch coverage ceiling justification (71 missed):**
-The 71 missed branches break down as:
+**Branch coverage ceiling justification (60 missed):**
+The 60 missed branches break down as:
 - ~35 `NEVER_COMPILED_OUT_ASSERT` True branches (one per assert call in the 16 functions;
   each assert expands to an `if (!cond)` whose True path is `[[noreturn]]` abort).
 - ~7 branches from the 2 unreachable payload-truncation guards above.
-- ~29 additional branches from function-entry `!m_initialized` checks (True branch,
-  5 functions × ~6 LLVM sub-branch entries), `build_wire_payload` ceiling paths, and
-  never-exercised combinations of the duplicate-response and request-stash guards.
+- ~18 additional branches from function-entry `!m_initialized` checks (True branch),
+  `build_wire_payload` ceiling paths, and never-exercised combinations of the
+  duplicate-response and request-stash guards.
+  (Down from ~29 in prior baseline: the 6 round-12 tests closed 11 of these.)
 
 All reachable branches (every decision point reachable under any test input that does
-not trigger an assert abort) are exercised by the 25 test cases in
-`tests/test_RequestReplyEngine.cpp`.
+not trigger an assert abort) are exercised by the 31 test cases in
+`tests/test_RequestReplyEngine.cpp` (25 original + 6 added in round 12).
+
+Threshold: **≥78%** (maximum achievable, merged profdata).
+
+---
+
+### core/ReassemblyBuffer.cpp — ceiling 98.18% lines / 81.59% branches
+
+**2026-04-10 (round 12):** First coverage entry for this file. 10 new tests added.
+
+**Line coverage: 270/275 (98.18%)** — 5 permanently-missed lines.
+**Branch coverage: 164/201 (81.59%)** — 37 permanently-missed branches.
+**Function coverage: 15/15 (100%).**
+
+*Methodology note:* Prior round-12 entries showed 246 branches / 82 missed (66.67%) from a
+per-binary measurement (test_TlsTcpBackend abort prevented merged profdata). The
+`TestPortAllocator` fix resolved the abort; 201 branches / 37 missed (81.59%) is the
+authoritative merged-profdata result. Merged coverage includes branches covered by
+`test_DeliveryEngine` which exercises the reassembly path via `DeliveryEngine::receive()`.
+
+**Permanently-missed lines (5):**
+
+Lines 195–199 — the True path of the `byte_offset > MSG_MAX_PAYLOAD_BYTES` guard inside
+`record_fragment()`. `byte_offset = fragment_index × FRAG_MAX_PAYLOAD_BYTES`. With
+`fragment_index` bounded by `FRAG_MAX_COUNT − 1 = 3` (enforced by `validate_metadata()`
+before `record_fragment()` is called) and `FRAG_MAX_PAYLOAD_BYTES = 1024`, the maximum
+achievable `byte_offset` is `3 × 1024 = 3072 < 4096 = MSG_MAX_PAYLOAD_BYTES`. The True
+path is mathematically unreachable through the public API (VVP-001 §4.3 d-iii). The guard
+is retained as defense-in-depth against future constant changes.
+
+**Branch coverage ceiling justification (37 missed):**
+
+The 37 missed branches consist of:
+
+**(a) ~35 `NEVER_COMPILED_OUT_ASSERT` True (abort) paths** — one per NCA call across the
+15 functions. The [[noreturn]] abort body prevents profile counters from being incremented
+(VVP-001 §4.3 d-i). In the merged-profdata run, each NCA contributes 1 missed branch outcome
+(vs ~2 in per-binary mode where the full instrumented unit is measured without exercising
+the path). 15 functions × ~2–3 NCAs per function ≈ 35 missed outcomes.
+
+**(b) ~2 branch outcomes from the architecturally-impossible `byte_offset > MSG_MAX_PAYLOAD_BYTES`
+guard** (lines 194–199, described above). The True branch is unreachable via the public API;
+the False branch is covered by every successful `record_fragment` call.
+
+All other decision points — slot search, bitmask completion, per-source cap enforcement,
+stale/expired sweep logic, fragment-index OOR rejection, total-length mismatch, and
+received-bytes overflow guard — have both True and False branches covered by the 28 test
+cases in `tests/test_ReassemblyBuffer.cpp` (18 original + 10 added in round 12).
+
+Threshold: **≥81%** (maximum achievable, merged profdata).
+
+---
+
+### core/Fragmentation.cpp — ceiling 95.24% lines / 78.12% branches
+
+**2026-04-10 (round 12):** First coverage entry for this file. `test_frag_zero_payload`
+added.
+
+**Line coverage: 40/42 (95.24%)** — 2 permanently-missed lines.
+**Branch coverage: 25/32 (78.12%)** — 7 permanently-missed branches.
+**Function coverage: 2/2 (100%).**
+
+*Methodology note:* Prior round-12 entries showed 40 branches / 15 missed (62.50%) from a
+per-binary measurement. The `TestPortAllocator` fix enabled a clean merged-profdata run;
+32 branches / 7 missed (78.12%) is the authoritative result. In merged mode each NCA
+contributes 1 missed branch outcome (not 2 as in per-binary mode), accounting for the
+difference: 7 NCAs × 1 = 7 missed (consistent with 25 covered branches in both modes).
+
+**Permanently-missed lines (2):**
+
+Lines 61–62 — the True path of the `if (out_cap < FRAG_MAX_COUNT)` guard inside
+`fragment_message()`. This guard is immediately preceded by
+`NEVER_COMPILED_OUT_ASSERT(out_cap >= FRAG_MAX_COUNT)` at line 52, which fires (and
+calls `abort()`) before line 60 is reached whenever `out_cap < FRAG_MAX_COUNT`. The
+True branch of line 60 is therefore architecturally unreachable through any test input
+that does not terminate the process (double-guard pattern; VVP-001 §4.3 d-i).
+
+**Branch coverage ceiling justification (7 missed):**
+
+- **7 NCA True (abort) paths** — one per `NEVER_COMPILED_OUT_ASSERT` call (lines 38, 39,
+  51, 52, 74, 75, 104). In merged-profdata mode each NCA contributes 1 missed branch outcome
+  (vs 2 in per-binary mode). 7 NCAs × 1 = 7 missed outcomes (VVP-001 §4.3 d-i).
+- The architecturally-dead double-guard `if (out_cap < FRAG_MAX_COUNT)` at line 60 is
+  subsumed into the NCA at line 52 in the merged count (NCA fires first; the guard's True
+  branch registers as part of the same NCA ceiling in merged mode).
+- Total: 7 missed outcomes.
+
+All other decision points — oversized-payload rejection, zero-payload True path, ceiling-
+division fragment count, ternary slice sizing, memcpy-skip False path — are covered by the
+8 test cases in `tests/test_Fragmentation.cpp` (7 original + 1 added in round 12).
+
+Threshold: **≥78%** (maximum achievable, merged profdata).
 
 ---
 
@@ -372,19 +505,28 @@ Threshold: **≥74%** (maximum achievable).
 
 ---
 
-### core/AssertState.cpp — ceiling 50.00% (1/2)
+### core/AssertState.cpp — ceiling 92.31% lines / 50.00% branches
 
 NSC-infrastructure (CLAUDE.md §10 assertion policy).
 
-LLVM reports 2 branch points: the `if (s_handler != nullptr)` decision inside
-`trigger_handler_for_test()`. The True branch (handler registered → virtual
-dispatch) is covered by `test_trigger_dispatches_to_handler` and
-`test_trigger_sets_fatal_flag`. The False branch (no handler → `::abort()`)
-cannot be tested without aborting the test process; verified by code inspection
-(same rationale as the `NEVER_COMPILED_OUT_ASSERT` no-handler fallback in
-`Assert.hpp`). Line coverage: 100% (21/21). Function coverage: 100% (4/4).
+**Branch coverage: 1/2 (50.00%)** — 1 permanently-missed branch.
+**Line coverage: 24/26 (92.31%)** — 2 permanently-missed lines.
 
-Threshold: **50%** (maximum achievable). Not a defect.
+LLVM reports 2 branch points: the `if (h != nullptr)` decision inside
+`trigger_handler_for_test()`. The True branch (handler registered → virtual
+dispatch) is covered by `test_trigger_dispatches_to_handler`,
+`test_trigger_sets_fatal_flag`, and `test_get_fatal_count_nonzero_after_trigger`.
+The False branch (no handler → `::abort()`, lines 77–78) cannot be tested without
+aborting the test process; verified by code inspection (same rationale as the
+`NEVER_COMPILED_OUT_ASSERT` no-handler fallback in `Assert.hpp`).
+
+**2026-04-10 (round 12):** `test_get_fatal_count_nonzero_after_trigger` added,
+covering `get_fatal_count()` (lines 85–88), which was previously uncovered.
+Line coverage improved from 80.77% (prior) to 92.31%. The 2 permanently-missed
+lines are 77–78 (the `::abort()` call and its enclosing brace — the False branch
+of `if (h != nullptr)`). Function coverage: 5/5 (100%).
+
+Threshold: **50%** (maximum achievable for branches). Not a defect.
 
 ---
 

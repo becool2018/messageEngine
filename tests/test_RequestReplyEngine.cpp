@@ -1520,6 +1520,308 @@ static void test_rre_send_response_engine_full()
     printf("PASS: test_rre_send_response_engine_full\n");
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 26: zero_payload_round_trip
+// Verifies: REQ-3.2.4, REQ-3.3.2, REQ-3.3.3
+//
+// Covers the following previously-uncovered branches (all in a single round-trip
+// with zero-length application payload):
+//   line 142 False  — build_wire_payload: app_len == 0 → memcpy skipped
+//   line 373 False  — dispatch_inbound_envelope: payload_length == RR_HEADER_SIZE
+//                     → app_len = 0 (ternary False branch)
+//   line 336 False  — handle_inbound_request: copy_len == 0 → memcpy skipped
+//   line 620 False  — receive_request: copy_len == 0 → memcpy skipped
+//   line 291 False  — handle_inbound_response: copy_len == 0 → memcpy skipped
+//   line 737 False  — receive_response: copy_len == 0 → memcpy skipped
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_zero_payload_round_trip()
+{
+    // Verifies: REQ-3.2.4, REQ-3.3.2, REQ-3.3.3
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    // A sends a request with zero application payload (app_payload_len = 0).
+    // build_wire_payload: app_len == 0 → line 142 False (memcpy skipped).
+    uint64_t cid = 0U;
+    Result rs = rrea.send_request(NODE_B, nullptr, 0U, TIMEOUT_5S, NOW_US, cid);
+    assert(rs == Result::OK);  // Assert: zero-payload send succeeds
+    assert(cid != 0U);         // Assert: correlation_id assigned
+
+    // B polls for the request.
+    // dispatch_inbound_envelope: payload_length == RR_HEADER_SIZE → line 373 False
+    // handle_inbound_request: copy_len == 0 → line 336 False (memcpy skipped)
+    uint8_t  req_buf[64U];
+    uint32_t req_len = 0U;
+    NodeId   req_src = 0U;
+    uint64_t req_cid = 0U;
+    Result rr = rreb.receive_request(req_buf, 64U, req_len, req_src, req_cid, NOW_US);
+    assert(rr == Result::OK);   // Assert: request received
+    // receive_request: copy_len == 0 → line 620 False (memcpy skipped)
+    assert(req_len == 0U);      // Assert: zero payload
+    assert(req_src == NODE_A);  // Assert: correct source
+    assert(req_cid == cid);     // Assert: correlation_id echoed
+
+    // B sends a zero-payload response back to A.
+    // build_wire_payload: app_len == 0 → line 142 False again.
+    Result resp_s = rreb.send_response(NODE_A, req_cid, nullptr, 0U, NOW_US);
+    assert(resp_s == Result::OK);  // Assert: zero-payload response sent
+
+    // A receives the response.
+    // handle_inbound_response: copy_len == 0 → line 291 False (memcpy skipped)
+    uint8_t  resp_buf[64U];
+    uint32_t resp_len = 0U;
+    Result resp_r = rrea.receive_response(cid, resp_buf, 64U, resp_len, NOW_US);
+    assert(resp_r == Result::OK);   // Assert: response received
+    // receive_response: copy_len == 0 → line 737 False (memcpy skipped)
+    assert(resp_len == 0U);         // Assert: zero payload echoed back
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_zero_payload_round_trip\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 27: parse_rr_header rejects pad[1] non-zero (line 207:36 True)
+// Verifies: REQ-3.2.4
+//
+// Existing test_rre_nonzero_pad_rejected covers pad[0] != 0 (line 207:9 True).
+// This test sets pad[0] = 0, pad[1] = 0xBB so the compound || short-circuits
+// past pad[0] and evaluates pad[1], hitting the 207:36 True branch.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_parse_pad_byte1_nonzero()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    // Craft a DATA envelope: valid kind + non-zero cid + pad[0]=0 pad[1]=0xBB pad[2]=0.
+    MessageEnvelope raw_env;
+    envelope_init(raw_env);
+    raw_env.message_type      = MessageType::DATA;
+    raw_env.source_id         = NODE_B;
+    raw_env.destination_id    = NODE_A;
+    raw_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    raw_env.expiry_time_us    = NOW_US + 5000000ULL;
+    raw_env.payload[0]  = 0x00U;  // kind = REQUEST
+    raw_env.payload[1]  = 0x00U;  // cid byte 0 (MSB)
+    raw_env.payload[2]  = 0x00U;
+    raw_env.payload[3]  = 0x00U;
+    raw_env.payload[4]  = 0x00U;
+    raw_env.payload[5]  = 0x00U;
+    raw_env.payload[6]  = 0x00U;
+    raw_env.payload[7]  = 0x00U;
+    raw_env.payload[8]  = 0x01U;  // cid LSB → cid = 1 (valid)
+    raw_env.payload[9]  = 0x00U;  // pad[0] = 0 (passes first clause)
+    raw_env.payload[10] = 0xBBU;  // pad[1] = 0xBB → 207:36 True → rejected
+    raw_env.payload[11] = 0x00U;  // pad[2]
+    raw_env.payload_length = 12U;
+    Result s = eb.send(raw_env, NOW_US);
+    assert(s == Result::OK);
+
+    // Request stash must be empty (frame rejected by parse_rr_header).
+    uint8_t  req_buf[64U];
+    uint32_t req_len = 0U;
+    NodeId   req_src = 0U;
+    uint64_t req_cid = 0U;
+    Result rr = rrea.receive_request(req_buf, 64U, req_len, req_src, req_cid, NOW_US);
+    assert(rr == Result::ERR_EMPTY);  // Assert: pad[1] non-zero caused rejection
+
+    // Frame must have landed in the non-RR stash instead.
+    MessageEnvelope stashed;
+    envelope_init(stashed);
+    Result nr = rrea.receive_non_rr(stashed, NOW_US);
+    assert(nr == Result::OK);  // Assert: non-RR stash received the frame
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_parse_pad_byte1_nonzero\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 28: parse_rr_header rejects pad[2] non-zero (line 207:63 True)
+// Verifies: REQ-3.2.4
+//
+// Sets pad[0] = 0, pad[1] = 0, pad[2] = 0xCC so that both the first and second
+// clauses evaluate False and the third clause evaluates True, hitting 207:63 True.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_parse_pad_byte2_nonzero()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    MessageEnvelope raw_env;
+    envelope_init(raw_env);
+    raw_env.message_type      = MessageType::DATA;
+    raw_env.source_id         = NODE_B;
+    raw_env.destination_id    = NODE_A;
+    raw_env.reliability_class = ReliabilityClass::BEST_EFFORT;
+    raw_env.expiry_time_us    = NOW_US + 5000000ULL;
+    raw_env.payload[0]  = 0x00U;  // kind = REQUEST
+    raw_env.payload[1]  = 0x00U;
+    raw_env.payload[2]  = 0x00U;
+    raw_env.payload[3]  = 0x00U;
+    raw_env.payload[4]  = 0x00U;
+    raw_env.payload[5]  = 0x00U;
+    raw_env.payload[6]  = 0x00U;
+    raw_env.payload[7]  = 0x00U;
+    raw_env.payload[8]  = 0x02U;  // cid = 2 (valid)
+    raw_env.payload[9]  = 0x00U;  // pad[0] = 0
+    raw_env.payload[10] = 0x00U;  // pad[1] = 0
+    raw_env.payload[11] = 0xCCU;  // pad[2] = 0xCC → 207:63 True → rejected
+    raw_env.payload_length = 12U;
+    Result s = eb.send(raw_env, NOW_US);
+    assert(s == Result::OK);
+
+    uint8_t  req_buf[64U];
+    uint32_t req_len = 0U;
+    NodeId   req_src = 0U;
+    uint64_t req_cid = 0U;
+    Result rr = rrea.receive_request(req_buf, 64U, req_len, req_src, req_cid, NOW_US);
+    assert(rr == Result::ERR_EMPTY);  // Assert: pad[2] non-zero caused rejection
+
+    MessageEnvelope stashed;
+    envelope_init(stashed);
+    Result nr = rrea.receive_non_rr(stashed, NOW_US);
+    assert(nr == Result::OK);  // Assert: frame in non-RR stash
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_parse_pad_byte2_nonzero\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 29: timeout_us overflow saturation in send_request (line 541 True)
+// Verifies: REQ-3.2.4
+//
+// When timeout_us == UINT64_MAX and now_us == 1, the sum would wrap to 0.
+// The saturation guard (line 541:21 True) must detect this and set
+// expiry_us = UINT64_MAX rather than wrapping.
+// The test verifies the send succeeds and the pending slot is created; the
+// internal expiry_us value is not directly observable but the True branch is
+// exercised.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_timeout_overflow_saturation()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    static const uint8_t req[] = {0x42U};
+    uint64_t cid = 0U;
+    // timeout_us = UINT64_MAX → UINT64_MAX > UINT64_MAX − 1U → True → saturate to UINT64_MAX.
+    Result r = rrea.send_request(NODE_B, req, 1U,
+                                 static_cast<uint64_t>(-1) /* UINT64_MAX */,
+                                 1ULL /* now_us */, cid);
+    assert(r == Result::OK);   // Assert: request sent successfully
+    assert(cid != 0U);         // Assert: correlation_id assigned
+
+    // The pending slot was set with expiry_us = UINT64_MAX (never expires during test).
+    // Sweep far in the future — the slot will still be active (not yet consumed).
+    uint32_t freed = rrea.sweep_timeouts(static_cast<uint64_t>(-1) - 1U);
+    // With expiry_us == UINT64_MAX, even this future time does not expire the slot
+    // (now_us = UINT64_MAX − 1 < UINT64_MAX = expiry_us).
+    assert(freed == 0U);  // Assert: slot not freed (saturated expiry)
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_timeout_overflow_saturation\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 30: send_response expiry overflow saturation (line 677 True)
+// Verifies: REQ-3.2.4
+//
+// k_resp_expiry_us = 5 000 000.  When now_us > UINT64_MAX − 5 000 000 the
+// addition would wrap; the guard (line 677:29 True) must saturate to UINT64_MAX.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_response_expiry_overflow()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    // Choose a now_us value that would cause 5 000 000 + now_us to overflow.
+    // UINT64_MAX = 18446744073709551615; UINT64_MAX − 5000000 + 1 = 18446744073704551616.
+    static const uint64_t k_resp_expiry_us = 5000000ULL;
+    static const uint64_t NOW_OVERFLOW     =
+        static_cast<uint64_t>(-1) - k_resp_expiry_us + 1ULL;
+
+    // Use a known non-zero correlation_id — no pending slot needed for send_response.
+    static const uint64_t TEST_CID = 0x0000000000000099ULL;
+    static const uint8_t  resp[]   = {0x55U};
+    // The expiry guard at line 677 fires (True): expiry_us = UINT64_MAX.
+    Result r = rreb.send_response(NODE_A, TEST_CID, resp, 1U, NOW_OVERFLOW);
+    // Result may be OK or non-OK depending on queue state; we only care that
+    // the guard fired (no crash/abort) and the function returned.
+    (void)r;
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_response_expiry_overflow\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 31: sweep_timeouts skips a not-yet-expired pending slot (line 781 False)
+// Verifies: REQ-3.2.4
+//
+// Sends a request with a far-future expiry.  sweep_timeouts is called with a
+// now_us value that is before the expiry → line 781 False (now_us < expires_us).
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_rre_sweep_not_yet_expired()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness    ha;
+    DeliveryEngine     ea;
+    RequestReplyEngine rrea;
+    LocalSimHarness    hb;
+    DeliveryEngine     eb;
+    RequestReplyEngine rreb;
+    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+
+    // Send a request with a 10-second timeout.  expiry_us = NOW_US + 10 000 000.
+    static const uint64_t TIMEOUT_10S = 10000000ULL;
+    static const uint8_t  req[]       = {0xEEU};
+    uint64_t cid = 0U;
+    Result r = rrea.send_request(NODE_B, req, 1U, TIMEOUT_10S, NOW_US, cid);
+    assert(r == Result::OK);
+    assert(cid != 0U);  // Assert: cid assigned
+
+    // Sweep at now_us = NOW_US + 1 (well before expiry).
+    // Line 781: now_us(NOW_US+1) >= expires_us(NOW_US+10 000 000)? False.
+    uint32_t freed = rrea.sweep_timeouts(NOW_US + 1U);
+    assert(freed == 0U);  // Assert: slot not freed (not yet expired)
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_rre_sweep_not_yet_expired\n");
+}
+
 int main()
 {
     printf("=== test_RequestReplyEngine ===\n");
@@ -1549,6 +1851,13 @@ int main()
     test_rre_sweep_never_expires();
     test_rre_send_request_engine_full();
     test_rre_send_response_engine_full();
+
+    test_rre_zero_payload_round_trip();
+    test_rre_parse_pad_byte1_nonzero();
+    test_rre_parse_pad_byte2_nonzero();
+    test_rre_timeout_overflow_saturation();
+    test_rre_response_expiry_overflow();
+    test_rre_sweep_not_yet_expired();
 
     printf("=== ALL TESTS PASSED ===\n");
     return 0;

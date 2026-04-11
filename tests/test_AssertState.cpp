@@ -239,6 +239,32 @@ static void test_abort_handler_is_ireset_handler()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 9 — get_fatal_count() returns the cumulative fatal-event counter:
+//   After trigger_handler_for_test() fires, g_fatal_count must be non-zero.
+//   This exercises lines 86–88 (get_fatal_count body) which were previously
+//   uncovered; the function is NSC-infrastructure (no REQ-x.x).
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_get_fatal_count_nonzero_after_trigger()
+{
+    MockResetHandler mock;
+    assert_state::set_reset_handler(mock);
+    // Reset flag and count to a known baseline.
+    assert_state::g_fatal_fired.store(false, std::memory_order_release);
+    assert_state::g_fatal_count.store(0U, std::memory_order_release);
+
+    assert_state::trigger_handler_for_test("count_test", "test.cpp", 1);
+
+    // get_fatal_count() must return the incremented counter.
+    uint32_t c = assert_state::get_fatal_count();
+    assert(c >= 1U);  // Assert: counter incremented by trigger
+
+    // Restore flag to avoid interfering with subsequent tests.
+    assert_state::g_fatal_fired.store(false, std::memory_order_release);
+
+    printf("PASS: test_get_fatal_count_nonzero_after_trigger\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -250,6 +276,7 @@ int main()
     test_trigger_dispatches_to_handler();
     test_trigger_sets_fatal_flag();
     test_abort_handler_is_ireset_handler();
+    test_get_fatal_count_nonzero_after_trigger();
 
     // check_and_clear tests do not depend on handler state.
     test_check_and_clear_false();
