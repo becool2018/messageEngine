@@ -247,6 +247,35 @@ static bool test_frag_last_shorter()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 7: Zero-payload message — fragment_message produces one empty fragment
+//   Covers: line 67 True branch (frag_count = 1U path for zero payload)
+//           line 97 False branch (frag_payload == 0 → memcpy skipped)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3, REQ-3.3.5
+static bool test_frag_zero_payload()
+{
+    // Verifies: REQ-3.2.3, REQ-3.3.5
+    MessageEnvelope logical;
+    envelope_init(logical);
+    logical.message_type   = MessageType::DATA;
+    logical.source_id      = 1U;
+    logical.payload_length = 0U;  // zero payload
+
+    // needs_fragmentation must return false for a zero-length payload
+    assert(!needs_fragmentation(logical));
+
+    // fragment_message must produce exactly one empty fragment (zero-payload path)
+    uint32_t count = fragment_message(logical, g_out_frags, FRAG_MAX_COUNT);
+    assert(count == 1U);  // Assert: exactly one fragment produced
+    assert(g_out_frags[0].payload_length == 0U);  // Assert: fragment carries no payload
+    assert(g_out_frags[0].fragment_index  == 0U);
+    assert(g_out_frags[0].fragment_count  == 1U);
+    assert(g_out_frags[0].total_payload_length == 0U);
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -276,6 +305,10 @@ int main()
     if (!test_frag_last_shorter()) {
         printf("FAIL: test_frag_last_shorter\n"); ++failed;
     } else { printf("PASS: test_frag_last_shorter\n"); }
+
+    if (!test_frag_zero_payload()) {
+        printf("FAIL: test_frag_zero_payload\n"); ++failed;
+    } else { printf("PASS: test_frag_zero_payload\n"); }
 
     return (failed > 0) ? 1 : 0;
 }
