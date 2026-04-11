@@ -27,7 +27,10 @@
  *   - Full loopback message roundtrip (TLS) using POSIX threads
  *   - TLS session resumption: default-off, save-after-handshake, reconnect cycle
  *
- * Test cert/key written to /tmp at test startup; cleaned up at exit.
+ * Test cert/key written to /tmp at test startup with PID-qualified names
+ * (e.g. /tmp/me_test_tls_1234.crt) to avoid conflicts between concurrent
+ * test suite instances; cleaned up at exit.
+ * Ports are allocated dynamically via alloc_ephemeral_port() (TestPortAllocator.hpp).
  * POSIX threads (pthread) used for loopback tests; allowed by -lpthread.
  *
  * Rules applied:
@@ -65,6 +68,7 @@
 #include "platform/IMbedtlsOps.hpp"
 #include "platform/MbedtlsOpsImpl.hpp"
 #include "MockSocketOps.hpp"
+#include "TestPortAllocator.hpp"
 #if __has_include(<mbedtls/build_info.h>)
 #  include <mbedtls/build_info.h>   // mbedTLS 3.x / 4.x
 #else
@@ -106,8 +110,8 @@ static const char* TEST_KEY_PEM =
     "F5GqzsQBY4RWI7ZfpqatCirfDrMj3FysnOz5w2155FGmUhUx0iJ2xIUQ\n"
     "-----END PRIVATE KEY-----\n";
 
-static const char* TEST_CERT_FILE = "/tmp/me_test_tls.crt";
-static const char* TEST_KEY_FILE  = "/tmp/me_test_tls.key";
+static char TEST_CERT_FILE[64] = {'\0'};
+static char TEST_KEY_FILE[64]  = {'\0'};
 
 static void write_pem_files()
 {
@@ -120,6 +124,14 @@ static void write_pem_files()
     assert(fp != nullptr);
     assert(fputs(TEST_KEY_PEM, fp) >= 0);
     assert(fclose(fp) == 0);
+}
+
+static void init_pem_paths()
+{
+    (void)snprintf(TEST_CERT_FILE, sizeof(TEST_CERT_FILE),
+                   "/tmp/me_test_tls_%d.crt", static_cast<int>(getpid()));
+    (void)snprintf(TEST_KEY_FILE, sizeof(TEST_KEY_FILE),
+                   "/tmp/me_test_tls_%d.key", static_cast<int>(getpid()));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -237,9 +249,10 @@ static void test_transport_config_includes_tls()
 
 static void test_server_bind_plaintext()
 {
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
     TlsTcpBackend backend;
     TransportConfig cfg;
-    make_transport_config(cfg, true, 19870U, false);
+    make_transport_config(cfg, true, PORT, false);
 
     Result res = backend.init(cfg);
     assert(res == Result::OK);
@@ -257,9 +270,10 @@ static void test_server_bind_plaintext()
 
 static void test_init_bad_cert_path()
 {
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
     TlsTcpBackend backend;
     TransportConfig cfg;
-    make_transport_config(cfg, true, 19871U, true);
+    make_transport_config(cfg, true, PORT, true);
     // Override cert_file to a path that does not exist
     (void)strncpy(cfg.tls.cert_file, "/tmp/does_not_exist.crt",
                   static_cast<uint32_t>(sizeof(cfg.tls.cert_file)) - 1U);
@@ -278,9 +292,10 @@ static void test_init_bad_cert_path()
 
 static void test_server_bind_tls()
 {
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
     TlsTcpBackend backend;
     TransportConfig cfg;
-    make_transport_config(cfg, true, 19872U, true);
+    make_transport_config(cfg, true, PORT, true);
 
     Result res = backend.init(cfg);
     assert(res == Result::OK);
@@ -299,7 +314,7 @@ static void test_server_bind_tls()
 
 static void test_plaintext_loopback()
 {
-    static const uint16_t PORT = 19873U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -347,7 +362,7 @@ static void test_plaintext_loopback()
 
 static void test_tls_loopback()
 {
-    static const uint16_t PORT = 19874U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -456,10 +471,11 @@ static void* echo_client_thread_func(void* raw_arg)
 
 static void test_connect_bad_host()
 {
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
     TlsTcpBackend client;
     TransportConfig cfg;
-    make_transport_config(cfg, false, 19875U, false);
-    // Port 19875 has no server → connect_to_server() fails at L247
+    make_transport_config(cfg, false, PORT, false);
+    // PORT has no server → connect_to_server() fails at L247
     cfg.connect_timeout_ms = 500U;
 
     Result res = client.init(cfg);
@@ -476,9 +492,10 @@ static void test_connect_bad_host()
 
 static void test_receive_timeout()
 {
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
     TlsTcpBackend server;
     TransportConfig cfg;
-    make_transport_config(cfg, true, 19876U, false);
+    make_transport_config(cfg, true, PORT, false);
 
     Result init_res = server.init(cfg);
     assert(init_res == Result::OK);
@@ -499,9 +516,10 @@ static void test_receive_timeout()
 
 static void test_server_send_no_clients()
 {
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
     TlsTcpBackend server;
     TransportConfig cfg;
-    make_transport_config(cfg, true, 19877U, false);
+    make_transport_config(cfg, true, PORT, false);
 
     Result init_res = server.init(cfg);
     assert(init_res == Result::OK);
@@ -534,7 +552,7 @@ static void test_server_send_no_clients()
 
 static void test_echo_loopback_plaintext()
 {
-    static const uint16_t PORT = 19878U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -801,7 +819,7 @@ static void* multi_msg_client_func(void* raw_arg)
 
 static void test_post_echo_remove_client_plaintext()
 {
-    static const uint16_t PORT = 19879U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -865,7 +883,7 @@ static void test_post_echo_remove_client_plaintext()
 
 static void test_tls_verify_peer_with_ca()
 {
-    static const uint16_t PORT = 19880U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -909,7 +927,7 @@ static void test_tls_verify_peer_with_ca()
 
 static void test_tls_verify_peer_no_ca()
 {
-    static const uint16_t PORT = 19881U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -973,9 +991,9 @@ static void test_init_bad_key_path()
 
 static void test_server_num_channels_zero()
 {
-    // 4-digit port: port_to_str(9100,...) → loop exits when val==0 at i==4,
+    // 4-digit port: port_to_str exercises the loop exits when val==0 at i==4,
     // i.e. the condition (val > 0U) is False before (i < 5U) is False → L52:41 False.
-    static const uint16_t PORT = 9100U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -1021,7 +1039,7 @@ static void test_server_num_channels_zero()
 
 static void test_tls_client_close_and_long_timeout()
 {
-    static const uint16_t PORT = 19882U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -1077,7 +1095,7 @@ static void test_server_bind_port_zero()
 
 static void test_raw_socket_no_tls_handshake()
 {
-    static const uint16_t PORT = 19883U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -1113,7 +1131,7 @@ static void test_raw_socket_no_tls_handshake()
 
 static void test_garbage_frame_deserialize_fail()
 {
-    static const uint16_t PORT = 19884U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -1163,7 +1181,7 @@ static void test_garbage_frame_deserialize_fail()
 
 static void test_two_client_queue_prefill()
 {
-    static const uint16_t PORT = 19885U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -1255,7 +1273,7 @@ static void test_two_client_queue_prefill()
 
 static void test_two_client_compact_loop()
 {
-    static const uint16_t PORT = 19886U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -1353,7 +1371,7 @@ static void test_tls_bad_ca_file()
 
 static void test_bind_port_in_use()
 {
-    static const uint16_t PORT = 19890U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     // Bind a raw POSIX socket to the port first (without SO_REUSEADDR so it
     // holds the port exclusively), then listen → port is taken.
@@ -1415,7 +1433,7 @@ static void test_bind_port_in_use()
 
 static void test_server_send_before_client_connects()
 {
-    static const uint16_t PORT = 19891U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -1469,7 +1487,7 @@ static void test_server_send_before_client_connects()
 
 static void test_max_connections_exceeded()
 {
-    static const uint16_t PORT = 19892U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
     static const uint32_t N_CLIENTS = 9U;   // one more than MAX_TCP_CONNECTIONS
 
     TlsTcpBackend server;
@@ -1633,7 +1651,7 @@ static void* tls_zero_frame_func(void* raw)
 
 static void test_tls_zero_length_frame()
 {
-    static const uint16_t PORT = 19893U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -1729,8 +1747,9 @@ static void test_di_constructor_executes()
 
     // Plain server bind: mbedtls_net_bind uses POSIX sockets directly, so
     // the mock is not involved here and the bind should succeed.
+    const uint16_t port_di = alloc_ephemeral_port(SOCK_STREAM);
     TransportConfig cfg;
-    make_transport_config(cfg, true, 19894U, false);
+    make_transport_config(cfg, true, port_di, false);
 
     Result res = backend.init(cfg);
     assert(res == Result::OK);
@@ -1761,7 +1780,7 @@ static void test_di_constructor_executes()
 // Verifies: REQ-4.1.3
 static void test_recv_queue_overflow()
 {
-    static const uint16_t PORT      = 19895U;
+    const uint16_t PORT             = alloc_ephemeral_port(SOCK_STREAM);
     static const uint32_t N_CLIENTS = 8U;    // fill all TCP slots
     // Each client sends 20 messages.  send_message() also calls
     // flush_delayed_to_clients() which re-sends from the delay buffer, so
@@ -1831,7 +1850,7 @@ static void test_recv_queue_overflow()
 // Verifies: REQ-5.1.3
 static void test_send_impairment_loss_drop()
 {
-    static const uint16_t PORT = 19896U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -1964,7 +1983,7 @@ static void* session_client_func(void* raw_arg)
 // Verification: M1 + M2 + M4
 static void test_tls_session_saved_after_handshake()
 {
-    static const uint16_t PORT = 19897U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -2093,7 +2112,7 @@ static void* resume_client_func(void* raw_arg)
 // Verification: M1 + M2 + M4
 static void test_tls_session_resumption_reconnect_cycle()
 {
-    static const uint16_t PORT = 19898U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -2191,7 +2210,7 @@ static void* tls_partition_srv_thread(void* raw)
 // Verifies: REQ-5.1.6
 static void test_tls_inbound_partition_drops_received()
 {
-    static const uint16_t PORT = 19899U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsPartSrvArg srv_arg;
     srv_arg.port        = PORT;
@@ -2257,12 +2276,13 @@ static void test_f2_recv_frame_short_read_via_mock()
     // MockSocketOps whose recv_frame always returns false (simulates EOF/error).
     // The plaintext path in tls_recv_frame() calls m_sock_ops->recv_frame();
     // returning false triggers remove_client() then ERR_IO in recv_from_client().
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
     MockSocketOps mock;
     mock.fail_recv_frame = true;  // configure: always return false
 
     TlsTcpBackend backend(mock);
     TransportConfig cfg;
-    make_transport_config(cfg, true, 19900U, false);  // plaintext server
+    make_transport_config(cfg, true, PORT, false);  // plaintext server
 
     Result init_res = backend.init(cfg);
     assert(init_res == Result::OK);
@@ -2271,7 +2291,7 @@ static void test_f2_recv_frame_short_read_via_mock()
     // Connect a plain client so m_client_count > 0; then the injected mock's
     // recv_frame returns false on the first poll → remove_client → ERR_IO.
     ClientThreadArg args;
-    args.port   = 19900U;
+    args.port   = PORT;
     args.tls_on = false;
     args.result = Result::ERR_IO;
 
@@ -2518,7 +2538,7 @@ static void* f3_raw_client_thread(void* raw_arg)
 // Verifies: REQ-6.1.6, REQ-6.1.7
 static void test_f3_bio_reassoc_after_remove_client()
 {
-    static const uint16_t PORT = 19901U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -2650,7 +2670,7 @@ static void test_tls_register_local_id_client_sends_hello()
 {
     // Note: TlsTcpBackend routes connection through mbedtls_net_connect(), not
     // ISocketOps, so a real loopback server is required for the client to connect.
-    static const uint16_t PORT = 19901U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsHello1ServerArg srv_arg;
     srv_arg.port   = PORT;
@@ -2690,8 +2710,9 @@ static void test_tls_register_local_id_server_no_hello()
     TlsTcpBackend backend(mock);
 
     // Server mode, plaintext: mock bind/listen succeed; do_accept returns -1.
+    const uint16_t port_server_no_hello = alloc_ephemeral_port(SOCK_STREAM);
     TransportConfig cfg;
-    make_transport_config(cfg, true, 19902U, false);
+    make_transport_config(cfg, true, port_server_no_hello, false);
     Result r = backend.init(cfg);
     assert(r == Result::OK);
     assert(backend.is_open() == true);
@@ -2756,7 +2777,7 @@ static void* tls_hello_client_thread(void* raw)
 // Verifies: REQ-6.1.8, REQ-6.1.9
 static void test_tls_hello_received_by_server_populates_routing_table()
 {
-    static const uint16_t PORT   = 19903U;
+    const uint16_t PORT          = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLI_ID = 55U;
 
     TlsTcpBackend server;
@@ -2814,7 +2835,7 @@ static void test_tls_hello_received_by_server_populates_routing_table()
 // Verifies: REQ-6.1.8
 static void test_tls_hello_frame_not_delivered_to_delivery_engine()
 {
-    static const uint16_t PORT = 19904U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -2857,7 +2878,7 @@ static void test_tls_hello_frame_not_delivered_to_delivery_engine()
 // Verifies: REQ-3.3.6
 static void test_tls_pop_hello_peer()
 {
-    static const uint16_t PORT   = 19913U;
+    const uint16_t PORT          = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLI_ID = 42U;
 
     TlsTcpBackend server;
@@ -2913,7 +2934,7 @@ static const uint32_t TLS_HELLO_OVERFLOW_NUM_CLIENTS = 8U;
 // Verifies: REQ-3.3.6
 static void test_tls_hello_queue_overflow()
 {
-    static const uint16_t PORT = 19914U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
     static_assert(TLS_HELLO_OVERFLOW_NUM_CLIENTS == static_cast<uint32_t>(MAX_TCP_CONNECTIONS),
                   "update TLS_HELLO_OVERFLOW_NUM_CLIENTS if MAX_TCP_CONNECTIONS changes");
 
@@ -2990,7 +3011,7 @@ static void test_tls_hello_queue_overflow()
 // Verifies: REQ-6.1.9
 static void test_tls_unicast_routes_to_registered_slot()
 {
-    static const uint16_t PORT = 19905U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -3069,7 +3090,7 @@ static void test_tls_unicast_routes_to_registered_slot()
 // Verifies: REQ-6.1.9
 static void test_tls_broadcast_when_destination_id_zero()
 {
-    static const uint16_t PORT = 19906U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -3261,7 +3282,7 @@ static void* src_validation_client_func(void* raw_arg)
 // Verifies: REQ-6.1.11
 static void test_tls_source_id_mismatch_dropped()
 {
-    static const uint16_t PORT = 19907U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -3306,7 +3327,7 @@ static void test_tls_source_id_mismatch_dropped()
 // Verifies: REQ-6.1.11
 static void test_tls_source_id_match_accepted()
 {
-    static const uint16_t PORT = 19908U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -3351,7 +3372,7 @@ static void test_tls_send_hello_frame_fail_via_mock()
     // Note: TlsTcpBackend client connects via mbedtls_net_connect() (not ISocketOps),
     // so a real loopback server is needed for init() to succeed.  After init() the
     // injected mock intercepts the plaintext send_frame call in send_hello_frame().
-    static const uint16_t PORT = 19910U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsHello1ServerArg srv_arg;
     srv_arg.port   = PORT;
@@ -3398,8 +3419,9 @@ static void test_tls_get_stats()
     MockSocketOps mock;
     TlsTcpBackend backend(mock);
 
+    const uint16_t port_stats = alloc_ephemeral_port(SOCK_STREAM);
     TransportConfig cfg;
-    make_transport_config(cfg, true, 19911U, false);  // plaintext server
+    make_transport_config(cfg, true, port_stats, false);  // plaintext server
     assert(backend.init(cfg) == Result::OK);
 
     TransportStats stats;
@@ -3419,9 +3441,10 @@ static void test_tls_cert_is_directory()
     // Covers: tls_path_is_regular_file() !S_ISREG(st.st_mode) True branch (L126)
     // Strategy: pass /tmp (always-present directory) as cert_file so lstat()
     //           succeeds but S_ISREG() returns false → ERR_IO.
+    const uint16_t port_cert_dir = alloc_ephemeral_port(SOCK_STREAM);
     TlsTcpBackend backend;
     TransportConfig cfg;
-    make_transport_config(cfg, true, 19912U, true);
+    make_transport_config(cfg, true, port_cert_dir, true);
 
     // Override cert_file with an existing directory — regular-file check fires.
     uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.cert_file)) - 1U;
@@ -3566,7 +3589,7 @@ static void* load_client_func(void* raw_arg)
 // Verification: M1 + M2 + M4
 static void test_tls_session_resumption_load_path()
 {
-    static const uint16_t PORT = 19915U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -3700,11 +3723,12 @@ static void test_log_fs_warning_tls13_ver()
 // Verifies: REQ-4.1.1
 static void test_tls_init_channels_exceed_max()
 {
+    const uint16_t port_ch_max = alloc_ephemeral_port(SOCK_STREAM);
     TlsTcpBackend backend;
     TransportConfig cfg;
     transport_config_default(cfg);
     cfg.is_server    = true;
-    cfg.bind_port    = 19920U;
+    cfg.bind_port    = port_ch_max;
     cfg.tls.tls_enabled = false;
     // Set num_channels beyond the allowed maximum (MAX_CHANNELS = 8).
     // transport_config_valid() returns false → init() returns ERR_INVALID.
@@ -3733,7 +3757,9 @@ static void test_tls_init_channels_exceed_max()
 // Verifies: REQ-6.3.4
 static void test_tls_bad_ca_file_content()
 {
-    static const char* BAD_CA_FILE = "/tmp/me_test_bad_ca.pem";
+    char BAD_CA_FILE[64] = {'\0'};
+    (void)snprintf(BAD_CA_FILE, sizeof(BAD_CA_FILE),
+                   "/tmp/me_test_bad_ca_%d.pem", static_cast<int>(getpid()));
 
     // Write garbage content that is not valid PEM.
     FILE* fp = fopen(BAD_CA_FILE, "w");
@@ -3778,7 +3804,9 @@ static void test_tls_bad_ca_file_content()
 // Verifies: REQ-6.3.4
 static void test_tls_bad_cert_file_content()
 {
-    static const char* BAD_CERT_FILE = "/tmp/me_test_bad_cert.pem";
+    char BAD_CERT_FILE[64] = {'\0'};
+    (void)snprintf(BAD_CERT_FILE, sizeof(BAD_CERT_FILE),
+                   "/tmp/me_test_bad_cert_%d.pem", static_cast<int>(getpid()));
 
     FILE* fp = fopen(BAD_CERT_FILE, "w");
     assert(fp != nullptr);
@@ -3821,7 +3849,9 @@ static void test_tls_bad_cert_file_content()
 // Verifies: REQ-6.3.4
 static void test_tls_bad_key_file_content()
 {
-    static const char* BAD_KEY_FILE = "/tmp/me_test_bad_key.pem";
+    char BAD_KEY_FILE[64] = {'\0'};
+    (void)snprintf(BAD_KEY_FILE, sizeof(BAD_KEY_FILE),
+                   "/tmp/me_test_bad_key_%d.pem", static_cast<int>(getpid()));
 
     FILE* fp = fopen(BAD_KEY_FILE, "w");
     assert(fp != nullptr);
@@ -3863,7 +3893,9 @@ static void test_tls_bad_key_file_content()
 // Verifies: REQ-6.3.4
 static void test_tls_crl_symlink_rejected()
 {
-    static const char* CRL_SYMLINK = "/tmp/me_test_crl_symlink.pem";
+    char CRL_SYMLINK[64] = {'\0'};
+    (void)snprintf(CRL_SYMLINK, sizeof(CRL_SYMLINK),
+                   "/tmp/me_test_crl_symlink_%d.pem", static_cast<int>(getpid()));
 
     // Remove any existing symlink (ignore errors — may not exist).
     (void)remove(CRL_SYMLINK);
@@ -3912,7 +3944,9 @@ static void test_tls_crl_symlink_rejected()
 // Verifies: REQ-6.3.4
 static void test_tls_crl_bad_content()
 {
-    static const char* BAD_CRL_FILE = "/tmp/me_test_bad_crl.pem";
+    char BAD_CRL_FILE[64] = {'\0'};
+    (void)snprintf(BAD_CRL_FILE, sizeof(BAD_CRL_FILE),
+                   "/tmp/me_test_bad_crl_%d.pem", static_cast<int>(getpid()));
 
     FILE* fp = fopen(BAD_CRL_FILE, "w");
     assert(fp != nullptr);
@@ -3988,7 +4022,7 @@ static void* sec021_client_func(void* raw_arg)
 // Verifies: REQ-6.4.6
 static void test_tls_verify_peer_empty_hostname_rejected()
 {
-    static const uint16_t PORT = 19921U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -4066,7 +4100,7 @@ static void* sec012_client_thread(void* raw_arg)
 // Verifies: REQ-6.1.9
 static void test_tls_sec012_duplicate_node_id()
 {
-    static const uint16_t PORT         = 19922U;
+    const uint16_t PORT               = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   DUP_NODE_ID  = 99U;
 
     TlsTcpBackend server;
@@ -4197,7 +4231,7 @@ static void* sec013_raw_client_func(void* raw_arg)
 // Verifies: REQ-6.1.8
 static void test_tls_sec013_duplicate_hello()
 {
-    static const uint16_t PORT = 19923U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -4245,7 +4279,7 @@ static void test_tls_sec013_duplicate_hello()
 // Verifies: REQ-5.1.1
 static void test_tls_delay_buffer_full()
 {
-    static const uint16_t PORT = 19924U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -4353,7 +4387,7 @@ static void* full_garbage_frame_thread(void* raw_arg)
 // Verifies: REQ-6.3.2
 static void test_tls_full_frame_deserialize_fail()
 {
-    static const uint16_t PORT = 19930U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsTcpBackend server;
     TransportConfig srv_cfg;
@@ -4525,7 +4559,7 @@ static void* tls_partition_client_thread(void* raw_arg)
 // Verifies: REQ-5.1.6
 static void test_tls_inbound_partition_with_hello()
 {
-    static const uint16_t PORT   = 19931U;
+    const uint16_t PORT          = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLI_ID = 77U;
 
     TlsTcpBackend server;
@@ -4648,7 +4682,7 @@ static void* hello_heavy_sender_func(void* raw_arg)
 // Verifies: REQ-4.1.3
 static void test_tls_recv_queue_overflow_with_hello()
 {
-    static const uint16_t PORT      = 19932U;
+    const uint16_t PORT             = alloc_ephemeral_port(SOCK_STREAM);
     static const uint32_t N_CLIENTS = 8U;
     static const uint32_t N_MSGS    = 20U;  // 8×20=160 DATAs; overflows queue at 65th
 
@@ -4713,7 +4747,7 @@ static void test_tls_recv_queue_overflow_with_hello()
 // Verifies: REQ-5.1.5
 static void test_tls_inbound_reorder_buffers_message()
 {
-    static const uint16_t PORT    = 19933U;
+    const uint16_t PORT          = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLI_ID  = 88U;
 
     TlsTcpBackend server;
@@ -4815,7 +4849,7 @@ static void* dummy_raw_client_thread(void* raw_arg)
 // Verifies: REQ-6.1.9
 static void test_tls_send_to_slot_fail()
 {
-    static const uint16_t PORT      = 19934U;
+    const uint16_t PORT             = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   TARGET_ID = 55U;
 
     // Build a serialized HELLO frame for TARGET_ID.
@@ -4903,7 +4937,7 @@ static void test_tls_send_to_slot_fail()
 // Verifies: REQ-6.1.7
 static void test_tls_broadcast_send_fail()
 {
-    static const uint16_t PORT      = 19935U;
+    const uint16_t PORT             = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   TARGET_ID = 66U;
 
     // Pre-load HELLO for TARGET_ID so the routing table is populated and
@@ -5405,7 +5439,7 @@ static void test_m5_ssl_ticket_setup_fail()
 // Verifies: REQ-6.3.4
 static void test_m5_net_tcp_bind_fail()
 {
-    static const uint16_t PORT = 19936U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsMockOps tls_mock;
     tls_mock.fail_net_tcp_bind = true;
@@ -5427,7 +5461,7 @@ static void test_m5_net_tcp_bind_fail()
 // Verifies: REQ-6.3.4
 static void test_m5_net_set_nonblock_listen_fail()
 {
-    static const uint16_t PORT = 19937U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsMockOps tls_mock;
     tls_mock.fail_net_set_nonblock = true;
@@ -5451,6 +5485,7 @@ static void test_m5_net_set_nonblock_listen_fail()
 // Verifies: REQ-6.3.4
 static void test_m5_net_tcp_connect_fail()
 {
+    const uint16_t port_19938 = alloc_ephemeral_port(SOCK_STREAM);
     TlsMockOps tls_mock;
     tls_mock.fail_net_tcp_connect = true;
 
@@ -5458,7 +5493,7 @@ static void test_m5_net_tcp_connect_fail()
     TlsTcpBackend client(sock_mock, tls_mock);
 
     TransportConfig cfg;
-    make_transport_config(cfg, false, 19938U, true);
+    make_transport_config(cfg, false, port_19938, true);
     cfg.peer_ip[0] = '\0';
     (void)strncpy(cfg.peer_ip, "127.0.0.1",
                   static_cast<uint32_t>(sizeof(cfg.peer_ip) - 1U));
@@ -5476,7 +5511,7 @@ static void test_m5_net_tcp_connect_fail()
 // Verifies: REQ-6.3.4
 static void test_m5_net_set_block_client_fail()
 {
-    static const uint16_t PORT = 19939U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     RawListenArg raw_arg;
     raw_arg.port          = PORT;
@@ -5508,7 +5543,7 @@ static void test_m5_net_set_block_client_fail()
 // Verifies: REQ-6.3.4
 static void test_m5_ssl_setup_client_fail()
 {
-    static const uint16_t PORT = 19940U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     RawListenArg raw_arg;
     raw_arg.port          = PORT;
@@ -5540,7 +5575,7 @@ static void test_m5_ssl_setup_client_fail()
 // Verifies: REQ-6.3.4, REQ-6.4.6
 static void test_m5_ssl_set_hostname_fail()
 {
-    static const uint16_t PORT = 19941U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     RawListenArg raw_arg;
     raw_arg.port          = PORT;
@@ -5575,7 +5610,7 @@ static void test_m5_ssl_set_hostname_fail()
 // Verifies: REQ-6.3.4
 static void test_m5_ssl_handshake_client_fail()
 {
-    static const uint16_t PORT = 19942U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     RawListenArg raw_arg;
     raw_arg.port          = PORT;
@@ -5608,7 +5643,7 @@ static void test_m5_ssl_handshake_client_fail()
 // Verifies: REQ-6.3.4
 static void test_m5_server_net_set_block_fail()
 {
-    static const uint16_t PORT = 19943U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsMockOps tls_mock;
     tls_mock.fail_net_set_block = true;
@@ -5647,7 +5682,7 @@ static void test_m5_server_net_set_block_fail()
 // Verifies: REQ-6.3.4
 static void test_m5_server_ssl_setup_fail()
 {
-    static const uint16_t PORT = 19944U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsMockOps tls_mock;
     tls_mock.fail_ssl_setup = true;
@@ -5683,7 +5718,7 @@ static void test_m5_server_ssl_setup_fail()
 // Verifies: REQ-6.3.4
 static void test_m5_server_ssl_handshake_fail()
 {
-    static const uint16_t PORT = 19945U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TlsMockOps tls_mock;
     tls_mock.fail_ssl_handshake = true;
@@ -5722,7 +5757,7 @@ static void test_m5_server_ssl_handshake_fail()
 static void test_m5_ssl_get_session_fail()
 {
 #if defined(MBEDTLS_SSL_SESSION_TICKETS)
-    static const uint16_t PORT = 19946U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     // Start a real TLS server in a background thread.
     M5ServerArg srv_arg;
@@ -5771,7 +5806,7 @@ static void test_m5_ssl_get_session_fail()
 static void test_m5_ssl_set_session_fail()
 {
 #if defined(MBEDTLS_SSL_SESSION_TICKETS)
-    static const uint16_t PORT = 19947U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     M5ServerArg srv_arg;
     srv_arg.port             = PORT;
@@ -5819,7 +5854,7 @@ static void test_m5_ssl_set_session_fail()
 // Verifies: REQ-6.3.4
 static void test_m5_ssl_write_hard_fail()
 {
-    static const uint16_t PORT = 19948U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     M5ServerArg srv_arg;
     srv_arg.port             = PORT;
@@ -5868,7 +5903,7 @@ static void test_m5_ssl_write_hard_fail()
 // Verifies: REQ-6.3.4
 static void test_m5_ssl_write_want_write_short()
 {
-    static const uint16_t PORT = 19949U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     M5ServerArg srv_arg;
     srv_arg.port             = PORT;
@@ -5917,7 +5952,7 @@ static void test_m5_ssl_write_want_write_short()
 // Verifies: REQ-6.3.4
 static void test_m5_ssl_read_header_hard_fail()
 {
-    static const uint16_t PORT = 19950U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     // Server sends one DATA frame after the handshake to trigger POLLIN.
     M5ServerArg srv_arg;
@@ -5965,7 +6000,7 @@ static void test_m5_ssl_read_header_hard_fail()
 // Verifies: REQ-6.3.4
 static void test_m5_ssl_read_header_want_read_timeout()
 {
-    static const uint16_t PORT = 19951U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     M5ServerArg srv_arg;
     srv_arg.port             = PORT;
@@ -6009,7 +6044,7 @@ static void test_m5_ssl_read_header_want_read_timeout()
 // Verifies: REQ-6.3.4
 static void test_m5_ssl_read_payload_hard_fail()
 {
-    static const uint16_t PORT = 19952U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     M5ServerArg srv_arg;
     srv_arg.port             = PORT;
@@ -6053,7 +6088,7 @@ static void test_m5_ssl_read_payload_hard_fail()
 // Verifies: REQ-6.3.4
 static void test_m5_ssl_read_payload_want_read_timeout()
 {
-    static const uint16_t PORT = 19953U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     M5ServerArg srv_arg;
     srv_arg.port             = PORT;
@@ -6139,6 +6174,7 @@ static void test_mbedtls_ops_impl_net_poll_direct()
 
 int main()
 {
+    init_pem_paths();
     write_pem_files();
 
     test_tls_config_default();
