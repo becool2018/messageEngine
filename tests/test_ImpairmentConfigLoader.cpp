@@ -634,6 +634,120 @@ static void test_parse_uint_accepts_max_valid()
     printf("PASS: test_parse_uint_accepts_max_valid\n");
 }
 
+// Verifies: REQ-5.2.1
+// Test 27: parse_prob rejects NaN (isnan guard, ImpairmentConfigLoader.cpp L97)
+//   strtod("nan") returns NaN without setting ERANGE; the isnan check must
+//   reject it and leave loss_probability at the default (0.0).
+static void test_parse_prob_nan()
+{
+    // Verifies: REQ-5.2.1
+    write_test_file("loss_probability=nan\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.loss_probability == 0.0);  // field must remain at default
+    assert(cfg.enabled == false);
+
+    printf("PASS: test_parse_prob_nan\n");
+}
+
+// Verifies: REQ-5.2.1
+// Test 28: parse_prob rejects Inf (isinf guard, ImpairmentConfigLoader.cpp L97)
+//   strtod("inf") returns +Infinity without setting ERANGE; the isinf check
+//   must reject it and leave loss_probability at the default (0.0).
+static void test_parse_prob_inf()
+{
+    // Verifies: REQ-5.2.1
+    write_test_file("loss_probability=inf\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.loss_probability == 0.0);  // field must remain at default
+    assert(cfg.enabled == false);
+
+    printf("PASS: test_parse_prob_inf\n");
+}
+
+// Verifies: REQ-5.2.1
+// Test 29: parse_uint ERANGE (ImpairmentConfigLoader.cpp L65)
+//   A value that overflows unsigned long on all platforms causes strtoul to
+//   set errno=ERANGE; the guard must reject it and leave fixed_latency_ms at 0.
+static void test_parse_uint_erange()
+{
+    // Verifies: REQ-5.2.1
+    // "99999999999999999999" >> ULONG_MAX on any platform; strtoul sets ERANGE.
+    write_test_file("fixed_latency_ms=99999999999999999999\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.fixed_latency_ms == 0U);  // field must remain at default
+    assert(cfg.enabled == false);
+
+    printf("PASS: test_parse_uint_erange\n");
+}
+
+// Verifies: REQ-5.2.1
+// Test 30: parse_u64 ERANGE (ImpairmentConfigLoader.cpp L125)
+//   A value that overflows unsigned long long causes strtoull to set ERANGE;
+//   the guard must reject it and leave prng_seed at 0.
+static void test_parse_u64_erange()
+{
+    // Verifies: REQ-5.2.1
+    // "99999999999999999999" >> ULLONG_MAX; strtoull sets ERANGE.
+    write_test_file("prng_seed=99999999999999999999\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.prng_seed == 0ULL);  // field must remain at default
+    assert(cfg.enabled == false);
+
+    printf("PASS: test_parse_u64_erange\n");
+}
+
+// Verifies: REQ-5.2.1
+// Test 31: apply_reorder_window ERANGE (ImpairmentConfigLoader.cpp L139)
+//   A value that overflows unsigned long causes strtoul to set errno=ERANGE;
+//   the ERANGE branch of the compound guard must reject it and leave
+//   reorder_window_size at the default (0).
+static void test_apply_reorder_window_erange()
+{
+    // Verifies: REQ-5.2.1
+    // "99999999999999999999" >> ULONG_MAX; strtoul sets ERANGE.
+    write_test_file("reorder_window_size=99999999999999999999\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.reorder_window_size == 0U);  // field must remain at default
+    assert(cfg.enabled == false);
+
+    printf("PASS: test_apply_reorder_window_erange\n");
+}
+
+// Verifies: REQ-5.2.1
+// Test 32: apply_reorder_window > UINT32_MAX (ImpairmentConfigLoader.cpp L139)
+//   On 64-bit platforms strtoul("4294967296") returns 4294967296UL (no ERANGE);
+//   the v > 0xFFFFFFFFUL sub-condition must reject it and leave
+//   reorder_window_size at the default (0).
+static void test_apply_reorder_window_overflow()
+{
+    // Verifies: REQ-5.2.1
+    // 4294967296 == UINT32_MAX + 1; on 64-bit no ERANGE but v > 0xFFFFFFFFUL.
+    write_test_file("reorder_window_size=4294967296\n");
+    ImpairmentConfig cfg;
+    Result res = impairment_config_load(TEST_FILE, cfg);
+
+    assert(res == Result::OK);
+    assert(cfg.reorder_window_size == 0U);  // field must remain at default
+    assert(cfg.enabled == false);
+
+    printf("PASS: test_apply_reorder_window_overflow\n");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
@@ -666,6 +780,12 @@ int main()
     test_reorder_window_trailing_garbage();
     test_parse_uint_rejects_overflow();
     test_parse_uint_accepts_max_valid();
+    test_parse_prob_nan();
+    test_parse_prob_inf();
+    test_parse_uint_erange();
+    test_parse_u64_erange();
+    test_apply_reorder_window_erange();
+    test_apply_reorder_window_overflow();
 
     // Cleanup temp file
     (void)remove(TEST_FILE);
