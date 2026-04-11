@@ -6169,6 +6169,164 @@ static void test_mbedtls_ops_impl_net_poll_direct()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// I-series coverage gap tests (round 15 — TlsTcpBackend confirmed coverable gaps)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Test I-1: peer_hostname non-null path in tls_connect_handshake ────────────
+// Covers: L824-826 ternary True — (m_cfg.tls.peer_hostname[0] != '\0')
+//         causes `hostname = m_cfg.tls.peer_hostname` rather than nullptr
+//         to be passed to ssl_set_hostname().
+//
+// All prior TLS client tests use make_transport_config() which leaves
+// peer_hostname zero-filled, always taking the ternary False (nullptr) path.
+// This test explicitly sets peer_hostname="127.0.0.1" with verify_peer=false
+// (so SEC-021 does not fire) to exercise the True branch.
+// A raw TCP server accepts the connection; TlsMockOps injects a handshake
+// failure so no real TLS negotiation is required and the test completes fast.
+//
+// Verifies: REQ-6.3.4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_i1_peer_hostname_nonnull()
+{
+    // Verifies: REQ-6.3.4
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
+
+    RawListenArg raw_arg;
+    raw_arg.port          = PORT;
+    raw_arg.stay_alive_us = 500000U;
+    raw_arg.result        = Result::ERR_IO;
+    pthread_t raw_tid = create_thread_4mb(raw_tcp_listen_thread, &raw_arg);
+    usleep(50000U);  // 50 ms: wait for server to bind and listen
+
+    TlsMockOps tls_mock;
+    tls_mock.fail_ssl_handshake = true;  // inject failure after ssl_set_hostname
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    // I-1: set a non-empty peer_hostname so the ternary at
+    // tls_connect_handshake() L824 takes the True branch
+    // (hostname = m_cfg.tls.peer_hostname instead of nullptr).
+    // verify_peer=false (make_transport_config default) so SEC-021
+    // empty-hostname guard at L799 does not fire first.
+    static const uint32_t HLEN = TLS_PATH_MAX - 1U;
+    (void)strncpy(cfg.tls.peer_hostname, "127.0.0.1", HLEN);
+    cfg.tls.peer_hostname[HLEN] = '\0';
+
+    Result res = client.init(cfg);
+    assert(res == Result::ERR_IO);      // handshake mock fails → ERR_IO
+    assert(!client.is_open());
+
+    (void)pthread_join(raw_tid, nullptr);
+    assert(raw_arg.result == Result::OK);
+
+    printf("PASS: test_i1_peer_hostname_nonnull\n");
+}
+
+// ── Test I-2: log_stale_ticket_warning True branch (had_session=true) ─────────
+// Covers: log_stale_ticket_warning() `if (had_session)` True branch.
+//
+// `had_session` is computed from has_resumable_session() which returns true
+// when session_resumption_enabled=true AND store is injected AND
+// store.session_valid=true. All prior M5 handshake-fail tests set
+// session_resumption_enabled=true but never inject a TlsSessionStore, so
+// m_session_store_ptr=nullptr → had_session=false → the True branch is never
+// reached. This test primes a store with session_valid=true before init().
+//
+// Note: session_valid is set manually here without a prior real TLS handshake.
+// try_load_client_session() succeeds regardless of session content because
+// session_valid is not altered by a successful ssl_set_session call or by its
+// failure (the function is deliberately non-fatal).  had_session remains true
+// through the handshake failure, triggering the WARNING_HI stale-ticket log.
+//
+// Verifies: REQ-6.3.4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_i2_stale_ticket_warning_with_session()
+{
+    // Verifies: REQ-6.3.4
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
+
+    RawListenArg raw_arg;
+    raw_arg.port          = PORT;
+    raw_arg.stay_alive_us = 1000000U;
+    raw_arg.result        = Result::ERR_IO;
+    pthread_t raw_tid = create_thread_4mb(raw_tcp_listen_thread, &raw_arg);
+    usleep(50000U);  // 50 ms: wait for server to bind and listen
+
+    // Prime the store: session_valid=true simulates a previously-saved session.
+    // No real TLS handshake is needed — the mock ssl_set_session (if SESSION
+    // TICKETS compiled) accepts any session struct and the subsequent
+    // ssl_handshake failure is what drives the stale-ticket warning.
+    TlsSessionStore store;
+    store.session_valid.store(true);  // pre-prime: simulate saved session
+
+    TlsMockOps tls_mock;
+    tls_mock.fail_ssl_handshake = true;  // handshake fails → had_session=true fires
+
+    MockSocketOps sock_mock;
+    TlsTcpBackend client(sock_mock, tls_mock);
+    client.set_session_store(&store);
+
+    TransportConfig cfg;
+    make_transport_config(cfg, false, PORT, true);
+    cfg.tls.session_resumption_enabled = true;  // makes has_resumable_session()=true
+
+    Result res = client.init(cfg);
+    assert(res == Result::ERR_IO);   // handshake mock fails → ERR_IO
+    assert(!client.is_open());
+
+    // session_valid is intentionally not cleared by a handshake failure;
+    // caller must call store.zeroize() to dispose of the material safely.
+    store.zeroize();
+
+    (void)pthread_join(raw_tid, nullptr);
+    assert(raw_arg.result == Result::OK);
+
+    printf("PASS: test_i2_stale_ticket_warning_with_session\n");
+}
+
+// ── Test I-3: session_ticket_lifetime_s == 0 → ternary False (default used) ──
+// Covers: maybe_setup_session_tickets() ternary False at L542-544:
+//         when session_ticket_lifetime_s == 0U the fallback value 86400U
+//         is substituted before calling setup_session_tickets().
+//
+// All prior session-resumption tests leave session_ticket_lifetime_s at its
+// default (86400U > 0), always taking the True branch.  Setting the field to
+// 0U forces the ternary False path.  The server still initialises successfully
+// because setup_session_tickets(86400U) succeeds.
+// When MBEDTLS_SSL_SESSION_TICKETS is not compiled in, maybe_setup_session_tickets
+// returns OK immediately and the test exercises only the server bind path —
+// still a valid correctness check.
+//
+// Verifies: REQ-6.3.4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_i3_session_ticket_zero_lifetime()
+{
+    // Verifies: REQ-6.3.4
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
+
+    TlsTcpBackend server;
+    TransportConfig cfg;
+    make_transport_config(cfg, true, PORT, true);
+    // I-3: explicitly zero the lifetime so the ternary at
+    // maybe_setup_session_tickets() L542 takes the False branch and
+    // substitutes the 86400 default before calling setup_session_tickets().
+    cfg.tls.session_resumption_enabled = true;
+    cfg.tls.session_ticket_lifetime_s  = 0U;
+
+    Result res = server.init(cfg);
+    assert(res == Result::OK);         // default lifetime substituted → OK
+    assert(server.is_open());
+
+    server.close();
+    assert(!server.is_open());
+
+    printf("PASS: test_i3_session_ticket_zero_lifetime\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -6298,6 +6456,11 @@ int main()
 
     // MbedtlsOpsImpl direct coverage (100% line + function for MbedtlsOpsImpl.cpp):
     test_mbedtls_ops_impl_net_poll_direct();
+
+    // I-series coverage gap tests (round 15 — TlsTcpBackend confirmed coverable gaps):
+    test_i1_peer_hostname_nonnull();
+    test_i2_stale_ticket_warning_with_session();
+    test_i3_session_ticket_zero_lifetime();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);

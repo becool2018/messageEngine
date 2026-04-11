@@ -208,6 +208,12 @@ unreachable (`send()` always sets `env.timestamp_us = now_us`; SEC-007 in `recei
 guarantees `receive_now_us >= send_ts`).  Documented in the per-file ceiling section.
 `core/DeliveryEngine.cpp` approximate result: 124 → ~121 missed; 74.11% → ~74.74%.
 
+**2026-04-11 update (round 15 — TlsTcpBackend I-series confirmed-coverable gap closure):**
+3 new tests (`test_i1_peer_hostname_nonnull`, `test_i2_stale_ticket_warning_with_session`,
+`test_i3_session_ticket_zero_lifetime`) close 7 previously-missed branch outcomes in
+`platform/TlsTcpBackend.cpp` — 791 branches, 177 → 170 missed, 77.62% → 78.51%.
+Threshold raised from ≥77% to ≥78%.
+
 **Policy floor vs. regression guard:** The policy floor is **100% of reachable branches**
 (VERIFICATION_POLICY.md M4; CLAUDE.md §14.4). The "Threshold" column below is a *regression
 guard* — it is set at the current maximum achievable and must not fall. It is not a relaxation
@@ -234,7 +240,7 @@ two categories is a defect, not a ceiling.
 | platform/PosixSyscallsImpl.cpp | 54 | 16 | 70.37% | ≥70% (NSC) | NSC |
 | platform/TcpBackend.cpp | 445 | 108 | 75.73% | ≥75% | SC |
 | platform/TlsSessionStore.cpp | 12 | 4 | 66.67% | ≥66% | SC |
-| platform/TlsTcpBackend.cpp | 791 | 174 | 78.00% | ≥77% | SC |
+| platform/TlsTcpBackend.cpp | 791 | 170 | 78.51% | ≥78% | SC |
 | platform/UdpBackend.cpp | 194 | 50 | 74.23% | ≥74% | SC |
 | platform/DtlsUdpBackend.cpp | 487 | 111 | 77.21% | ≥77% | SC |
 | platform/LocalSimHarness.cpp | 122 | 36 | 70.49% | ≥70% | SC |
@@ -890,7 +896,7 @@ Threshold: **≥75%** (maximum achievable).
 
 ---
 
-### platform/TlsTcpBackend.cpp — ceiling 71.57% (506/707)
+### platform/TlsTcpBackend.cpp — ceiling 78.51% (621/791)
 
 **Updated 2026-04-09 (round 1):** 2 new MockSocketOps fault-injection tests closed
 4 previously-missed LLVM branch outcomes. **Round 2:** `test_tls_cert_is_directory`
@@ -941,6 +947,23 @@ Threshold updated from ≥71% to ≥72%.
 branch outcomes — 784 branches, 219 → 192 missed, 72.07% → 75.51%.  Line coverage: 90.16%
 (119 missed / 1209 total), up from 88.09%.
 
+**2026-04-11 (round 15 — I-series confirmed-coverable gap closure):**
+3 new I-series tests close 7 previously-missed branch outcomes in `TlsTcpBackend.cpp`:
+- `test_i1_peer_hostname_nonnull`: sets `cfg.tls.peer_hostname = "127.0.0.1"` and injects
+  `fail_ssl_handshake = true` via `TlsMockOps`; covers the `(m_cfg.tls.peer_hostname[0] != '\0')`
+  True branch of the `ssl_set_hostname` ternary at L824–826 (previously always False — all prior
+  tests left `peer_hostname` zero-filled), plus associated compound sub-expression outcomes.
+- `test_i2_stale_ticket_warning_with_session`: pre-primes `TlsSessionStore::session_valid = true`
+  then injects `fail_ssl_handshake = true`; covers the `if (had_session)` True branch in
+  `log_stale_ticket_warning()` (L778), which requires `has_resumable_session()` = True before
+  the handshake attempt fails — no prior test combined a live session with a forced handshake
+  failure.
+- `test_i3_session_ticket_zero_lifetime`: sets `session_ticket_lifetime_s = 0U` on a server
+  init; covers the `(tls_cfg.session_ticket_lifetime_s > 0U)` False branch of the ternary
+  at L542–544 in `maybe_setup_session_tickets()` (previously always True because the default
+  lifetime is 86400U > 0).
+Net: 791 branches, 177 → 170 missed, 77.62% → 78.51%.  Threshold raised from ≥77% to ≥78%.
+
 **2026-04-10 (round 12 — M5 TlsMockOps fault-injection closes 15 branch outcomes):**
 22 M5 fault-injection tests added via `TlsMockOps` (implements `IMbedtlsOps`), covering
 all hard mbedTLS/POSIX dependency-failure branches previously listed in section (b):
@@ -957,13 +980,14 @@ The M5 architectural ceiling claim (VVP-001 §4.3 e-i) for section (b) below is
 **retracted** — these branches are now fully exercised by TlsMockOps fault injection
 (VVP-001 M5 satisfied for TlsTcpBackend dependency-failure paths).
 
-SC file meeting policy floor. Remaining 177 missed branches are:
+SC file meeting policy floor. Remaining 170 missed branches are:
 
 **(a) NEVER_COMPILED_OUT_ASSERT True paths (135 branches):** `TlsTcpBackend.cpp` contains
 135 `NEVER_COMPILED_OUT_ASSERT` calls; each generates one permanently-missed LLVM True path
-(the `[[noreturn]]` abort branch). A further ~12 branches arise from compound-condition
+(the `[[noreturn]]` abort branch). A further ~5 branches arise from compound-condition
 sub-expressions in several error-check sequences where only one sub-expression outcome is
-reachable during normal or M5-fault-injection execution.
+reachable during normal or M5-fault-injection execution (reduced from ~12 after the round 15
+I-series tests covered the peer_hostname and session_ticket_lifetime_s ternary sub-expressions).
 All are `[[noreturn]]` abort paths or equivalent structural one-way conditions; VVP-001 §4.3 d-i.
 
 **(b) [RETRACTED — covered by M5 TlsMockOps tests]:** The ~120-branch M5 gap documented
@@ -1002,7 +1026,7 @@ and `try_save_client_session()`, CI must include a build configuration with
 `MBEDTLS_SSL_SESSION_TICKETS` enabled.  A build without this flag is insufficient
 for SC function verification of the session-resumption paths.
 
-Threshold: **≥77%** (maximum achievable after M5 TlsMockOps fault-injection round).
+Threshold: **≥78%** (maximum achievable after M5 TlsMockOps fault-injection round + round 15 I-series gap closure).
 
 ---
 
