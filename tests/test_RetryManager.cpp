@@ -748,6 +748,113 @@ static void test_collect_due_monotonic_sequence()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: cancel() — wrong message_id — covers compound-condition C=False and
+//       loop-exhaustion / A=False (inactive-slot) branches in cancel().
+// Verifies: REQ-3.2.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_cancel_no_match()
+{
+    RetryManager mgr;
+    mgr.init();
+
+    // Schedule message (src=1, id=100) with immediate retry.
+    MessageEnvelope env;
+    make_test_envelope(env, 100ULL);  // src=1, id=100
+    const uint64_t T = 1000000ULL;
+    Result r = mgr.schedule(env, T, 3U, 100U);
+    assert(r == Result::OK);  // Assert: scheduled successfully
+
+    // Cancel wrong id: active slot → A=True(active), B=True(src=1), C=False(999≠100).
+    // Remaining slots are inactive → A=False (short-circuit). Loop exhausts → False.
+    Result r2 = mgr.cancel(1U, 999ULL);
+    assert(r2 == Result::ERR_INVALID);  // Assert: not found returns ERR_INVALID
+
+    // Original slot still active — collect confirms retry fires.
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+    uint32_t count = mgr.collect_due(T, buf, ACK_TRACKER_CAPACITY);
+    assert(count == 1U);  // Assert: slot still active after failed cancel
+
+    printf("PASS: test_cancel_no_match\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: cancel() — wrong source_id — covers compound-condition B=False in
+//       cancel().
+// Verifies: REQ-3.2.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_cancel_wrong_source()
+{
+    RetryManager mgr;
+    mgr.init();
+
+    // Schedule (src=1, id=200).
+    MessageEnvelope env;
+    make_test_envelope(env, 200ULL);  // src=1, id=200
+    const uint64_t T = 1000000ULL;
+    Result r = mgr.schedule(env, T, 3U, 100U);
+    assert(r == Result::OK);  // Assert: scheduled successfully
+
+    // Cancel wrong source: A=True(active), B=False(src=2≠1). B=False covered.
+    Result r2 = mgr.cancel(2U, 200ULL);
+    assert(r2 == Result::ERR_INVALID);  // Assert: source mismatch returns ERR_INVALID
+
+    // Original slot still active.
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+    uint32_t count = mgr.collect_due(T, buf, ACK_TRACKER_CAPACITY);
+    assert(count == 1U);  // Assert: slot still active after failed cancel
+
+    printf("PASS: test_cancel_wrong_source\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: collect_due() — backward timestamp — covers the True branch of the
+//       non-monotonic guard `if (now_us < m_last_collect_us)`.
+// Verifies: REQ-3.2.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_collect_due_backward_timestamp()
+{
+    RetryManager mgr;
+    mgr.init();
+
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+
+    // First collect at T=1000000 — sets m_last_collect_us.
+    uint32_t c1 = mgr.collect_due(1000000ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(c1 == 0U);  // Assert: empty manager, nothing due
+
+    // Second collect at T=500000 (backward) — True branch of backward-timestamp guard.
+    // collect_due clamps now_us to m_last_collect_us and returns normally.
+    uint32_t c2 = mgr.collect_due(500000ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(c2 == 0U);  // Assert: backward timestamp — nothing collected (clamped)
+
+    printf("PASS: test_collect_due_backward_timestamp\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: init() on already-initialized EMPTY manager — covers the False branch
+//       of the `m_count > 0U` sub-condition in `if (m_initialized && m_count > 0U)`.
+// Verifies: REQ-3.2.5
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_reinit_empty_no_warning()
+{
+    RetryManager mgr;
+    mgr.init();   // First init: m_initialized=false → m_initialized=true, m_count=0
+
+    // Second init with no active slots: m_initialized=true, m_count=0.
+    // Branch: A=True(m_initialized) && B=False(m_count==0) → B=False covered.
+    // The warning block is NOT entered; re-init proceeds cleanly.
+    mgr.init();
+
+    // Manager should be in clean state after reinit.
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+    uint32_t count = mgr.collect_due(1000000ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(count == 0U);   // Assert: empty after reinit — no spurious retries
+    assert(mgr.get_stats().retries_sent == 0U);  // Assert: stats zeroed by reinit
+
+    printf("PASS: test_reinit_empty_no_warning\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -775,6 +882,10 @@ int main()
     test_retry_manager_cancel();
     test_collect_due_accepts_equal_now_us();
     test_collect_due_monotonic_sequence();
+    test_cancel_no_match();
+    test_cancel_wrong_source();
+    test_collect_due_backward_timestamp();
+    test_reinit_empty_no_warning();
 
     printf("ALL RetryManager tests passed.\n");
     return 0;
