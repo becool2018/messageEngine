@@ -216,14 +216,14 @@ two categories is a defect, not a ceiling.
 | core/DeliveryEngine.cpp | 479 | 124 | 74.11% | ≥74% | SC |
 | core/AssertState.cpp | 2 | 1 | 50.00% | ≥50% | NSC-infra |
 | platform/ImpairmentEngine.cpp | 256 | 66 | 74.22% | ≥74% | SC |
-| platform/ImpairmentConfigLoader.cpp | 174 | 34 | 80.46% | ≥80% | SC |
+| platform/ImpairmentConfigLoader.cpp | 174 | 28 | 83.91% | ≥83% | SC |
 | platform/SocketUtils.cpp | 306 | 74 | 75.82% | ≥75% | NSC |
 | platform/PosixSyscallsImpl.cpp | 54 | 16 | 70.37% | ≥70% (NSC) | NSC |
 | platform/TcpBackend.cpp | 445 | 113 | 74.61% | ≥74% | SC |
 | platform/TlsSessionStore.cpp | 12 | 4 | 66.67% | ≥66% | SC |
-| platform/TlsTcpBackend.cpp | 791 | 177 | 77.62% | ≥77% | SC |
+| platform/TlsTcpBackend.cpp | 791 | 174 | 78.00% | ≥77% | SC |
 | platform/UdpBackend.cpp | 194 | 50 | 74.23% | ≥74% | SC |
-| platform/DtlsUdpBackend.cpp | 487 | 114 | 76.59% | ≥76% | SC |
+| platform/DtlsUdpBackend.cpp | 487 | 111 | 77.21% | ≥77% | SC |
 | platform/LocalSimHarness.cpp | 122 | 36 | 70.49% | ≥70% | SC |
 | platform/MbedtlsOpsImpl.cpp | 150 | 46 | 69.33% | ≥69% | SC |
 | platform/SocketOpsImpl.cpp | 72 | 24 | 66.67% | ≥66% (NSC) | NSC |
@@ -653,16 +653,18 @@ Threshold: **74%** (maximum achievable).
 
 ---
 
-### platform/ImpairmentConfigLoader.cpp — ceiling 82.50% (132/160)
+### platform/ImpairmentConfigLoader.cpp — ceiling 83.91% (146/174)
 
 The implementation was refactored to extract five parse helpers (`parse_uint`,
 `parse_bool`, `parse_prob`, `parse_u64`, `apply_reorder_window`) and three topic
 dispatchers (`apply_kv_latency_jitter`, `apply_kv_loss_reorder`,
-`apply_kv_partition_seed`) to reduce cyclomatic complexity.  The refactoring grew
-the branch count from 109 to 160, adding 18 new permanently-missed branches from
-`NEVER_COMPILED_OUT_ASSERT` calls in the new functions.  All five `*end != '\0'`
-True branches (trailing-garbage rejection paths) are now exercised by tests
-20–24.
+`apply_kv_partition_seed`) to reduce cyclomatic complexity.  The branch count
+grew from 109 → 160 → 174 as security guards were added.  All five `*end != '\0'`
+True branches (trailing-garbage rejection paths) are exercised by tests 20–24.
+Six additional tests (27–32) were added to cover NaN/Inf and ERANGE branches
+added by the L-4 security fix (std::isnan / std::isinf guard in `parse_prob`)
+and CERT INT30-C overflow guards in `parse_uint`, `parse_u64`, and
+`apply_reorder_window`.
 
 **Permanently-missed branches (28 total):**
 
@@ -690,9 +692,9 @@ True branches (trailing-garbage rejection paths) are now exercised by tests
 - `apply_kv_loss_reorder`: 2 NCAs (`key≠nullptr`, `val≠nullptr`).
 - `apply_kv_partition_seed`: 2 NCAs (`key≠nullptr`, `val≠nullptr`).
 
-All 132 reachable decision-level branches are 100% covered.
+All 146 reachable decision-level branches are 100% covered (tests 1–32).
 
-Threshold: **82%** (maximum achievable after tests 20–24).
+Threshold: **≥83%** (maximum achievable after tests 27–32).
 
 ---
 
@@ -1002,58 +1004,78 @@ Threshold: **75%** (maximum achievable).
 
 ---
 
-### platform/DtlsUdpBackend.cpp — ceiling 81.76% (242/296)
+### platform/DtlsUdpBackend.cpp — ceiling 77.21% (376/487)
 
 **Updated 2026-04-09 (round 1):** 4 new MockSocketOps + DtlsMockOps fault-injection
 tests closed 4 previously-missed LLVM branch outcomes. **Round 2:**
-`test_dtls_cert_is_directory` closed 1 more — the `!S_ISREG(st.st_mode)` True
-branch at L120 in `tls_path_is_regular_file()` (pass `/tmp` as cert_file; lstat
-succeeds but S_ISREG returns false). New LLVM result: 373/487 (76.59%), up from
-368/487 (75.56%).
+`test_dtls_cert_is_directory` closed the `!S_ISREG(st.st_mode)` True branch.
+**Round 3 (2026-04-11):** Three config-validation tests closed 3 more branches:
+`test_init_max_channels_exceeded` (L1110 True), `test_init_ipv6_peer_rejected`
+(L1129 True), `test_client_verify_peer_empty_hostname` (L656 True, SEC-001/REQ-6.4.6).
 
-Two CC-reduction helpers (`send_delayed_envelopes`, `flush_delayed_to_queue`)
-were added, growing the branch count from 240 to 296 (+56 branches).
-`test_two_delayed_messages_second_recv_prequeue` now covers the
-`receive_message()` L801 True branch (pre-poll `recv_queue.pop` succeeds
-because a second delayed message was already queued by the first call's
-`flush_delayed_to_queue` invocation).
+The prior e-i (loopback) ceiling claims for WANT_READ/WANT_WRITE retry branches
+(old L325:20 False and L522:13 False) are **resolved** — those paths are now
+covered by `test_mock_dtls_ssl_write_fail` and `test_mock_dtls_ssl_read_error`
+via DtlsMockOps fault injection. No e-i ceiling claims remain; all Class B
+dependency-failure paths are either injectable via DtlsMockOps or documented as
+structural ceilings below.
 
-Three independent sources of permanently-missed branches (54 total):
+Current LLVM result: 376/487 (77.21%).
 
-**(a)** 30 permanently-missed `NEVER_COMPILED_OUT_ASSERT` branches (up from 26):
-- Original 26 across the original 16 functions.
-- `send_delayed_envelopes` adds 3: `delayed≠nullptr`, `count≤IMPAIR_DELAY_BUF_SIZE`,
-  and the per-iteration `i<IMPAIR_DELAY_BUF_SIZE`.
-- `flush_delayed_to_queue` adds 2: `now_us>0ULL`, `m_open` (the loop-body
-  NCA `i<IMPAIR_DELAY_BUF_SIZE` is now counted in the 26 originals).
+Two independent sources of permanently-missed branches (111 total):
 
-*(Note: `flush_delayed_to_queue` existed before but was reclassified; net new
-NCA count from new functions: +4.)*
+**(a)** 82 permanently-missed `NEVER_COMPILED_OUT_ASSERT` True paths
+(VVP-001 §4.3 d-i): one per `NEVER_COMPILED_OUT_ASSERT` call across all 35
+functions (82 guards × 1 missed True/abort outcome each).
 
-**(b)** ~14 remaining hard mbedTLS and structural error paths (unchanged from
-prior ceiling):
-- `send_delayed_envelopes` L734:13 True — `Serializer::serialize` failure:
-  architecturally unreachable because every message in the delay buffer
-  already passed the MTU check in `send_message()` and serialize is
-  deterministic.
-- `send_delayed_envelopes` L734:32 True — `dlen > DTLS_MAX_DATAGRAM_BYTES`:
-  same rationale — messages in the delay buffer were already validated as
-  ≤ DTLS_MAX_DATAGRAM_BYTES when originally queued.
-- `recv_one_dtls_datagram` L565:9 True — `recv_queue.push` failure:
-  `MSG_RING_CAPACITY (64) > IMPAIR_DELAY_BUF_SIZE`, making queue overflow
-  unreachable through the public API.
-- `recv_one_dtls_datagram` L756:9 True — socket/ssl_read failure on an
-  open connection; same POSIX loopback rationale as TcpBackend.
-- `connect_client_udp` L458:23 True — `NEVER_COMPILED_OUT_ASSERT` macro
-  expansion branch at the `htons()` call site; abort path.
-- WANT_READ/WANT_WRITE retry branches L325:20 False and L522:13 False —
-  documented in the prior ceiling; SSL send/recv deferred paths not triggered
-  in fast loopback.
-- Remaining 8 paths from the prior ceiling documentation (unchanged).
+**(b)** 29 remaining structural error paths — all VVP-001 §4.3 d-iii
+(architecturally unreachable via any injectable test path):
 
-All 242 reachable decision-level branches are 100% covered.
+*TLS credential loading — direct mbedTLS calls, not in IMbedtlsOps:*
+- L248-250: `mbedtls_x509_crt_parse_file` CA cert failure: direct API call;
+  requires a corrupt on-disk CA cert file; not injectable through IMbedtlsOps.
+- L278-280: `mbedtls_x509_crt_parse_file` server/client cert failure: same.
+- L288-290: `mbedtls_pk_parse_keyfile` private key failure: same.
 
-Threshold: **81%** (maximum achievable).
+*CRL loading block — entire block unreached (no test configures CRL):*
+- L320-328: `crl_file[0] != '\0'` True block (4 branch outcomes): no test
+  supplies a CRL file; this code path is functionally correct but exercised
+  only with an explicit CRL configuration.
+
+*Capacity invariant ceilings:*
+- `recv_one_dtls_datagram` recv_queue.push failure: `MSG_RING_CAPACITY (64) >
+  IMPAIR_DELAY_BUF_SIZE`, making queue overflow unreachable through the API.
+- `send_delayed_envelopes` Serializer::serialize failure (L~1290): architecturally
+  unreachable — every message in the delay buffer already passed the MTU check
+  in `send_message()`.
+- `send_delayed_envelopes` `dlen > DTLS_MAX_DATAGRAM_BYTES` (L~1291): same
+  rationale — delayed messages were validated as ≤ DTLS_MAX_DATAGRAM_BYTES when
+  originally queued.
+
+*Plaintext-mode-only paths not exercised by mock tests:*
+- `validate_source` L755: `m_tls_enabled == true` early-return True path:
+  DTLS TLS path calls `validate_source` in non-TLS mode only; in TLS mode
+  DTLS record MAC provides per-datagram peer authentication.
+- `apply_inbound_impairment` L995: `inbound_count == 0` True path: the reorder
+  engine buffers messages instead of passing them; no current test configures
+  a reorder window that triggers this path.
+- `register_local_id` L1178: `!m_is_server` True path (sends HELLO datagram):
+  not exercised in the TLS mock test suite (post-init HELLO send on plaintext
+  client path).
+
+*send_hello_datagram failure paths — non-injectable in current mock:*
+- L1228-1230: serialize failed or MTU exceeded in send_hello_datagram.
+- L1235-1238: send_wire_bytes failed in send_hello_datagram.
+
+*send_message serialize failure:*
+- L1347-1349: `Serializer::serialize` returns non-OK in `send_message()`: the
+  mock does not intercept the Serializer; a message that passes size validation
+  will always serialize successfully.
+
+All 376 reachable decision-level branches are 100% covered.
+
+Threshold: **≥77%** (maximum achievable without extending IMbedtlsOps to cover
+direct mbedTLS cert/key parsing and Serializer injection).
 
 ---
 

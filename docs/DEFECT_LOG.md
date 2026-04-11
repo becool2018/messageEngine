@@ -1267,3 +1267,57 @@ All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-04-10. DEF-022-1 (MINOR) resolved. All entry and exit criteria satisfied. `make lint`, `make run_tests`, and `make check_traceability` all PASS. TlsTcpBackend.cpp M5 gap fully closed; no remaining engineering work for Class B reclassification (see TODO_FOR_CLASS_B_CERT.txt — Items 6, 7, 8, 9 are external/organizational). Inspection INSP-022 closed PASS.
+
+---
+
+### INSP-023 — Class B compliance: ImpairmentConfigLoader NaN/Inf/ERANGE branches + DtlsUdpBackend ceiling reconciliation (2026-04-11)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-11 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | CLOSED — Class B compliance gaps resolved; all entry and exit criteria met |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `tests/test_ImpairmentConfigLoader.cpp` | 6 new tests (27–32) covering NaN/Inf guard in `parse_prob` (L97) and ERANGE/overflow guards in `parse_uint` (L65), `parse_u64` (L125), and `apply_reorder_window` (L139); 34 → 28 missed branches; 80.46% → 83.91% branch coverage |
+| `tests/test_DtlsUdpBackend.cpp` | 3 new config-validation tests: `test_init_max_channels_exceeded` (L1110-1115), `test_init_ipv6_peer_rejected` (L1129-1134), `test_client_verify_peer_empty_hostname` (L656-662 SEC-001/REQ-6.4.6); 114 → 111 missed branches; 76.59% → 77.21% branch coverage |
+| `docs/COVERAGE_CEILINGS.md` | Summary table updated (ImpairmentConfigLoader ≥83%, DtlsUdpBackend ≥77%, TlsTcpBackend 174/78.00% confirmed). Per-file ImpairmentConfigLoader section updated from stale "ceiling 82.50% (132/160)" to "ceiling 83.91% (146/174)". Per-file DtlsUdpBackend section rewritten from stale "ceiling 81.76% (242/296)" to "ceiling 77.21% (376/487)"; prior e-i (loopback) claims retracted — WANT_READ/WANT_WRITE paths confirmed covered by existing DtlsMockOps tests; 111 missed branches fully accounted as NCA True paths (82) + structural/non-injectable ceilings (29) |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations (CC ≤ 10 enforced) | PASS |
+| `make run_tests` all tests green | PASS |
+| `make check_traceability` RESULT: PASS | PASS |
+| `make coverage` DtlsUdpBackend.cpp ≥77%, ImpairmentConfigLoader.cpp ≥83% | PASS |
+| All new/modified `tests/` files carry `// Verifies: REQ-x.x` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Defects found
+
+| ID | File : function | Description | Severity | Status | Disposition |
+|----|----------------|-------------|----------|--------|-------------|
+| (none) | | No defects found during review | — | — | — |
+
+#### Checklist reference
+
+All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
+- New ImpairmentConfigLoader tests 27–32: each test has ≥2 `assert()` calls; uses fixed test file path (`TEST_FILE`); no dynamic allocation on test path; `// Verifies: REQ-5.2.1` tags present. ✓
+- New DtlsUdpBackend tests use default `DtlsUdpBackend` ctor (tests 1-2) or `DtlsMockOps` (test 3); no real socket left open on error return paths. ✓
+- `test_client_verify_peer_empty_hostname`: the socket fd created by `create_and_bind_udp_socket` is released by `DtlsUdpBackend` destructor (backend goes out of scope at function end); no fd leak. ✓
+- DtlsUdpBackend e-i ceiling retraction: `test_mock_dtls_ssl_read_error` and `test_mock_dtls_ssl_write_fail` confirm the previously-claimed loopback-only WANT_READ/WANT_WRITE paths are covered by M5 injection; VVP-001 §4.3 e-i claims were stale documentation, not a current coverage gap. ✓
+- Remaining 29 non-NCA missed branches in DtlsUdpBackend: 6 are direct mbedTLS API calls (not in IMbedtlsOps), 4 are CRL-path (unreached configuration block), 8 are capacity-invariant unreachable, 5 are plaintext-mode-only paths, 6 are send_hello/serialize non-injectable paths — all §4.3 d-iii. ✓
+- `COVERAGE_CEILINGS.md` threshold updated: DtlsUdpBackend ≥77% (was stale ≥76%); ImpairmentConfigLoader ≥83% (was stale ≥80%). ✓
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-11. No defects found. All entry and exit criteria satisfied. `make lint`, `make run_tests`, `make check_traceability`, and `make coverage` all PASS. Class B compliance gaps for ImpairmentConfigLoader.cpp and DtlsUdpBackend.cpp fully resolved; no remaining e-i ceiling claims in any platform file. Inspection INSP-023 closed PASS.
