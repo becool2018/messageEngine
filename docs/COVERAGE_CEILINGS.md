@@ -192,7 +192,7 @@ two categories is a defect, not a ceiling.
 | platform/UdpBackend.cpp | 194 | 50 | 74.23% | ≥74% | SC |
 | platform/DtlsUdpBackend.cpp | 487 | 114 | 76.59% | ≥76% | SC |
 | platform/LocalSimHarness.cpp | 122 | 36 | 70.49% | ≥70% | SC |
-| platform/MbedtlsOpsImpl.cpp | 91 | 27 | 70.33% | ≥70% | SC |
+| platform/MbedtlsOpsImpl.cpp | 150 | 46 | 69.33% | ≥69% | SC |
 | platform/SocketOpsImpl.cpp | 72 | 24 | 66.67% | ≥66% (NSC) | NSC |
 
 ---
@@ -841,19 +841,29 @@ Threshold: **72%** (maximum achievable).
 
 ---
 
-### platform/MbedtlsOpsImpl.cpp — ceiling 69.77% (60/86)
+### platform/MbedtlsOpsImpl.cpp — ceiling 69.33% (104/150)
 
-Single source: 26 permanently-missed `NEVER_COMPILED_OUT_ASSERT` branches across
-all 15 functions. (Count increased from 23 to 26 when `ssl_handshake` (1 assert)
-and `ssl_read` (2 asserts) were added to the interface.)
+Single source: 46 permanently-missed `NEVER_COMPILED_OUT_ASSERT` branches across
+all 25 functions. Branch count grew from 86 → 91 → 150 as new delegation methods
+were added to `IMbedtlsOps` for M5 fault-injection coverage (rounds 11–12 and the
+`net_poll` direct-test commit). Each added method carries ≥ 1 `NEVER_COMPILED_OUT_ASSERT`
+precondition guard, contributing 2 additional missed LLVM branch outcomes
+(True/False of the outer `if (!(cond))` and the abort sub-expression).
+
+**2026-04-10 (round 12 + net_poll):** 10 new delegation methods added
+(`net_tcp_bind`, `net_tcp_connect`, `net_set_block`, `ssl_setup`, `ssl_set_hostname`,
+`ssl_get_session`, `ssl_set_session`, `ssl_write`, `ssl_read`, `net_poll`);
+branch count 91 → 150 (+59 branches from new assert guards); missed 27 → 46
+(+19 NCA True paths); coverage 70.33% → 69.33%.
+100% line coverage and 100% function coverage confirmed: all 104 reachable
+decision-level branches (the False/normal-execution outcomes of all assert guards
+and the single library-call passthrough per function) are fully exercised.
 
 `MbedtlsOpsImpl` is a pure delegation layer with no control-flow logic of its
-own; every function body is a precondition assertion followed by a single mbedTLS
-or POSIX library call passthrough. All 60 reachable decision-level branches (the
-False outcomes of the assert guards, i.e., the normal execution paths) are 100%
-covered.
+own. All 46 missed branches are `[[noreturn]]` NCA True abort paths
+(VVP-001 §4.3 d-i). No remaining coverable branch exists.
 
-Threshold: **69%** (maximum achievable).
+Threshold: **≥69%** (maximum achievable).
 
 ---
 
