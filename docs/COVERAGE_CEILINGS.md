@@ -219,7 +219,7 @@ two categories is a defect, not a ceiling.
 | platform/ImpairmentConfigLoader.cpp | 174 | 28 | 83.91% | ≥83% | SC |
 | platform/SocketUtils.cpp | 306 | 74 | 75.82% | ≥75% | NSC |
 | platform/PosixSyscallsImpl.cpp | 54 | 16 | 70.37% | ≥70% (NSC) | NSC |
-| platform/TcpBackend.cpp | 445 | 108 | 75.73% | ≥75% | SC |
+| platform/TcpBackend.cpp | 445 | 107 | 75.96% | ≥75% | SC |
 | platform/TlsSessionStore.cpp | 12 | 4 | 66.67% | ≥66% | SC |
 | platform/TlsTcpBackend.cpp | 791 | 174 | 78.00% | ≥77% | SC |
 | platform/UdpBackend.cpp | 194 | 50 | 74.23% | ≥74% | SC |
@@ -777,7 +777,7 @@ Threshold: **≥70%** (maximum achievable).
 
 ---
 
-### platform/TcpBackend.cpp — ceiling 75.73% (337/445)
+### platform/TcpBackend.cpp — ceiling 75.96% (338/445)
 
 **Updated 2026-04-09 (rounds 1–3):** 5 new MockSocketOps fault-injection tests
 (bind_fail, connect_fail, recv_frame_fail, send_hello_frame_fail, get_stats) closed
@@ -821,7 +821,20 @@ New LLVM result: 332/445 (74.61%), threshold ≥74%.
   branch (lines 396–400) now covered (REQ-6.1.11, HAZ-009).
 New LLVM result: 337/445 (75.73%), threshold ≥75%.
 
-Two independent sources of permanently-missed branches (108 total):
+**2026-04-11 (round 15 — deserialize-fail path + client-mode HELLO echo):**
+2 new tests close 1 previously-missed branch outcome:
+- `test_tcp_full_frame_deserialize_fail` — raw socket sends a 52-byte all-zeros
+  frame (length-prefixed). `tcp_recv_frame()` accepts it (52 >= WIRE_HEADER_SIZE),
+  `Serializer::deserialize()` rejects it (proto-version byte = 0 ≠ PROTO_VERSION);
+  `recv_from_client` lines 374–377 (deserialize-fail True branch) now covered.
+- `test_tcp_client_receives_hello_from_server` — MockSocketOps + socketpair in
+  client mode; pre-serialized HELLO injected via `recv_frame_once_buf`; poll()
+  fires POLLIN on the real socketpair fd; `recv_from_client` deserializes the
+  HELLO, hits `m_is_server == false` → returns `ERR_AGAIN` (line 387), covering
+  the False branch of `if (m_is_server)` inside the HELLO intercept block.
+New LLVM result: 338/445 (75.96%), threshold ≥75%.
+
+Two independent sources of permanently-missed branches (107 total):
 
 **(a)** Permanently-missed `NEVER_COMPILED_OUT_ASSERT` branches across all functions
 (one per assert call, `[[noreturn]]` abort paths per VVP-001 §4.3 d-i).
@@ -831,10 +844,10 @@ Two independent sources of permanently-missed branches (108 total):
   False path: queue full. Requires enqueueing `MAX_TCP_CONNECTIONS - 1 = 7` HELLOs
   without draining, but `MAX_TCP_CONNECTIONS` is also the maximum client count, so
   the queue cannot be filled to overflow through the public API (VVP-001 §4.3 d-iii).
-- `accept_clients` EAGAIN path, `recv_from_client` queue-full and Serializer failure
-  paths, `flush_delayed_to_queue` Serializer failure path, `build_poll_fds` valid-fd
-  short-circuit False path, `remove_client_fd` loop-bound and first-slot paths —
-  all architecturally-unreachable as documented in prior ceiling entries.
+- `accept_clients` EAGAIN path, `flush_delayed_to_queue` Serializer failure path,
+  `build_poll_fds` valid-fd short-circuit False path, `remove_client_fd` loop-bound
+  and first-slot paths — all architecturally-unreachable as documented in prior
+  ceiling entries.
 
 All other reachable decision-level branches are 100% covered.
 
