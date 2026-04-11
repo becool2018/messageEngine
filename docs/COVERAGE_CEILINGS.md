@@ -188,7 +188,7 @@ two categories is a defect, not a ceiling.
 | platform/PosixSyscallsImpl.cpp | 54 | 16 | 70.37% | ≥70% (NSC) | NSC |
 | platform/TcpBackend.cpp | 445 | 113 | 74.61% | ≥74% | SC |
 | platform/TlsSessionStore.cpp | 12 | 4 | 66.67% | ≥66% | SC |
-| platform/TlsTcpBackend.cpp | 784 | 192 | 75.51% | ≥75% | SC |
+| platform/TlsTcpBackend.cpp | 791 | 177 | 77.62% | ≥77% | SC |
 | platform/UdpBackend.cpp | 194 | 50 | 74.23% | ≥74% | SC |
 | platform/DtlsUdpBackend.cpp | 487 | 114 | 76.59% | ≥76% | SC |
 | platform/LocalSimHarness.cpp | 122 | 36 | 70.49% | ≥70% | SC |
