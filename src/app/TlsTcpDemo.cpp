@@ -65,8 +65,18 @@ static const uint32_t RECV_TIMEOUT_MS     = 200U;
 static const uint32_t MSG_EXPIRY_MS       = 10000U;
 static const int      CLIENT_STARTUP_US   = 120000;  // 120 ms wait for server
 
-static const char*    CERT_FILE  = "/tmp/me_tls_demo.crt";
-static const char*    KEY_FILE   = "/tmp/me_tls_demo.key";
+static char           CERT_FILE[64] = {'\0'};
+static char           KEY_FILE[64]  = {'\0'};
+
+// Populate CERT_FILE and KEY_FILE with PID-qualified paths so concurrent
+// demo instances on the same machine do not share the same /tmp files.
+static void init_pem_paths()
+{
+    (void)snprintf(CERT_FILE, sizeof(CERT_FILE),
+                   "/tmp/me_tls_demo_%d.crt", static_cast<int>(getpid()));
+    (void)snprintf(KEY_FILE, sizeof(KEY_FILE),
+                   "/tmp/me_tls_demo_%d.key", static_cast<int>(getpid()));
+}
 
 // Self-signed EC P-256 certificate and key (10-year validity, test use only)
 static const char* DEMO_CERT_PEM =
@@ -105,8 +115,8 @@ static void sig_handler(int sig)
 // ─────────────────────────────────────────────────────────────────────────────
 static bool write_pem_files(void)
 {
-    NEVER_COMPILED_OUT_ASSERT(CERT_FILE != nullptr);  // Assert: cert path constant valid
-    NEVER_COMPILED_OUT_ASSERT(KEY_FILE  != nullptr);  // Assert: key path constant valid
+    NEVER_COMPILED_OUT_ASSERT(CERT_FILE[0] != '\0');  // Assert: cert path initialised
+    NEVER_COMPILED_OUT_ASSERT(KEY_FILE[0]  != '\0');  // Assert: key path initialised
 
     // MISRA C++:2023 deviation — fopen/fclose (C file I/O):
     // Rationale: write_pem_files() is called once at process startup to
@@ -427,6 +437,7 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    init_pem_paths();
     if (!write_pem_files()) {
         (void)fprintf(stderr, "ERROR: failed to write TLS cert/key to /tmp\n");
         return 1;
