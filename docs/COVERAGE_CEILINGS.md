@@ -232,7 +232,7 @@ two categories is a defect, not a ceiling.
 | platform/ImpairmentConfigLoader.cpp | 174 | 28 | 83.91% | ≥83% | SC |
 | platform/SocketUtils.cpp | 306 | 74 | 75.82% | ≥75% | NSC |
 | platform/PosixSyscallsImpl.cpp | 54 | 16 | 70.37% | ≥70% (NSC) | NSC |
-| platform/TcpBackend.cpp | 445 | 113 | 74.61% | ≥74% | SC |
+| platform/TcpBackend.cpp | 445 | 108 | 75.73% | ≥75% | SC |
 | platform/TlsSessionStore.cpp | 12 | 4 | 66.67% | ≥66% | SC |
 | platform/TlsTcpBackend.cpp | 791 | 174 | 78.00% | ≥77% | SC |
 | platform/UdpBackend.cpp | 194 | 50 | 74.23% | ≥74% | SC |
@@ -825,7 +825,7 @@ Threshold: **≥70%** (maximum achievable).
 
 ---
 
-### platform/TcpBackend.cpp — ceiling 74.61% (332/445)
+### platform/TcpBackend.cpp — ceiling 75.73% (337/445)
 
 **Updated 2026-04-09 (rounds 1–3):** 5 new MockSocketOps fault-injection tests
 (bind_fail, connect_fail, recv_frame_fail, send_hello_frame_fail, get_stats) closed
@@ -851,7 +851,25 @@ and log WARNING_HI, covering the `send_frame` failure branch.
 These 2 tests closed 18 previously-missed branch outcomes.
 New LLVM result: 332/445 (74.61%), threshold ≥74%.
 
-Two independent sources of permanently-missed branches (113 total):
+**2026-04-11 (round 14 — inbound impairment + HELLO compliance):**
+5 new tests close 5 previously-missed branch outcomes:
+- `test_tcp_init_invalid_num_channels` — `transport_config_valid()` True branch
+  (lines 148–152); `num_channels > MAX_CHANNELS` returns ERR_INVALID without opening a socket.
+- `test_tcp_inbound_partition_drops_received` fix — added `register_local_id(2U)` on the
+  client side so the DATA frame passes the unregistered-slot guard (REQ-6.1.11) and reaches
+  `apply_inbound_impairment()`; partition True branch at line 318 now covered.
+- `test_tcp_inbound_reorder_buffers_message` fix — added `register_local_id(2U)` and
+  reduced to 1 message (window_size=2 + 2 msgs = full window = release, defeating the test);
+  reorder `inbound_count==0` True branch at line 338 now covered.
+- `test_recv_queue_overflow` fix — added unique `node_id` per sender (10..17) and
+  `register_local_id(node_id)` in `heavy_tcp_sender_func` so DATA frames pass the
+  unregistered-slot guard; recv-queue overflow path (lines 346–348) now reachable.
+- `test_tcp_data_before_hello_dropped` — raw POSIX socket client sends a properly
+  serialized DATA frame without a prior HELLO; server's `is_unregistered_slot()` True
+  branch (lines 396–400) now covered (REQ-6.1.11, HAZ-009).
+New LLVM result: 337/445 (75.73%), threshold ≥75%.
+
+Two independent sources of permanently-missed branches (108 total):
 
 **(a)** Permanently-missed `NEVER_COMPILED_OUT_ASSERT` branches across all functions
 (one per assert call, `[[noreturn]]` abort paths per VVP-001 §4.3 d-i).
@@ -868,7 +886,7 @@ Two independent sources of permanently-missed branches (113 total):
 
 All other reachable decision-level branches are 100% covered.
 
-Threshold: **≥74%** (maximum achievable).
+Threshold: **≥75%** (maximum achievable).
 
 ---
 
