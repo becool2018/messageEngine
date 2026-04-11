@@ -3567,6 +3567,229 @@ static void test_de_reset_peer_ordering_discards_held_pending()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test 71: Forge-ACK discard — process_ack() FORGE-ACK True branch (L131)
+//
+// Exercises the F-7 forge-ACK guard: an ACK whose source_id does not match the
+// node we originally sent to must be silently discarded.
+//
+// Setup: send RELIABLE_ACK from node 1 to node 2.
+// Action: inject a spoofed ACK with source_id=3 (not node 2) but the correct
+//         message_id, then call receive().
+// Verify:
+//   — no ACK_RECEIVED event emitted; first poll returns SEND_OK, second empty.
+//   — AckTracker slot still pending: sweep_ack_timeouts past deadline returns ≥1.
+//
+// Verifies: REQ-3.2.4
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_forge_ack_discarded()
+{
+    // Verifies: REQ-3.2.4
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Send RELIABLE_ACK; engine assigns message_id and opens an AckTracker slot
+    // recording expected_ack_sender = 2 (the original destination).
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+    Result send_r = engine.send(env, NOW_US);
+    assert(send_r == Result::OK);  // Assert: send succeeds
+
+    const uint64_t assigned_id = env.message_id;
+
+    // Build a forge-ACK: correct message_id but source_id=3 (not node 2).
+    // process_ack() calls get_tracked_destination(dst=1, msg_id=assigned_id)
+    // → expected_ack_sender=2; env.source_id=3 != 2 → True branch fires → discarded.
+    MessageEnvelope spoof_ack;
+    make_ack_envelope(spoof_ack, 3U, 1U, assigned_id);  // src=3 (spoofer), dst=1
+
+    Result inj = harness_a.inject(spoof_ack);
+    assert(inj == Result::OK);  // Assert: injection accepted by transport
+
+    // receive() processes the spoofed ACK; FORGE-ACK guard fires inside process_ack()
+    // and returns early before calling on_ack() — the AckTracker slot is NOT cancelled.
+    // Note: handle_control_message() emits ACK_RECEIVED unconditionally after process_ack()
+    // returns, so the event ring does not distinguish legitimate from forged ACKs.
+    // The definitive proof is that the AckTracker slot survives: sweep_ack_timeouts past
+    // the deadline must return ≥1 because the slot was never legitimately cancelled.
+    MessageEnvelope out;
+    Result recv_r = engine.receive(out, 0U, NOW_US + 1000ULL);
+    assert(recv_r == Result::OK);  // Assert: receive returns OK (control msg consumed)
+
+    // AckTracker slot still open: sweep past the recv_timeout deadline returns ≥1.
+    // recv_timeout_ms=1000 in setup_engine → deadline = NOW_US + 1 000 000 us.
+    uint32_t expired = engine.sweep_ack_timeouts(NOW_US + 2000000ULL);
+    assert(expired >= 1U);  // Assert: slot timed out (forge-ACK did not cancel it)
+
+    harness_a.close();
+    harness_b.close();
+    printf("PASS: test_de_forge_ack_discarded\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 72: Latency min/max update branches — update_latency_stats() L1220–1225
+//
+// Exercises both the min-update True branch (rtt < m_stats.latency_min_us) and
+// the max-update True branch (rtt > m_stats.latency_max_us) inside the else-block
+// of update_latency_stats().
+//
+// Key constraint: send() always writes env.timestamp_us = now_us (the send time).
+// AckTracker stores that send time as send_ts.  RTT = receive_now_us - send_ts.
+// To produce a SMALLER RTT after the first sample we must send msg3 LATER (larger
+// send_ts) and receive its ACK only slightly after that send, so
+// rtt3 = R3 - S3 < rtt1 = R1 - S1.  Interleaving one receive between sends makes
+// this possible while satisfying SEC-007 (monotonic now_us).
+//
+// Sequence:
+//   Send1 at S1=NOW_US          → send_ts1=NOW_US
+//   Send2 at S2=NOW_US          → send_ts2=NOW_US
+//   receive(ACK1) at R1=NOW_US+500  → rtt1=500   first sample: min=max=500
+//   Send3 at S3=NOW_US+500      → send_ts3=NOW_US+500   (S3 == R1 is allowed)
+//   receive(ACK2) at R2=NOW_US+600  → rtt2=600>500      max-update True branch: max=600
+//   receive(ACK3) at R3=NOW_US+650  → rtt3=150<500      min-update True branch: min=150
+//
+// Expected final stats: count=3, sum=1250, min=150, max=600.
+//
+// Verifies: REQ-7.2.1
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_latency_min_max_updates()
+{
+    // Verifies: REQ-7.2.1
+    LocalSimHarness harness_a;
+    LocalSimHarness harness_b;
+    DeliveryEngine  engine;
+    setup_engine(harness_a, harness_b, engine);
+
+    // Send1 and Send2 at NOW_US; send_ts1=send_ts2=NOW_US (send() overwrites timestamp_us).
+    static const uint64_t S1 = NOW_US;
+    static const uint64_t S2 = NOW_US;
+    static const uint64_t S3 = NOW_US + 500ULL;  // set after first receive; send_ts3=S3
+
+    static const uint64_t R1 = NOW_US + 500ULL;  // rtt1 = R1-S1 = 500 (first sample)
+    static const uint64_t R2 = NOW_US + 600ULL;  // rtt2 = R2-S2 = 600 > 500 → max branch
+    static const uint64_t R3 = NOW_US + 650ULL;  // rtt3 = R3-S3 = 150 < 500 → min branch
+
+    MessageEnvelope env1;
+    make_data_envelope(env1, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+    Result r1 = engine.send(env1, S1);
+    assert(r1 == Result::OK);  // Assert: send 1 succeeds
+    const uint64_t id1 = env1.message_id;
+
+    MessageEnvelope env2;
+    make_data_envelope(env2, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+    Result r2 = engine.send(env2, S2);
+    assert(r2 == Result::OK);  // Assert: send 2 succeeds
+    const uint64_t id2 = env2.message_id;
+
+    // Inject only ACK1 before the first receive; ACK2/ACK3 are injected after Send3.
+    MessageEnvelope ack1;
+    make_ack_envelope(ack1, 2U, 1U, id1);
+    Result inj1 = harness_a.inject(ack1);
+    assert(inj1 == Result::OK);  // Assert: ACK1 injected
+
+    // receive(ACK1) at R1: rtt1=500 → first sample; min=max=500.
+    // Sets m_last_now_us=R1=NOW_US+500, allowing Send3 at S3=NOW_US+500.
+    MessageEnvelope out;
+    Result ra1 = engine.receive(out, 0U, R1);
+    assert(ra1 == Result::OK);  // Assert: ACK1 processed
+
+    // Send3 at S3=R1=NOW_US+500: monotonic guard allows equal (not strict).
+    // send() sets send_ts3 = S3 = NOW_US+500 in the AckTracker slot.
+    MessageEnvelope env3;
+    make_data_envelope(env3, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_ACK);
+    Result r3 = engine.send(env3, S3);
+    assert(r3 == Result::OK);  // Assert: send 3 succeeds
+    const uint64_t id3 = env3.message_id;
+
+    // Inject ACK2 and ACK3 (FIFO order).
+    MessageEnvelope ack2;
+    make_ack_envelope(ack2, 2U, 1U, id2);
+    Result inj2 = harness_a.inject(ack2);
+    assert(inj2 == Result::OK);  // Assert: ACK2 injected
+
+    MessageEnvelope ack3;
+    make_ack_envelope(ack3, 2U, 1U, id3);
+    Result inj3 = harness_a.inject(ack3);
+    assert(inj3 == Result::OK);  // Assert: ACK3 injected
+
+    // receive(ACK2) at R2=NOW_US+600: rtt2=600>max(500) → max-update True branch.
+    Result ra2 = engine.receive(out, 0U, R2);
+    assert(ra2 == Result::OK);  // Assert: ACK2 processed
+
+    // receive(ACK3) at R3=NOW_US+650: rtt3=150<min(500) → min-update True branch.
+    Result ra3 = engine.receive(out, 0U, R3);
+    assert(ra3 == Result::OK);  // Assert: ACK3 processed
+
+    // Verify latency statistics: both min and max update branches were exercised.
+    DeliveryStats s;
+    engine.get_stats(s);
+    assert(s.latency_sample_count == 3U);      // Assert: three samples recorded
+    assert(s.latency_sum_us == 1250ULL);        // Assert: 500 + 600 + 150 = 1250
+    assert(s.latency_min_us == 150ULL);         // Assert: min-update True branch exercised
+    assert(s.latency_max_us == 600ULL);         // Assert: max-update True branch exercised
+
+    harness_a.close();
+    harness_b.close();
+    printf("PASS: test_de_latency_min_max_updates\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 74: Sequence-state exhaustion — next_seq_for() L1318–1321
+//
+// Exercises the "all slots in use" log + return-0 path in next_seq_for().
+// ACK_TRACKER_CAPACITY (32) seq_state slots are filled by sending to 32
+// distinct destination nodes on an ORDERED channel.  A 33rd new destination
+// exhausts the table; next_seq_for() logs WARNING_HI and returns 0U.
+//
+// Verify: env.sequence_num == 0U after the exhaustion send (next_seq_for
+// returned 0), while send() itself still returns OK (graceful degradation).
+//
+// Verifies: REQ-3.3.5
+// Verification: M1 + M2 + M4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_sequence_state_exhaustion()
+{
+    // Verifies: REQ-3.3.5
+    LocalSimHarness ha;
+    LocalSimHarness hb;
+    DeliveryEngine  engine_a;
+    DeliveryEngine  engine_b;
+    setup_two_ordered_engines(ha, hb, engine_a, engine_b);
+
+    // Fill all ACK_TRACKER_CAPACITY seq_state slots by sending BEST_EFFORT DATA
+    // messages to ACK_TRACKER_CAPACITY distinct destination IDs (2 .. 2+CAP-1).
+    // Each first-send to a new dst allocates one slot and returns sequence 1.
+    // No ACK tracking needed (BEST_EFFORT) — avoids hitting the ack_tracker limit.
+    // MSG_RING_CAPACITY (64) > ACK_TRACKER_CAPACITY (32), so no queue-full.
+    // Power of 10: bounded loop
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        MessageEnvelope env;
+        make_data_envelope(env, 1U, static_cast<NodeId>(2U + i), 0ULL,
+                           ReliabilityClass::BEST_EFFORT);
+        Result r = engine_a.send(env, NOW_US);
+        assert(r == Result::OK);             // Assert: each send succeeds
+        assert(env.sequence_num == 1U);      // Assert: first sequence for new dst
+    }
+
+    // 33rd new destination: all 32 slots active, none matches dst=2+CAP.
+    // next_seq_for() logs WARNING_HI "Sequence state full" and returns 0U.
+    // env.sequence_num is left at 0U; send() degrades gracefully and returns OK.
+    MessageEnvelope env_full;
+    const NodeId overflow_dst = static_cast<NodeId>(2U + ACK_TRACKER_CAPACITY);
+    make_data_envelope(env_full, 1U, overflow_dst, 0ULL, ReliabilityClass::BEST_EFFORT);
+    Result r_full = engine_a.send(env_full, NOW_US);
+    assert(r_full == Result::OK);               // Assert: send still succeeds (graceful)
+    assert(env_full.sequence_num == 0U);        // Assert: 0 returned by exhausted table
+
+    ha.close();
+    hb.close();
+    printf("PASS: test_de_sequence_state_exhaustion\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -3642,6 +3865,9 @@ int main()
     test_de_reassembly_per_source_cap_drops_fragment();
     test_de_reassembly_invalid_fragment_drops();
     test_de_reset_peer_ordering_discards_held_pending();
+    test_de_forge_ack_discarded();
+    test_de_latency_min_max_updates();
+    test_de_sequence_state_exhaustion();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;

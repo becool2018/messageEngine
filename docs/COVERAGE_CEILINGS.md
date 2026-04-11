@@ -195,6 +195,19 @@ Net result: SocketUtils.cpp 93 → 74 missed branches; 69.61% → 75.82%; thresh
 New file PosixSyscallsImpl.cpp: 54 branches, 16 missed, 70.37% (all 16 are NEVER_COMPILED_OUT_ASSERT
 True `[[noreturn]]` abort paths — one per assert per method; structural ceiling).
 
+**2026-04-11 update (round 14 — DeliveryEngine coverable-gap closure + NCA d-iii finding):**
+3 new tests in `test_DeliveryEngine.cpp` close previously-missed coverable branches and
+one NCA d-iii proof documents an unreachable guard:
+- `test_de_forge_ack_discarded`: F-7 FORGE-ACK True branch at `process_ack()` L131.
+- `test_de_latency_min_max_updates`: both else-block update branches in
+  `update_latency_stats()` L1220–1225 (min-update True + max-update True), exercised
+  via an interleaved send/receive sequence that produces decreasing and increasing RTTs.
+- `test_de_sequence_state_exhaustion`: `next_seq_for()` all-slots-full return at L1318–1321.
+NCA d-iii: `update_latency_stats()` backward-timestamp guard at L1205 is structurally
+unreachable (`send()` always sets `env.timestamp_us = now_us`; SEC-007 in `receive()`
+guarantees `receive_now_us >= send_ts`).  Documented in the per-file ceiling section.
+`core/DeliveryEngine.cpp` approximate result: 124 → ~121 missed; 74.11% → ~74.74%.
+
 **Policy floor vs. regression guard:** The policy floor is **100% of reachable branches**
 (VERIFICATION_POLICY.md M4; CLAUDE.md §14.4). The "Threshold" column below is a *regression
 guard* — it is set at the current maximum achievable and must not fall. It is not a relaxation
@@ -213,7 +226,7 @@ two categories is a defect, not a ceiling.
 | core/DuplicateFilter.cpp | 67 | 18 | 73.13% | ≥73% | SC |
 | core/AckTracker.cpp | 152 | 35 | 76.97% | ≥76% | SC |
 | core/RetryManager.cpp | 157 | 36 | 77.07% | ≥77% | SC |
-| core/DeliveryEngine.cpp | 479 | 124 | 74.11% | ≥74% | SC |
+| core/DeliveryEngine.cpp | 479 | ~121 | ~74.74% | ≥74% | SC |
 | core/AssertState.cpp | 2 | 1 | 50.00% | ≥50% | NSC-infra |
 | platform/ImpairmentEngine.cpp | 256 | 66 | 74.22% | ≥74% | SC |
 | platform/ImpairmentConfigLoader.cpp | 174 | 34 | 80.46% | ≥80% | SC |
@@ -495,7 +508,7 @@ Threshold: **≥77%** (maximum achievable, merged profdata).
 
 ---
 
-### core/DeliveryEngine.cpp — ceiling 74.11% (355/479)
+### core/DeliveryEngine.cpp — ceiling ~74.8% (≈358/479)
 
 **Updated 2026-04-06:** MC/DC tests 60–64 closed 10 previously-missed branches
 (backward-timestamp True cases in `send()` and `receive()`, sequence-assignment
@@ -526,7 +539,40 @@ previously-missed branch outcomes:
   (m_held_pending.source_id == src))` True branch in `reset_peer_ordering()` (a message
   was staged in `m_held_pending` before the reset).
 
-New result: 479 branches, 124 missed, 74.11%.
+Intermediate result: 479 branches, 124 missed, 74.11%.
+
+**2026-04-11 (round 14 — DeliveryEngine coverable-gap closure):** Branch coverage
+audit identified 3 coverable missed branches and 1 NCA d-iii (VVP-001 §4.3) finding.
+Three new tests in `test_DeliveryEngine.cpp` close the coverable gaps:
+- `test_de_forge_ack_discarded`: F-7 FORGE-ACK True branch in `process_ack()` L131.
+  An ACK with source_id ≠ expected_ack_sender is silently discarded; verified by
+  confirming the AckTracker slot remains PENDING (sweep_ack_timeouts returns ≥1).
+- `test_de_latency_min_max_updates`: Both latency-update else-branches in
+  `update_latency_stats()` L1220–1225. Three interleaved sends/receives produce RTTs
+  of 500 (first sample), 600 (> max → max-update True), and 150 (< min → min-update
+  True). Verified: count=3, sum=1250, min=150, max=600.
+- `test_de_sequence_state_exhaustion`: `next_seq_for()` "all slots in use" path at
+  L1318–1321. ACK_TRACKER_CAPACITY (32) sends to distinct destinations fill all
+  seq_state slots; a 33rd new destination triggers the WARNING_HI log and returns 0U
+  (verified by env.sequence_num == 0 after send()).
+
+NCA d-iii finding — `update_latency_stats()` backward-timestamp guard L1205:
+```
+if (now_us < send_ts) { return; }
+```
+This guard is **structurally unreachable** through the public API.
+- `send()` always writes `env.timestamp_us = now_us` (line 720) before calling
+  `reserve_bookkeeping()`. The AckTracker therefore stores `send_ts = send_now_us`.
+- `receive()` enforces `SEC-007`: it rejects calls where `now_us < m_last_now_us`
+  (which was set to `send_now_us` by `send()`).
+- Therefore `receive_now_us >= send_now_us = send_ts` always holds, making
+  `receive_now_us < send_ts` mathematically impossible through the public API.
+- Category: VVP-001 §4.3 d-iii — invariant enforced jointly by `send()` and the
+  SEC-007 guard in `receive()`, provably excluding the backward case.
+- LLVM branch count contribution: 2 additional missed outcomes (True branch of the
+  guard and the associated sub-condition in the backward-timestamp `if`).
+
+Approximate new result: 479 branches, ~121 missed, ~74.74%.
 
 Two independent sources of permanently-missed branches:
 
@@ -544,14 +590,16 @@ API in a correctly-configured harness. Key examples:
   and 899), which aborts before the guard is reached when `m_initialized` is false
   (NCA double-guard pattern; VVP-001 §4.3 d-i). The guards are dead code in test builds
   and serve as a production soft-reset safety net only.
+- `update_latency_stats()` L1205: backward-timestamp guard — VVP-001 §4.3 d-iii proof
+  above; see round-14 update.
 - Transport-queue-full paths requiring `MSG_RING_CAPACITY` to be exceeded via normal
   `send()` calls (structurally impossible in any single-threaded test harness).
 
 All branches reachable through the public API in a correctly-configured test harness
-are 100% covered. The 124 remaining missed branches are entirely accounted for by
+are 100% covered. The ~121 remaining missed branches are entirely accounted for by
 category (a) and category (b) above.
 
-Threshold: **≥74%** (maximum achievable).
+Threshold: **≥74%** (maximum achievable; CI run will confirm exact post-round-14 figure).
 
 ---
 
