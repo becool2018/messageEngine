@@ -48,8 +48,9 @@
 
 struct MockTransportInterface : public TransportInterface {
     // ── Failure flags (false = nominal, true = return ERR_IO) ────────────────
-    bool fail_send_message    = false;
-    bool fail_receive_message = false;
+    bool fail_send_message       = false;
+    bool fail_receive_message    = false;
+    bool fail_register_local_id  = false;
 
     // ── Partial-send failure injection ────────────────────────────────────────
     // When fail_send_after_n >= 0, send_message() succeeds for the first
@@ -59,8 +60,9 @@ struct MockTransportInterface : public TransportInterface {
     int fail_send_after_n = -1;  ///< -1 = disabled; ≥0 = fail after this many successes
 
     // ── Call counters ─────────────────────────────────────────────────────────
-    int n_send_message    = 0;   ///< Incremented on each send_message() call.
-    int n_receive_message = 0;   ///< Incremented on each receive_message() call.
+    int n_send_message        = 0;   ///< Incremented on each send_message() call.
+    int n_receive_message     = 0;   ///< Incremented on each receive_message() call.
+    int n_register_local_id   = 0;   ///< Incremented on each register_local_id() call.
 
     ~MockTransportInterface() override {}
 
@@ -74,6 +76,15 @@ struct MockTransportInterface : public TransportInterface {
     void close() override {}
 
     bool is_open() const override { return true; }
+
+    // ── Registration — REQ-6.1.10 ────────────────────────────────────────────
+
+    Result register_local_id(NodeId id) override
+    {
+        ++n_register_local_id;
+        (void)id;
+        return fail_register_local_id ? Result::ERR_IO : Result::OK;
+    }
 
     // ── Send ──────────────────────────────────────────────────────────────────
 

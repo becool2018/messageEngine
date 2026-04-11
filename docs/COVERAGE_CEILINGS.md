@@ -180,7 +180,7 @@ two categories is a defect, not a ceiling.
 | core/DuplicateFilter.cpp | 67 | 18 | 73.13% | ≥73% | SC |
 | core/AckTracker.cpp | 152 | 52 | 65.79% | ≥65% | SC |
 | core/RetryManager.cpp | 157 | 42 | 73.25% | ≥73% | SC |
-| core/DeliveryEngine.cpp | 479 | 124 | 74.11% | ≥74% | SC |
+| core/DeliveryEngine.cpp | 479 | 116 | 75.78% | ≥75% | SC |
 | core/AssertState.cpp | 2 | 1 | 50.00% | ≥50% | NSC-infra |
 | platform/ImpairmentEngine.cpp | 256 | 66 | 74.22% | ≥74% | SC |
 | platform/ImpairmentConfigLoader.cpp | 174 | 34 | 80.46% | ≥80% | SC |
@@ -317,7 +317,7 @@ Threshold: **75%** (maximum achievable rounds to 79%).
 
 ---
 
-### core/DeliveryEngine.cpp — ceiling 74.11% (355/479)
+### core/DeliveryEngine.cpp — ceiling 75.78% (363/479)
 
 **Updated 2026-04-06:** MC/DC tests 60–64 closed 10 previously-missed branches
 (backward-timestamp True cases in `send()` and `receive()`, sequence-assignment
@@ -348,7 +348,31 @@ previously-missed branch outcomes:
   (m_held_pending.source_id == src))` True branch in `reset_peer_ordering()` (a message
   was staged in `m_held_pending` before the reset).
 
-New result: 479 branches, 124 missed, 74.11%.
+Result after round 5: 479 branches, 124 missed, 74.11%.
+
+**2026-04-11 (round 6 — latency, chain-drain, register coverage):** 4 new tests
+closed 8 previously-missed branch outcomes that code inspection showed were
+reachable but untested; the round-5 ceiling claim of "all reachable branches 100%
+covered" was incorrect for these paths:
+
+- `test_mock_init_register_local_id_failure`: `if (!result_ok(reg_res))` True branch
+  in `init()` (L334). MockTransportInterface previously inherited the default
+  `register_local_id()` which always returns OK; added `fail_register_local_id` flag
+  and override to make the WARNING_HI non-fatal path reachable. 1 branch.
+- `test_stats_latency_multi_sample`: `update_latency_stats()` else clause (L1219–1226):
+  5 branch outcomes — `if (latency_sample_count == 1U)` False; `if (rtt < min)` True
+  and False; `if (rtt > max)` True and False. Three RELIABLE_ACK round-trips with RTTs
+  3000/1000/5000 µs exercise all combinations.
+- `test_de_ordered_chain_drain`: `if (rel_res == Result::OK)` True at `deliver_held_
+  pending()` L1502 (normal path). Requires seq=3 AND seq=4 both held simultaneously;
+  when seq=2 fills the gap, seq=3 is staged and deliver_held_pending for seq=3 finds
+  seq=4 via try_release_next. 1 branch.
+- `test_de_ordered_chain_drain_with_expiry`: `if (rel_res == Result::OK)` True at
+  `deliver_held_pending()` L1487 (expiry path). Same chain scenario but seq=3 carries
+  SHORT_EXPIRY; after time advances past expiry the expired-branch try_release_next
+  finds seq=4. 1 branch.
+
+New result: 479 branches, 116 missed, 75.78%.
 
 Two independent sources of permanently-missed branches:
 
@@ -365,10 +389,10 @@ API in a correctly-configured harness (e.g., `m_initialized` False paths after
 `MSG_RING_CAPACITY` through normal `send()` calls).
 
 All branches reachable through the public API in a correctly-configured test harness
-are 100% covered. The 124 remaining missed branches are entirely accounted for by
+are 100% covered. The 116 remaining missed branches are entirely accounted for by
 category (a) and category (b) above.
 
-Threshold: **≥74%** (maximum achievable).
+Threshold: **≥75%** (maximum achievable).
 
 ---
 
