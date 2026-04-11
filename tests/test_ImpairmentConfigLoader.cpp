@@ -31,15 +31,23 @@
 #include <cstring>
 #include <cassert>
 #include <cstdint>
+#include <unistd.h>
 
 #include "core/Types.hpp"
 #include "platform/ImpairmentConfigLoader.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test fixture helpers — write temporary INI files to /tmp
+// Path is PID-qualified so concurrent test suite instances don't collide.
 // ─────────────────────────────────────────────────────────────────────────────
 
-static const char* TEST_FILE = "/tmp/test_icl_config.ini";
+static char TEST_FILE[64] = {'\0'};
+
+static void init_test_path()
+{
+    (void)snprintf(TEST_FILE, sizeof(TEST_FILE),
+                   "/tmp/test_icl_config_%d.ini", static_cast<int>(getpid()));
+}
 
 static void write_test_file(const char* content)
 {
@@ -631,6 +639,7 @@ static void test_parse_uint_accepts_max_valid()
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
 {
+    init_test_path();
     test_file_not_found();
     test_empty_file();
     test_all_fields();

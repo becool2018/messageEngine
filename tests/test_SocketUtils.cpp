@@ -40,8 +40,8 @@
  * failure, listen failure, accept failure, close failure, recvfrom failure,
  * inet_ntop failure, UDP partial send).
  *
- * Port range 19200-19250 is reserved for SocketUtils tests.
- * Port range 19251-19260 is reserved for MockPosixSyscalls tests.
+ * Ports are allocated dynamically via alloc_ephemeral_port() (TestPortAllocator.hpp)
+ * so multiple test suite instances can run concurrently without conflicts.
  *
  * Rules applied:
  *   - Power of 10: fixed buffers, bounded loops, ≥2 assertions per test.
@@ -71,6 +71,7 @@
 #include "platform/SocketUtils.hpp"
 #include "platform/IPosixSyscalls.hpp"
 #include "platform/PosixSyscallsImpl.hpp"
+#include "TestPortAllocator.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Loopback address and base port
@@ -177,7 +178,8 @@ static void test_bind_valid()
     bool ra = socket_set_reuseaddr(fd);
     assert(ra);
 
-    bool ok = socket_bind(fd, LOOPBACK_IP, 19200U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool ok = socket_bind(fd, LOOPBACK_IP, port);
     assert(ok);
 
     socket_close(fd);
@@ -195,7 +197,8 @@ static void test_bind_bad_ip()
     int fd = socket_create_tcp(false);
     assert(fd >= 0);
 
-    bool ok = socket_bind(fd, BAD_IP, 19201U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool ok = socket_bind(fd, BAD_IP, port);
     assert(!ok);
 
     socket_close(fd);
@@ -215,7 +218,8 @@ static void test_listen()
     bool ra = socket_set_reuseaddr(fd);
     assert(ra);
 
-    bool bound = socket_bind(fd, LOOPBACK_IP, 19202U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool bound = socket_bind(fd, LOOPBACK_IP, port);
     assert(bound);
 
     bool ok = socket_listen(fd, 1);
@@ -241,7 +245,8 @@ static void test_accept()
     bool ra = socket_set_reuseaddr(srv_fd);
     assert(ra);
 
-    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19203U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, port);
     assert(bound);
 
     bool listening = socket_listen(srv_fd, 1);
@@ -252,7 +257,7 @@ static void test_accept()
     assert(cli_fd >= 0);
 
     bool connected = socket_connect_with_timeout(cli_fd, LOOPBACK_IP,
-                                                  19203U, TIMEOUT_MS);
+                                                  port, TIMEOUT_MS);
     assert(connected);
 
     // Server-side: wait for the SYN to arrive then accept
@@ -296,7 +301,8 @@ static void test_connect_with_timeout()
     bool ra = socket_set_reuseaddr(srv_fd);
     assert(ra);
 
-    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19204U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, port);
     assert(bound);
 
     bool listening = socket_listen(srv_fd, 1);
@@ -306,7 +312,7 @@ static void test_connect_with_timeout()
     int cli_fd = socket_create_tcp(false);
     assert(cli_fd >= 0);
 
-    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19204U,
+    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, port,
                                            TIMEOUT_MS);
     assert(ok);
 
@@ -338,7 +344,8 @@ static void test_tcp_frame_round_trip()
     bool ra = socket_set_reuseaddr(srv_fd);
     assert(ra);
 
-    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19205U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, port);
     assert(bound);
 
     bool listening = socket_listen(srv_fd, 1);
@@ -348,7 +355,7 @@ static void test_tcp_frame_round_trip()
     int cli_fd = socket_create_tcp(false);
     assert(cli_fd >= 0);
 
-    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19205U,
+    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, port,
                                            TIMEOUT_MS);
     assert(ok);
 
@@ -406,7 +413,8 @@ static void test_tcp_recv_oversized_frame()
     bool ra = socket_set_reuseaddr(srv_fd);
     assert(ra);
 
-    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19206U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, port);
     assert(bound);
 
     bool listening = socket_listen(srv_fd, 1);
@@ -416,7 +424,7 @@ static void test_tcp_recv_oversized_frame()
     int cli_fd = socket_create_tcp(false);
     assert(cli_fd >= 0);
 
-    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19206U,
+    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, port,
                                            TIMEOUT_MS);
     assert(ok);
 
@@ -469,7 +477,8 @@ static void test_send_to_bad_ip()
 
     static const uint8_t DATA[4U] = {0x01U, 0x02U, 0x03U, 0x04U};
 
-    bool ok = socket_send_to(fd, DATA, 4U, BAD_IP, 19207U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_DGRAM);
+    bool ok = socket_send_to(fd, DATA, 4U, BAD_IP, port);
     assert(!ok);
 
     socket_close(fd);
@@ -483,14 +492,15 @@ static void test_send_to_bad_ip()
 
 static void test_udp_send_recv_round_trip()
 {
-    // Receiver binds to 19208; sender uses 19209 as an ephemeral source.
+    // Receiver binds to a dynamically allocated port; sender sends to that port.
     int recv_fd = socket_create_udp(false);
     assert(recv_fd >= 0);
 
     bool ra = socket_set_reuseaddr(recv_fd);
     assert(ra);
 
-    bool bound = socket_bind(recv_fd, LOOPBACK_IP, 19208U);
+    const uint16_t recv_port = alloc_ephemeral_port(SOCK_DGRAM);
+    bool bound = socket_bind(recv_fd, LOOPBACK_IP, recv_port);
     assert(bound);
 
     int send_fd = socket_create_udp(false);
@@ -501,7 +511,7 @@ static void test_udp_send_recv_round_trip()
     static const uint32_t PAYLOAD_LEN = 8U;
 
     bool sent = socket_send_to(send_fd, PAYLOAD, PAYLOAD_LEN,
-                                LOOPBACK_IP, 19208U);
+                                LOOPBACK_IP, recv_port);
     assert(sent);
 
     // Receive on recv_fd
@@ -538,7 +548,8 @@ static void test_udp_recv_timeout()
     bool ra = socket_set_reuseaddr(fd);
     assert(ra);
 
-    bool bound = socket_bind(fd, LOOPBACK_IP, 19209U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_DGRAM);
+    bool bound = socket_bind(fd, LOOPBACK_IP, port);
     assert(bound);
 
     uint8_t  recv_buf[256U];
@@ -573,7 +584,8 @@ static void test_tcp_send_recv_exact()
     bool ra = socket_set_reuseaddr(srv_fd);
     assert(ra);
 
-    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19210U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, port);
     assert(bound);
 
     bool listening = socket_listen(srv_fd, 1);
@@ -583,7 +595,7 @@ static void test_tcp_send_recv_exact()
     int cli_fd = socket_create_tcp(false);
     assert(cli_fd >= 0);
 
-    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19210U,
+    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, port,
                                            TIMEOUT_MS);
     assert(ok);
 
@@ -632,7 +644,8 @@ static void test_tcp_frame_zero_payload()
     bool ra = socket_set_reuseaddr(srv_fd);
     assert(ra);
 
-    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19211U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, port);
     assert(bound);
 
     bool listening = socket_listen(srv_fd, 1);
@@ -642,7 +655,7 @@ static void test_tcp_frame_zero_payload()
     int cli_fd = socket_create_tcp(false);
     assert(cli_fd >= 0);
 
-    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19211U,
+    bool ok = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, port,
                                            TIMEOUT_MS);
     assert(ok);
 
@@ -739,7 +752,8 @@ static void test_bind_ipv6()
     bool ra = socket_set_reuseaddr(fd);
     assert(ra);
 
-    bool ok = socket_bind(fd, LOOPBACK_IP6, 19300U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool ok = socket_bind(fd, LOOPBACK_IP6, port);
     assert(ok);
 
     socket_close(fd);
@@ -760,7 +774,8 @@ static void test_udp_ipv6_send_recv()
     bool ra = socket_set_reuseaddr(recv_fd);
     assert(ra);
 
-    bool bound = socket_bind(recv_fd, LOOPBACK_IP6, 19301U);
+    const uint16_t recv_port = alloc_ephemeral_port(SOCK_DGRAM);
+    bool bound = socket_bind(recv_fd, LOOPBACK_IP6, recv_port);
     assert(bound);
 
     int send_fd = socket_create_udp(true);
@@ -771,7 +786,7 @@ static void test_udp_ipv6_send_recv()
     static const uint32_t PAYLOAD_LEN = 6U;
 
     bool sent = socket_send_to(send_fd, PAYLOAD, PAYLOAD_LEN,
-                                LOOPBACK_IP6, 19301U);
+                                LOOPBACK_IP6, recv_port);
     assert(sent);
 
     uint8_t  recv_buf[256U];
@@ -809,7 +824,8 @@ static void test_fill_addr_bad_ipv6()
     assert(fd >= 0);
 
     // "::zzz" passes socket_is_ipv6 (has ':') but inet_pton(AF_INET6) rejects it.
-    bool ok = socket_bind(fd, "::zzz", 19302U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool ok = socket_bind(fd, "::zzz", port);
     assert(!ok);  // Assert: fill_addr returns false; bind propagates it
 
     socket_close(fd);
@@ -862,13 +878,14 @@ static void test_bind_eaddrinuse()
 {
     int fd1 = socket_create_tcp(false);
     assert(fd1 >= 0);
-    bool b1 = socket_bind(fd1, LOOPBACK_IP, 19303U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool b1 = socket_bind(fd1, LOOPBACK_IP, port);
     assert(b1);  // Assert: first bind succeeds
 
     int fd2 = socket_create_tcp(false);
     assert(fd2 >= 0);
     // No SO_REUSEADDR on fd2; same port → EADDRINUSE → lines 245-248
-    bool b2 = socket_bind(fd2, LOOPBACK_IP, 19303U);
+    bool b2 = socket_bind(fd2, LOOPBACK_IP, port);
     assert(!b2);  // Assert: second bind on same port fails
 
     socket_close(fd1);
@@ -888,7 +905,8 @@ static void test_connect_nonblocking_fails()
     assert(fd >= 0);
     socket_close(fd);  // closed; socket_set_nonblocking will fail
 
-    bool ok = socket_connect_with_timeout(fd, LOOPBACK_IP, 19304U, TIMEOUT_MS);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool ok = socket_connect_with_timeout(fd, LOOPBACK_IP, port, TIMEOUT_MS);
     assert(!ok);  // Assert: returns false because socket_set_nonblocking failed
 
     printf("PASS: test_connect_nonblocking_fails\n");
@@ -906,7 +924,8 @@ static void test_connect_bad_ipv6()
     assert(fd >= 0);
 
     // "::zzz" passes socket_is_ipv6 but inet_pton rejects it → fill_addr fails
-    bool ok = socket_connect_with_timeout(fd, "::zzz", 19305U, TIMEOUT_MS);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool ok = socket_connect_with_timeout(fd, "::zzz", port, TIMEOUT_MS);
     assert(!ok);  // Assert: fill_addr fails → early return at lines 282-283
 
     socket_close(fd);
@@ -925,9 +944,10 @@ static void test_connect_refused()
     int fd = socket_create_tcp(false);
     assert(fd >= 0);
 
-    // Port 19399 has no listener; non-blocking connect returns ECONNREFUSED
+    // Allocate a port then release it; no listener will be present → ECONNREFUSED
     // immediately on loopback → errno != EINPROGRESS → lines 297-300
-    bool ok = socket_connect_with_timeout(fd, LOOPBACK_IP, 19399U, TIMEOUT_MS);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool ok = socket_connect_with_timeout(fd, LOOPBACK_IP, port, TIMEOUT_MS);
     assert(!ok);  // Assert: ECONNREFUSED — not EINPROGRESS
 
     socket_close(fd);
@@ -1025,7 +1045,8 @@ static void test_recv_exact_timeout()
     bool ra = socket_set_reuseaddr(fd);
     assert(ra);
 
-    bool bound = socket_bind(fd, LOOPBACK_IP, 19307U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_DGRAM);
+    bool bound = socket_bind(fd, LOOPBACK_IP, port);
     assert(bound);
 
     uint8_t buf[16U];
@@ -1070,14 +1091,15 @@ static void test_recv_exact_peer_closed()
     assert(srv_fd >= 0);
     bool ra = socket_set_reuseaddr(srv_fd);
     assert(ra);
-    bool bound = socket_bind(srv_fd, LOOPBACK_IP, 19308U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool bound = socket_bind(srv_fd, LOOPBACK_IP, port);
     assert(bound);
     bool listening = socket_listen(srv_fd, 1);
     assert(listening);
 
     int cli_fd = socket_create_tcp(false);
     assert(cli_fd >= 0);
-    bool connected = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, 19308U, TIMEOUT_MS);
+    bool connected = socket_connect_with_timeout(cli_fd, LOOPBACK_IP, port, TIMEOUT_MS);
     assert(connected);
 
     bool readable = wait_readable(srv_fd, TIMEOUT_MS);
@@ -1194,7 +1216,8 @@ static void test_send_to_closed_fd()
 
     static const uint8_t DATA[4U] = {0xAAU, 0xBBU, 0xCCU, 0xDDU};
     // fill_addr(LOOPBACK_IP) succeeds; sendto(closed_fd) → EBADF → lines 631-634
-    bool ok = socket_send_to(fd, DATA, 4U, LOOPBACK_IP, 19309U);
+    const uint16_t port = alloc_ephemeral_port(SOCK_DGRAM);
+    bool ok = socket_send_to(fd, DATA, 4U, LOOPBACK_IP, port);
     assert(!ok);  // Assert: sendto fails with EBADF
 
     printf("PASS: test_send_to_closed_fd\n");
@@ -1215,7 +1238,8 @@ static void test_recv_from_zero_datagram()
     assert(recv_fd >= 0);
     bool ra = socket_set_reuseaddr(recv_fd);
     assert(ra);
-    bool bound = socket_bind(recv_fd, LOOPBACK_IP, 19310U);
+    const uint16_t recv_port = alloc_ephemeral_port(SOCK_DGRAM);
+    bool bound = socket_bind(recv_fd, LOOPBACK_IP, recv_port);
     assert(bound);
 
     int send_fd = socket_create_udp(false);
@@ -1225,7 +1249,7 @@ static void test_recv_from_zero_datagram()
     struct sockaddr_in dst;
     (void)memset(&dst, 0, sizeof(dst));
     dst.sin_family = AF_INET;
-    dst.sin_port   = htons(static_cast<uint16_t>(19310U));
+    dst.sin_port   = htons(recv_port);
     int pton_r = inet_pton(AF_INET, LOOPBACK_IP, &dst.sin_addr);
     assert(pton_r == 1);  // Assert: address converted
 
@@ -1473,7 +1497,8 @@ static void test_connect_immediate_success()
     mock.connect_ret      = 0;   // immediate success
     mock.connect_err      = 0;
 
-    bool ok = socket_connect_with_timeout(sv[0], "127.0.0.1", 19251U, 100U, mock);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool ok = socket_connect_with_timeout(sv[0], "127.0.0.1", port, 100U, mock);
     assert(ok);  // Assert: immediate success returns true
 
     (void)close(sv[0]);
@@ -1501,7 +1526,8 @@ static void test_connect_poll_timeout_mock()
     mock.poll_fail_call   = 0;            // first poll call (for connect wait) returns 0
     mock.poll_fail_ret    = 0;            // 0 = timeout
 
-    bool ok = socket_connect_with_timeout(sv[0], "127.0.0.1", 19252U, 100U, mock);
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    bool ok = socket_connect_with_timeout(sv[0], "127.0.0.1", port, 100U, mock);
     assert(!ok);  // Assert: poll timeout returns false
 
     (void)close(sv[0]);
@@ -1554,7 +1580,8 @@ static void test_sendto_partial_mock()
         0x01U, 0x02U, 0x03U, 0x04U, 0x05U,
         0x06U, 0x07U, 0x08U, 0x09U, 0x0AU
     };
-    bool ok = socket_send_to(fd, data, 10U, "127.0.0.1", 19253U, mock);
+    const uint16_t port = alloc_ephemeral_port(SOCK_DGRAM);
+    bool ok = socket_send_to(fd, data, 10U, "127.0.0.1", port, mock);
     assert(!ok);  // Assert: partial sendto() returns false (lines 638-641)
 
     socket_close(fd);

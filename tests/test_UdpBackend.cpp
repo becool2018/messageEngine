@@ -27,7 +27,8 @@
  *   - Close before init (safe no-op)
  *   - is_open() lifecycle
  *
- * Ports 19600–19620 are reserved for UdpBackend tests.
+ * Ports are allocated dynamically via alloc_ephemeral_port() (TestPortAllocator.hpp)
+ * so multiple test suite instances can run concurrently without conflicts.
  * No threads required: UDP send is non-blocking for datagrams that fit in
  * kernel buffers; receive_message() polls with 100 ms intervals.
  *
@@ -55,6 +56,7 @@
 #include "core/MessageEnvelope.hpp"
 #include "platform/UdpBackend.hpp"
 #include "MockSocketOps.hpp"
+#include "TestPortAllocator.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — build a UDP TransportConfig for loopback
@@ -108,11 +110,13 @@ static void make_hello_envelope(MessageEnvelope& env, NodeId src)
 static void test_udp_config()
 {
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19600U, 19601U);
+    const uint16_t bind_p = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p, peer_p);
 
     assert(cfg.kind == TransportKind::UDP);
-    assert(cfg.bind_port == 19600U);
-    assert(cfg.peer_port == 19601U);
+    assert(cfg.bind_port == bind_p);
+    assert(cfg.peer_port == peer_p);
 
     printf("PASS: test_udp_config\n");
 }
@@ -128,7 +132,9 @@ static void test_udp_bind_and_close()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19602U, 19603U);  // peer not needed for bind-only test
+    const uint16_t bind_p19602 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19603 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19602, peer_p19603);  // peer not needed for bind-only test
 
     Result r = backend.init(cfg);
     assert(r == Result::OK);
@@ -149,7 +155,9 @@ static void test_udp_receive_timeout()
 {
     UdpBackend backend;
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19604U, 19605U);
+    const uint16_t bind_p19604 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19605 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19604, peer_p19605);
 
     Result r = backend.init(cfg);
     assert(r == Result::OK);
@@ -170,8 +178,8 @@ static void test_udp_receive_timeout()
 
 static void test_udp_loopback_send_receive()
 {
-    static const uint16_t PORT_A   = 19606U;
-    static const uint16_t PORT_B   = 19607U;
+    const uint16_t PORT_A   = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t PORT_B   = alloc_ephemeral_port(SOCK_DGRAM);
     static const uint64_t TEST_ID  = 0xCAFEBABEULL;
 
     UdpBackend side_a;
@@ -214,8 +222,8 @@ static void test_udp_loopback_send_receive()
 
 static void test_udp_multiple_messages()
 {
-    static const uint16_t PORT_A = 19608U;
-    static const uint16_t PORT_B = 19609U;
+    const uint16_t PORT_A = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t PORT_B = alloc_ephemeral_port(SOCK_DGRAM);
     static const uint32_t N      = 4U;
 
     UdpBackend side_a;
@@ -289,7 +297,9 @@ static void test_udp_is_open_lifecycle()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19610U, 19611U);
+    const uint16_t bind_p19610 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19611 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19610, peer_p19611);
 
     assert(backend.init(cfg) == Result::OK);
     assert(backend.is_open());
@@ -314,7 +324,9 @@ static void test_udp_send_to_unreachable()
 {
     UdpBackend backend;
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19612U, 19699U);  // nothing on 19699
+    const uint16_t bind_p19612 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19699 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19612, peer_p19699);  // nothing listening on peer port
 
     assert(backend.init(cfg) == Result::OK);
 
@@ -338,7 +350,9 @@ static void test_udp_bind_bad_ip()
 {
     UdpBackend backend;
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19613U, 19614U);
+    const uint16_t bind_p19613 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19614 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19613, peer_p19614);
 
     const char bad_ip[] = "999.999.999.999";
     (void)memcpy(cfg.bind_ip, bad_ip, sizeof(bad_ip));
@@ -360,7 +374,9 @@ static void test_udp_num_channels_zero()
 {
     UdpBackend backend;
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19615U, 19616U);
+    const uint16_t bind_p19615 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19616 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19615, peer_p19616);
     cfg.num_channels = 0U;
 
     Result r = backend.init(cfg);
@@ -379,11 +395,12 @@ static void test_udp_num_channels_zero()
 
 static void test_udp_recv_garbage_datagram()
 {
-    static const uint16_t BIND_PORT = 19617U;
+    const uint16_t BIND_PORT = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19618 = alloc_ephemeral_port(SOCK_DGRAM);
 
     UdpBackend backend;
     TransportConfig cfg;
-    make_udp_cfg(cfg, BIND_PORT, 19618U);
+    make_udp_cfg(cfg, BIND_PORT, peer_p19618);
 
     assert(backend.init(cfg) == Result::OK);
 
@@ -434,7 +451,9 @@ static void test_mock_udp_create_fail()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19650U, 19651U);
+    const uint16_t bind_p19650 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19651 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19650, peer_p19651);
 
     Result r = backend.init(cfg);
     assert(r == Result::ERR_IO);
@@ -453,7 +472,9 @@ static void test_mock_udp_reuseaddr_fail()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19652U, 19653U);
+    const uint16_t bind_p19652 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19653 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19652, peer_p19653);
 
     Result r = backend.init(cfg);
     assert(r == Result::ERR_IO);
@@ -481,7 +502,9 @@ static void test_udp_impairment_delay_paths()
     UdpBackend backend(mock);
 
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19620U, 19621U);
+    const uint16_t bind_p19620 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19621 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19620, peer_p19621);
     cfg.channels[0U].impairment.enabled          = true;
     cfg.channels[0U].impairment.fixed_latency_ms = 1U;  // 1 ms delay
 
@@ -543,7 +566,9 @@ static void test_udp_send_loss_impairment()
 {
     UdpBackend backend;
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19625U, 19626U);  // peer 19626: nothing listens there
+    const uint16_t bind_p19625 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19626 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19625, peer_p19626);  // peer port: nothing listens there
 
     // Configure 100 % loss so check_loss() always fires → process_outbound
     // returns ERR_IO.
@@ -595,7 +620,9 @@ static void test_mock_send_to_fail()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19660U, 19661U);
+    const uint16_t bind_p19660 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19661 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19660, peer_p19661);
 
     Result r = backend.init(cfg);
     assert(r == Result::OK);
@@ -657,7 +684,9 @@ static void test_udp_recv_queue_initial_pop()
     UdpBackend backend(mock);
 
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19662U, 19663U);
+    const uint16_t bind_p19662 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19663 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19662, peer_p19663);
     // Impairment with 1 ms delay: each send_message queues to delay buffer;
     // collect_deliverable in send_message finds nothing expired yet (same now_us).
     cfg.channels[0U].impairment.enabled          = true;
@@ -720,7 +749,9 @@ static void test_mock_udp_recv_from_fail()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19670U, 19671U);
+    const uint16_t bind_p19670 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19671 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19670, peer_p19671);
 
     // init must succeed: create_udp / set_reuseaddr / do_bind all unblocked
     Result r = backend.init(cfg);
@@ -762,13 +793,15 @@ static void test_recv_wrong_source_dropped()
     // peer_ip defaults to "127.0.0.1"; set mock to return "192.168.1.99".
     (void)strncpy(mock.recv_src_ip, "192.168.1.99", sizeof(mock.recv_src_ip) - 1U);
     mock.recv_src_ip[sizeof(mock.recv_src_ip) - 1U] = '\0';
-    mock.recv_src_port = 19681U;  // arbitrary port for the spoofed source
+    const uint16_t bind_p  = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p  = alloc_ephemeral_port(SOCK_DGRAM);
+    mock.recv_src_port = peer_p;  // arbitrary port for the spoofed source
 
     UdpBackend backend(mock);
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19680U, 19681U);  // peer_ip="127.0.0.1", peer_port=19681
+    make_udp_cfg(cfg, bind_p, peer_p);  // peer_ip="127.0.0.1"
 
     Result r = backend.init(cfg);
     assert(r == Result::OK);
@@ -806,8 +839,8 @@ static void test_udp_inbound_partition_drops_received()
     // the partition timer on the first call to is_partition_active()).  Then
     // wait > gap_ms so the partition becomes active, and send the test datagram.
     // side_b::receive_message() must now return ERR_TIMEOUT (partition drop).
-    static const uint16_t SIDE_A_PORT = 19690U;
-    static const uint16_t SIDE_B_PORT = 19691U;
+    const uint16_t SIDE_A_PORT = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t SIDE_B_PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     UdpBackend side_a;  // sender — no impairment
     UdpBackend side_b;  // receiver — partition active on inbound
@@ -879,8 +912,8 @@ static void test_udp_inbound_partition_drops_received()
 // Verifies: REQ-6.1.8, REQ-6.2.4
 static void test_udp_hello_registration()
 {
-    static const uint16_t PORT_A = 19700U;
-    static const uint16_t PORT_B = 19701U;
+    const uint16_t PORT_A = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t PORT_B = alloc_ephemeral_port(SOCK_DGRAM);
 
     UdpBackend side_a;
     UdpBackend side_b;
@@ -924,8 +957,8 @@ static void test_udp_hello_registration()
 // Verifies: REQ-6.1.8, REQ-6.2.4
 static void test_udp_data_before_hello_dropped()
 {
-    static const uint16_t PORT_A = 19702U;
-    static const uint16_t PORT_B = 19703U;
+    const uint16_t PORT_A = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t PORT_B = alloc_ephemeral_port(SOCK_DGRAM);
 
     UdpBackend side_a;
     UdpBackend side_b;
@@ -961,8 +994,8 @@ static void test_udp_data_before_hello_dropped()
 // Verifies: REQ-6.2.4
 static void test_udp_source_id_rotation_rejected()
 {
-    static const uint16_t PORT_A = 19704U;
-    static const uint16_t PORT_B = 19705U;
+    const uint16_t PORT_A = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t PORT_B = alloc_ephemeral_port(SOCK_DGRAM);
 
     UdpBackend side_a;
     UdpBackend side_b;
@@ -1008,8 +1041,8 @@ static void test_udp_source_id_rotation_rejected()
 // Verifies: REQ-6.1.8
 static void test_udp_duplicate_hello_dropped()
 {
-    static const uint16_t PORT_A = 19706U;
-    static const uint16_t PORT_B = 19707U;
+    const uint16_t PORT_A = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t PORT_B = alloc_ephemeral_port(SOCK_DGRAM);
 
     UdpBackend side_a;
     UdpBackend side_b;
@@ -1062,7 +1095,9 @@ static void test_mock_udp_bind_fail()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19710U, 19711U);
+    const uint16_t bind_p19710 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19711 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19710, peer_p19711);
 
     Result r = backend.init(cfg);
     assert(r == Result::ERR_IO);
@@ -1081,7 +1116,9 @@ static void test_mock_udp_send_hello_send_to_fail()
     UdpBackend backend(mock);
 
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19712U, 19713U);
+    const uint16_t bind_p19712 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19713 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19712, peer_p19713);
     assert(backend.init(cfg) == Result::OK);
     assert(backend.is_open());
 
@@ -1104,8 +1141,9 @@ static void test_mock_udp_send_hello_no_peer()
     UdpBackend backend;
 
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19714U, 0U);  // peer_port = 0 triggers the guard
-    cfg.peer_ip[0] = '\0';           // also clear peer_ip for belt-and-braces
+    const uint16_t bind_p19714 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19714, 0U);  // peer_port = 0 triggers the guard
+    cfg.peer_ip[0] = '\0';               // also clear peer_ip for belt-and-braces
 
     assert(backend.init(cfg) == Result::OK);
     assert(backend.is_open());
@@ -1125,7 +1163,9 @@ static void test_mock_udp_get_stats()
     UdpBackend backend(mock);
 
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19715U, 19716U);
+    const uint16_t bind_p19715 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19716 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19715, peer_p19716);
     assert(backend.init(cfg) == Result::OK);
 
     TransportStats stats;
@@ -1147,7 +1187,9 @@ static void test_udp_invalid_num_channels()
     // Strategy: set num_channels > MAX_CHANNELS (8) → ERR_INVALID before any bind.
     UdpBackend backend;
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19717U, 19718U);
+    const uint16_t bind_p19717 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t peer_p19718 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19717, peer_p19718);
     cfg.num_channels = 9U;  // exceeds MAX_CHANNELS = 8
 
     Result r = backend.init(cfg);
@@ -1164,7 +1206,8 @@ static void test_udp_send_hello_peer_port_zero()
     //         which hits the first sub-branch: peer_ip[0] == '\0').
     UdpBackend backend;
     TransportConfig cfg;
-    make_udp_cfg(cfg, 19719U, 0U);  // peer_ip stays "127.0.0.1"; peer_port = 0
+    const uint16_t bind_p19719 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_udp_cfg(cfg, bind_p19719, 0U);  // peer_ip stays "127.0.0.1"; peer_port = 0
 
     assert(backend.init(cfg) == Result::OK);
     assert(backend.is_open());

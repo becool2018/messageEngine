@@ -28,8 +28,8 @@
  *   - Client disconnect detection: server polls disconnected fd, removes it
  *   - is_open() lifecycle (false before init, true after, false after close)
  *
- * Ports 19700–19720 are reserved for TcpBackend tests to avoid conflicts
- * with TlsTcpBackend (19870–19875) and DtlsUdpBackend (19500–19520) tests.
+ * Ports are allocated dynamically via alloc_ephemeral_port() (TestPortAllocator.hpp)
+ * so multiple test suite instances can run concurrently without conflicts.
  *
  * POSIX threads (pthread) used for loopback tests.
  * No TLS involved; pure TCP plaintext.
@@ -63,6 +63,7 @@
 #include "core/Serializer.hpp"
 #include "platform/TcpBackend.hpp"
 #include "MockSocketOps.hpp"
+#include "TestPortAllocator.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — build server / client TransportConfig
@@ -366,7 +367,8 @@ static void test_server_bind_and_close()
     assert(!server.is_open());  // false before init
 
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19700U);
+    const uint16_t port_19700 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19700);
 
     Result r = server.init(cfg);
     assert(r == Result::OK);
@@ -387,7 +389,8 @@ static void test_client_no_server_fails()
 {
     TcpBackend client;
     TransportConfig cfg;
-    make_tcp_client_cfg(cfg, 19701U);  // no server on 19701
+    const uint16_t port_19701 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port_19701);  // no server on this port
     cfg.connect_timeout_ms = 500U;    // short timeout to keep test fast
 
     Result r = client.init(cfg);
@@ -406,7 +409,8 @@ static void test_server_receive_timeout()
 {
     TcpBackend server;
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19702U);
+    const uint16_t port_19702 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19702);
 
     Result r = server.init(cfg);
     assert(r == Result::OK);
@@ -430,7 +434,8 @@ static void test_server_send_no_clients()
 {
     TcpBackend server;
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19703U);
+    const uint16_t port_19703 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19703);
 
     Result r = server.init(cfg);
     assert(r == Result::OK);
@@ -472,7 +477,8 @@ static void test_is_open_lifecycle()
     assert(!server.is_open());
 
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19704U);
+    const uint16_t port_19704 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19704);
 
     Result r = server.init(cfg);
     assert(r == Result::OK);
@@ -497,7 +503,7 @@ static void test_is_open_lifecycle()
 
 static void test_loopback_roundtrip()
 {
-    static const uint16_t PORT     = 19705U;
+    const uint16_t PORT     = alloc_ephemeral_port(SOCK_STREAM);
     static const uint64_t TEST_ID  = 0xDEADBEEFCAFEULL;
 
     TcpSrvArg srv_arg;
@@ -551,7 +557,8 @@ static void test_receive_large_timeout_cap()
 {
     TcpBackend server;
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19706U);
+    const uint16_t port_19706 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19706);
 
     Result r = server.init(cfg);
     assert(r == Result::OK);
@@ -605,7 +612,8 @@ static void test_server_bind_bad_ip()
 {
     TcpBackend server;
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19707U);
+    const uint16_t port_19707 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19707);
 
     // Invalid IP forces socket_bind to fail in bind_and_listen().
     const char bad_ip[] = "999.999.999.999";
@@ -628,7 +636,8 @@ static void test_num_channels_zero()
 {
     TcpBackend server;
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19708U);
+    const uint16_t port_19708 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19708);
     cfg.num_channels = 0U;
 
     Result r = server.init(cfg);
@@ -647,7 +656,7 @@ static void test_num_channels_zero()
 
 static void test_garbage_frame_deserialize_fail()
 {
-    static const uint16_t PORT = 19709U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     GarbageSrvArg srv_arg;
     srv_arg.port        = PORT;
@@ -684,7 +693,7 @@ static void test_garbage_frame_deserialize_fail()
 
 static void test_two_clients_compact()
 {
-    static const uint16_t PORT = 19710U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TwoCliSrvArg srv_arg;
     srv_arg.port        = PORT;
@@ -748,7 +757,7 @@ static void test_two_clients_compact()
 
 static void test_client_detect_server_close()
 {
-    static const uint16_t PORT = 19711U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     SrvCloseArg srv_arg;
     srv_arg.port        = PORT;
@@ -804,7 +813,8 @@ static void test_mock_tcp_server_create_fail()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19721U);
+    const uint16_t port_19721 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19721);
 
     Result r = backend.init(cfg);
     assert(r == Result::ERR_IO);
@@ -823,7 +833,8 @@ static void test_mock_tcp_server_reuseaddr_fail()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19722U);
+    const uint16_t port_19722 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19722);
 
     Result r = backend.init(cfg);
     assert(r == Result::ERR_IO);
@@ -843,7 +854,8 @@ static void test_mock_tcp_server_listen_fail()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19723U);
+    const uint16_t port_19723 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19723);
 
     Result r = backend.init(cfg);
     assert(r == Result::ERR_IO);
@@ -862,7 +874,8 @@ static void test_mock_tcp_server_nonblocking_fail()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19724U);
+    const uint16_t port_19724 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19724);
 
     Result r = backend.init(cfg);
     assert(r == Result::ERR_IO);
@@ -881,7 +894,8 @@ static void test_mock_tcp_client_create_fail()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_tcp_client_cfg(cfg, 19725U);
+    const uint16_t port_19725 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port_19725);
 
     Result r = backend.init(cfg);
     assert(r == Result::ERR_IO);
@@ -900,7 +914,8 @@ static void test_mock_tcp_client_reuseaddr_fail()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_tcp_client_cfg(cfg, 19726U);
+    const uint16_t port_19726 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port_19726);
 
     Result r = backend.init(cfg);
     assert(r == Result::ERR_IO);
@@ -932,7 +947,8 @@ static void test_tcp_impairment_delay_paths()
     TcpBackend backend(mock);
 
     TransportConfig cfg;
-    make_tcp_client_cfg(cfg, 19730U);  // client mode; mock connect succeeds
+    const uint16_t port_19730 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port_19730);  // client mode; mock connect succeeds
     cfg.channels[0U].impairment.enabled          = true;
     cfg.channels[0U].impairment.fixed_latency_ms = 1U;  // 1 ms delay
 
@@ -1036,7 +1052,7 @@ static void* two_cli_srv_b_thread(void* raw)
 // Verifies: REQ-6.1.7
 static void test_remove_client_fd_false_at_index0()
 {
-    static const uint16_t PORT = 19712U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TwoCliSrvArgB srv_arg;
     srv_arg.port        = PORT;
@@ -1143,7 +1159,7 @@ static void* heavy_tcp_sender_func(void* raw_arg)
 
 static void test_recv_queue_overflow()
 {
-    static const uint16_t PORT      = 19713U;
+    const uint16_t PORT      = alloc_ephemeral_port(SOCK_STREAM);
     static const uint32_t N_CLIENTS = 8U;
     static const uint32_t N_MSGS    = 20U;
 
@@ -1220,7 +1236,8 @@ static void test_send_to_all_clients_send_frame_fail()
     // Client mode: connect_to_server → create_tcp (FAKE_FD) → reuseaddr →
     // connect_with_timeout → m_client_fds[0]=FAKE_FD, m_open=true.
     TransportConfig cfg;
-    make_tcp_client_cfg(cfg, 19714U);
+    const uint16_t port_19714 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port_19714);
 
     Result r = backend.init(cfg);
     assert(r == Result::OK);
@@ -1261,7 +1278,8 @@ static void test_send_message_loss_impairment_drop()
 
     // Client mode with 100% loss impairment.
     TransportConfig cfg;
-    make_tcp_client_cfg(cfg, 19715U);
+    const uint16_t port_19715 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port_19715);
     cfg.channels[0U].impairment.enabled          = true;
     cfg.channels[0U].impairment.loss_probability = 1.0;
 
@@ -1299,7 +1317,7 @@ static void test_send_message_loss_impairment_drop()
 static void test_connection_limit_reached()
 {
     // Verifies: REQ-6.1.7, REQ-6.3.5
-    static const uint16_t PORT     = 19716U;
+    const uint16_t PORT     = alloc_ephemeral_port(SOCK_STREAM);
     static const int      MAX_CONN = 8;   // MAX_TCP_CONNECTIONS
 
     TcpBackend server;
@@ -1434,7 +1452,7 @@ static void* tcp_partition_srv_thread(void* raw)
 // Verifies: REQ-5.1.6
 static void test_tcp_inbound_partition_drops_received()
 {
-    static const uint16_t PORT = 19740U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TcpPartSrvArg srv_arg;
     srv_arg.port        = PORT;
@@ -1513,7 +1531,7 @@ static void* tcp_reorder_srv_thread(void* raw)
 // Verifies: REQ-5.1.5
 static void test_tcp_inbound_reorder_buffers_message()
 {
-    static const uint16_t PORT = 19741U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TcpReorderSrvArg srv_arg;
     srv_arg.port        = PORT;
@@ -1557,9 +1575,7 @@ static void test_tcp_inbound_reorder_buffers_message()
 // ─────────────────────────────────────────────────────────────────────────────
 // HELLO registration and unicast routing tests (REQ-6.1.8, REQ-6.1.9, REQ-6.1.10)
 //
-// Ports 19742–19748 reserved for these tests.
-// Ports 19742-19748 are sub-range of the 19700-19760 block assigned to
-// TcpBackend tests and do not conflict with existing tests (19700-19741).
+// Ports allocated dynamically via alloc_ephemeral_port() for these tests.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1578,7 +1594,8 @@ static void test_register_local_id_client_sends_hello()
 
     // Client mode: connect_to_server succeeds via mock → m_client_fds[0]=FAKE_FD
     TransportConfig cfg;
-    make_tcp_client_cfg(cfg, 19742U);
+    const uint16_t port_19742 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port_19742);
     Result r = backend.init(cfg);
     assert(r == Result::OK);
     assert(backend.is_open());
@@ -1611,7 +1628,8 @@ static void test_register_local_id_server_no_hello()
 
     // Server mode: bind_and_listen uses mock; do_accept returns -1 (EAGAIN).
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19743U);
+    const uint16_t port_19743 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19743);
     Result r = backend.init(cfg);
     assert(r == Result::OK);
     assert(backend.is_open());
@@ -1677,7 +1695,7 @@ static void* hello_client_thread(void* raw)
 // Verifies: REQ-6.1.8, REQ-6.1.9
 static void test_hello_received_by_server_populates_routing_table()
 {
-    static const uint16_t PORT    = 19744U;
+    const uint16_t PORT    = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLI_ID  = 55U;
 
     TcpBackend server;
@@ -1734,7 +1752,7 @@ static void test_hello_received_by_server_populates_routing_table()
 // Verifies: REQ-6.1.8
 static void test_hello_frame_not_delivered_to_delivery_engine()
 {
-    static const uint16_t PORT = 19745U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TcpBackend server;
     TransportConfig srv_cfg;
@@ -1788,7 +1806,7 @@ static const uint32_t HELLO_OVERFLOW_NUM_CLIENTS = 8U;
 // Verifies: REQ-3.3.6
 static void test_tcp_hello_queue_overflow()
 {
-    static const uint16_t PORT = 19756U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
     // Enforce that the literal 8 matches the capacity constant.
     static_assert(HELLO_OVERFLOW_NUM_CLIENTS == static_cast<uint32_t>(MAX_TCP_CONNECTIONS),
                   "update HELLO_OVERFLOW_NUM_CLIENTS if MAX_TCP_CONNECTIONS changes");
@@ -1876,7 +1894,7 @@ static void test_tcp_hello_queue_overflow()
 // Verifies: REQ-3.3.6
 static void test_tcp_pop_hello_peer()
 {
-    static const uint16_t PORT   = 19755U;
+    const uint16_t PORT   = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLI_ID = 42U;
 
     TcpBackend server;
@@ -1964,7 +1982,7 @@ static void* dual_hello_client_thread(void* raw)
 // Verifies: REQ-6.1.9
 static void test_unicast_routes_to_registered_slot()
 {
-    static const uint16_t PORT = 19746U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TcpBackend server;
     TransportConfig srv_cfg;
@@ -2036,7 +2054,7 @@ static void test_unicast_routes_to_registered_slot()
 // Verifies: REQ-6.1.9
 static void test_broadcast_when_destination_id_zero()
 {
-    static const uint16_t PORT = 19747U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TcpBackend server;
     TransportConfig srv_cfg;
@@ -2120,7 +2138,8 @@ static void test_idle_client_not_closed_during_poll()
 
     // Server mode: bind_and_listen via mock (create_tcp → FAKE_FD, all ops succeed).
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19750U);
+    const uint16_t port_19750 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19750);
     Result r = backend.init(cfg);
     assert(r == Result::OK);
     assert(backend.is_open());
@@ -2162,7 +2181,7 @@ static void test_idle_client_not_closed_during_poll()
 // Verifies: REQ-4.1.2, REQ-4.1.3
 static void test_readable_client_still_serviced_after_fix()
 {
-    static const uint16_t PORT    = 19751U;
+    const uint16_t PORT    = alloc_ephemeral_port(SOCK_STREAM);
     static const uint64_t TEST_ID = 0xFEEDFACECAFEULL;
 
     TcpSrvArg srv_arg;
@@ -2205,7 +2224,7 @@ static void test_readable_client_still_serviced_after_fix()
 // ─────────────────────────────────────────────────────────────────────────────
 // Source address validation tests (REQ-6.1.11)
 //
-// Ports 19752–19753 are reserved for these tests.
+// Ports allocated dynamically via alloc_ephemeral_port() for these tests.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Thread arg: client that sends HELLO with local_id, then sends a DATA frame
@@ -2266,7 +2285,7 @@ static void* src_valid_client_thread(void* raw)
 // Verifies: REQ-6.1.11
 static void test_source_id_mismatch_dropped()
 {
-    static const uint16_t PORT = 19752U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
     TcpBackend server;
     TransportConfig srv_cfg;
@@ -2323,7 +2342,7 @@ static void test_source_id_mismatch_dropped()
 // Verifies: REQ-6.1.11
 static void test_source_id_match_accepted()
 {
-    static const uint16_t PORT       = 19753U;
+    const uint16_t PORT       = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLIENT_ID  = 1U;
 
     TcpBackend server;
@@ -2447,7 +2466,7 @@ static void* srv_rotate_thread(void* raw)
 // Verifies: REQ-6.1.11
 static void test_tcp_client_server_nodeid_rotation_rejected()
 {
-    static const uint16_t PORT      = 19754U;
+    const uint16_t PORT      = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   SERVER_A  = 10U;  // first source_id — gets locked in
     static const NodeId   SERVER_B  = 11U;  // rotated source_id — must be rejected
     static const NodeId   CLIENT_ID = 1U;
@@ -2523,7 +2542,8 @@ static void test_mock_tcp_server_bind_fail()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19760U);
+    const uint16_t port_19760 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19760);
 
     Result r = backend.init(cfg);
     assert(r == Result::ERR_IO);
@@ -2544,7 +2564,8 @@ static void test_mock_tcp_client_connect_fail()
     assert(!backend.is_open());
 
     TransportConfig cfg;
-    make_tcp_client_cfg(cfg, 19761U);
+    const uint16_t port_19761 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port_19761);
 
     Result r = backend.init(cfg);
     assert(r == Result::ERR_IO);
@@ -2568,7 +2589,8 @@ static void test_mock_tcp_recv_frame_fail()
     TcpBackend backend(mock);
 
     TransportConfig cfg;
-    make_tcp_client_cfg(cfg, 19762U);
+    const uint16_t port_19762 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port_19762);
     assert(backend.init(cfg) == Result::OK);
     assert(backend.is_open());
 
@@ -2593,7 +2615,8 @@ static void test_mock_tcp_send_hello_frame_fail()
     TcpBackend backend(mock);
 
     TransportConfig cfg;
-    make_tcp_client_cfg(cfg, 19763U);
+    const uint16_t port_19763 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port_19763);
     assert(backend.init(cfg) == Result::OK);
     assert(backend.is_open());
 
@@ -2614,7 +2637,8 @@ static void test_mock_tcp_get_stats()
     TcpBackend backend(mock);
 
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19764U);
+    const uint16_t port_19764 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19764);
     assert(backend.init(cfg) == Result::OK);
 
     TransportStats stats;
@@ -2653,7 +2677,7 @@ static void test_mock_tcp_get_stats()
 // Verifies: REQ-6.1.9
 static void test_tcp_handle_hello_duplicate_nodeid_evicts_impostor()
 {
-    static const uint16_t PORT    = 19755U;
+    const uint16_t PORT    = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   DUPL_ID = 77U;
 
     TcpBackend server;
@@ -2763,7 +2787,8 @@ static void test_tcp_send_to_slot_failure_logs_warning()
 
     TcpBackend backend(mock);
     TransportConfig cfg;
-    make_tcp_server_cfg(cfg, 19765U);  // port irrelevant; no real bind in mock
+    const uint16_t port_19765 = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port_19765);  // port irrelevant; no real bind in mock
     Result r = backend.init(cfg);
     assert(r == Result::OK);
     assert(backend.is_open());

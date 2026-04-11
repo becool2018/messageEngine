@@ -25,7 +25,10 @@
  *   - Payload exceeding DTLS_MAX_DATAGRAM_BYTES → ERR_INVALID
  *   - receive_message() returns ERR_TIMEOUT when no data arrives
  *
- * Test cert/key written to /tmp at test startup; cleaned up at exit.
+ * Test cert/key written to /tmp at test startup with PID-qualified names
+ * (e.g. /tmp/me_dtls_test_1234.crt) to avoid conflicts between concurrent
+ * test suite instances; cleaned up at exit.
+ * Ports are allocated dynamically via alloc_ephemeral_port() (TestPortAllocator.hpp).
  * POSIX threads used for loopback tests; server init() blocks until first
  * client datagram arrives (DTLS handshake blocks in server_wait_and_handshake).
  *
@@ -58,6 +61,7 @@
 #include "platform/DtlsUdpBackend.hpp"
 #include "platform/IMbedtlsOps.hpp"
 #include "MockSocketOps.hpp"
+#include "TestPortAllocator.hpp"
 #include <psa/crypto.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -85,8 +89,8 @@ static const char* TEST_KEY_PEM =
     "F5GqzsQBY4RWI7ZfpqatCirfDrMj3FysnOz5w2155FGmUhUx0iJ2xIUQ\n"
     "-----END PRIVATE KEY-----\n";
 
-static const char* DTLS_TEST_CERT_FILE = "/tmp/me_dtls_test.crt";
-static const char* DTLS_TEST_KEY_FILE  = "/tmp/me_dtls_test.key";
+static char DTLS_TEST_CERT_FILE[64] = {'\0'};
+static char DTLS_TEST_KEY_FILE[64]  = {'\0'};
 
 static void write_pem_files()
 {
@@ -99,6 +103,14 @@ static void write_pem_files()
     assert(fp != nullptr);
     assert(fputs(TEST_KEY_PEM, fp) >= 0);
     assert(fclose(fp) == 0);
+}
+
+static void init_pem_paths()
+{
+    (void)snprintf(DTLS_TEST_CERT_FILE, sizeof(DTLS_TEST_CERT_FILE),
+                   "/tmp/me_dtls_test_%d.crt", static_cast<int>(getpid()));
+    (void)snprintf(DTLS_TEST_KEY_FILE, sizeof(DTLS_TEST_KEY_FILE),
+                   "/tmp/me_dtls_test_%d.key", static_cast<int>(getpid()));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -197,9 +209,10 @@ static void* dtls_client_thread(void* arg)
 static void test_plaintext_server_bind()
 {
     // Verifies: REQ-4.1.1, REQ-4.1.4, REQ-6.4.5
+    const uint16_t port_14580 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 14580U, false);
+    make_dtls_config(cfg, true, port_14580, false);
 
     Result res = backend.init(cfg);
     assert(res == Result::OK);
@@ -219,9 +232,10 @@ static void test_plaintext_server_bind()
 static void test_dtls_bad_cert()
 {
     // Verifies: REQ-6.4.1
+    const uint16_t port_14582 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 14582U, true);
+    make_dtls_config(cfg, true, port_14582, true);
     // Override cert to a non-existent path
     (void)strncpy(cfg.tls.cert_file, "/tmp/does_not_exist.crt",
                   static_cast<uint32_t>(sizeof(cfg.tls.cert_file)) - 1U);
@@ -242,7 +256,7 @@ static void test_dtls_bad_cert()
 static void test_plaintext_loopback()
 {
     // Verifies: REQ-4.1.2, REQ-4.1.3, REQ-6.4.5
-    static const uint16_t PORT = 14583U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     // Server: plaintext UDP receives from any sender — no handshake needed
     DtlsUdpBackend server;
@@ -320,7 +334,7 @@ static void* dtls_server_thread(void* arg)
 static void test_dtls_loopback()
 {
     // Verifies: REQ-4.1.2, REQ-4.1.3, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3
-    static const uint16_t PORT = 14584U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsLoopbackArg srv_arg;
     srv_arg.port            = PORT;
@@ -371,9 +385,10 @@ static void test_dtls_loopback()
 static void test_oversized_payload_rejected()
 {
     // Verifies: REQ-6.4.4
+    const uint16_t port_14585 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 14585U, false);
+    make_dtls_config(cfg, true, port_14585, false);
 
     Result init_res = backend.init(cfg);
     assert(init_res == Result::OK);
@@ -409,9 +424,10 @@ static void test_oversized_payload_rejected()
 static void test_receive_timeout()
 {
     // Verifies: REQ-4.1.3
+    const uint16_t port_14586 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 14586U, false);
+    make_dtls_config(cfg, true, port_14586, false);
 
     Result init_res = backend.init(cfg);
     assert(init_res == Result::OK);
@@ -539,9 +555,10 @@ static void* dtls_garbage_sender_thread(void* arg)
 static void test_dtls_bad_key_path()
 {
     // Verifies: REQ-6.4.1
+    const uint16_t port_14587 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 14587U, true);
+    make_dtls_config(cfg, true, port_14587, true);
     // Valid cert, non-existent key → pk_parse_keyfile returns error
     uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.key_file)) - 1U;
     (void)strncpy(cfg.tls.key_file, "/tmp/does_not_exist.key", path_max);
@@ -563,9 +580,10 @@ static void test_dtls_bad_key_path()
 static void test_dtls_bad_ca_cert_file()
 {
     // Verifies: REQ-6.4.1
+    const uint16_t port_14588 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 14588U, true);
+    make_dtls_config(cfg, true, port_14588, true);
     cfg.tls.verify_peer = true;
     uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.ca_file)) - 1U;
     (void)strncpy(cfg.tls.ca_file, "/tmp/bad_ca.crt", path_max);
@@ -587,9 +605,10 @@ static void test_dtls_bad_ca_cert_file()
 static void test_dtls_server_init_timeout()
 {
     // Verifies: REQ-4.1.2, REQ-6.4.1
+    const uint16_t port_14589 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 14589U, true);
+    make_dtls_config(cfg, true, port_14589, true);
     cfg.connect_timeout_ms = 250U;  // short timeout; no client will connect
 
     Result res = backend.init(cfg);
@@ -608,10 +627,11 @@ static void test_dtls_server_init_timeout()
 static void test_dtls_client_bad_peer_ip()
 {
     // Verifies: REQ-6.4.1
+    const uint16_t port_14590 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
     // is_server=false, tls_on=true; bind_port=0 (OS assigns ephemeral)
-    make_dtls_config(cfg, false, 14590U, true);
+    make_dtls_config(cfg, false, port_14590, true);
     // Override peer_ip to an invalid address string
     (void)strncpy(cfg.peer_ip, "999.999.999.999",
                   static_cast<uint32_t>(sizeof(cfg.peer_ip)) - 1U);
@@ -635,9 +655,10 @@ static void test_dtls_client_bad_peer_ip()
 static void test_init_bad_bind_ip()
 {
     // Verifies: REQ-4.1.1
+    const uint16_t port_14591 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 14591U, false);
+    make_dtls_config(cfg, true, port_14591, false);
     // Override bind_ip to an address that inet_aton() will reject
     (void)strncpy(cfg.bind_ip, "999.999.999.999",
                   static_cast<uint32_t>(sizeof(cfg.bind_ip)) - 1U);
@@ -661,7 +682,7 @@ static void test_init_bad_bind_ip()
 static void test_dtls_server_recv_after_client_close()
 {
     // Verifies: REQ-4.1.3, REQ-6.4.1
-    static const uint16_t PORT = 14592U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsSimpleServerArg srv_arg;
     srv_arg.port            = PORT;
@@ -713,7 +734,7 @@ static void test_dtls_server_recv_after_client_close()
 static void test_plaintext_recv_garbage_datagram()
 {
     // Verifies: REQ-4.1.3, REQ-6.4.5
-    static const uint16_t PORT = 14593U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsUdpBackend backend;
     TransportConfig cfg;
@@ -760,7 +781,7 @@ static void test_plaintext_recv_garbage_datagram()
 static void test_dtls_server_handshake_garbage()
 {
     // Verifies: REQ-6.4.1
-    static const uint16_t PORT = 14594U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsGarbageSenderArg sender_arg;
     sender_arg.target_port = PORT;
@@ -803,12 +824,13 @@ static void test_dtls_server_handshake_garbage()
 static void test_plaintext_send_bad_peer_ip()
 {
     // Verifies: REQ-4.1.2, REQ-6.4.5
+    const uint16_t port_14595 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
     // Plaintext client: valid bind_ip, ephemeral bind_port, bad peer_ip.
     // init() (plaintext) binds the socket without using peer_ip → succeeds.
     // send_message() calls socket_send_to with the invalid peer_ip → ERR_IO.
-    make_dtls_config(cfg, false, 14595U, false);
+    make_dtls_config(cfg, false, port_14595, false);
     (void)strncpy(cfg.peer_ip, "999.999.999.999",
                   static_cast<uint32_t>(sizeof(cfg.peer_ip)) - 1U);
     cfg.peer_ip[sizeof(cfg.peer_ip) - 1U] = '\0';
@@ -843,7 +865,7 @@ static void test_plaintext_send_bad_peer_ip()
 static void test_receive_long_timeout_clamp()
 {
     // Verifies: REQ-4.1.3
-    static const uint16_t PORT = 14596U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsUdpBackend server;
     TransportConfig srv_cfg;
@@ -888,9 +910,10 @@ static void test_receive_long_timeout_clamp()
 static void test_dtls_server_verify_peer_no_ca()
 {
     // Verifies: REQ-6.4.1
+    const uint16_t port_14597 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 14597U, true);
+    make_dtls_config(cfg, true, port_14597, true);
     // verify_peer=true but ca_file remains "" (zero-initialized by transport_config_default).
     // setup_dtls_config: `verify_peer && ca_file[0] != '\0'` → True && False → skip CA block.
     // Cert and key parse OK; server_wait_and_handshake times out after 200 ms.
@@ -913,9 +936,10 @@ static void test_dtls_server_verify_peer_no_ca()
 static void test_dtls_server_valid_ca_cert_load()
 {
     // Verifies: REQ-6.4.1
+    const uint16_t port_14598 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 14598U, true);
+    make_dtls_config(cfg, true, port_14598, true);
     // Use the self-signed test cert as both CA and server cert.
     // CA cert parse succeeds → `if (ret != 0)` False → ssl_conf_ca_chain called.
     // No client connects → server_wait_and_handshake times out after 200 ms.
@@ -941,7 +965,7 @@ static void test_dtls_server_valid_ca_cert_load()
 static void test_dtls_server_zero_connect_timeout()
 {
     // Verifies: REQ-4.1.1, REQ-6.4.1
-    static const uint16_t PORT = 14599U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     // Client thread waits 150 ms before connecting, giving the server time to
     // enter server_wait_and_handshake and start the 30 s poll.
@@ -1233,8 +1257,9 @@ static void test_mock_crypto_init_fail()
     DtlsUdpBackend backend(mock);
     assert(!backend.is_open());
 
+    const uint16_t port_14600 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_mock_server_cfg(cfg, 14600U);
+    make_mock_server_cfg(cfg, port_14600);
 
     Result res = backend.init(cfg);
     assert(res == Result::ERR_IO);
@@ -1258,8 +1283,9 @@ static void test_mock_ssl_config_defaults_fail()
     DtlsUdpBackend backend(mock);
     assert(!backend.is_open());
 
+    const uint16_t port_14601 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_mock_server_cfg(cfg, 14601U);
+    make_mock_server_cfg(cfg, port_14601);
 
     Result res = backend.init(cfg);
     assert(res == Result::ERR_IO);
@@ -1283,8 +1309,9 @@ static void test_mock_ssl_conf_own_cert_fail()
     DtlsUdpBackend backend(mock);
     assert(!backend.is_open());
 
+    const uint16_t port_14602 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_mock_server_cfg(cfg, 14602U);
+    make_mock_server_cfg(cfg, port_14602);
 
     Result res = backend.init(cfg);
     assert(res == Result::ERR_IO);
@@ -1308,8 +1335,9 @@ static void test_mock_ssl_cookie_setup_fail()
     DtlsUdpBackend backend(mock);
     assert(!backend.is_open());
 
+    const uint16_t port_14603 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_mock_server_cfg(cfg, 14603U);
+    make_mock_server_cfg(cfg, port_14603);
 
     Result res = backend.init(cfg);
     assert(res == Result::ERR_IO);
@@ -1328,7 +1356,7 @@ static void test_mock_ssl_cookie_setup_fail()
 static void test_mock_server_recvfrom_peek_fail()
 {
     // Verifies: REQ-6.4.1
-    static const uint16_t PORT = 14604U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsMockOps mock;
     mock.r_recvfrom_peek = -1;  // all setup succeeds; recvfrom_peek fails
@@ -1361,7 +1389,7 @@ static void test_mock_server_recvfrom_peek_fail()
 static void test_mock_server_net_connect_fail()
 {
     // Verifies: REQ-6.4.1
-    static const uint16_t PORT = 14605U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsMockOps mock;
     mock.r_net_connect = -1;  // recvfrom_peek succeeds; connect fails
@@ -1394,7 +1422,7 @@ static void test_mock_server_net_connect_fail()
 static void test_mock_server_ssl_setup_fail()
 {
     // Verifies: REQ-6.4.1
-    static const uint16_t PORT = 14606U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsMockOps mock;
     mock.r_ssl_setup = -1;  // recvfrom_peek and connect succeed; ssl_setup fails
@@ -1427,7 +1455,7 @@ static void test_mock_server_ssl_setup_fail()
 static void test_mock_server_ssl_set_transport_id_fail()
 {
     // Verifies: REQ-6.4.1, REQ-6.4.2
-    static const uint16_t PORT = 14607U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsMockOps mock;
     // ssl_setup succeeds (mock); set_client_transport_id fails
@@ -1468,8 +1496,9 @@ static void test_mock_client_net_connect_fail()
     DtlsUdpBackend backend(mock);
     assert(!backend.is_open());
 
+    const uint16_t port_14608 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_mock_client_cfg(cfg, 14608U);
+    make_mock_client_cfg(cfg, port_14608);
 
     Result res = backend.init(cfg);
     assert(res == Result::ERR_IO);
@@ -1494,8 +1523,9 @@ static void test_mock_client_ssl_setup_fail()
     DtlsUdpBackend backend(mock);
     assert(!backend.is_open());
 
+    const uint16_t port_14609 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_mock_client_cfg(cfg, 14609U);
+    make_mock_client_cfg(cfg, port_14609);
 
     Result res = backend.init(cfg);
     assert(res == Result::ERR_IO);
@@ -1517,8 +1547,9 @@ static void test_mock_client_ssl_set_hostname_fail()
     DtlsMockOps mock;
     mock.r_ssl_set_hostname = MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
     DtlsUdpBackend backend(mock);
+    const uint16_t port_14610 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_mock_client_cfg(cfg, 14610U);
+    make_mock_client_cfg(cfg, port_14610);
     (void)strncpy(cfg.tls.peer_hostname, "test.example.com",
                   sizeof(cfg.tls.peer_hostname) - 1U);
     cfg.tls.peer_hostname[sizeof(cfg.tls.peer_hostname) - 1U] = '\0';
@@ -1541,8 +1572,9 @@ static void test_mock_client_ssl_set_hostname_called()
     // When peer_hostname is set, ssl_set_hostname must be called with that value.
     DtlsMockOps mock;
     DtlsUdpBackend backend(mock);
+    const uint16_t port_14611 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_mock_client_cfg(cfg, 14611U);
+    make_mock_client_cfg(cfg, port_14611);
     (void)strncpy(cfg.tls.peer_hostname, "test.example.com",
                   sizeof(cfg.tls.peer_hostname) - 1U);
     cfg.tls.peer_hostname[sizeof(cfg.tls.peer_hostname) - 1U] = '\0';
@@ -1571,8 +1603,9 @@ static void test_mock_sock_create_udp_fail()
     DtlsUdpBackend backend(sock_mock, tls_mock);
     assert(!backend.is_open());
 
+    const uint16_t port_14620 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 14620U, false);  // plaintext server
+    make_dtls_config(cfg, true, port_14620, false);  // plaintext server
 
     Result res = backend.init(cfg);
     assert(res == Result::ERR_IO);
@@ -1598,8 +1631,9 @@ static void test_mock_sock_reuseaddr_fail()
     DtlsUdpBackend backend(sock_mock, tls_mock);
     assert(!backend.is_open());
 
+    const uint16_t port_14621 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 14621U, false);  // plaintext server
+    make_dtls_config(cfg, true, port_14621, false);  // plaintext server
 
     Result res = backend.init(cfg);
     assert(res == Result::ERR_IO);
@@ -1621,9 +1655,10 @@ static void test_init_num_channels_zero()
     // Verifies: REQ-4.1.1
     // With num_channels == 0 the False branch of `if (config.num_channels > 0U)`
     // is taken and impairment_config_default() provides the ImpairmentConfig.
+    const uint16_t port_14622 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 14622U, false);
+    make_dtls_config(cfg, true, port_14622, false);
     cfg.num_channels = 0U;  // force False branch at L554
 
     Result init_res = backend.init(cfg);
@@ -1651,7 +1686,7 @@ static void test_loss_impairment_drops_send()
     // by the impairment engine.  send_message() should return OK (silent drop)
     // and a subsequent receive_message() with 0 ms timeout should return
     // ERR_TIMEOUT (nothing was actually transmitted).
-    static const uint16_t SRV_PORT = 14623U;
+    const uint16_t SRV_PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     // Server (receiver): bind plaintext UDP, no impairment
     DtlsUdpBackend server;
@@ -1714,7 +1749,7 @@ static void test_delay_impairment_flush_and_recv()
     // iterates over the deliverable entries (loop body), sends each to the wire
     // via send_one_envelope(), and does NOT push into recv_queue.  Therefore
     // receive_message() returns ERR_TIMEOUT (recv_queue stays empty).
-    static const uint16_t SRV_PORT = 14624U;
+    const uint16_t SRV_PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     // Server (receiver): no impairment — just receives
     DtlsUdpBackend server;
@@ -1798,7 +1833,7 @@ static void test_delay_impairment_flush_and_recv()
 static void test_two_delayed_messages_second_recv_prequeue()
 {
     // Verifies: REQ-5.1.1
-    static const uint16_t SRV_PORT = 14625U;
+    const uint16_t SRV_PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     // Server: needed so the client UDP connect() has a valid peer address.
     DtlsUdpBackend server;
@@ -1912,8 +1947,9 @@ static void test_mock_dtls_ssl_write_fail()
     DtlsUdpBackend backend(mock);
     assert(!backend.is_open());
 
+    const uint16_t port_14630 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_mock_client_cfg(cfg, 14630U);
+    make_mock_client_cfg(cfg, port_14630);
 
     Result res = backend.init(cfg);
     assert(res == Result::OK);
@@ -1960,8 +1996,9 @@ static void test_mock_dtls_handshake_iteration_limit()
     DtlsUdpBackend backend(mock);
     assert(!backend.is_open());
 
+    const uint16_t port_14631 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_mock_client_cfg(cfg, 14631U);
+    make_mock_client_cfg(cfg, port_14631);
 
     Result res = backend.init(cfg);
     assert(res == Result::ERR_IO);
@@ -1993,8 +2030,9 @@ static void test_mock_dtls_ssl_read_error()
     DtlsUdpBackend backend(mock);
     assert(!backend.is_open());
 
+    const uint16_t port_14632 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_mock_client_cfg(cfg, 14632U);
+    make_mock_client_cfg(cfg, port_14632);
 
     Result init_res = backend.init(cfg);
     assert(init_res == Result::OK);
@@ -2023,7 +2061,7 @@ static void test_mock_dtls_ssl_read_error()
 static void test_dtls_inbound_partition_drops_received()
 {
     // Verifies: REQ-5.1.6, REQ-4.1.3, REQ-6.4.5
-    static const uint16_t PORT = 14700U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsUdpBackend side_b;  // server / receiver — has partition active
     DtlsUdpBackend side_a;  // client / sender   — no impairment
@@ -2111,7 +2149,7 @@ static void test_hello_registers_peer_and_data_passes()
     // Strategy: server receives a HELLO from source_id=2, then a DATA from
     // source_id=2.  Because source_id matches the registered peer, DATA must
     // reach receive_message() as Result::OK.
-    static const uint16_t PORT = 14701U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsUdpBackend server;
     TransportConfig srv_cfg;
@@ -2184,7 +2222,7 @@ static void test_source_id_spoof_after_hello_dropped()
     // Strategy: server receives HELLO from NodeId=2 (registers peer as 2).
     // Then receives DATA with source_id=99 (spoof).  Spoofed frame must be
     // dropped: server receive_message() returns ERR_TIMEOUT.
-    static const uint16_t PORT = 14702U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsUdpBackend server;
     TransportConfig srv_cfg;
@@ -2253,7 +2291,7 @@ static void test_duplicate_hello_rejected()
     // Strategy: send two HELLO frames from the same client. The first is
     // accepted (peer registered). The second must be rejected (WARNING_HI).
     // After both, a DATA with the registered source_id must be delivered.
-    static const uint16_t PORT = 14703U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsUdpBackend server;
     TransportConfig srv_cfg;
@@ -2339,7 +2377,7 @@ static void test_server_hello_response_enables_client_recv()
     //   4. Client drains server HELLO (consumed → ERR_TIMEOUT); client now has
     //      m_peer_hello_received=true and m_peer_node_id=SERVER_ID.
     //   5. Server sends DATA(source_id=SERVER_ID); client must deliver it (OK).
-    static const uint16_t PORT       = 14771U;
+    const uint16_t PORT       = alloc_ephemeral_port(SOCK_DGRAM);
     static const NodeId   SERVER_ID  = 1U;
     static const NodeId   CLIENT_ID  = 2U;
 
@@ -2425,7 +2463,7 @@ static void test_early_data_does_not_poison_port_lock()
     //      still 0 → IP-only pass); process_hello_or_validate commits
     //      m_peer_src_port = B.
     //   4. client2 sends DATA → server delivers it (source_id matches, port matches).
-    static const uint16_t PORT = 14772U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsUdpBackend server;
     TransportConfig srv_cfg;
@@ -2516,7 +2554,7 @@ static void test_plaintext_server_wrong_port_after_learn_dropped()
     //   2. client1 sends HELLO → server learns client1's ephemeral port and locks it.
     //   3. client2 (different DtlsUdpBackend, different ephemeral port) sends DATA.
     //   4. server must silently drop the DATA (port mismatch) → ERR_TIMEOUT.
-    static const uint16_t PORT = 14704U;
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     DtlsUdpBackend server;
     TransportConfig srv_cfg;
@@ -2594,8 +2632,9 @@ static void test_mock_dtls_sock_bind_fail()
     DtlsUdpBackend backend(sock_mock, tls_mock);
     assert(!backend.is_open());
 
+    const uint16_t port_15001 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 15001U, false);  // plaintext server
+    make_dtls_config(cfg, true, port_15001, false);  // plaintext server
 
     Result res = backend.init(cfg);
     assert(res == Result::ERR_IO);
@@ -2619,8 +2658,9 @@ static void test_mock_dtls_plaintext_recv_from_fail()
 
     DtlsUdpBackend backend(sock_mock, tls_mock);
 
+    const uint16_t port_15002 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 15002U, false);  // plaintext server
+    make_dtls_config(cfg, true, port_15002, false);  // plaintext server
 
     Result init_res = backend.init(cfg);
     assert(init_res == Result::OK);
@@ -2647,7 +2687,8 @@ static void test_mock_dtls_plaintext_send_to_fail()
     DtlsUdpBackend backend(sock_mock, tls_mock);
 
     TransportConfig cfg;
-    make_dtls_config(cfg, false, 15003U, false);  // plaintext client
+    const uint16_t port_15003 = alloc_ephemeral_port(SOCK_DGRAM);
+    make_dtls_config(cfg, false, port_15003, false);  // plaintext client
     assert(backend.init(cfg) == Result::OK);
     assert(backend.is_open());
 
@@ -2677,8 +2718,9 @@ static void test_mock_dtls_get_stats()
 
     DtlsUdpBackend backend(sock_mock, tls_mock);
 
+    const uint16_t port_15004 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 15004U, false);  // plaintext server
+    make_dtls_config(cfg, true, port_15004, false);  // plaintext server
     assert(backend.init(cfg) == Result::OK);
 
     TransportStats stats;
@@ -2699,9 +2741,10 @@ static void test_dtls_cert_is_directory()
     // Covers: tls_path_is_regular_file() !S_ISREG(st.st_mode) True branch (L120)
     // Strategy: pass /tmp (always-present directory) as cert_file so lstat()
     //           succeeds but S_ISREG() returns false → ERR_IO.
+    const uint16_t port_15005 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
-    make_dtls_config(cfg, true, 15005U, true);
+    make_dtls_config(cfg, true, port_15005, true);
 
     // Override cert_file with an existing directory — regular-file check fires.
     uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.cert_file)) - 1U;
@@ -2720,6 +2763,7 @@ static void test_dtls_cert_is_directory()
 
 int main()
 {
+    init_pem_paths();
     write_pem_files();
 
     test_plaintext_server_bind();
