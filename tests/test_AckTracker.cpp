@@ -523,6 +523,148 @@ static void test_sweep_expired_monotonic_sequence()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: cancel() — wrong message_id — covers compound-condition C=False and
+//       all loop-exhaustion / A=False (FREE-slot) branches.
+// Verifies: REQ-3.2.4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_cancel_no_match()
+{
+    AckTracker tracker;
+    tracker.init();
+
+    // Track one message (src=1, id=100) — slot 0 becomes PENDING.
+    MessageEnvelope env;
+    make_test_envelope(env, 100ULL);  // src=1, id=100
+    Result r = tracker.track(env, 5000000ULL);
+    assert(r == Result::OK);  // Assert: tracked successfully
+
+    // Cancel wrong id: slot 0 → A=True(PENDING), B=True(src=1), C=False(999≠100).
+    // Slots 1..N are FREE → A=False (short-circuit). Loop exhausts → loop False covered.
+    Result r2 = tracker.cancel(1U, 999ULL);
+    assert(r2 == Result::ERR_INVALID);  // Assert: not found returns ERR_INVALID
+
+    // Original slot still PENDING — sweep confirms it expires normally.
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+    uint32_t expired = tracker.sweep_expired(6000001ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(expired == 1U);  // Assert: original slot still present after failed cancel
+
+    printf("PASS: test_cancel_no_match\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: cancel() — wrong source_id — covers compound-condition B=False.
+// Verifies: REQ-3.2.4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_cancel_wrong_source()
+{
+    AckTracker tracker;
+    tracker.init();
+
+    // Track (src=1, id=200).
+    MessageEnvelope env;
+    make_test_envelope(env, 200ULL);  // src=1, id=200
+    Result r = tracker.track(env, 5000000ULL);
+    assert(r == Result::OK);  // Assert: tracked successfully
+
+    // Cancel wrong source: slot 0 → A=True(PENDING), B=False(src=2≠1). B=False covered.
+    Result r2 = tracker.cancel(2U, 200ULL);
+    assert(r2 == Result::ERR_INVALID);  // Assert: source mismatch returns ERR_INVALID
+
+    // Original slot still PENDING.
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+    uint32_t expired = tracker.sweep_expired(6000001ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(expired == 1U);  // Assert: slot still present after failed cancel
+
+    printf("PASS: test_cancel_wrong_source\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: get_send_timestamp() — not-found cases — covers loop-exhaustion False
+//       and compound sub-condition B=False and C=False.
+// Verifies: REQ-3.2.4, REQ-7.2.1
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_get_send_timestamp_not_found()
+{
+    AckTracker tracker;
+    tracker.init();
+
+    // Track (src=1, id=300).
+    MessageEnvelope env;
+    make_test_envelope(env, 300ULL);  // src=1, id=300
+    Result r = tracker.track(env, 5000000ULL);
+    assert(r == Result::OK);  // Assert: tracked successfully
+
+    uint64_t out_ts = 0ULL;
+
+    // Wrong id: A=True(PENDING), B=True(src=1), C=False(999≠300). C=False covered.
+    // FREE slots → A=False. Loop exhausts → loop False covered.
+    Result r1 = tracker.get_send_timestamp(1U, 999ULL, out_ts);
+    assert(r1 == Result::ERR_INVALID);  // Assert: wrong id returns ERR_INVALID
+    assert(out_ts == 0ULL);             // Assert: out_ts unchanged on failure
+
+    // Wrong source: A=True(PENDING), B=False(src=2≠1). B=False covered.
+    Result r2 = tracker.get_send_timestamp(2U, 300ULL, out_ts);
+    assert(r2 == Result::ERR_INVALID);  // Assert: wrong source returns ERR_INVALID
+
+    printf("PASS: test_get_send_timestamp_not_found\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: get_tracked_destination() — not-found cases — mirrors
+//       test_get_send_timestamp_not_found for the destination-lookup path.
+// Verifies: REQ-3.2.4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_get_tracked_dest_not_found()
+{
+    AckTracker tracker;
+    tracker.init();
+
+    // Track (src=1, id=400, dst=2).
+    MessageEnvelope env;
+    make_test_envelope(env, 400ULL);  // src=1, dst=2, id=400
+    Result r = tracker.track(env, 5000000ULL);
+    assert(r == Result::OK);  // Assert: tracked successfully
+
+    NodeId out_dst = 0U;
+
+    // Wrong id: A=True(PENDING), B=True(src=1), C=False(999≠400). C=False covered.
+    // FREE slots → A=False. Loop exhausts → loop False covered.
+    Result r1 = tracker.get_tracked_destination(1U, 999ULL, out_dst);
+    assert(r1 == Result::ERR_INVALID);  // Assert: wrong id returns ERR_INVALID
+    assert(out_dst == 0U);              // Assert: out_dst unchanged on failure
+
+    // Wrong source: A=True(PENDING), B=False(src=2≠1). B=False covered.
+    Result r2 = tracker.get_tracked_destination(2U, 400ULL, out_dst);
+    assert(r2 == Result::ERR_INVALID);  // Assert: wrong source returns ERR_INVALID
+
+    printf("PASS: test_get_tracked_dest_not_found\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: sweep_expired() — backward timestamp — covers the True branch of the
+//       non-monotonic guard `if (now_us < m_last_sweep_us)`.
+// Verifies: REQ-3.2.4
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_sweep_expired_backward_timestamp()
+{
+    AckTracker tracker;
+    tracker.init();
+
+    MessageEnvelope buf[ACK_TRACKER_CAPACITY];
+
+    // First sweep at T=1000000 — sets m_last_sweep_us.
+    uint32_t c1 = tracker.sweep_expired(1000000ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(c1 == 0U);  // Assert: empty tracker, nothing expired
+
+    // Second sweep at T=500000 (backward) — True branch of backward-timestamp guard.
+    // Function clamps now_us to m_last_sweep_us and returns normally (no abort).
+    uint32_t c2 = tracker.sweep_expired(500000ULL, buf, ACK_TRACKER_CAPACITY);
+    assert(c2 == 0U);  // Assert: backward timestamp — zero entries expired (clamped)
+
+    printf("PASS: test_sweep_expired_backward_timestamp\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -543,6 +685,11 @@ int main()
     test_ack_tracker_cancel();
     test_sweep_expired_accepts_equal_now_us();
     test_sweep_expired_monotonic_sequence();
+    test_cancel_no_match();
+    test_cancel_wrong_source();
+    test_get_send_timestamp_not_found();
+    test_get_tracked_dest_not_found();
+    test_sweep_expired_backward_timestamp();
 
     printf("ALL AckTracker tests passed.\n");
     return 0;

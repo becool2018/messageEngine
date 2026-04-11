@@ -53,3 +53,98 @@ jobs:
       - name: Static analysis (clang-tidy + cppcheck + scan-build)
         run: |
           make static_analysis
+
+  coverage:
+    name: Coverage Report
+    runs-on: ubuntu-latest
+    needs: build_test_and_analysis
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            llvm \
+            libmbedtls-dev
+
+      - name: Run coverage
+        run: make coverage_report 2>&1 | tee /tmp/cov_report.txt
+
+      - name: Write Job Summary
+        run: |
+          {
+            echo "## Coverage Report — $(date '+%Y-%m-%d %H:%M')"
+            echo ""
+            echo "### Per-file summary (functions / lines / branches)"
+            echo '```'
+            sed -n '/^--- Per-file summary/,/^--- Per-function detail/{/^---/!p}' /tmp/cov_report.txt
+            echo '```'
+            echo ""
+            echo "<details><summary>Per-function detail</summary>"
+            echo ""
+            echo '```'
+            sed -n '/^--- Per-function detail/,/^--- Policy compliance/{/^---/!p}' /tmp/cov_report.txt
+            echo '```'
+            echo ""
+            echo "</details>"
+            echo ""
+            echo "<details><summary>Policy compliance notes (CLAUDE.md §14)</summary>"
+            echo ""
+            echo '```'
+            sed -n '/^--- Policy compliance/,/^======/{/^======/!p}' /tmp/cov_report.txt
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Extract per-file table
+        if: github.event_name == 'pull_request'
+        id: cov_table
+        run: |
+          # Grab the per-file llvm-cov table: header + src/ rows + TOTAL.
+          # Stops at the first TOTAL so we don't bleed into the per-function block.
+          TABLE=$(sed -n '/^--- Per-file summary/,/^--- Per-function detail/{/^---/!p}' \
+                    /tmp/cov_report.txt \
+                  | awk '/^TOTAL/{print; exit} /src\/(core|platform)\//{print} /^Filename/{print} /^-{3,}/{print}')
+          {
+            echo "table<<EOF"
+            echo "$TABLE"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Find existing coverage comment
+        if: github.event_name == 'pull_request'
+        uses: peter-evans/find-comment@v3
+        id: find_comment
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          comment-author: github-actions[bot]
+          body-includes: "<!-- coverage-report -->"
+
+      - name: Create or update coverage comment
+        if: github.event_name == 'pull_request'
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.find_comment.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          edit-mode: replace
+          body: |
+            <!-- coverage-report -->
+            ## Coverage Report
+
+            <details open><summary>Per-file branch &amp; line coverage</summary>
+
+            ```
+            ${{ steps.cov_table.outputs.table }}
+            ```
+
+            </details>
+
+            > Full per-function detail and policy compliance notes in the [Actions Job Summary](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).

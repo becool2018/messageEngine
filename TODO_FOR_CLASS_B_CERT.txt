@@ -146,10 +146,9 @@ Status summary
     8a21ca3  test(mc-dc): add 5 MC/DC tests closing send/receive branch gaps
     0e01f9a  security: reject MessageType::INVALID (0xFF) on wire
 
-  In-flight (branch test/socketutils-coverage-2026-04, PR #79, not yet merged):
-    1ccfbb3  docs: clarify 100% policy floor vs per-file regression guards
-    1983036  docs: update test counts in Design.md and FILES.txt for INSP-019
-    f473619  docs: add INSP-019, update traceability matrix and verification policy
-    46d5af3  docs: update README coverage table for 2026-04-09 fault-injection
-    0b6918e  test(coverage): close 7 more reachable branches in UDP/DTLS/TLS
-    681cedd  test(coverage): add MockSocketOps fault-injection tests to all 4 backends
+  In-flight (branch test/impairment-socketutils-coverage-round9-2026-04, INSP-022):
+    8cbfedb  test(coverage): net_poll direct test for MbedtlsOpsImpl.cpp 100% coverage
+    cb0e712  test(m5): TlsMockOps IMbedtlsOps + 22 M5 fault-injection tests (round 12)
+    e56f2cc  test(coverage): H-series tests for TlsTcpBackend (round 11)
+    e4658c3  feat(platform): IPosixSyscalls DI injection layer + 11 SocketUtils tests (round 10)
+    777652e  test(coverage): round 9 — ImpairmentEngine overflow + SocketUtils send-buffer flush

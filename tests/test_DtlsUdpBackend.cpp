@@ -2757,6 +2757,77 @@ static void test_dtls_cert_is_directory()
     printf("PASS: test_dtls_cert_is_directory\n");
 }
 
+// Verifies: REQ-4.1.1
+// Test: init() rejects num_channels > MAX_CHANNELS (DtlsUdpBackend.cpp L1110-1115)
+//   transport_config_valid() returns false when num_channels exceeds MAX_CHANNELS (8).
+//   init() must return ERR_INVALID without touching any socket or TLS resource.
+static void test_init_max_channels_exceeded()
+{
+    // Verifies: REQ-4.1.1
+    DtlsUdpBackend backend;
+    TransportConfig cfg;
+    transport_config_default(cfg);
+    cfg.kind         = TransportKind::DTLS_UDP;
+    cfg.num_channels = static_cast<uint32_t>(MAX_CHANNELS) + 1U;  // exceeds limit
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_INVALID);
+    assert(!backend.is_open());
+
+    printf("PASS: test_init_max_channels_exceeded\n");
+}
+
+// Verifies: REQ-6.4.1
+// Test: init() rejects IPv6 peer_ip (DtlsUdpBackend.cpp L1130-1134)
+//   DtlsUdpBackend is IPv4-only. A ':' in peer_ip identifies an IPv6 address;
+//   init() must return ERR_INVALID without creating any socket.
+static void test_init_ipv6_peer_rejected()
+{
+    // Verifies: REQ-6.4.1
+    DtlsUdpBackend backend;
+    TransportConfig cfg;
+    // Use a dummy port (0); init() returns before creating any socket.
+    make_dtls_config(cfg, false, 0U, false);
+    // Override peer_ip with an IPv6 address; ':' triggers the rejection check.
+    (void)strncpy(cfg.peer_ip, "::1", sizeof(cfg.peer_ip) - 1U);
+    cfg.peer_ip[sizeof(cfg.peer_ip) - 1U] = '\0';
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_INVALID);
+    assert(!backend.is_open());
+
+    printf("PASS: test_init_ipv6_peer_rejected\n");
+}
+
+// Verifies: REQ-6.4.6
+// Test: client_connect_and_handshake() rejects verify_peer=true with empty hostname
+//   (DtlsUdpBackend.cpp L656-662, SEC-001, REQ-6.4.6)
+//   When verify_peer=true but peer_hostname is empty, hostname verification cannot
+//   be performed; any valid-CA cert would pass — refusing the connection prevents
+//   silent degradation of certificate validation (CWE-297).
+static void test_client_verify_peer_empty_hostname()
+{
+    // Verifies: REQ-6.4.6
+    // DtlsMockOps: all ops return success by default; setup_dtls_config() succeeds;
+    // the hostname check (pure config validation) fires before any TLS handshake op.
+    DtlsMockOps mock;
+
+    DtlsUdpBackend backend(mock);
+    assert(!backend.is_open());
+
+    const uint16_t port_15006 = alloc_ephemeral_port(SOCK_DGRAM);
+    TransportConfig cfg;
+    make_mock_client_cfg(cfg, port_15006);
+    cfg.tls.verify_peer = true;  // enable peer verification
+    // peer_hostname remains "" (zero-initialised by transport_config_default)
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_INVALID);
+    assert(!backend.is_open());
+
+    printf("PASS: test_client_verify_peer_empty_hostname\n");
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2835,6 +2906,11 @@ int main()
     test_mock_dtls_plaintext_send_to_fail();
     test_mock_dtls_get_stats();
     test_dtls_cert_is_directory();
+
+    // Config-validation branch coverage (Class B M4 — config guard paths)
+    test_init_max_channels_exceeded();
+    test_init_ipv6_peer_rejected();
+    test_client_verify_peer_empty_hostname();
 
     printf("=== test_DtlsUdpBackend: ALL TESTS PASSED ===\n");
     return 0;

@@ -649,6 +649,139 @@ static void test_num_channels_zero()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// test_tcp_init_invalid_num_channels
+//
+// Pass a TransportConfig with num_channels > MAX_CHANNELS to TcpBackend::init().
+// transport_config_valid() returns false → init() returns ERR_INVALID without
+// touching the socket layer.
+//
+// Covers: TcpBackend.cpp line 148–152 (transport_config_valid True branch).
+// Verifies: REQ-4.1.1
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-4.1.1
+static void test_tcp_init_invalid_num_channels()
+{
+    TcpBackend server;
+    TransportConfig cfg;
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_server_cfg(cfg, port);
+    cfg.num_channels = static_cast<uint32_t>(MAX_CHANNELS) + 1U;  // exceeds limit
+
+    Result r = server.init(cfg);
+    assert(r == Result::ERR_INVALID);
+    assert(!server.is_open());
+
+    printf("PASS: test_tcp_init_invalid_num_channels\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// test_tcp_data_before_hello_dropped
+//
+// A raw TCP client connects and immediately sends a valid DATA frame without
+// first sending a HELLO.  The server's is_unregistered_slot() returns true
+// and the frame is silently discarded (REQ-6.1.11, HAZ-009).
+// receive_message() must return ERR_TIMEOUT because nothing was queued.
+//
+// Covers: TcpBackend.cpp lines 396–400 (is_unregistered_slot True branch).
+// Verifies: REQ-6.1.11
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct RawDataSenderArg {
+    uint16_t port;
+};
+
+static void* raw_data_sender_thread(void* raw)
+{
+    // Power of 10 Rule 2 deviation: infrastructure connect loop — bounded by
+    // retry count, terminates when connected or retries exhausted.
+    const RawDataSenderArg* a = static_cast<const RawDataSenderArg*>(raw);
+    assert(a != nullptr);
+
+    usleep(80000U);  // 80 ms: let server bind and enter receive_message poll
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { return nullptr; }
+
+    struct sockaddr_in addr;
+    (void)memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(a->port);
+    (void)inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    // MISRA C++:2023 5.2.4: reinterpret_cast required by POSIX connect() signature
+    if (connect(fd, reinterpret_cast<const struct sockaddr*>(&addr),
+                static_cast<socklen_t>(sizeof(addr))) != 0) {
+        (void)close(fd);
+        return nullptr;
+    }
+
+    // Serialize a valid DATA frame (no HELLO sent first).
+    // The server will accept the bytes (passes recv_frame), deserialize
+    // successfully, then reject because the slot is unregistered (REQ-6.1.11).
+    MessageEnvelope env;
+    make_test_envelope(env, 0xDADA0001ULL);
+    uint8_t  wire[SOCKET_RECV_BUF_BYTES];
+    uint32_t wire_len = 0U;
+    (void)memset(wire, 0, sizeof(wire));
+    Result ser_r = Serializer::serialize(env, wire, SOCKET_RECV_BUF_BYTES, wire_len);
+    if (ser_r == Result::OK && wire_len > 0U) {
+        // Prepend 4-byte big-endian frame length (same framing as TcpBackend)
+        uint8_t framed[SOCKET_RECV_BUF_BYTES + 4U];
+        framed[0U] = static_cast<uint8_t>((wire_len >> 24U) & 0xFFU);
+        framed[1U] = static_cast<uint8_t>((wire_len >> 16U) & 0xFFU);
+        framed[2U] = static_cast<uint8_t>((wire_len >>  8U) & 0xFFU);
+        framed[3U] = static_cast<uint8_t>( wire_len         & 0xFFU);
+        (void)memcpy(&framed[4U], wire, static_cast<size_t>(wire_len));
+        (void)send(fd, static_cast<const void*>(framed),
+                   static_cast<size_t>(wire_len) + 4U, 0);
+    }
+
+    usleep(100000U);  // 100 ms: let server process, then close
+    (void)close(fd);
+    return nullptr;
+}
+
+// Verifies: REQ-6.1.11
+static void test_tcp_data_before_hello_dropped()
+{
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+    assert(server.is_open());
+
+    RawDataSenderArg sender_arg;
+    sender_arg.port = PORT;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t sender_tid;
+    (void)pthread_create(&sender_tid, &attr, raw_data_sender_thread, &sender_arg);
+
+    // Drain: accept the client and attempt to receive the DATA frame.
+    // Must time out because the frame is dropped at the unregistered-slot guard.
+    // Power of 10 Rule 2: fixed loop bound (5 × 100 ms = 500 ms max).
+    Result recv_r = Result::OK;
+    for (uint32_t i = 0U; i < 5U; ++i) {
+        MessageEnvelope env;
+        recv_r = server.receive_message(env, 100U);
+        if (recv_r == Result::OK) { break; }
+    }
+
+    (void)pthread_join(sender_tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+    server.close();
+
+    assert(recv_r != Result::OK);  // unregistered DATA must be dropped
+    printf("PASS: test_tcp_data_before_hello_dropped\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test 12: garbage TCP frame → Serializer::deserialize fails in recv_from_client
 // Covers recv_from_client L249 True branch (!result_ok after deserialize).
 // Verifies: REQ-6.1.5, REQ-6.1.6
@@ -1127,6 +1260,7 @@ static void test_remove_client_fd_false_at_index0()
 struct HeavyTcpSenderArg {
     uint32_t num_msgs;
     uint32_t stay_alive_us;
+    NodeId   node_id;   // unique per sender — used for HELLO registration
     uint16_t port;
     Result   result;
 };
@@ -1145,10 +1279,15 @@ static void* heavy_tcp_sender_func(void* raw_arg)
     a->result = client.init(cfg);
     if (a->result != Result::OK) { return nullptr; }
 
+    // REQ-6.1.8: register before sending DATA so server accepts the frames
+    // (server rejects data from unregistered slots per REQ-6.1.11).
+    (void)client.register_local_id(a->node_id);
+
     // Power of 10 Rule 2 deviation (test loop): bounded by a->num_msgs.
     for (uint32_t m = 0U; m < a->num_msgs; ++m) {
         MessageEnvelope env;
         make_test_envelope(env, 0x8000ULL + static_cast<uint64_t>(m));
+        env.source_id = a->node_id;  // match the registered NodeId
         (void)client.send_message(env);
     }
 
@@ -1178,10 +1317,13 @@ static void test_recv_queue_overflow()
     (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
 
     // Power of 10 Rule 2: fixed loop bound (N_CLIENTS = 8)
+    // Each client gets a unique node_id (10..17) so duplicate-NodeId eviction
+    // (G-3) is not triggered; all 8 register successfully.
     for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
         args[k].port          = PORT;
         args[k].num_msgs      = N_MSGS;
         args[k].stay_alive_us = 2000000U;  // 2 s — stay alive during drain
+        args[k].node_id       = static_cast<NodeId>(10U + k);
         args[k].result        = Result::ERR_IO;
         (void)pthread_create(&tids[k], &attr, heavy_tcp_sender_func, &args[k]);
     }
@@ -1475,6 +1617,10 @@ static void test_tcp_inbound_partition_drops_received()
     Result cli_init = client.init(cli_cfg);
 
     if (cli_init == Result::OK) {
+        // REQ-6.1.8: send HELLO first so the server registers this slot;
+        // without this the data frame is rejected at the unregistered-slot
+        // guard (REQ-6.1.11) before apply_inbound_impairment() is reached.
+        (void)client.register_local_id(2U);
         MessageEnvelope env;
         make_test_envelope(env, 0xDEAD0001ULL);
         (void)client.send_message(env);
@@ -1554,13 +1700,18 @@ static void test_tcp_inbound_reorder_buffers_message()
     Result cli_init = client.init(cli_cfg);
 
     if (cli_init == Result::OK) {
+        // REQ-6.1.8: send HELLO first so the server registers this slot;
+        // without this the data frame is rejected at the unregistered-slot
+        // guard (REQ-6.1.11) before apply_inbound_impairment() is reached.
+        (void)client.register_local_id(2U);
+
+        // Send exactly 1 message — with reorder_window_size=2 it is buffered
+        // (inbound_count==0) and never pushed to m_recv_queue.  A second
+        // message would fill the window and trigger a release, defeating the
+        // purpose of this test.
         MessageEnvelope env1;
         make_test_envelope(env1, 0xBEEF0001ULL);
         (void)client.send_message(env1);
-
-        MessageEnvelope env2;
-        make_test_envelope(env2, 0xBEEF0002ULL);
-        (void)client.send_message(env2);
 
         client.close();
     }
@@ -2828,6 +2979,181 @@ static void test_tcp_send_to_slot_failure_logs_warning()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// test_tcp_full_frame_deserialize_fail
+//
+// A raw TCP client connects and sends a length-prefixed frame whose payload is
+// exactly WIRE_HEADER_SIZE (52) zero bytes.  tcp_recv_frame() accepts the frame
+// (52 >= WIRE_HEADER_SIZE == 52).  Serializer::deserialize() rejects it because
+// the proto-version byte (byte 2 of the payload) is 0, which does not equal
+// PROTO_VERSION.  recv_from_client() executes lines 374-377 (the deserialize-
+// fail branch) and returns the error without queuing anything.
+// receive_message() must therefore return ERR_TIMEOUT.
+//
+// No HELLO is sent.  The deserialize check at line 373 fires BEFORE the
+// unregistered-slot guard at line 395, so a HELLO is not required here.
+//
+// Covers: TcpBackend.cpp lines 374-377 (deserialize fail in recv_from_client).
+// Verifies: REQ-6.1.5, REQ-6.1.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Thread: connects and sends a 52-byte all-zeros frame (length-prefixed).
+static void* full_frame_zero_sender_thread(void* raw)
+{
+    const RawDataSenderArg* a = static_cast<const RawDataSenderArg*>(raw);
+    assert(a != nullptr);
+
+    usleep(80000U);  // 80 ms: let server bind and enter receive_message poll
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { return nullptr; }
+
+    struct sockaddr_in addr;
+    (void)memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(a->port);
+    (void)inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    // MISRA C++:2023 5.2.4: reinterpret_cast required by POSIX connect() signature
+    if (connect(fd, reinterpret_cast<const struct sockaddr*>(&addr),
+                static_cast<socklen_t>(sizeof(addr))) != 0) {
+        (void)close(fd);
+        return nullptr;
+    }
+
+    // Frame: 4-byte big-endian length = WIRE_HEADER_SIZE (52), then 52 zero bytes.
+    // tcp_recv_frame() accepts (52 >= WIRE_HEADER_SIZE == 52, within max_frame_size).
+    // Serializer::deserialize() rejects (proto version byte at byte 2 == 0 !=
+    // PROTO_VERSION) → recv_from_client lines 374-377 are exercised.
+    // Buffer: 4 (length prefix) + 52 (WIRE_HEADER_SIZE payload) = 56 bytes total.
+    static const uint32_t FRAME_LEN = 52U;  // == Serializer::WIRE_HEADER_SIZE
+    uint8_t framed[56U];                    // 4 + 52
+    framed[0U] = static_cast<uint8_t>((FRAME_LEN >> 24U) & 0xFFU);
+    framed[1U] = static_cast<uint8_t>((FRAME_LEN >> 16U) & 0xFFU);
+    framed[2U] = static_cast<uint8_t>((FRAME_LEN >>  8U) & 0xFFU);
+    framed[3U] = static_cast<uint8_t>( FRAME_LEN         & 0xFFU);
+    (void)memset(&framed[4U], 0, FRAME_LEN);  // all-zero payload → bad proto version
+
+    (void)send(fd, static_cast<const void*>(framed), sizeof(framed), 0);
+
+    usleep(100000U);  // 100 ms: let server process, then close
+    (void)close(fd);
+    return nullptr;
+}
+
+// Verifies: REQ-6.1.5, REQ-6.1.6
+static void test_tcp_full_frame_deserialize_fail()
+{
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    Result r = server.init(srv_cfg);
+    assert(r == Result::OK);
+    assert(server.is_open());
+
+    RawDataSenderArg sender_arg;
+    sender_arg.port = PORT;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t sender_tid;
+    (void)pthread_create(&sender_tid, &attr, full_frame_zero_sender_thread, &sender_arg);
+
+    // Power of 10 Rule 2: fixed bound (3 × 200 ms = 600 ms max).
+    // recv_from_client returns the deserialize error (not queued) → loop times out.
+    Result recv_r = Result::OK;
+    for (uint32_t i = 0U; i < 3U; ++i) {
+        MessageEnvelope env;
+        recv_r = server.receive_message(env, 200U);
+        if (recv_r == Result::OK) { break; }  // should not happen
+    }
+
+    (void)pthread_join(sender_tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+    server.close();
+
+    assert(recv_r != Result::OK);  // bad frame dropped; nothing delivered
+    printf("PASS: test_tcp_full_frame_deserialize_fail\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// test_tcp_client_receives_hello_from_server
+//
+// A client-mode TcpBackend receives a HELLO frame from the server side.
+// recv_from_client() deserializes the HELLO, checks m_is_server == false, and
+// returns ERR_AGAIN (line 387: "client received HELLO echo; consumed").
+// Nothing is pushed to m_recv_queue, so receive_message() returns ERR_TIMEOUT.
+//
+// Technique (M5 fault injection):
+//   MockSocketOps.create_tcp_once_fd = sp[0] (a real socketpair fd) so that
+//   poll() returns POLLIN when a byte is written to sp[1].
+//   MockSocketOps.recv_frame_once_buf contains a pre-serialized HELLO frame,
+//   returned on the first recv_frame() call inside recv_from_client().
+//
+// Covers: TcpBackend.cpp line 387 (client-mode HELLO echo consumed).
+// Verifies: REQ-6.1.8
+// Verification: M1 + M2 + M5 (fault injection via ISocketOps + socketpair)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Verifies: REQ-6.1.8
+static void test_tcp_client_receives_hello_from_server()
+{
+    // socketpair: sp[0] = mock client fd; writing to sp[1] makes sp[0] readable.
+    int sp[2] = {-1, -1};
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sp) == 0);
+
+    // Serialize a valid HELLO frame directly into the mock's one-shot recv buffer.
+    MessageEnvelope hello_env;
+    envelope_init(hello_env);
+    hello_env.message_type = MessageType::HELLO;
+    hello_env.source_id    = 1U;  // arbitrary; server NodeId not validated in this path
+
+    MockSocketOps mock;
+    uint32_t hello_len = 0U;
+    Result ser_r = Serializer::serialize(hello_env,
+                                         mock.recv_frame_once_buf,
+                                         static_cast<uint32_t>(sizeof(mock.recv_frame_once_buf)),
+                                         hello_len);
+    assert(ser_r == Result::OK);
+    assert(hello_len > 0U);
+    mock.recv_frame_once_len = hello_len;
+
+    // Use sp[0] as the client connect fd so that poll() fires on it.
+    mock.create_tcp_once_fd = sp[0];
+
+    TcpBackend backend(mock);
+    TransportConfig cfg;
+    const uint16_t port_hello_echo = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port_hello_echo);
+    Result r = backend.init(cfg);
+    assert(r == Result::OK);
+    assert(backend.is_open());
+
+    // Write a byte to sp[1] → sp[0] becomes readable → poll() returns POLLIN.
+    char const dummy = 'X';
+    // MISRA C++:2023 5.2.4: reinterpret_cast required for write() const-void* arg
+    ssize_t const wn = write(sp[1], reinterpret_cast<const void*>(&dummy), 1U);
+    assert(wn == 1);
+
+    // receive_message: poll() fires POLLIN on sp[0] → recv_from_client(sp[0]) →
+    // mock returns the HELLO frame → deserialize OK → message_type == HELLO →
+    // m_is_server == false → ERR_AGAIN returned (line 387) → nothing queued →
+    // receive_message exhausts the poll loop and returns ERR_TIMEOUT.
+    MessageEnvelope recv_env;
+    r = backend.receive_message(recv_env, 200U);
+    assert(r == Result::ERR_TIMEOUT);  // HELLO echo consumed; not delivered
+
+    // MockSocketOps::do_close() does not close real fds; close the pair manually.
+    backend.close();
+    (void)close(sp[0]);
+    (void)close(sp[1]);
+
+    printf("PASS: test_tcp_client_receives_hello_from_server\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2846,6 +3172,8 @@ int main()
     test_receive_large_timeout_cap();
     test_server_bind_bad_ip();
     test_num_channels_zero();
+    test_tcp_init_invalid_num_channels();
+    test_tcp_data_before_hello_dropped();
     test_garbage_frame_deserialize_fail();
     test_two_clients_compact();
     test_client_detect_server_close();
@@ -2907,6 +3235,12 @@ int main()
 
     // send_to_slot() failure path — WARNING_HI log + ERR_IO (REQ-6.1.9, M5)
     test_tcp_send_to_slot_failure_logs_warning();
+
+    // Deserialize fail on a full-size (WIRE_HEADER_SIZE) zero frame (REQ-6.1.5)
+    test_tcp_full_frame_deserialize_fail();
+
+    // Client-mode HELLO echo consumed at line 387 (REQ-6.1.8, M5)
+    test_tcp_client_receives_hello_from_server();
 
     printf("=== ALL PASSED ===\n");
     return 0;

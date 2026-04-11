@@ -1206,3 +1206,118 @@ All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-04-09. DEF-021-1 resolved FIX — `m_open` converted to `std::atomic<bool>`; `close()` uses `compare_exchange_strong` for lock-free single-entry guarantee (CWE-416 eliminated). `SECURITY_ASSUMPTIONS.md §14` updated to reflect the fix and document remaining non-thread-safe methods. All entry and exit criteria satisfied. `make lint` and `make run_tests` PASS. Inspection INSP-021 closed PASS.
+
+---
+
+### INSP-022 — Coverage rounds 9–12: IPosixSyscalls DI layer, H-series TlsTcpBackend tests, TlsMockOps M5 fault injection, MbedtlsOpsImpl net_poll coverage (2026-04-10)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-10 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | CLOSED — 1 minor defect found and fixed; all M5 coverage gaps closed |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `src/platform/IPosixSyscalls.hpp` | New pure-virtual interface wrapping 8 POSIX syscalls used by `SocketUtils.cpp` (`socket`, `fcntl`, `connect`, `poll`, `send`, `sendto`, `recvfrom`, `inet_ntop`); vtable-backed dispatch per Power of 10 Rule 9 exception |
+| `src/platform/PosixSyscallsImpl.hpp` / `.cpp` | New production singleton delegating to real POSIX calls; each method carries `NEVER_COMPILED_OUT_ASSERT` guards; 54 branches, 16 missed (all NCA True paths — structural ceiling) |
+| `src/platform/SocketUtils.cpp` / `.hpp` | DI constructor `SocketUtils(IPosixSyscalls&)` added; production default ctor retains `PosixSyscallsImpl::instance()`; send-buffer flush path (round 9) covered |
+| `src/platform/MbedtlsOpsImpl.cpp` | `net_poll` delegation method enabled; 100% line+function coverage achieved for `MbedtlsOpsImpl.cpp` |
+| `tests/test_SocketUtils.cpp` | 11 `MockPosixSyscalls` M5 fault-injection tests covering all 8 syscall failure paths; round 9 `test_send_buffer_flush` added; `<cerrno>` include added (DEF-022-1) |
+| `tests/test_TlsTcpBackend.cpp` | 6 H-series tests (round 11): deserialize-fail, inbound-partition, recv-queue overflow, reorder-buffer early-return, send-to-slot fail, broadcast-send fail; 22 `TlsMockOps` M5 fault-injection tests (round 12) covering all hard mbedTLS/PSA dependency-failure branches listed in `COVERAGE_CEILINGS.md` §TlsTcpBackend (b) — now retracted |
+| `tests/test_ImpairmentEngine.cpp` | Round 9: `test_compute_jitter_overflow` and `test_partition_consecutive` covering overflow guard branches |
+| `docs/COVERAGE_CEILINGS.md` | Round 9–12 narrative updates; M5 ceiling (b) for `TlsTcpBackend.cpp` retracted; `TlsTcpBackend` threshold table entry updated from 784\|192\|75.51%\|≥75% to 791\|177\|77.62%\|≥77%; `PosixSyscallsImpl.cpp` section added |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations (CC ≤ 10 enforced) | PASS |
+| `make run_tests` all tests green | PASS |
+| `make check_traceability` RESULT: PASS | PASS |
+| All new/modified `src/` files carry `// Implements: REQ-x.x` tags | PASS |
+| All new/modified `tests/` files carry `// Verifies: REQ-x.x` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Defects found
+
+| ID | File : function | Description | Severity | Status | Disposition |
+|----|----------------|-------------|----------|--------|-------------|
+| DEF-022-1 | `tests/test_SocketUtils.cpp` : file-level | **Missing `<cerrno>` include.** `EADDRINUSE`, `ECONNREFUSED`, and `ETIMEDOUT` errno constants used in test fixtures without including `<cerrno>`. Caused compilation failure on strict include-order environments. | MINOR | CLOSED | Fixed in commit `80e300e`: `#include <cerrno>` added to `test_SocketUtils.cpp`. |
+
+#### Checklist reference
+
+All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
+- `IPosixSyscalls`: pure-virtual interface only; no implementation; vtable dispatch is the permitted Power of 10 Rule 9 exception. ✓
+- `PosixSyscallsImpl`: each of 8 methods carries ≥ 2 `NEVER_COMPILED_OUT_ASSERT` guards (Rule 5 satisfied). NSC classification — thin POSIX wrappers, no message-delivery policy. ✓
+- `SocketUtils.cpp` DI constructor: `IPosixSyscalls&` stored by reference; no allocation; singleton default path unchanged (Power of 10 Rule 3). ✓
+- `TlsMockOps` (inline in `test_TlsTcpBackend.cpp`): delegation-based — all non-faulted methods forward to real `MbedtlsOpsImpl`; no hidden state drift; fault flags are plain `bool` initialized at declaration (§7b). ✓
+- M5 ceiling (b) retracted: all 22 TlsMockOps tests exercise previously-unreachable mbedTLS dependency-failure branches; VVP-001 §4.3 e-i ceiling no longer applies to `TlsTcpBackend.cpp`. ✓
+- Remaining ceilings (a) NEVER_COMPILED_OUT_ASSERT True paths (~147 branches) and (c) structurally-unreachable guards (~12 branches) are valid at Class B per VVP-001 §4.3 d-i and d-iii. ✓
+- `COVERAGE_CEILINGS.md` threshold table updated to match round 12 numbers (791 branches, 177 missed, 77.62%, ≥77%). ✓
+- DEF-022-1 (MINOR): missing `<cerrno>` in test file; fixed in same commit; no production code affected. ✓
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-10. DEF-022-1 (MINOR) resolved. All entry and exit criteria satisfied. `make lint`, `make run_tests`, and `make check_traceability` all PASS. TlsTcpBackend.cpp M5 gap fully closed; no remaining engineering work for Class B reclassification (see TODO_FOR_CLASS_B_CERT.txt — Items 6, 7, 8, 9 are external/organizational). Inspection INSP-022 closed PASS.
+
+---
+
+### INSP-023 — Class B compliance: ImpairmentConfigLoader NaN/Inf/ERANGE branches + DtlsUdpBackend ceiling reconciliation (2026-04-11)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-11 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup (AI-assisted development; human engineer acts as moderator per §12.1) |
+| Reviewer(s) | Claude Sonnet 4.6 (AI co-author); human engineer self-review against INSPECTION_CHECKLIST.md |
+| Outcome     | CLOSED — Class B compliance gaps resolved; all entry and exit criteria met |
+
+#### Scope of change
+
+| File(s) | Change summary |
+|---------|---------------|
+| `tests/test_ImpairmentConfigLoader.cpp` | 6 new tests (27–32) covering NaN/Inf guard in `parse_prob` (L97) and ERANGE/overflow guards in `parse_uint` (L65), `parse_u64` (L125), and `apply_reorder_window` (L139); 34 → 28 missed branches; 80.46% → 83.91% branch coverage |
+| `tests/test_DtlsUdpBackend.cpp` | 3 new config-validation tests: `test_init_max_channels_exceeded` (L1110-1115), `test_init_ipv6_peer_rejected` (L1129-1134), `test_client_verify_peer_empty_hostname` (L656-662 SEC-001/REQ-6.4.6); 114 → 111 missed branches; 76.59% → 77.21% branch coverage |
+| `docs/COVERAGE_CEILINGS.md` | Summary table updated (ImpairmentConfigLoader ≥83%, DtlsUdpBackend ≥77%, TlsTcpBackend 174/78.00% confirmed). Per-file ImpairmentConfigLoader section updated from stale "ceiling 82.50% (132/160)" to "ceiling 83.91% (146/174)". Per-file DtlsUdpBackend section rewritten from stale "ceiling 81.76% (242/296)" to "ceiling 77.21% (376/487)"; prior e-i (loopback) claims retracted — WANT_READ/WANT_WRITE paths confirmed covered by existing DtlsMockOps tests; 111 missed branches fully accounted as NCA True paths (82) + structural/non-injectable ceilings (29) |
+
+#### Entry criteria verification
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations (CC ≤ 10 enforced) | PASS |
+| `make run_tests` all tests green | PASS |
+| `make check_traceability` RESULT: PASS | PASS |
+| `make coverage` DtlsUdpBackend.cpp ≥77%, ImpairmentConfigLoader.cpp ≥83% | PASS |
+| All new/modified `tests/` files carry `// Verifies: REQ-x.x` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+| Author self-reviewed against `docs/INSPECTION_CHECKLIST.md` | PASS |
+
+#### Defects found
+
+| ID | File : function | Description | Severity | Status | Disposition |
+|----|----------------|-------------|----------|--------|-------------|
+| (none) | | No defects found during review | — | — | — |
+
+#### Checklist reference
+
+All items in `docs/INSPECTION_CHECKLIST.md` verified. Key checks:
+- New ImpairmentConfigLoader tests 27–32: each test has ≥2 `assert()` calls; uses fixed test file path (`TEST_FILE`); no dynamic allocation on test path; `// Verifies: REQ-5.2.1` tags present. ✓
+- New DtlsUdpBackend tests use default `DtlsUdpBackend` ctor (tests 1-2) or `DtlsMockOps` (test 3); no real socket left open on error return paths. ✓
+- `test_client_verify_peer_empty_hostname`: the socket fd created by `create_and_bind_udp_socket` is released by `DtlsUdpBackend` destructor (backend goes out of scope at function end); no fd leak. ✓
+- DtlsUdpBackend e-i ceiling retraction: `test_mock_dtls_ssl_read_error` and `test_mock_dtls_ssl_write_fail` confirm the previously-claimed loopback-only WANT_READ/WANT_WRITE paths are covered by M5 injection; VVP-001 §4.3 e-i claims were stale documentation, not a current coverage gap. ✓
+- Remaining 29 non-NCA missed branches in DtlsUdpBackend: 6 are direct mbedTLS API calls (not in IMbedtlsOps), 4 are CRL-path (unreached configuration block), 8 are capacity-invariant unreachable, 5 are plaintext-mode-only paths, 6 are send_hello/serialize non-injectable paths — all §4.3 d-iii. ✓
+- `COVERAGE_CEILINGS.md` threshold updated: DtlsUdpBackend ≥77% (was stale ≥76%); ImpairmentConfigLoader ≥83% (was stale ≥80%). ✓
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-11. No defects found. All entry and exit criteria satisfied. `make lint`, `make run_tests`, `make check_traceability`, and `make coverage` all PASS. Class B compliance gaps for ImpairmentConfigLoader.cpp and DtlsUdpBackend.cpp fully resolved; no remaining e-i ceiling claims in any platform file. Inspection INSP-023 closed PASS.
