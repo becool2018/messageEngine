@@ -812,6 +812,335 @@ static bool test_two_source_slot_sharing()
     return true;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 17: validate_fragment rejects mismatched total_payload_length
+//   Covers: line 168 True branch in validate_fragment()
+//   A second fragment that declares a different total_payload_length than the
+//   first must be rejected (slot already stores the first fragment's length).
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3, REQ-3.3.3
+static bool test_validate_fragment_total_length_mismatch()
+{
+    // Verifies: REQ-3.2.3
+    ReassemblyBuffer buf;
+    buf.init();
+
+    static const uint8_t p[] = {0x11U, 0x22U};
+    static const uint64_t NOW = 1000000ULL;
+
+    // Fragment 0: declare total_payload_length = 200, fragment_count = 2
+    MessageEnvelope f0;
+    make_fragment(f0, 200ULL, 1U, 0U, 2U, 200U, p, 2U);
+    MessageEnvelope out;
+    envelope_init(out);
+    Result r0 = buf.ingest(f0, out, NOW);
+    assert(r0 == Result::ERR_AGAIN);  // Assert: slot opened, waiting for fragment 1
+
+    // Fragment 1: same message but different total_payload_length → must be rejected
+    MessageEnvelope f1;
+    make_fragment(f1, 200ULL, 1U, 1U, 2U, 100U /* mismatch */, p, 2U);
+    envelope_init(out);
+    Result r1 = buf.ingest(f1, out, NOW);
+    assert(r1 == Result::ERR_INVALID);  // Assert: mismatched total_payload_length rejected
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 18: validate_metadata rejects fragment_index >= fragment_count (outer True)
+//   Covers: line 313:9 True branch in validate_metadata()
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_validate_metadata_fragment_index_oor()
+{
+    // Verifies: REQ-3.2.3
+    ReassemblyBuffer buf;
+    buf.init();
+
+    // fragment_index (2) >= fragment_count (2) → validate_metadata must return ERR_INVALID
+    MessageEnvelope frag;
+    make_fragment(frag, 300ULL, 2U, 2U /* index */, 2U /* count */, 4U, nullptr, 0U);
+    MessageEnvelope out;
+    envelope_init(out);
+    Result r = buf.ingest(frag, out, 1000000ULL);
+    assert(r == Result::ERR_INVALID);  // Assert: index out of range rejected
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 19: validate_metadata fragment_count == 0 hits ternary True branch
+//   Covers: line 313:33 True branch (ternary evaluates fragment_count == 0U)
+//   With fragment_count=0 and fragment_index=0: ternary produces 1, 0 < 1 →
+//   outer condition False → validate_metadata returns OK.  The message then
+//   takes the single-fragment fast path in ingest().
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_validate_metadata_fragment_count_zero_ternary()
+{
+    // Verifies: REQ-3.2.3
+    ReassemblyBuffer buf;
+    buf.init();
+
+    static const uint8_t p[] = {0xAAU};
+    // fragment_count = 0 is treated as 1 (unfragmented) per the backward-compat comment
+    MessageEnvelope frag;
+    make_fragment(frag, 400ULL, 3U, 0U /* index */, 0U /* count = 0 */, 1U, p, 1U);
+    MessageEnvelope out;
+    envelope_init(out);
+    // validate_metadata: ternary True (count==0→1), outer False (0<1) → OK
+    // ingest fast path: fragment_count(0) <= 1 → copies directly, returns OK
+    Result r = buf.ingest(frag, out, 1000000ULL);
+    assert(r == Result::OK);  // Assert: count==0 treated as single-fragment
+    assert(out.payload[0] == 0xAAU);  // Assert: payload copied correctly
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 20: validate_metadata rejects fragment_count > FRAG_MAX_COUNT
+//   Covers: line 316 True branch in validate_metadata()
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3
+static bool test_validate_metadata_fragment_count_too_large()
+{
+    // Verifies: REQ-3.2.3
+    ReassemblyBuffer buf;
+    buf.init();
+
+    // fragment_count = FRAG_MAX_COUNT + 1 = 5 → must be rejected
+    static const uint8_t MAX_COUNT_PLUS_ONE = static_cast<uint8_t>(FRAG_MAX_COUNT + 1U);
+    MessageEnvelope frag;
+    make_fragment(frag, 500ULL, 4U, 0U, MAX_COUNT_PLUS_ONE, 4U, nullptr, 0U);
+    MessageEnvelope out;
+    envelope_init(out);
+    Result r = buf.ingest(frag, out, 1000000ULL);
+    assert(r == Result::ERR_INVALID);  // Assert: count > FRAG_MAX_COUNT rejected
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 21: record_fragment overrun guard (line 204 True) + ingest_multifrag
+//          rec_r != OK branch (line 424 True)
+//   Fragment 3 of a 4-fragment message carries payload_length = 1025 bytes.
+//   byte_offset = 3 × FRAG_MAX_PAYLOAD_BYTES = 3072.
+//   1025 > MSG_MAX_PAYLOAD_BYTES − 3072 (= 1024) → overrun → ERR_INVALID.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3, REQ-3.3.3
+static bool test_record_fragment_overrun()
+{
+    // Verifies: REQ-3.2.3
+    ReassemblyBuffer buf;
+    buf.init();
+
+    static const uint64_t NOW   = 1000000ULL;
+    static const NodeId   SRC   = 10U;
+    static const uint64_t MSG_ID = 600ULL;
+
+    // total_payload_length = MSG_MAX_PAYLOAD_BYTES so validate_metadata passes.
+    static const uint16_t TOTAL_LEN =
+        static_cast<uint16_t>(MSG_MAX_PAYLOAD_BYTES);
+
+    // Open the slot by sending the first 3 fragments (each 100 bytes).
+    static const uint8_t filler[100U] = {0x5AU};
+    for (uint8_t i = 0U; i < 3U; ++i) {
+        MessageEnvelope f;
+        make_fragment(f, MSG_ID, SRC, i, 4U, TOTAL_LEN, filler, 100U);
+        MessageEnvelope out;
+        envelope_init(out);
+        Result r = buf.ingest(f, out, NOW);
+        assert(r == Result::ERR_AGAIN);  // Assert: slot open, not yet complete
+    }
+
+    // Fragment 3: payload_length = 1025 > (4096 − 3072 = 1024) → overrun in record_fragment.
+    // This exercises line 204 True and triggers the rec_r != OK path at line 424.
+    static const uint8_t big[1025U] = {0xBBU};
+    MessageEnvelope f3;
+    make_fragment(f3, MSG_ID, SRC, 3U, 4U, TOTAL_LEN, big, 1025U);
+    MessageEnvelope out;
+    envelope_init(out);
+    Result r3 = buf.ingest(f3, out, NOW);
+    assert(r3 == Result::ERR_INVALID);  // Assert: overrun detected and slot freed
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 22: record_fragment received_bytes overflow guard (line 216 True)
+//   Fragment 0 carries 3000 bytes (received_bytes = 3000).
+//   Fragment 1 carries 2000 bytes: 2000 > MSG_MAX_PAYLOAD_BYTES − 3000 = 1096 → overflow.
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3, REQ-3.3.3
+static bool test_record_fragment_received_bytes_overflow()
+{
+    // Verifies: REQ-3.2.3
+    ReassemblyBuffer buf;
+    buf.init();
+
+    static const uint64_t NOW    = 1000000ULL;
+    static const NodeId   SRC    = 11U;
+    static const uint64_t MSG_ID = 700ULL;
+    // total_payload_length declared as MSG_MAX_PAYLOAD_BYTES (valid for validate_metadata).
+    static const uint16_t TOTAL_LEN = static_cast<uint16_t>(MSG_MAX_PAYLOAD_BYTES);
+
+    // Fragment 0: 3000 bytes — payload fits: 3000 ≤ 4096 − 0.
+    static const uint8_t big0[3000U] = {0xC0U};
+    MessageEnvelope f0;
+    make_fragment(f0, MSG_ID, SRC, 0U, 2U, TOTAL_LEN, big0, 3000U);
+    MessageEnvelope out;
+    envelope_init(out);
+    Result r0 = buf.ingest(f0, out, NOW);
+    assert(r0 == Result::ERR_AGAIN);  // Assert: slot open after first fragment
+
+    // Fragment 1: 2000 bytes at offset 1024.
+    // Overrun guard (line 204): 2000 > 4096 − 1024 = 3072? NO.
+    // Overflow guard (line 216): 2000 > 4096 − 3000 = 1096? YES → ERR_INVALID.
+    static const uint8_t big1[2000U] = {0xC1U};
+    MessageEnvelope f1;
+    make_fragment(f1, MSG_ID, SRC, 1U, 2U, TOTAL_LEN, big1, 2000U);
+    envelope_init(out);
+    Result r1 = buf.ingest(f1, out, NOW);
+    assert(r1 == Result::ERR_INVALID);  // Assert: received_bytes overflow detected
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 23: assemble_and_free received_bytes mismatch (line 259 True) and
+//          ingest_multifrag asm_r != OK branch (line 442 True)
+//   All 3 fragments arrive (is_complete = true), but the sum of their
+//   payload_lengths (250) differs from total_payload_length declared (300).
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3, REQ-3.3.3
+static bool test_assemble_received_bytes_mismatch()
+{
+    // Verifies: REQ-3.2.3
+    ReassemblyBuffer buf;
+    buf.init();
+
+    static const uint64_t NOW    = 1000000ULL;
+    static const NodeId   SRC    = 12U;
+    static const uint64_t MSG_ID = 800ULL;
+    // Declare total_payload_length = 300 but actual sum will be 250.
+    static const uint16_t TOTAL_LEN = 300U;
+
+    static const uint8_t p100[100U] = {0xD0U};
+    static const uint8_t p50[50U]   = {0xD1U};
+
+    // Fragments 0 and 1: 100 bytes each → received_bytes = 200.
+    MessageEnvelope out;
+    for (uint8_t i = 0U; i < 2U; ++i) {
+        MessageEnvelope f;
+        make_fragment(f, MSG_ID, SRC, i, 3U, TOTAL_LEN, p100, 100U);
+        envelope_init(out);
+        Result r = buf.ingest(f, out, NOW);
+        assert(r == Result::ERR_AGAIN);  // Assert: incomplete
+    }
+
+    // Fragment 2: 50 bytes → received_bytes = 250 ≠ total_length 300.
+    // is_complete() sees all 3 bits set and returns true; assemble_and_free
+    // then detects the mismatch and returns ERR_INVALID (line 259 True).
+    MessageEnvelope f2;
+    make_fragment(f2, MSG_ID, SRC, 2U, 3U, TOTAL_LEN, p50, 50U);
+    envelope_init(out);
+    Result r2 = buf.ingest(f2, out, NOW);
+    assert(r2 == Result::ERR_INVALID);  // Assert: mismatch detected, slot freed
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 24: Zero-payload two-fragment message assembles correctly
+//   Covers: line 202 False (payload_length == 0 → memcpy skipped in record_fragment)
+//           line 285 False (payload_length == 0 → memcpy skipped in assemble_and_free)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.3, REQ-3.3.3
+static bool test_zero_payload_two_frag_assembles()
+{
+    // Verifies: REQ-3.2.3
+    ReassemblyBuffer buf;
+    buf.init();
+
+    static const uint64_t NOW    = 1000000ULL;
+    static const NodeId   SRC    = 13U;
+    static const uint64_t MSG_ID = 900ULL;
+
+    // Both fragments carry zero payload; total_payload_length = 0.
+    MessageEnvelope f0;
+    make_fragment(f0, MSG_ID, SRC, 0U, 2U, 0U, nullptr, 0U);
+    MessageEnvelope out;
+    envelope_init(out);
+    Result r0 = buf.ingest(f0, out, NOW);
+    assert(r0 == Result::ERR_AGAIN);  // Assert: slot opened
+
+    MessageEnvelope f1;
+    make_fragment(f1, MSG_ID, SRC, 1U, 2U, 0U, nullptr, 0U);
+    envelope_init(out);
+    Result r1 = buf.ingest(f1, out, NOW);
+    // Both fragments received: received_bytes(0) == total_length(0) → assemble OK.
+    // assemble_and_free: payload_length == 0 → False branch at line 285.
+    assert(r1 == Result::OK);  // Assert: zero-payload assembly succeeds
+    assert(out.payload_length == 0U);  // Assert: no payload in assembled message
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 25: sweep_stale does not free a slot that has not yet aged past threshold
+//   Covers: line 474 False branch (age < stale_threshold_us)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.9
+static bool test_sweep_stale_not_old_enough()
+{
+    // Verifies: REQ-3.2.9
+    ReassemblyBuffer buf;
+    buf.init();
+
+    // Open a slot at now_us = 1000.
+    static const uint8_t p[] = {0x01U};
+    MessageEnvelope f0;
+    make_fragment(f0, 1000ULL, 5U, 0U, 2U, 2U, p, 1U);
+    MessageEnvelope out;
+    envelope_init(out);
+    Result r = buf.ingest(f0, out, 1000ULL);
+    assert(r == Result::ERR_AGAIN);  // Assert: slot is open
+
+    // Sweep with now_us = 1100, threshold = 5000: age = 100 < 5000 → slot kept.
+    // This exercises line 473 True (1100 >= 1000) and line 474 False (100 < 5000).
+    uint32_t freed = buf.sweep_stale(1100ULL, 5000ULL);
+    assert(freed == 0U);  // Assert: slot not freed (not yet stale)
+
+    return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 26: sweep_stale skips slot when now_us < open_time_us (clock-backward guard)
+//   Covers: line 473 False branch (now_us < open_time_us)
+// ─────────────────────────────────────────────────────────────────────────────
+// Verifies: REQ-3.2.9
+static bool test_sweep_stale_now_before_open_time()
+{
+    // Verifies: REQ-3.2.9
+    ReassemblyBuffer buf;
+    buf.init();
+
+    // Open a slot at now_us = 5000 (future timestamp).
+    static const uint8_t p[] = {0x02U};
+    MessageEnvelope f0;
+    make_fragment(f0, 2000ULL, 6U, 0U, 2U, 2U, p, 1U);
+    MessageEnvelope out;
+    envelope_init(out);
+    Result r = buf.ingest(f0, out, 5000ULL);
+    assert(r == Result::ERR_AGAIN);  // Assert: slot is open at time=5000
+
+    // Sweep with now_us = 1000 < open_time(5000) → condition 473 False (now < open).
+    uint32_t freed = buf.sweep_stale(1000ULL, 100ULL);
+    assert(freed == 0U);  // Assert: slot skipped (now before open time)
+
+    return true;
+}
+
 int main()
 {
     int failed = 0;
@@ -879,6 +1208,46 @@ int main()
     if (!test_two_source_slot_sharing()) {
         printf("FAIL: test_two_source_slot_sharing\n"); ++failed;
     } else { printf("PASS: test_two_source_slot_sharing\n"); }
+
+    if (!test_validate_fragment_total_length_mismatch()) {
+        printf("FAIL: test_validate_fragment_total_length_mismatch\n"); ++failed;
+    } else { printf("PASS: test_validate_fragment_total_length_mismatch\n"); }
+
+    if (!test_validate_metadata_fragment_index_oor()) {
+        printf("FAIL: test_validate_metadata_fragment_index_oor\n"); ++failed;
+    } else { printf("PASS: test_validate_metadata_fragment_index_oor\n"); }
+
+    if (!test_validate_metadata_fragment_count_zero_ternary()) {
+        printf("FAIL: test_validate_metadata_fragment_count_zero_ternary\n"); ++failed;
+    } else { printf("PASS: test_validate_metadata_fragment_count_zero_ternary\n"); }
+
+    if (!test_validate_metadata_fragment_count_too_large()) {
+        printf("FAIL: test_validate_metadata_fragment_count_too_large\n"); ++failed;
+    } else { printf("PASS: test_validate_metadata_fragment_count_too_large\n"); }
+
+    if (!test_record_fragment_overrun()) {
+        printf("FAIL: test_record_fragment_overrun\n"); ++failed;
+    } else { printf("PASS: test_record_fragment_overrun\n"); }
+
+    if (!test_record_fragment_received_bytes_overflow()) {
+        printf("FAIL: test_record_fragment_received_bytes_overflow\n"); ++failed;
+    } else { printf("PASS: test_record_fragment_received_bytes_overflow\n"); }
+
+    if (!test_assemble_received_bytes_mismatch()) {
+        printf("FAIL: test_assemble_received_bytes_mismatch\n"); ++failed;
+    } else { printf("PASS: test_assemble_received_bytes_mismatch\n"); }
+
+    if (!test_zero_payload_two_frag_assembles()) {
+        printf("FAIL: test_zero_payload_two_frag_assembles\n"); ++failed;
+    } else { printf("PASS: test_zero_payload_two_frag_assembles\n"); }
+
+    if (!test_sweep_stale_not_old_enough()) {
+        printf("FAIL: test_sweep_stale_not_old_enough\n"); ++failed;
+    } else { printf("PASS: test_sweep_stale_not_old_enough\n"); }
+
+    if (!test_sweep_stale_now_before_open_time()) {
+        printf("FAIL: test_sweep_stale_now_before_open_time\n"); ++failed;
+    } else { printf("PASS: test_sweep_stale_now_before_open_time\n"); }
 
     return (failed > 0) ? 1 : 0;
 }
