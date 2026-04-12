@@ -73,12 +73,16 @@ jobs:
         run: make RELEASE=1 package
 
       # ── Rename for matrix disambiguation ──────────────────────────────────
+      # The Makefile produces: build/messageengine-vVER-OS-ARCH.tar.gz
+      # (with a 'v' prefix and the OS/arch already embedded).
+      # We glob for the actual file, then rename to the canonical convention:
+      #   messageengine-VER-OS_TAG.tar.gz  (no 'v'; standardised OS tag).
       - name: Rename tarball
         id: tarball
         run: |
           VER="${{ steps.ver.outputs.version }}"
           OS_TAG="${{ runner.os == 'Linux' && 'linux-x86_64' || 'macos-arm64' }}"
-          SRC="build/messageengine-${VER}.tar.gz"
+          SRC=$(ls build/messageengine-v${VER}-*.tar.gz | head -1)
           DST="build/messageengine-${VER}-${OS_TAG}.tar.gz"
           mv "$SRC" "$DST"
           echo "path=$DST" >> "$GITHUB_OUTPUT"
