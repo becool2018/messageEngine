@@ -315,8 +315,8 @@ help:
 	@echo "Test:"
 	@echo "  tests               Build all 23 unit test binaries"
 	@echo "  run_tests           Build and run the full unit test suite"
-	@echo "  stress_tests        Build capacity/slot-recycling stress test"
-	@echo "  run_stress_tests    Build and run stress tests"
+	@echo "  stress_tests        Build all stress tests (capacity, e2e, ordering)"
+	@echo "  run_stress_tests    Build and run all stress tests"
 	@echo "  sanitize_tests      Build test suite with ASan + UBSan"
 	@echo "  run_sanitize        Build and run ASan + UBSan test suite"
 	@echo ""
@@ -401,12 +401,19 @@ build/test_%: $(ALL_LIB_OBJS) build/objs/tests/test_%.o
 #   make stress_tests        — build only
 #   make run_stress_tests    — build and run
 # ─────────────────────────────────────────────────────────────────────────────
-stress_tests: build/test_stress_capacity
+stress_tests: \
+    build/test_stress_capacity \
+    build/test_stress_e2e \
+    build/test_stress_ordering
 
 run_stress_tests: stress_tests
 	@echo "=== Stress tests: capacity exhaustion and slot recycling ==="
 	@echo "    (may take several seconds on slow hardware)"
 	@build/test_stress_capacity
+	@echo "=== Stress tests: E2E pipeline, fragmentation/reassembly, impairment ==="
+	@build/test_stress_e2e
+	@echo "=== Stress tests: OrderingBuffer gap-inject soak ==="
+	@build/test_stress_ordering
 	@echo "=== STRESS TESTS PASSED ==="
 
 # ─────────────────────────────────────────────────────────────────────────────
