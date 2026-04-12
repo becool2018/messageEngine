@@ -1,6 +1,6 @@
 # Use Case Frequency Classification
 
-This document classifies all 58 use cases by how often they execute during
+This document classifies all 76 use cases by how often they execute during
 normal application operation. Use this as a guide for performance analysis,
 code review prioritisation, and deciding where to focus profiling effort.
 
@@ -19,6 +19,9 @@ directly impact all traffic.
 | **UC_25** | Serializer::serialize() — encode envelope to wire bytes | Invoked on every outbound message before transmission |
 | **UC_26** | Serializer::deserialize() — decode wire bytes to envelope | Invoked on every inbound message after reception |
 | **UC_52** | RingBuffer push/pop — SPSC lock-free inbound staging queue | Every send and receive passes through the ring buffer |
+| **UC_70** | ReassemblyBuffer::ingest() — reassembly gate on every wire frame | Called on every received frame; single-fragment fast path is O(1) |
+| **UC_71** | OrderingBuffer::ingest() / try_release_next() — ordering gate | Called on every DATA receive via handle_ordering_gate() |
+| **UC_74** | OrderingBuffer::sweep_expired_holds() — proactive expiry sweep | Called inside handle_ordering_gate() on every DATA receive |
 | **UC_10** | RetryManager fires a scheduled retry (backoff interval elapsed) | Executed inside every `DeliveryEngine::pump_retries()` tick |
 | **UC_11** | AckTracker sweep: PENDING entries past deadline collected | Executed inside every `DeliveryEngine::sweep_ack_timeouts()` tick |
 
@@ -38,6 +41,7 @@ modes, impairments, or error conditions are active.
 | **UC_07** | Duplicate detected and dropped by DuplicateFilter | Frequent under retry or network-partition conditions |
 | **UC_53** | ImpairmentEngine process_outbound / collect_deliverable / process_inbound | Every send and receive when any impairment is configured |
 | **UC_54** | PrngEngine next() / next_double() / next_range() | Every loss, jitter, or duplication decision in ImpairmentEngine |
+| **UC_69** | Large message fragmentation — send_fragments() + fragment_message() | Every send whose payload exceeds FRAG_MAX_PAYLOAD_BYTES |
 
 ---
 
@@ -90,6 +94,8 @@ testing and configuration. Correctness matters; performance is not the concern.
 | UC_32 | 100% loss configuration: every outbound message dropped | Per test scenario validating total loss |
 | UC_33 | Sliding-window eviction: oldest entry evicted when DEDUP_WINDOW_SIZE full | When dedup window reaches capacity |
 | UC_40 | MTU enforcement: oversized DTLS message rejected before encryption | Per oversized message attempt |
+| UC_72 | Peer reconnect ordering reset — drain_hello_reconnects() / reset_peer() | Once per peer reconnect event; drain_hello_reconnects() itself is called on every receive() but is a no-op when the queue is empty |
+| UC_73 | Stale reassembly slot reclamation — sweep_stale() | Periodically from sweep_ack_timeouts(); fires only when stale slots exist |
 | UC_43 | envelope_init(): zero-initialise a MessageEnvelope | Once per envelope before field assignment |
 | UC_44 | envelope_is_data() / envelope_is_control() / envelope_valid() | Per envelope classification call |
 | UC_45 | Receive happy path (also in hottest path — listed here for completeness) | — |
@@ -112,6 +118,8 @@ frequency is determined entirely by whichever higher-level UC invokes them.
 | UC_56 | AssertState / IResetHandler / AbortResetHandler | Triggered only on assertion failure — rare |
 | UC_57 | ISocketOps / SocketOpsImpl — injectable POSIX socket adapter | Inherits from all TCP/UDP send/receive UCs |
 | UC_58 | IMbedtlsOps / MbedtlsOpsImpl — injectable mbedTLS adapter | Inherits from UC_38 / UC_39 (DTLS) |
+| UC_75 | TlsSessionStore save/load — try_save/try_load_client_session() | Once per TLS connection init (load) and once after each handshake (save) |
+| UC_76 | IPosixSyscalls / PosixSyscallsImpl — injectable POSIX syscall adapter | Inherits from all SocketUtils-based TCP/UDP send/receive UCs |
 
 ---
 
@@ -120,13 +128,14 @@ frequency is determined entirely by whichever higher-level UC invokes them.
 The tightest inner loop for an application under message load is:
 
 ```
-Send:    UC_01/02/03 → UC_55 → UC_25 → UC_53 → UC_52 → UC_20/22
-Receive: UC_45       → UC_52 → UC_26 → UC_07  → UC_09
+Send:    UC_01/02/03 → UC_55 → UC_25 → UC_69(large) → UC_53 → UC_52 → UC_20/22
+Receive: UC_45 → UC_52 → UC_26 → UC_70(frag) → UC_07 → UC_09 → UC_74(ord-sweep)
+                                                                → UC_71(ord-gate)
 Tick:    UC_10  (pump_retries)
-         UC_11  (sweep_ack_timeouts)
+         UC_11  (sweep_ack_timeouts → UC_73 stale-reasm)
 ```
 
-These seven user-facing use cases (UC_01, UC_45, UC_25, UC_26, UC_52, UC_10,
-UC_11) plus their three System Internal helpers (UC_50, UC_55, UC_53) form the
-performance-critical core. All other use cases are lifecycle, configuration,
-simulation, or error-path operations.
+The nine user-facing use cases (UC_01, UC_45, UC_25, UC_26, UC_52, UC_10,
+UC_11, UC_70, UC_71) plus their System Internal helpers (UC_50, UC_55, UC_53,
+UC_69, UC_74) form the performance-critical core. All other use cases are
+lifecycle, configuration, simulation, or error-path operations.
