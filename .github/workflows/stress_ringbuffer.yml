@@ -1,0 +1,61 @@
+name: Stress Tests — RingBuffer Concurrent
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Manual-only workflow for the RingBuffer concurrent producer/consumer stress
+# test (Session 3).
+#
+# This workflow is intentionally NOT triggered by push or pull_request.
+# Run it manually from the GitHub Actions tab before any merge that touches:
+#   • RingBuffer push() / pop() implementation  (src/core/RingBuffer.hpp)
+#   • MSG_RING_CAPACITY                         (src/core/Types.hpp)
+#   • std::atomic ordering in the ring path
+#
+# Two concurrent tests per run:
+#   Test 1 — symmetric producer/consumer: both threads run at full speed;
+#             ring cycles between full and empty ~156× per round.
+#   Test 2 — backpressure storm: consumer is artificially delayed so the
+#             producer repeatedly hits ERR_FULL and must spin.
+#
+# Multiple instances of the binary can run simultaneously on the same runner
+# without interference — each process has its own address space (no shared
+# memory, sockets, or files between instances).
+#
+# Usage:
+#   GitHub Actions tab → "Stress Tests — RingBuffer Concurrent" → Run workflow
+#   Local:  make run_stress_ringbuffer
+#           make run_stress_ringbuffer STRESS_DURATION=300   # 5-minute soak
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:   # manual trigger only — no push or pull_request triggers
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  stress_ringbuffer:
+    name: Stress Tests — RingBuffer concurrent
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libmbedtls-dev
+
+      - name: Build RingBuffer stress test
+        run: make build/test_stress_ringbuffer
+
+      - name: Run RingBuffer stress test — concurrent producer/consumer + backpressure storm
+        # Suppress INFO-level logger output so only PASS/FAIL lines are visible.
+        # Failures abort via non-zero exit from assert().
+        run: build/test_stress_ringbuffer 2>/dev/null
