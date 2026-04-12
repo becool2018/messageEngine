@@ -13,9 +13,32 @@ SRC_DIR="$REPO_ROOT/src"
 TESTS_DIR="$REPO_ROOT/tests"
 
 # ── Known unimplemented requirements ─────────────────────────────────────────
-# Currently no known unimplemented requirements. Add REQ IDs here only for
-# requirements that are intentionally not yet implemented (document why).
-KNOWN_GAPS=""
+# Add REQ IDs here only for requirements that are intentionally not yet
+# implemented (document why and which PR will implement them).
+#
+# Security fix PRs 1-5 (branch fix/security-step0-2026-04 forward):
+#   REQ-3.2.10 — C-3/C-4: frame_len / total_payload_length overflow guard
+#                Implemented in: PR 1 (SocketUtils.cpp, ReassemblyBuffer.cpp)
+#   REQ-3.2.11 — C-1/C-2: constant-time equality comparator
+#                Implemented in: PR 2 (AckTracker, DuplicateFilter, OrderingBuffer,
+#                                      DtlsUdpBackend)
+#   REQ-5.2.6  — H-6: entropy source failure → FATAL in production
+#                Implemented in: PR 5 (DeliveryEngine.cpp)
+#   REQ-6.1.12 — H-5: HELLO timeout slot eviction
+#                Implemented in: PR 5 (TcpBackend.cpp, TlsTcpBackend.cpp)
+#   REQ-6.2.5  — H-7: UdpBackend wildcard peer_ip rejection
+#                Implemented in: PR 5 (UdpBackend.cpp)
+#   REQ-6.3.6  — H-1: empty CA fatal when verify_peer=true
+#                Implemented in: PR 3 (TlsTcpBackend.cpp, DtlsUdpBackend.cpp)
+#   REQ-6.3.7  — H-2: require_crl enforcement (new TlsConfig field)
+#                Implemented in: PR 3 (TlsTcpBackend.cpp, DtlsUdpBackend.cpp)
+#   REQ-6.3.8  — H-4: forward secrecy TLS 1.2 resumption rejection
+#                Implemented in: PR 3 (TlsTcpBackend.cpp)
+#   REQ-6.3.9  — H-8: verify_peer=false + non-empty hostname rejection
+#                Implemented in: PR 3 (TlsTcpBackend.cpp, DtlsUdpBackend.cpp)
+#   REQ-6.3.10 — H-3: TlsSessionStore POSIX mutex for concurrent access
+#                Implemented in: PR 4 (TlsSessionStore.cpp)
+KNOWN_GAPS="REQ-3.2.10 REQ-3.2.11 REQ-5.2.6 REQ-6.1.12 REQ-6.2.5 REQ-6.3.6 REQ-6.3.7 REQ-6.3.8 REQ-6.3.9 REQ-6.3.10"
 
 PASS=0
 FAIL=0
