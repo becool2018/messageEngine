@@ -32,9 +32,9 @@
  *   COLLECTING → COMPLETE (all fragments received)
  *   COLLECTING → INACTIVE (sweep_expired when slot.expiry_us < now_us)
  *
- * Implements: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9
+ * Implements: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9, REQ-3.2.10
  */
-// Implements: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9
+// Implements: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9, REQ-3.2.10
 
 #ifndef CORE_REASSEMBLY_BUFFER_HPP
 #define CORE_REASSEMBLY_BUFFER_HPP
@@ -52,8 +52,9 @@ public:
     /// Must be called once during system initialization before any other method.
     void init();
 
-    // Safety-critical (SC): HAZ-003 — reassembly is on the receive path; a
-    // corrupt fragment could allow duplicate delivery or slot exhaustion.
+    // Safety-critical (SC): HAZ-003, HAZ-019 — reassembly is on the receive path;
+    // a corrupt fragment could allow duplicate delivery, slot exhaustion, or integer
+    // overflow via wire-supplied total_payload_length (REQ-3.2.10).
     /// Ingest one wire fragment.
     ///
     /// @param frag      [in]  Wire fragment envelope (fragment_count > 1 expected,

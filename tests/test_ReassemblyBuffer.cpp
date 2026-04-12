@@ -322,8 +322,11 @@ static bool test_reassembly_slot_exhaustion()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 7: total_payload_length > MSG_MAX_PAYLOAD_BYTES → ERR_INVALID
+// Exercises the REQ-3.2.10 ceiling guard in validate_metadata(): a wire-supplied
+// total_payload_length exceeding MSG_MAX_PAYLOAD_BYTES must return ERR_INVALID
+// before any slot is opened (HAZ-019, CERT INT30-C).
 // ─────────────────────────────────────────────────────────────────────────────
-// Verifies: REQ-3.2.3
+// Verifies: REQ-3.2.3, REQ-3.2.10
 static bool test_reassembly_payload_too_large_rejected()
 {
     ReassemblyBuffer buf;
