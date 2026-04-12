@@ -24,7 +24,7 @@
  *   - MISRA C++: no exceptions, all return values checked.
  *   - F-Prime style: event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.5, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.1.12, REQ-6.3.5, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
  */
 
 #include "platform/TcpBackend.hpp"
@@ -54,7 +54,8 @@ TcpBackend::TcpBackend()
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         m_client_fds[i]            = -1;
         m_client_node_ids[i]       = NODE_ID_INVALID;
-        m_client_hello_received[i] = false;  // REQ-6.1.8: no HELLO received yet
+        m_client_hello_received[i] = false;   // REQ-6.1.8: no HELLO received yet
+        m_client_accept_ts[i]      = 0ULL;    // REQ-6.1.12: no accept timestamp yet
         m_hello_queue[i]           = NODE_ID_INVALID;  // REQ-3.3.6
     }
     m_hello_queue_read  = 0U;  // REQ-3.3.6
@@ -73,7 +74,8 @@ TcpBackend::TcpBackend(ISocketOps& ops)
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         m_client_fds[i]            = -1;
         m_client_node_ids[i]       = NODE_ID_INVALID;
-        m_client_hello_received[i] = false;  // REQ-6.1.8: no HELLO received yet
+        m_client_hello_received[i] = false;   // REQ-6.1.8: no HELLO received yet
+        m_client_accept_ts[i]      = 0ULL;    // REQ-6.1.12: no accept timestamp yet
         m_hello_queue[i]           = NODE_ID_INVALID;  // REQ-3.3.6
     }
     m_hello_queue_read  = 0U;  // REQ-3.3.6
@@ -165,12 +167,13 @@ Result TcpBackend::init(const TransportConfig& config)
     }
     m_impairment.init(imp_cfg);
 
-    // REQ-6.1.8, REQ-6.1.9: zero node-identity routing table during init phase
+    // REQ-6.1.8, REQ-6.1.9, REQ-6.1.12: zero node-identity routing table during init phase
     // Power of 10 rule 2: fixed loop bound (MAX_TCP_CONNECTIONS)
     m_local_node_id = NODE_ID_INVALID;
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         m_client_node_ids[i]       = NODE_ID_INVALID;
         m_client_hello_received[i] = false;  // REQ-6.1.8: no HELLO received yet
+        m_client_accept_ts[i]      = 0ULL;   // REQ-6.1.12: no accept timestamp yet
     }
 
     Result res;
@@ -254,7 +257,8 @@ Result TcpBackend::accept_clients()
     // Add new client to array
     NEVER_COMPILED_OUT_ASSERT(m_client_count < MAX_TCP_CONNECTIONS);
     m_client_fds[m_client_count]            = client_fd;
-    m_client_hello_received[m_client_count] = false;  // REQ-6.1.8: must receive HELLO before data
+    m_client_hello_received[m_client_count] = false;             // REQ-6.1.8: must receive HELLO before data
+    m_client_accept_ts[m_client_count]      = timestamp_now_us(); // REQ-6.1.12: record accept time for HELLO timeout
     ++m_client_count;
     ++m_connections_opened;  // REQ-7.2.4: successful server accept
 
@@ -278,16 +282,18 @@ void TcpBackend::remove_client_fd(int client_fd)
         if (m_client_fds[i] == client_fd) {
             m_sock_ops->do_close(m_client_fds[i]);
             m_client_fds[i] = -1;
-            // Compact the fd, node-id, and hello-flag arrays by shifting left.
+            // Compact the fd, node-id, hello-flag, and accept-timestamp arrays by shifting left.
             // Power of 10 rule 2: bound is m_client_count - 1 (< MAX_TCP_CONNECTIONS)
             for (uint32_t j = i; j < m_client_count - 1U; ++j) {
                 m_client_fds[j]            = m_client_fds[j + 1U];
                 m_client_node_ids[j]       = m_client_node_ids[j + 1U];
                 m_client_hello_received[j] = m_client_hello_received[j + 1U];  // REQ-6.1.8
+                m_client_accept_ts[j]      = m_client_accept_ts[j + 1U];       // REQ-6.1.12
             }
             m_client_fds[m_client_count - 1U]            = -1;
             m_client_node_ids[m_client_count - 1U]       = NODE_ID_INVALID;
-            m_client_hello_received[m_client_count - 1U] = false;  // REQ-6.1.8
+            m_client_hello_received[m_client_count - 1U] = false;   // REQ-6.1.8
+            m_client_accept_ts[m_client_count - 1U]      = 0ULL;    // REQ-6.1.12
             --m_client_count;
             ++m_connections_closed;  // REQ-7.2.4: connection removed
             NEVER_COMPILED_OUT_ASSERT(m_client_count < MAX_TCP_CONNECTIONS);  // Power of 10: post-condition
@@ -630,6 +636,12 @@ void TcpBackend::poll_clients_once(uint32_t timeout_ms)
     NEVER_COMPILED_OUT_ASSERT(m_open);                  // Power of 10: transport must be open
     NEVER_COMPILED_OUT_ASSERT(timeout_ms <= 60000U);    // Power of 10: reasonable per-poll timeout
 
+    // REQ-6.1.12: evict server slots that timed out waiting for HELLO before polling.
+    // Sweep first so that stale fds are removed from m_client_fds before build_poll_fds.
+    if (m_is_server) {
+        sweep_hello_timeouts();
+    }
+
     // Build a pollfd set: listen fd (server, not at capacity) + all client fds.
     // Power of 10: fixed-size stack array; bounded build loop.
     static const uint32_t MAX_POLL_FDS = MAX_TCP_CONNECTIONS + 1U;
@@ -896,6 +908,49 @@ void TcpBackend::close_and_evict_slot(int client_fd)
 
     // Post-condition: count is still in range after compaction.
     NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// sweep_hello_timeouts()
+// REQ-6.1.12 (H-5 / HAZ-023 / CWE-400): evict server slots that have not sent
+// a HELLO within hello_timeout_ms (= channels[0].recv_timeout_ms) of acceptance.
+// Called at the start of poll_clients_once() (server mode only) before building
+// the pollfd set, so timed-out fds are removed before any poll() call.
+// Safety-critical (SC): HAZ-023
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void TcpBackend::sweep_hello_timeouts()
+{
+    // Power of 10 Rule 5 — Assert 1: must be server mode (client has no slots to sweep).
+    NEVER_COMPILED_OUT_ASSERT(m_is_server);
+    // Assert 2: client count in range.
+    NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);
+
+    const uint64_t now_us      = timestamp_now_us();
+    // hello_timeout_ms defaults to channels[0].recv_timeout_ms per REQ-6.1.12.
+    // CERT INT30-C: recv_timeout_ms <= UINT32_MAX; cast to uint64 before × 1000 is safe.
+    const uint64_t timeout_us  =
+        static_cast<uint64_t>(m_cfg.channels[0U].recv_timeout_ms) * 1000ULL;
+
+    // Power of 10 Rule 2: bounded by m_client_count ≤ MAX_TCP_CONNECTIONS.
+    // Conditional increment: after close_and_evict_slot() the arrays are compacted
+    // (element i becomes the former i+1), so we must NOT advance i after eviction.
+    for (uint32_t i = 0U; i < m_client_count; ) {
+        if (!m_client_hello_received[i] &&
+            (m_client_accept_ts[i] != 0ULL) &&
+            ((now_us - m_client_accept_ts[i]) > timeout_us)) {
+            Logger::log(Severity::WARNING_HI, "TcpBackend",
+                        "HELLO timeout: evicting fd=%d (slot %u); "
+                        "no HELLO within %u ms (REQ-6.1.12 / HAZ-023)",
+                        m_client_fds[i], i,
+                        m_cfg.channels[0U].recv_timeout_ms);
+            close_and_evict_slot(m_client_fds[i]);
+            // close_and_evict_slot compacts arrays — do not increment i.
+        } else {
+            ++i;
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

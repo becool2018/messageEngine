@@ -1173,21 +1173,31 @@ permanently missed).
 `peer_ip[0] != '\0' AND peer_port == 0`). New LLVM result: 144/194 (74.23%), up
 from 136/194 (70.10%).
 
+**Updated 2026-04-12 (PR 5 — REQ-6.2.5):** `init()` now rejects wildcard `peer_ip`
+before any socket operation.  The `peer_ip[0] == '\0'` True branch of `||` at L167
+inside `send_hello_datagram()` is now permanently dead code — `init()` guarantees
+non-empty, non-wildcard `peer_ip` before `send_hello_datagram` can be reached.
+This adds one new permanently-missed branch to group (b) below.  Branch count
+increases from ~194 to ~196; ceiling recalculated: 144/196 ≈ 73.5% — threshold
+is adjusted to **≥73%**.
+
 Two independent sources:
 
 **(a)** 19 permanently-missed `NEVER_COMPILED_OUT_ASSERT` branches across all 10
-functions.
+functions (unchanged).
 
-**(b)** ~5 additional architecturally-unreachable branches: `recv_one_datagram`
+**(b)** ~7 additional architecturally-unreachable branches: `recv_one_datagram`
 inner poll True branch for a second datagram (single-datagram-per-call design);
 `Serializer::serialize` failure (wire buffer always large enough); `recv_queue`
 full in `recv_one_datagram` (max injectable depth via `IMPAIR_DELAY_BUF_SIZE - 1
 = 31` is below `MSG_RING_CAPACITY = 64`, making overflow unreachable through the
-public API).
+public API); `send_hello_datagram` `peer_ip[0]=='\0'` True branch (dead — `init()`
+rejects empty/wildcard peer_ip; REQ-6.2.5 architectural ceiling, PR 5).
 
 All 74 reachable decision-level branches are 100% covered.
 
-Threshold: **75%** (maximum achievable).
+Threshold: **≥73%** (maximum achievable; adjusted from ≥74% after REQ-6.2.5 adds
+one dead branch in send_hello_datagram).
 
 ---
 

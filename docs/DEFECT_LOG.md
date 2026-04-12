@@ -1563,3 +1563,75 @@ tests still pass unchanged — TlsMockOps injection still works because `try_sav
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-04-12. No defects found during inspection. All entry and exit criteria satisfied. `make lint`, `make run_tests`, and `make check_traceability` all PASS. REQ-6.3.10 (HAZ-021, H-3) fully implemented with M1+M2+M4 verification. try_load() False branch (TOCTOU path) covered by K-1. Inspection INSP-027 closed PASS.
+
+---
+
+### INSP-028 — PR 5: H-5/H-6/H-7 — HELLO timeout, entropy fail-fast, UDP wildcard (REQ-6.1.12, REQ-5.2.6, REQ-6.2.5)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-12 |
+| Author      | Claude Sonnet 4.6 (AI-assisted) |
+| Moderator   | Don Jessup |
+| Reviewer    | Don Jessup |
+| Branch      | fix/security-pr5-hello-timeout-entropy-udp-2026-04 |
+| Scope       | src/platform/TcpBackend.hpp/.cpp, TlsTcpBackend.hpp/.cpp, UdpBackend.cpp; src/core/DeliveryEngine.cpp; tests/test_TcpBackend.cpp, test_TlsTcpBackend.cpp, test_UdpBackend.cpp; docs/check_traceability.sh |
+
+#### Summary of change
+
+Implements the three remaining SEC_REPORT.txt security items:
+
+**REQ-6.1.12 (H-5, HAZ-023, CWE-400) — HELLO timeout slot eviction:**
+- `TcpBackend`: `uint64_t m_client_accept_ts[MAX_TCP_CONNECTIONS]` added; `accept_clients()` records
+  `timestamp_now_us()` per accepted slot; `remove_client_fd()` compacts `m_client_accept_ts`;
+  `sweep_hello_timeouts()` private helper sweeps and evicts unregistered slots past `recv_timeout_ms`.
+  Called at the start of `poll_clients_once()` (server mode only).
+- `TlsTcpBackend`: same pattern — `m_client_accept_ts[]` added; `accept_and_handshake()` records
+  timestamp; `remove_client()` resets slot's timestamp; `sweep_hello_timeouts()` iterates all
+  `MAX_TCP_CONNECTIONS` slots (no compaction per Fix-5).
+- Tests: `test_tcp_hello_timeout_evicts_slot` (TcpBackend) and
+  `test_l1_hello_timeout_evicts_slot_plaintext` (TlsTcpBackend) — raw TCP client connects,
+  does not send HELLO, verifies server closes the connection after `recv_timeout_ms=10ms`.
+
+**REQ-5.2.6 (H-6, HAZ-022, CWE-338) — DeliveryEngine entropy fail-fast:**
+- `get_seed_entropy()` return value now captured in `init()` (was previously discarded with `(void)`).
+- `#if !defined(ALLOW_WEAK_PRNG_SEED)` guard: if `strong_entropy=false`, log FATAL +
+  `NEVER_COMPILED_OUT_ASSERT(false)` + return to prevent production use of weak seed.
+- `#if defined(ALLOW_WEAK_PRNG_SEED) && defined(NDEBUG)` compile-time error added (mirrors
+  ImpairmentEngine pattern) to prevent ALLOW_WEAK_PRNG_SEED from entering release builds.
+
+**REQ-6.2.5 (H-7, HAZ-024, CWE-290) — UdpBackend wildcard peer_ip rejection:**
+- `UdpBackend::init()`: rejects `peer_ip[0]=='\0'`, `"0.0.0.0"`, or `"::"` with `ERR_INVALID`
+  + FATAL log before any socket operations.
+- `test_mock_udp_send_hello_no_peer` updated to verify the new `init()`-level rejection for all
+  three wildcard forms. The old `send_hello_datagram()` `peer_ip` guard is now an architectural
+  ceiling (init() prevents empty peer_ip from reaching it).
+- `docs/check_traceability.sh`: KNOWN_GAPS cleared (all three remaining requirements implemented).
+
+**Architectural ceiling (new):**
+- `UdpBackend::send_hello_datagram()` `peer_ip[0]=='\0'` branch is now dead code — `init()`
+  rejects empty `peer_ip` before `send_hello_datagram` can be reached. Documented in
+  COVERAGE_CEILINGS.md.
+
+#### Entry criteria
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations | PASS |
+| `make run_tests` all tests green | PASS |
+| `make check_traceability` RESULT: PASS | PASS |
+| All new/modified `src/` files carry `// Implements:` tags | PASS |
+| All new/modified `tests/` files carry `// Verifies:` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+
+#### Defects found
+
+| ID | File : function | Description | Severity | Status | Disposition |
+|----|----------------|-------------|----------|--------|-------------|
+| (none) | — | No defects found during inspection. | — | — | — |
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-12. No defects found during inspection. All entry and exit criteria satisfied. `make lint`, `make run_tests`, and `make check_traceability` all PASS. REQ-6.1.12 / REQ-5.2.6 / REQ-6.2.5 (H-5/H-6/H-7) fully implemented with M1+M2+M4+M5 verification. HELLO timeout verified by real-socket tests in both TcpBackend and TlsTcpBackend. All SEC_REPORT.txt security items now resolved. Inspection INSP-028 closed PASS.

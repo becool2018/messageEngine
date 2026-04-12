@@ -62,13 +62,13 @@
  *   - MISRA C++:2023: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: Result return codes; Logger::log() for events.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4,
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.12,
  *             REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6,
  *             REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11,
  *             REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9,
  *             REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-6.3.10, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.1.12, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-6.3.10, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #ifndef PLATFORM_TLS_TCP_BACKEND_HPP
 #define PLATFORM_TLS_TCP_BACKEND_HPP
@@ -213,6 +213,7 @@ private:
     NodeId            m_client_node_ids[MAX_TCP_CONNECTIONS];  ///< NodeId per client slot (NODE_ID_INVALID = unknown) — REQ-6.1.9
     NodeId            m_local_node_id;            ///< Our own node identity (set by register_local_id) — REQ-6.1.10
     bool              m_client_hello_received[MAX_TCP_CONNECTIONS]; ///< True once HELLO received for this slot — REQ-6.1.8
+    uint64_t          m_client_accept_ts[MAX_TCP_CONNECTIONS];      ///< Accept timestamp (µs) for each slot — REQ-6.1.12
 
     // REQ-3.3.6: circular FIFO of NodeIds from recently-registered HELLO frames.
     // Populated by handle_hello_frame(); drained by pop_hello_peer().
@@ -432,6 +433,12 @@ private:
 
     /// Accept new clients (server) and drain one frame per active client.
     void poll_clients_once(uint32_t timeout_ms);
+
+    /// REQ-6.1.12 (H-5 / HAZ-023 / CWE-400): sweep all server slots that have
+    /// not sent a HELLO within hello_timeout_ms (= channels[0].recv_timeout_ms)
+    /// of acceptance and evict them.  Prevents slot-exhaustion DoS via slow-connect.
+    /// Safety-critical (SC): HAZ-023
+    void sweep_hello_timeouts();
 
     // ── TLS-aware framing helpers ─────────────────────────────────────────────
 

@@ -39,7 +39,7 @@
  *   - STL exempted in tests/ for test fixture setup only.
  *
  * Verifies: REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10,
- *           REQ-6.1.11, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9,
+ *           REQ-6.1.11, REQ-6.1.12, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9,
  *           REQ-6.3.10, REQ-5.1.6
  *           (also covers: HAZ-017 try_load_client_session True branch via
  *            test_tls_session_resumption_load_path)
@@ -6512,6 +6512,103 @@ static void test_k1_try_load_no_session_returns_false()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// L-1: HELLO timeout slot eviction — TlsTcpBackend plaintext server (REQ-6.1.12)
+//
+// A raw TCP client connects to a TlsTcpBackend server (tls_enabled=false) but
+// never sends a HELLO.  channels[0].recv_timeout_ms is set to 10 ms so the
+// sweep fires quickly.  After receive_message() runs, the slot is evicted and
+// the server closes the fd.  The client detects EOF (recv() == 0).
+//
+// Covers:
+//   TlsTcpBackend::sweep_hello_timeouts() True branch
+//     (slot active, !hello_received, timeout expired → remove_client)
+//
+// Verifies: REQ-6.1.12
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct TlsHelloTimeoutArg {
+    uint16_t port;
+    bool     server_closed;
+};
+
+static void* tls_hello_timeout_no_hello_thread(void* raw)
+{
+    TlsHelloTimeoutArg* a = static_cast<TlsHelloTimeoutArg*>(raw);
+    assert(a != nullptr);
+
+    usleep(30000U);  // 30 ms: let server bind
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { return nullptr; }
+
+    struct sockaddr_in addr;
+    (void)memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(a->port);
+    (void)inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    // MISRA C++:2023 5.2.4: reinterpret_cast required by POSIX connect()
+    if (connect(fd, reinterpret_cast<const struct sockaddr*>(&addr),
+                static_cast<socklen_t>(sizeof(addr))) != 0) {
+        (void)close(fd);
+        return nullptr;
+    }
+
+    // Connected but intentionally NOT sending a HELLO.
+    // Power of 10 Rule 2: at most 30 × 10 ms = 300 ms.
+    a->server_closed = false;
+    for (uint32_t iter = 0U; iter < 30U; ++iter) {
+        usleep(10000U);
+        uint8_t buf[1];
+        const ssize_t n = recv(fd, static_cast<void*>(buf), sizeof(buf),
+                               MSG_PEEK | MSG_DONTWAIT);
+        if (n == 0) {
+            a->server_closed = true;
+            break;
+        }
+    }
+    (void)close(fd);
+    return nullptr;
+}
+
+// Verifies: REQ-6.1.12
+static void test_l1_hello_timeout_evicts_slot_plaintext()
+{
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
+
+    TlsTcpBackend server;
+    TransportConfig srv_cfg;
+    make_transport_config(srv_cfg, true, PORT, false);  // tls_enabled=false
+    srv_cfg.channels[0U].recv_timeout_ms = 10U;  // short HELLO timeout
+
+    Result init_r = server.init(srv_cfg);
+    assert(init_r == Result::OK);
+    assert(server.is_open());
+
+    TlsHelloTimeoutArg arg;
+    arg.port         = PORT;
+    arg.server_closed = false;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t tid;
+    (void)pthread_create(&tid, &attr, tls_hello_timeout_no_hello_thread, &arg);
+
+    // Power of 10 Rule 2: fixed loop bound — receive_message polls 6 × 100 ms.
+    MessageEnvelope env;
+    Result recv_r = server.receive_message(env, 600U);
+    assert(recv_r != Result::OK);
+
+    (void)pthread_join(tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+    server.close();
+
+    assert(arg.server_closed);
+    printf("PASS: test_l1_hello_timeout_evicts_slot_plaintext\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -6655,6 +6752,9 @@ int main()
 
     // K-series: TlsSessionStore POSIX mutex branch coverage (PR 4 — REQ-6.3.10):
     test_k1_try_load_no_session_returns_false();
+
+    // L-series: HELLO timeout eviction (PR 5 — REQ-6.1.12):
+    test_l1_hello_timeout_evicts_slot_plaintext();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);

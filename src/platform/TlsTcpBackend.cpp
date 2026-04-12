@@ -31,7 +31,7 @@
  *             REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10,
  *             REQ-6.3.4, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-6.3.10, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.1.12, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-6.3.10, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #include "platform/TlsTcpBackend.hpp"
 #include "platform/TlsSessionStore.hpp"
@@ -163,7 +163,8 @@ TlsTcpBackend::TlsTcpBackend()
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         mbedtls_net_init(&m_client_net[i]);
         mbedtls_ssl_init(&m_ssl[i]);
-        m_client_hello_received[i] = false;  // Fix 4: REQ-6.1.8
+        m_client_hello_received[i] = false;   // Fix 4: REQ-6.1.8
+        m_client_accept_ts[i]      = 0ULL;   // REQ-6.1.12: no accept timestamp yet
         m_client_slot_active[i]    = false;  // Fix 5: no compaction
         m_hello_queue[i]           = NODE_ID_INVALID;  // REQ-3.3.6
     }
@@ -195,7 +196,8 @@ TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops)
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         mbedtls_net_init(&m_client_net[i]);
         mbedtls_ssl_init(&m_ssl[i]);
-        m_client_hello_received[i] = false;  // Fix 4: REQ-6.1.8
+        m_client_hello_received[i] = false;   // Fix 4: REQ-6.1.8
+        m_client_accept_ts[i]      = 0ULL;   // REQ-6.1.12: no accept timestamp yet
         m_client_slot_active[i]    = false;  // Fix 5: no compaction
         m_hello_queue[i]           = NODE_ID_INVALID;  // REQ-3.3.6
     }
@@ -227,7 +229,8 @@ TlsTcpBackend::TlsTcpBackend(ISocketOps& sock_ops, IMbedtlsOps& tls_ops)
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         mbedtls_net_init(&m_client_net[i]);
         mbedtls_ssl_init(&m_ssl[i]);
-        m_client_hello_received[i] = false;  // Fix 4: REQ-6.1.8
+        m_client_hello_received[i] = false;   // Fix 4: REQ-6.1.8
+        m_client_accept_ts[i]      = 0ULL;   // REQ-6.1.12: no accept timestamp yet
         m_client_slot_active[i]    = false;  // Fix 5: no compaction
         m_hello_queue[i]           = NODE_ID_INVALID;  // REQ-3.3.6
     }
@@ -1027,7 +1030,8 @@ Result TlsTcpBackend::accept_and_handshake()
 
     // Fix 5: mark slot active — no array compaction on remove.
     m_client_slot_active[slot]    = true;
-    m_client_hello_received[slot] = false;  // Fix 4: must receive HELLO before data
+    m_client_hello_received[slot] = false;            // Fix 4: must receive HELLO before data
+    m_client_accept_ts[slot]      = timestamp_now_us(); // REQ-6.1.12: record accept time
     ++m_client_count;
     ++m_connections_opened;  // REQ-7.2.4: successful server accept
     Logger::log(Severity::INFO, "TlsTcpBackend",
@@ -1065,11 +1069,53 @@ void TlsTcpBackend::remove_client(uint32_t idx)
     // Eliminates the undefined-behaviour bitwise copy of opaque mbedTLS structs.
     m_client_slot_active[idx]    = false;
     m_client_node_ids[idx]       = static_cast<NodeId>(NODE_ID_INVALID);
-    m_client_hello_received[idx] = false;  // Fix 4: reset for slot reuse
+    m_client_hello_received[idx] = false;   // Fix 4: reset for slot reuse
+    m_client_accept_ts[idx]      = 0ULL;    // REQ-6.1.12: clear accept timestamp
     --m_client_count;
     ++m_connections_closed;  // REQ-7.2.4: client connection removed
 
     NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// sweep_hello_timeouts()
+// REQ-6.1.12 (H-5 / HAZ-023 / CWE-400): evict server slots that have not sent
+// a HELLO within hello_timeout_ms (= channels[0].recv_timeout_ms) of acceptance.
+// Called at the start of poll_clients_once() before accept_and_handshake().
+// Safety-critical (SC): HAZ-023
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+void TlsTcpBackend::sweep_hello_timeouts()
+{
+    // Power of 10 Rule 5 — Assert 1: must be server mode.
+    NEVER_COMPILED_OUT_ASSERT(m_is_server);
+    // Assert 2: client count in range.
+    NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);
+
+    const uint64_t now_us     = timestamp_now_us();
+    // hello_timeout_ms defaults to channels[0].recv_timeout_ms per REQ-6.1.12.
+    // CERT INT30-C: recv_timeout_ms <= UINT32_MAX; cast to uint64 before × 1000 is safe.
+    const uint64_t timeout_us =
+        static_cast<uint64_t>(m_cfg.channels[0U].recv_timeout_ms) * 1000ULL;
+
+    // Power of 10 Rule 2: bounded by MAX_TCP_CONNECTIONS.
+    // TlsTcpBackend uses slot indices (Fix 5: no compaction on remove_client), so
+    // we always iterate all MAX_TCP_CONNECTIONS slots and skip inactive ones.
+    for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
+        if (!m_client_slot_active[i])  { continue; }
+        if (m_client_hello_received[i]) { continue; }
+        if (m_client_accept_ts[i] == 0ULL) { continue; }
+        if ((now_us - m_client_accept_ts[i]) > timeout_us) {
+            Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                        "HELLO timeout: evicting slot %u; "
+                        "no HELLO within %u ms (REQ-6.1.12 / HAZ-023)",
+                        i, m_cfg.channels[0U].recv_timeout_ms);
+            remove_client(i);
+            // remove_client() clears the slot without compaction (Fix 5);
+            // remaining slots remain valid — continue iterating.
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1791,6 +1837,10 @@ void TlsTcpBackend::poll_clients_once(uint32_t timeout_ms)
     NEVER_COMPILED_OUT_ASSERT(timeout_ms <= 60000U);
 
     if (m_is_server) {
+        // REQ-6.1.12: evict slots that timed out waiting for HELLO before accepting
+        // new connections, so stale slots do not block new accepts.
+        sweep_hello_timeouts();
+
         // When no clients are connected, wait on the listen socket so the
         // receive_message() polling loop does not spin in zero time before the
         // client has had a chance to connect.  mbedtls_net_poll returns as soon
