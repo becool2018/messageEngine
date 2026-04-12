@@ -232,7 +232,7 @@ private:
     /// REQ-6.3.9 (H-8): verify_peer=false + non-empty peer_hostname → ERR_INVALID + WARNING_HI.
     /// Only called when tls_enabled is true. Returns OK when all constraints are satisfied.
     // Safety-critical (SC): HAZ-020 — incorrect TLS config validation.
-    Result validate_tls_init_config(const TlsConfig& tls_cfg);
+    static Result validate_tls_init_config(const TlsConfig& tls_cfg);
 
     /// Enforce REQ-6.3.8 after a successful client handshake.
     /// Calls check_forward_secrecy() and zeroizes the session store on rejection.

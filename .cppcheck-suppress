@@ -216,3 +216,20 @@ knownConditionTrueFalse:src/core/OrderingBuffer.cpp
 # that cppcheck analyses. Not dead code.
 # Deviation: false positive -- cppcheck does not see test callers.
 unusedFunction:src/platform/TlsTcpBackend.cpp
+
+# Justification: nullPointerRedundantCheck in MbedtlsOpsImpl net_set_block/nonblock/poll
+# -- NEVER_COMPILED_OUT_ASSERT(ctx != nullptr) aborts before the subsequent
+# ctx->fd dereference; cppcheck cannot trace through the macro's abort path and
+# incorrectly hypothesizes a null-dereference on the fd access.
+# Same pattern as existing entries for DeliveryEngine, TlsTcpBackend, etc.
+# Deviation: false positive from macro expansion making the abort-path visible.
+nullPointerRedundantCheck:src/platform/MbedtlsOpsImpl.cpp
+
+# Justification: constParameterPointer / constParameterReference for try_load() in
+# TlsSessionStore -- ssl and ops are passed to ops.ssl_set_session() which is declared
+# non-const in IMbedtlsOps. Cppcheck only sees the #else path when
+# MBEDTLS_SSL_SESSION_TICKETS is not defined, where those parameters appear unused.
+# The non-const usage is real and present under the #ifdef-guarded code path.
+# Deviation: false positive from conditional-compilation call-site visibility.
+constParameterPointer:src/platform/TlsSessionStore.cpp
+constParameterReference:src/platform/TlsSessionStore.cpp
