@@ -48,6 +48,10 @@
  *            drain_events() bulk-drain API and full 8-kind event coverage (UC_61).
  *   2.0.0 — protocol v2: sequence_num, fragment_index/count, total_payload_length;
  *            ordering enforcement; bounded fragmentation/reassembly.
+ *   2.0.1 — packaging infrastructure: ME_API visibility macro, static + shared
+ *            library Makefile targets, install-dev target, pkg-config template,
+ *            CMakeLists.txt (root), and automated package.yml CI workflow.
+ *            No API, wire format, or ABI change.
  *
  * NSC-infrastructure: compile-time version constants only; no requirement
  *   implementation belongs here. No REQ-x.x tag applies.
@@ -65,7 +69,7 @@
 
 static const uint32_t ME_VERSION_MAJOR  = 2U;
 static const uint32_t ME_VERSION_MINOR  = 0U;
-static const uint32_t ME_VERSION_PATCH  = 0U;
+static const uint32_t ME_VERSION_PATCH  = 1U;
 
 /// Packed single integer for compile-time range checks: (major<<16)|(minor<<8)|patch
 static const uint32_t ME_VERSION_NUMBER =
@@ -73,6 +77,6 @@ static const uint32_t ME_VERSION_NUMBER =
 
 /// Human-readable version string — must match the git tag vMAJOR.MINOR.PATCH exactly.
 /// The `make check_version` target verifies this at release time.
-static const char ME_VERSION_STRING[] = "2.0.0";
+static const char ME_VERSION_STRING[] = "2.0.1";
 
 #endif // CORE_VERSION_HPP

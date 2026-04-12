@@ -1,0 +1,35 @@
+# MessageEngineConfigVersion.cmake.in
+# SemVer compatibility check for find_package(MessageEngine VERSION x.y.z).
+# Placeholder @VERSION@ substituted by `make package` / `make install-dev`.
+
+set(PACKAGE_VERSION "@VERSION@")
+
+# Extract components from the requested version (if supplied).
+if(PACKAGE_FIND_VERSION_MAJOR)
+    set(_req_major "${PACKAGE_FIND_VERSION_MAJOR}")
+else()
+    set(_req_major 0)
+endif()
+
+if(PACKAGE_FIND_VERSION_MINOR)
+    set(_req_minor "${PACKAGE_FIND_VERSION_MINOR}")
+else()
+    set(_req_minor 0)
+endif()
+
+# Extract this package's MAJOR from the version string.
+string(REGEX REPLACE "^([0-9]+)\\..*" "\\1" _pkg_major "${PACKAGE_VERSION}")
+
+# SemVer rule: same MAJOR is required; MINOR/PATCH must be >= requested.
+if("${_pkg_major}" EQUAL "${_req_major}" AND
+   "${PACKAGE_VERSION}" VERSION_GREATER_EQUAL "${PACKAGE_FIND_VERSION}")
+    set(PACKAGE_VERSION_COMPATIBLE TRUE)
+else()
+    set(PACKAGE_VERSION_COMPATIBLE FALSE)
+endif()
+
+if("${PACKAGE_VERSION}" VERSION_EQUAL "${PACKAGE_FIND_VERSION}")
+    set(PACKAGE_VERSION_EXACT TRUE)
+else()
+    set(PACKAGE_VERSION_EXACT FALSE)
+endif()

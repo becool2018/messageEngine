@@ -1,0 +1,36 @@
+# MessageEngineTargets.cmake.in
+# Declares imported CMake targets for the installed messageEngine library.
+# Placeholders substituted by `make package` / `make install-dev`:
+#   @VERSION@          — library version string (e.g. 2.0.1)
+#   @SHARED_LIB_NAME@  — versioned shared library filename (e.g. libmessageengine.so.2.0.1
+#                        or libmessageengine.2.0.1.dylib)
+
+# Guard against multiple inclusion.
+if(TARGET MessageEngine::messageengine)
+    return()
+endif()
+
+set(_me_prefix "${CMAKE_CURRENT_LIST_DIR}/../../..")
+get_filename_component(_me_prefix "${_me_prefix}" ABSOLUTE)
+
+# ── Static imported target ────────────────────────────────────────────────────
+add_library(MessageEngine::static STATIC IMPORTED)
+set_target_properties(MessageEngine::static PROPERTIES
+    IMPORTED_LOCATION             "${_me_prefix}/lib/libmessageengine.a"
+    INTERFACE_INCLUDE_DIRECTORIES "${_me_prefix}/include"
+    INTERFACE_COMPILE_DEFINITIONS "MESSAGEENGINE_STATIC_DEFINE"
+    INTERFACE_COMPILE_OPTIONS     "-std=c++17;-fno-exceptions;-fno-rtti"
+)
+
+# ── Shared imported target ────────────────────────────────────────────────────
+add_library(MessageEngine::shared SHARED IMPORTED)
+set_target_properties(MessageEngine::shared PROPERTIES
+    IMPORTED_LOCATION             "${_me_prefix}/lib/@SHARED_LIB_NAME@"
+    IMPORTED_SONAME               "${_me_prefix}/lib/@SHARED_LIB_NAME@"
+    INTERFACE_INCLUDE_DIRECTORIES "${_me_prefix}/include"
+    INTERFACE_COMPILE_OPTIONS     "-std=c++17;-fno-exceptions;-fno-rtti"
+)
+
+# ── Default alias — static is the safe default for embedded / Yocto consumers.
+# Override with MessageEngine::shared if a shared build is preferred.
+add_library(MessageEngine::messageengine ALIAS MessageEngine::static)

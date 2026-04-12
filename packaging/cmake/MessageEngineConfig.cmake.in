@@ -1,0 +1,17 @@
+# MessageEngineConfig.cmake.in
+# CMake package config for messageEngine — installed copy.
+# Placeholder @VERSION@ substituted by `make package` / `make install-dev`.
+#
+# Consumers use:
+#   find_package(MessageEngine @VERSION@ REQUIRED)
+#   target_link_libraries(my_target PRIVATE MessageEngine::messageengine)
+
+cmake_minimum_required(VERSION 3.16)
+
+include(CMakeFindDependencyMacro)
+
+# messageEngine requires mbedTLS for TLS/DTLS transport backends.
+find_dependency(MbedTLS REQUIRED)
+
+# Include the imported targets (static + shared).
+include("${CMAKE_CURRENT_LIST_DIR}/MessageEngineTargets.cmake")
