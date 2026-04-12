@@ -30,6 +30,7 @@ Section 3 — Message envelope and semantics
   REQ-3.3.3      Reliable-with-retry-and-dedupe delivery semantics
   REQ-3.3.4      Expiring messages
   REQ-3.3.5      Ordered vs unordered channels
+  REQ-3.3.6      Peer reconnect — ordering state reset (reset_peer, drain_hello_reconnects, reset_peer_ordering, pop_hello_peer)
 
 Section 4 — Transport abstraction API
   REQ-4.1.1      init(config)

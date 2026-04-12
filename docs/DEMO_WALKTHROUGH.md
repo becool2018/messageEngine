@@ -1,10 +1,10 @@
 # Demo Walkthrough — messageEngine in 5 Minutes
 
-This document walks through a live run of `./Server` and `./Client`, explaining every
+This document walks through a live run of `build/server` and `build/client`, explaining every
 log line so you can see exactly what the library does end-to-end.
 
-The demo uses the plain TCP transport.  The TLS (`./TlsTcpDemo`) and DTLS-UDP
-(`./DtlsUdpDemo`) demos follow the same pattern with an additional handshake phase.
+The demo uses the plain TCP transport.  The TLS (`build/tls_demo`) and DTLS-UDP
+(`build/dtls_demo`) demos follow the same pattern with an additional handshake phase.
 
 ---
 
@@ -21,7 +21,7 @@ make          # builds Server, Client, and the full test suite
 ```
 Terminal 1          Terminal 2
 ──────────────────  ──────────────────────────────────────
-./Server            (wait ~1 s, then)  ./Client
+build/server        (wait ~1 s, then)  build/client
 
   ← client connects ────────────────────────────────┐
   ← HELLO frame ────────────────────────────────────┤  (identifies itself as node 2)
@@ -48,7 +48,7 @@ Terminal 1          Terminal 2
 ## Terminal 1 — Server
 
 ```
-$ ./Server
+$ build/server
 ```
 
 ### Startup
@@ -145,7 +145,7 @@ Hello from client #1
 ## Terminal 2 — Client
 
 ```
-$ ./Client
+$ build/client
 ```
 
 ### Startup
@@ -214,9 +214,9 @@ $ ./Client
 |---|---|
 | Watch retry fire | Kill the server mid-run; the client will log `Retried message_id=N` up to 3× then `ACK timeout` |
 | Add impairment (loss/latency) | Edit `TransportConfig` in `Client.cpp` to enable `ImpairmentConfig`; rebuild |
-| TLS transport | `./TlsTcpDemo server` and `./TlsTcpDemo client` — same log structure, plus mbedTLS handshake lines |
-| DTLS-UDP transport | `./DtlsUdpDemo server` and `./DtlsUdpDemo client` |
-| Run the full test suite | `make run_tests` — 24 test files covering every component in isolation |
+| TLS transport | `build/tls_demo server` and `build/tls_demo client` — same log structure, plus mbedTLS handshake lines |
+| DTLS-UDP transport | `build/dtls_demo server` and `build/dtls_demo client` |
+| Run the full test suite | `make run_tests` — 23 test files covering every component in isolation |
 | Branch coverage report | `make coverage` — shows per-file SC function coverage |
 
 For the full architecture and design rationale, see:

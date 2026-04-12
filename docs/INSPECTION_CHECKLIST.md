@@ -135,6 +135,11 @@ every item is checked PASS.
 
 ## Part I — Exit gate (moderator completes after all defects dispositioned)
 
+> **Disposition code note:** The valid disposition codes for defect table rows are exactly:
+> **FIX**, **WAIVE**, or **DEFER**. "CLOSED" is an Outcome state for the inspection record
+> header — it must NOT appear as a Disposition column value in a defect table row. Use FIX
+> for resolved defects, WAIVE for accepted-as-is defects, DEFER for deferred defects.
+
 | # | Item | Pass / Fail |
 |---|------|-------------|
 | I1 | All CRITICAL and MAJOR defects in DEFECT_LOG.md are dispositioned (FIX or WAIVE); MINOR defects may remain DEFER if accompanied by a tracked note | |

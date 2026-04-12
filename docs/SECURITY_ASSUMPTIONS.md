@@ -96,6 +96,11 @@ detects the reconnect via the HELLO frame queued by the backend's
 `next_expected_seq` to 1 and frees held slots for that peer. This is the only
 sanctioned path for a peer's sequence counter to move backward (HAZ-016 mitigation).
 
+> **Note:** UDP and DTLS backends inherit the `TransportInterface` default no-op
+> `pop_hello_peer()` because they are single-peer and have no HELLO reconnect queue.
+> HELLO-before-data enforcement in those backends uses `process_hello_or_validate()`
+> instead.
+
 ---
 
 ## 4. Transport-layer source address validation

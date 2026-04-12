@@ -45,7 +45,7 @@ equivalent) for all state machines documented here.
 - `0 ≤ m_count ≤ ACK_TRACKER_CAPACITY` at all times.
 - A slot in `ACKED` state is freed on the very next `sweep_expired()` call.
 - A slot in `PENDING` state is freed by: (a) `sweep_expired()` when the deadline passes — copied to `expired_buf` if space available; or (b) `cancel()` on send-failure rollback — freed directly to `FREE` with no stat bump and no copy to `expired_buf`.
-- `on_ack()` never decrements `m_count` — only `sweep_expired()` does.
+- `on_ack()` never decrements `m_count` — only `sweep_expired()` and `cancel()` do.
 - `now_us` must be non-zero at entry. A backward `now_us` (now < m_last_sweep_us) triggers WARNING_HI and is **clamped** to `m_last_sweep_us`; processing continues with the clamped value (G-1 behavior, commit d7584dd). This replaces the prior `NEVER_COMPILED_OUT_ASSERT` which would have aborted the process.
 
 > **Note:** `cancel()` is a rollback-only path, callable exclusively from `DeliveryEngine::send()` on transport failure before any wire I/O. It must not be called after a message has been delivered to the wire.
@@ -86,7 +86,7 @@ logical states are:
 |---------------|----------|-----------|---------|
 | `INACTIVE` | false | — | Slot is free |
 | `WAITING` | true | `next_retry_us > now_us` | Retry scheduled; not yet due |
-| `DUE` | true | `next_retry_us ≤ now_us` AND `retry_count < max_retries` AND `expiry_us > now_us` | Ready to retransmit |
+| `DUE` | true | `next_retry_us ≤ now_us` AND `retry_count < max_retries` AND `expiry_us > now_us` | Ready to retransmit. Note: `collect_due()` uses a two-phase design — Phase 1 (`reap_terminated_slots()`) reaps EXPIRED and EXHAUSTED slots first; Phase 2 checks `next_retry_us <= now_us`. The `DUE` guard is a conceptual composite evaluated across both phases, not a single compound condition in one branch. |
 | `EXHAUSTED` | true | `retry_count ≥ max_retries` | No more retries; will be reaped |
 | `EXPIRED` | true | `now_us ≥ expiry_us` | Message lifetime elapsed; will be reaped |
 
@@ -100,13 +100,13 @@ logical states are:
 | `WAITING` | `collect_due(now, buf)` | `now_us ≥ expiry_us` | `INACTIVE` | Decrement m_count; log `WARNING_LO` (expired) |
 | `WAITING` | `collect_due(now, buf)` | `retry_count ≥ max_retries` | `INACTIVE` | Decrement m_count; log `WARNING_HI` (exhausted) |
 | `WAITING` | `on_ack(src, msg_id)` | src and msg_id match | `INACTIVE` | Decrement m_count; log INFO |
-| `WAITING` | `on_ack(src, msg_id)` | src or msg_id does not match | `WAITING` | Returns `ERR_INVALID`; no state change. |
+| `WAITING` | `on_ack(src, msg_id)` | src or msg_id does not match | `WAITING` | Returns `ERR_INVALID`; log `WARNING_LO`; no state change. |
 | `DUE` | `collect_due(now, buf)` | buf has space | `WAITING` | Copy to buf; increment retry_count; advance backoff; set next_retry_us |
-| `DUE` | `collect_due(now, buf)` | buf full | `DUE` | Not collected this sweep; will retry on next call |
+| `DUE` | `collect_due(now, buf)` | buf full | `DUE` | Not collected this sweep; will retry on next call. Note: slot's `next_retry_us` is not advanced when buffer is full; the slot will be collected on the next `collect_due()` call that has buffer capacity. |
 
 ### Invariants
 
-- `0 ≤ m_count ≤ ACK_TRACKER_CAPACITY` at all times.
+- `0 ≤ m_count ≤ ACK_TRACKER_CAPACITY` at all times. (RetryManager uses `ACK_TRACKER_CAPACITY` — the same constant as AckTracker — for its slot array size.)
 - `backoff_ms` is monotonically non-decreasing per slot, capped at 60 000 ms.
 - `retry_count` is monotonically non-decreasing per slot.
 - A slot transitions to `INACTIVE` only through: ACK received, exhausted, or expired.
@@ -135,7 +135,7 @@ The ImpairmentEngine has two orthogonal state dimensions:
 
 | State | Condition | Meaning |
 |-------|-----------|---------|
-| `UNINIT` | `!m_initialized` | `init()` not yet called; all operations assert-fail |
+| `UNINIT` | `!m_initialized` | `init()` not yet called; all operations assert-fail. In debug/test builds, pre-init calls abort via `NEVER_COMPILED_OUT_ASSERT`; in production builds, they trigger `IResetHandler::on_fatal_assert()` controlled reset. |
 | `READY` | `m_initialized` | Ready to process messages |
 
 **Dimension 2 — Partition (within `READY`):**
@@ -143,7 +143,15 @@ The ImpairmentEngine has two orthogonal state dimensions:
 | State | Fields | Meaning |
 |-------|--------|---------|
 | `NO_PARTITION` | `m_partition_active == false` | Link is up; messages pass through impairment pipeline |
-| `PARTITION_ACTIVE` | `m_partition_active == true` | Simulated link outage; all outbound messages dropped with `ERR_IO` |
+| `PARTITION_ACTIVE` | `m_partition_active == true`, `m_partition_start_us` = start timestamp | Simulated link outage; all outbound messages dropped with `ERR_IO` |
+
+**Partition state fields:**
+
+| Field | Description |
+|-------|-------------|
+| `m_partition_active` | True when a simulated link outage is in progress |
+| `m_partition_start_us` | Start timestamp of the current partition interval, set when partition becomes active; used for diagnostics |
+| `m_next_partition_event_us` | Timestamp of the next partition state transition (gap→active or active→gap) |
 
 Transitions are driven by `m_next_partition_event_us` (uint64_t) and the `now_us` argument passed to each `process_outbound()` call. The initial state is always `NO_PARTITION`; the first active partition begins after `partition_gap_ms` elapses from the first call.
 
@@ -151,7 +159,7 @@ Transitions are driven by `m_next_partition_event_us` (uint64_t) and the `now_us
 
 | Current State | Event | Next State | Action |
 |---------------|-------|------------|--------|
-| `UNINIT` | `init(cfg)` | `READY` | Seed PRNG; zero delay buffer; set m_initialized |
+| `UNINIT` | `init(cfg)` | `READY` | Seed PRNG; zero delay buffer; zero reorder buffer; reset reorder count; reset `m_partition_active` to false; reset `m_partition_start_us` to 0; reset `m_next_partition_event_us` to 0; zero stats; set `m_initialized` |
 | `READY` | Any operation | `READY` | Normal processing |
 
 ### Transition Table — Partition Dimension (within READY)
@@ -195,14 +203,19 @@ ready slots, copying envelopes to the caller's buffer.
 - `m_initialized` is set exactly once, in `init()`.
 - `m_delay_count` equals the number of `active == true` slots in `m_delay_buf`.
 - `0 ≤ m_delay_count ≤ IMPAIR_DELAY_BUF_SIZE` at all times.
-- `process_outbound()` checks `is_partition_active()` as its first action — no
-  message is queued to the delay buffer during a partition.
+- When `m_cfg.enabled == true`, `process_outbound()` checks `is_partition_active()`
+  before any queuing decision. When `m_cfg.enabled == false`, the `!m_cfg.enabled`
+  fast-path runs first and the partition check is bypassed — messages pass through
+  directly (subject to buffer-full). No message is queued to the delay buffer during
+  an active partition (enabled-mode only).
 - If `m_cfg.enabled == false`, messages are queued to the delay buffer with
   `release_us = now_us` (immediate pass-through), preserving the pipeline interface.
+  If the delay buffer is full, `process_outbound()` returns `ERR_FULL` even in
+  disabled mode.
 
 ---
 
-## §4 Software Classification and Formal Methods Applicability
+## Appendix A — Software Classification and Formal Methods Applicability
 
 **Classification:** Class C (NPR 7150.2D Appendix D)
 
@@ -228,7 +241,7 @@ overlying application safety barrier), the following formal methods obligations 
 | Theorem proving of Serializer bounds | Frama-C (WP plugin) or Coq | serialize() and deserialize() bounds checks |
 | Proof of retry termination | TLA+ liveness property | RetryManager: every WAITING slot eventually reaches INACTIVE |
 
-Pending reclassification, the state machine tables in §1–§5 of this document serve
+Pending reclassification, the state machine tables in §§1–6 of this document serve
 as the lightweight formal specification required for Class C review.
 
 ---

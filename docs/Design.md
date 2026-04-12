@@ -144,7 +144,7 @@ ReliabilityClass: BEST_EFFORT  RELIABLE_ACK  RELIABLE_RETRY
 
 Severity:         INFO  WARNING_LO  WARNING_HI  FATAL
 
-TransportKind:    TCP  UDP  LOCAL_SIM  TLS_TCP  DTLS_UDP
+TransportKind:    TCP=0  UDP=1  LOCAL_SIM=2  DTLS_UDP=3
 
 OrderingMode:     UNORDERED  ORDERED
 ```
@@ -281,10 +281,11 @@ Key design choices:
 
 #### 8.1.3 TransportInterface (`TransportInterface.hpp`)
 
-Pure-virtual abstract base class. Defines the seven-function contract: `init`, `send_message`, `receive_message`, `close`, `is_open`, `register_local_id`, `get_transport_stats`.
+Pure-virtual abstract base class. Defines the eight-function contract: `init`, `send_message`, `receive_message`, `close`, `is_open`, `register_local_id`, `pop_hello_peer`, `get_transport_stats`.
 
 - `register_local_id(NodeId)` — non-pure virtual (default returns OK). TCP/UDP/DTLS backends override to send the HELLO registration frame before any DATA frame is transmitted (REQ-6.1.8, REQ-6.1.10).
-- `get_transport_stats(TransportStats&) const` — non-pure virtual (default no-op). All concrete backends override to expose message counts and connection events (REQ-7.2.4).
+- `pop_hello_peer()` — non-pure virtual (default returns NODE_ID_INVALID). Overridden by TcpBackend and TlsTcpBackend to drain a bounded HELLO reconnect FIFO; polled by `DeliveryEngine::drain_hello_reconnects()` on every `receive()` call (REQ-3.3.6).
+- `get_transport_stats(TransportStats&) const` — pure virtual (`= 0`). All concrete backends must implement to expose message counts and connection events (REQ-7.2.4).
 
 Virtual dispatch is the only use of virtual functions in the project. It is explicitly permitted by the MISRA C++:2023 carve-out for `TransportInterface` polymorphism (no explicit function pointer declarations; vtable is compiler-generated).
 
@@ -497,7 +498,7 @@ All send/receive operations use `poll()` with a caller-supplied timeout, prevent
 **Server mode** (`is_server = true`):
 - Binds to `bind_ip:bind_port`, listens.
 - Accepts up to `MAX_TCP_CONNECTIONS = 8` clients.
-- Each accepted connection spawns a POSIX thread that loops: `tcp_recv_frame → Serializer::deserialize → RingBuffer::push`.
+- Each accepted connection spawns a POSIX thread that loops: `tcp_recv_frame → Serializer::deserialize → RingBuffer::push`. Note: the TcpBackend implementation uses a poll-based model (`poll_clients_once`, `build_poll_fds`, `drain_readable_clients`) — the thread-per-connection description refers to the conceptual model only. Verify against TcpBackend.cpp for the current concurrency strategy.
 - `send_message()` serializes the envelope and sends to all connected clients.
 
 **Client mode** (`is_server = false`):
