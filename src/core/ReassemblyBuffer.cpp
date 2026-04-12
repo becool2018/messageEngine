@@ -22,9 +22,9 @@
  *   - MISRA C++:2023: checked casts, no UB.
  *   - F-Prime style: explicit error codes.
  *
- * Implements: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9
+ * Implements: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9, REQ-3.2.10
  */
-// Implements: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9
+// Implements: REQ-3.2.3, REQ-3.3.3, REQ-3.2.9, REQ-3.2.10
 
 #include "ReassemblyBuffer.hpp"
 #include "Assert.hpp"
@@ -130,6 +130,12 @@ void ReassemblyBuffer::open_slot(uint32_t idx, const MessageEnvelope& frag, uint
 {
     NEVER_COMPILED_OUT_ASSERT(idx < REASSEMBLY_SLOT_COUNT);   // Assert: valid index
     NEVER_COMPILED_OUT_ASSERT(!m_slots[idx].active);           // Assert: slot is free
+    // REQ-3.2.10, HAZ-019: defence-in-depth — validate_metadata() must have already
+    // rejected total_payload_length > MSG_MAX_PAYLOAD_BYTES; this assertion catches
+    // any future caller that bypasses validate_metadata().  The True path is a d-i
+    // coverage ceiling (NEVER_COMPILED_OUT_ASSERT [[noreturn]] on assert failure).
+    NEVER_COMPILED_OUT_ASSERT(
+        static_cast<uint32_t>(frag.total_payload_length) <= MSG_MAX_PAYLOAD_BYTES);
 
     m_slots[idx].active          = true;
     m_slots[idx].message_id      = frag.message_id;
@@ -316,7 +322,14 @@ Result ReassemblyBuffer::validate_metadata(const MessageEnvelope& frag) const
     if (static_cast<uint32_t>(frag.fragment_count) > FRAG_MAX_COUNT) {
         return Result::ERR_INVALID;
     }
+    // REQ-3.2.10, HAZ-019, CERT INT30-C: reject wire-supplied total_payload_length
+    // that exceeds the compile-time ceiling before any slot arithmetic is performed.
     if (static_cast<uint32_t>(frag.total_payload_length) > MSG_MAX_PAYLOAD_BYTES) {
+        Logger::log(Severity::WARNING_HI, "ReassemblyBuffer",
+                    "validate_metadata: total_payload_length %u > ceiling %u "
+                    "(REQ-3.2.10, HAZ-019, CERT INT30-C)",
+                    static_cast<unsigned>(frag.total_payload_length),
+                    static_cast<unsigned>(MSG_MAX_PAYLOAD_BYTES));
         return Result::ERR_INVALID;
     }
 

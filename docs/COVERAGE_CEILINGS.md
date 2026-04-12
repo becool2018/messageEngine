@@ -365,20 +365,22 @@ is retained as defense-in-depth against future constant changes.
 
 The 37 missed branches consist of:
 
-**(a) ~35 `NEVER_COMPILED_OUT_ASSERT` True (abort) paths** — one per NCA call across the
+**(a) ~36 `NEVER_COMPILED_OUT_ASSERT` True (abort) paths** — one per NCA call across the
 15 functions. The [[noreturn]] abort body prevents profile counters from being incremented
-(VVP-001 §4.3 d-i). In the merged-profdata run, each NCA contributes 1 missed branch outcome
-(vs ~2 in per-binary mode where the full instrumented unit is measured without exercising
-the path). 15 functions × ~2–3 NCAs per function ≈ 35 missed outcomes.
+(VVP-001 §4.3 d-i). In the merged-profdata run, each NCA contributes 1 missed branch outcome.
+Round 12: ~35 NCAs. PR-1 (security/REQ-3.2.10): +1 NCA in `open_slot()` (defense-in-depth
+guard: `total_payload_length <= MSG_MAX_PAYLOAD_BYTES`; True path fires reset handler;
+never reachable via public API because `validate_metadata()` is always called first). Total ~36.
 
 **(b) ~2 branch outcomes from the architecturally-impossible `byte_offset > MSG_MAX_PAYLOAD_BYTES`
 guard** (lines 194–199, described above). The True branch is unreachable via the public API;
 the False branch is covered by every successful `record_fragment` call.
 
 All other decision points — slot search, bitmask completion, per-source cap enforcement,
-stale/expired sweep logic, fragment-index OOR rejection, total-length mismatch, and
-received-bytes overflow guard — have both True and False branches covered by the 28 test
-cases in `tests/test_ReassemblyBuffer.cpp` (18 original + 10 added in round 12).
+stale/expired sweep logic, fragment-index OOR rejection, total-length mismatch,
+received-bytes overflow guard, and the REQ-3.2.10 `total_payload_length > MSG_MAX_PAYLOAD_BYTES`
+guard in `validate_metadata()` (both True and False covered by tests 7 and all normal reassembly
+tests) — have both True and False branches covered.
 
 Threshold: **≥81%** (maximum achievable, merged profdata).
 

@@ -27,7 +27,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: Result/bool return codes, explicit error logging.
  *
- * Implements: REQ-6.1.5, REQ-6.1.6, REQ-6.3.1, REQ-6.3.2, REQ-6.3.3
+ * Implements: REQ-6.1.5, REQ-6.1.6, REQ-6.3.1, REQ-6.3.2, REQ-6.3.3, REQ-3.2.10
  */
 
 #include "SocketUtils.hpp"
@@ -610,18 +610,29 @@ bool tcp_recv_frame(int fd, uint8_t* buf, uint32_t buf_cap,
                         (static_cast<uint32_t>(header[2]) << 8U) |
                         (static_cast<uint32_t>(header[3]));
 
-    // Validate frame length
-    uint32_t max_frame_size = Serializer::WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES;
+    // REQ-3.2.10, HAZ-019, CERT INT30-C: validate wire-supplied length against a
+    // compile-time ceiling before any arithmetic.  The static_assert proves that
+    // the ceiling constant itself cannot overflow uint32_t on any conforming target.
+    static_assert(
+        MSG_MAX_PAYLOAD_BYTES <= (0xFFFFFFFFU - Serializer::WIRE_HEADER_SIZE),
+        "MAX_SAFE_FRAME_LEN overflow — check Types.hpp constants");
+    static const uint32_t k_max_safe_frame =
+        Serializer::WIRE_HEADER_SIZE + static_cast<uint32_t>(MSG_MAX_PAYLOAD_BYTES);
+
     // F-4: a valid framed message must be at least WIRE_HEADER_SIZE bytes;
     // zero-length or truncated frames cannot contain a valid envelope header.
     if (frame_len < Serializer::WIRE_HEADER_SIZE ||
-        frame_len > max_frame_size || frame_len > buf_cap) {
+        frame_len > k_max_safe_frame || frame_len > buf_cap) {
         Logger::log(Severity::WARNING_HI, "SocketUtils",
-                   "tcp_recv_frame: invalid frame size %u (min=%u, max=%u)",
-                   frame_len, static_cast<unsigned>(Serializer::WIRE_HEADER_SIZE),
-                   max_frame_size);
+                   "tcp_recv_frame: frame_len %u outside valid range [%u, %u]"
+                   " (REQ-3.2.10, HAZ-019, CERT INT30-C)",
+                   frame_len,
+                   static_cast<unsigned>(Serializer::WIRE_HEADER_SIZE),
+                   static_cast<unsigned>(k_max_safe_frame));
         return false;
     }
+    // REQ-3.2.10: postcondition — frame_len is safe for all subsequent arithmetic.
+    NEVER_COMPILED_OUT_ASSERT(frame_len <= k_max_safe_frame);
 
     // Receive frame payload (frame_len >= WIRE_HEADER_SIZE > 0 guaranteed above).
     if (!socket_recv_exact(fd, buf, frame_len, timeout_ms)) {
@@ -634,7 +645,7 @@ bool tcp_recv_frame(int fd, uint8_t* buf, uint32_t buf_cap,
 
     // Power of 10: postcondition assertions
     NEVER_COMPILED_OUT_ASSERT(*out_len <= buf_cap);
-    NEVER_COMPILED_OUT_ASSERT(*out_len <= max_frame_size);
+    NEVER_COMPILED_OUT_ASSERT(*out_len <= k_max_safe_frame);
     return true;
 }
 

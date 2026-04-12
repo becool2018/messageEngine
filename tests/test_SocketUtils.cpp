@@ -399,9 +399,10 @@ static void test_tcp_frame_round_trip()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 12: tcp_recv_frame() rejects an oversized frame
-// Sends a raw 4-byte length prefix that exceeds max_frame_size; verifies
-// tcp_recv_frame() returns false.
-// Verifies: REQ-6.1.5, REQ-6.1.6
+// Sends a raw 4-byte length prefix that exceeds max_frame_size (0xFFFFFFFF);
+// verifies tcp_recv_frame() returns false.  Exercises the REQ-3.2.10 ceiling
+// guard (frame_len > k_max_safe_frame branch).
+// Verifies: REQ-6.1.5, REQ-6.1.6, REQ-3.2.10
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void test_tcp_recv_oversized_frame()
