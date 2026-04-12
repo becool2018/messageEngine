@@ -1,6 +1,6 @@
 # messageEngine
 
-> **Experimental project.** This codebase is a learning and research exercise largely produced with AI assistance (Claude Code). It is not production software. APIs, behavior, and documentation may change without notice.
+> This codebase is a learning and research exercise largely produced with AI assistance (Claude Code).  APIs, behavior, and documentation may change without notice.
 
 ![CI](https://github.com/becool2018/messageEngine/actions/workflows/CI.yml/badge.svg)
 ![Stress Tests](https://github.com/becool2018/messageEngine/actions/workflows/stress.yml/badge.svg)
