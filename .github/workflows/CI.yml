@@ -50,7 +50,10 @@ jobs:
         run: |
           # Confirm that compiling DeliveryEngine with both ALLOW_WEAK_PRNG_SEED and
           # NDEBUG triggers the compile-time #error guard (REQ-5.2.6, H-6, HAZ-022).
+          # Remove the existing object file first so make cannot skip recompilation
+          # due to an up-to-date timestamp from the prior build step.
           # If the build succeeds the guard is broken — fail CI immediately.
+          rm -f build/objs/core/DeliveryEngine.o
           if make EXTRA_CXXFLAGS="-DALLOW_WEAK_PRNG_SEED -DNDEBUG" \
                build/objs/core/DeliveryEngine.o 2>/dev/null; then
             echo "ERROR: ALLOW_WEAK_PRNG_SEED+NDEBUG compiled without error" \
@@ -58,6 +61,8 @@ jobs:
             exit 1
           fi
           echo "ALLOW_WEAK_PRNG_SEED+NDEBUG guard PASS: compile-time #error fires as expected"
+          # Restore the object file so subsequent steps are not affected.
+          make build/objs/core/DeliveryEngine.o 2>/dev/null || true
 
       - name: Build + run sanitizer tests (ASan + UBSan)
         run: |
