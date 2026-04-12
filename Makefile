@@ -316,7 +316,10 @@ help:
 	@echo "  tests               Build all 23 unit test binaries"
 	@echo "  run_tests           Build and run the full unit test suite"
 	@echo "  stress_tests        Build all stress tests (capacity, e2e, ordering)"
-	@echo "  run_stress_tests    Build and run all stress tests"
+	@echo "  run_stress_tests    Build and run all stress tests (STRESS_DURATION=60)"
+	@echo "  run_stress_capacity Run capacity suite only (STRESS_DURATION=60)"
+	@echo "  run_stress_e2e      Run E2E suite only      (STRESS_DURATION=60)"
+	@echo "  run_stress_ordering Run ordering suite only (STRESS_DURATION=60)"
 	@echo "  sanitize_tests      Build test suite with ASan + UBSan"
 	@echo "  run_sanitize        Build and run ASan + UBSan test suite"
 	@echo ""
@@ -398,22 +401,41 @@ build/test_%: $(ALL_LIB_OBJS) build/objs/tests/test_%.o
 #     index-wrap arithmetic) that unit tests do not cover.
 #
 # Usage:
-#   make stress_tests        — build only
-#   make run_stress_tests    — build and run
+#   make stress_tests                      — build all three stress binaries
+#   make run_stress_tests                  — build and run all (default 60 s each)
+#   make run_stress_capacity               — capacity suite only (default 60 s)
+#   make run_stress_e2e                    — E2E suite only      (default 60 s)
+#   make run_stress_ordering               — ordering suite only (default 60 s)
+#   make run_stress_capacity STRESS_DURATION=120  — run for 120 s instead
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Duration in seconds passed to each stress binary's argv[1]. Default: 60 s.
+STRESS_DURATION ?= 60
+
 stress_tests: \
     build/test_stress_capacity \
     build/test_stress_e2e \
     build/test_stress_ordering
 
+run_stress_capacity: build/test_stress_capacity
+	@echo "=== Stress: capacity ($(STRESS_DURATION) s) ==="
+	@build/test_stress_capacity $(STRESS_DURATION) 2>/dev/null
+	@echo "=== run_stress_capacity: PASSED ==="
+
+run_stress_e2e: build/test_stress_e2e
+	@echo "=== Stress: E2E ($(STRESS_DURATION) s) ==="
+	@build/test_stress_e2e $(STRESS_DURATION) 2>/dev/null
+	@echo "=== run_stress_e2e: PASSED ==="
+
+run_stress_ordering: build/test_stress_ordering
+	@echo "=== Stress: ordering ($(STRESS_DURATION) s) ==="
+	@build/test_stress_ordering $(STRESS_DURATION) 2>/dev/null
+	@echo "=== run_stress_ordering: PASSED ==="
+
 run_stress_tests: stress_tests
-	@echo "=== Stress tests: capacity exhaustion and slot recycling ==="
-	@echo "    (may take several seconds on slow hardware)"
-	@build/test_stress_capacity
-	@echo "=== Stress tests: E2E pipeline, fragmentation/reassembly, impairment ==="
-	@build/test_stress_e2e
-	@echo "=== Stress tests: OrderingBuffer gap-inject soak ==="
-	@build/test_stress_ordering
+	@$(MAKE) run_stress_capacity  STRESS_DURATION=$(STRESS_DURATION)
+	@$(MAKE) run_stress_e2e       STRESS_DURATION=$(STRESS_DURATION)
+	@$(MAKE) run_stress_ordering  STRESS_DURATION=$(STRESS_DURATION)
 	@echo "=== STRESS TESTS PASSED ==="
 
 # ─────────────────────────────────────────────────────────────────────────────
