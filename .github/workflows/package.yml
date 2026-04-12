@@ -1,48 +1,53 @@
 name: Package
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Manual-only trigger.  Run from the GitHub Actions tab → "Run workflow".
+# Supply an optional branch, tag, or commit SHA to build; defaults to main.
+# Produces two tarballs (Linux x86_64 and macOS arm64) and attaches them to
+# a version-tagged GitHub Release.
+# ─────────────────────────────────────────────────────────────────────────────
 on:
-  workflow_run:
-    workflows: ["CI"]
-    branches: [ "main" ]
-    types: [ completed ]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch, tag, or commit SHA to build (default: main)'
+        required: false
+        default: 'main'
 
 permissions:
   contents: write
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
-  # Only run when CI passed on main.
-  # ─────────────────────────────────────────────────────────────────────────────
-  guard:
-    name: Guard — CI must have succeeded
-    runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    steps:
-      - name: CI conclusion OK
-        run: echo "CI passed — proceeding with package build."
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Build tarballs on Linux (glibc) and macOS.
+  # Build tarballs — one job per platform, run in parallel.
   # ─────────────────────────────────────────────────────────────────────────────
   build-package:
-    name: Build package — ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    needs: guard
+    name: Build package — ${{ matrix.os_label }}
+    runs-on: ${{ matrix.runner }}
 
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest ]
+        include:
+          # ── Linux x86_64 (glibc) ─────────────────────────────────────────
+          - runner:   ubuntu-22.04
+            os_label: Linux x86_64
+            os_tag:   linux-x86_64
+
+          # ── macOS arm64 (Apple Silicon, M1/M2/M3) ────────────────────────
+          - runner:   macos-14
+            os_label: macOS arm64
+            os_tag:   macos-arm64
 
     steps:
-      - name: Checkout (at the commit that triggered CI)
+      - name: Checkout
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event.inputs.ref }}
 
-      # ── Linux toolchain ────────────────────────────────────────────────────
-      - name: Install toolchain (Linux)
-        if: runner.os == 'Linux'
+      # ── Linux toolchain ──────────────────────────────────────────────────
+      - name: Install toolchain (Linux x86_64)
+        if: matrix.os_tag == 'linux-x86_64'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -50,13 +55,13 @@ jobs:
             pkg-config \
             libmbedtls-dev
 
-      # ── macOS toolchain ────────────────────────────────────────────────────
-      - name: Install toolchain (macOS)
-        if: runner.os == 'macOS'
+      # ── macOS toolchain ──────────────────────────────────────────────────
+      - name: Install toolchain (macOS arm64)
+        if: matrix.os_tag == 'macos-arm64'
         run: |
           brew install mbedtls pkg-config
 
-      # ── Read version from source (once) ───────────────────────────────────
+      # ── Read version from source ─────────────────────────────────────────
       - name: Extract version
         id: ver
         run: |
@@ -64,15 +69,15 @@ jobs:
                 | sed 's/.*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/')
           echo "version=$VER" >> "$GITHUB_OUTPUT"
 
-      # ── Build static + shared libraries ───────────────────────────────────
+      # ── Build static + shared libraries ─────────────────────────────────
       - name: Build release libraries
         run: make RELEASE=1 libs
 
-      # ── Stage and pack ─────────────────────────────────────────────────────
+      # ── Stage and pack ───────────────────────────────────────────────────
       - name: Create distribution tarball
         run: make RELEASE=1 package
 
-      # ── Rename for matrix disambiguation ──────────────────────────────────
+      # ── Rename for matrix disambiguation ────────────────────────────────
       # The Makefile produces: build/messageengine-vVER-OS-ARCH.tar.gz
       # (with a 'v' prefix and the OS/arch already embedded).
       # We glob for the actual file, then rename to the canonical convention:
@@ -81,14 +86,14 @@ jobs:
         id: tarball
         run: |
           VER="${{ steps.ver.outputs.version }}"
-          OS_TAG="${{ runner.os == 'Linux' && 'linux-x86_64' || 'macos-arm64' }}"
+          OS_TAG="${{ matrix.os_tag }}"
           SRC=$(ls build/messageengine-v${VER}-*.tar.gz | head -1)
           DST="build/messageengine-${VER}-${OS_TAG}.tar.gz"
           mv "$SRC" "$DST"
           echo "path=$DST" >> "$GITHUB_OUTPUT"
           echo "name=messageengine-${VER}-${OS_TAG}.tar.gz" >> "$GITHUB_OUTPUT"
 
-      # ── Upload as workflow artifact ────────────────────────────────────────
+      # ── Upload as workflow artifact ──────────────────────────────────────
       - name: Upload tarball artifact
         uses: actions/upload-artifact@v4
         with:
@@ -98,7 +103,7 @@ jobs:
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Create a version-tagged GitHub Release and attach both tarballs.
-  # Runs once; downloads both artifacts uploaded above.
+  # Runs once after both platform builds succeed.
   # ─────────────────────────────────────────────────────────────────────────────
   release:
     name: Create GitHub Release
@@ -109,7 +114,7 @@ jobs:
       - name: Checkout (for version read)
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event.inputs.ref }}
 
       - name: Extract version
         id: ver
