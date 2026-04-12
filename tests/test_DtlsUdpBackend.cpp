@@ -41,7 +41,7 @@
  *           REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4,
  *           REQ-6.4.5, REQ-7.1.1
  */
-// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.2.4, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6, REQ-7.1.1
+// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.2.4, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.9, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6, REQ-7.1.1
 // Verification: M1 + M2 + M4 + M5 (fault injection via IMbedtlsOps / ISocketOps)
 
 #include <cstdio>
@@ -902,26 +902,25 @@ static void test_receive_long_timeout_clamp()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Test 17: DTLS server, verify_peer=true but ca_file="" → skips CA loading
-// Covers: setup_dtls_config() `ca_file[0] != '\0'` False branch (inner &&, L144)
-// Verifies: REQ-6.4.1
+// Test 17: DTLS server, verify_peer=true but ca_file="" → REQ-6.3.6 H-1 rejection
+// Covers: validate_dtls_init_config() REQ-6.3.6 True path (H-1, HAZ-020)
+// Verifies: REQ-6.3.6
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void test_dtls_server_verify_peer_no_ca()
 {
-    // Verifies: REQ-6.4.1
+    // Verifies: REQ-6.3.6
     const uint16_t port_14597 = alloc_ephemeral_port(SOCK_DGRAM);
     DtlsUdpBackend backend;
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14597, true);
-    // verify_peer=true but ca_file remains "" (zero-initialized by transport_config_default).
-    // setup_dtls_config: `verify_peer && ca_file[0] != '\0'` → True && False → skip CA block.
-    // Cert and key parse OK; server_wait_and_handshake times out after 200 ms.
+    // REQ-6.3.6 / H-1: verify_peer=true but ca_file="" → init must return ERR_IO
+    // and log FATAL before any state mutation or socket binding.
     cfg.tls.verify_peer    = true;
-    cfg.connect_timeout_ms = 200U;
+    // ca_file remains "" (zero-initialized by transport_config_default).
 
     Result res = backend.init(cfg);
-    assert(res == Result::ERR_TIMEOUT);
+    assert(res == Result::ERR_IO);
     assert(backend.is_open() == false);
     printf("PASS: test_dtls_server_verify_peer_no_ca\n");
 }
@@ -1554,6 +1553,14 @@ static void test_mock_client_ssl_set_hostname_fail()
                   sizeof(cfg.tls.peer_hostname) - 1U);
     cfg.tls.peer_hostname[sizeof(cfg.tls.peer_hostname) - 1U] = '\0';
     cfg.tls.verify_peer = true;
+    // REQ-6.3.6: ca_file must be non-empty when verify_peer=true so
+    // validate_dtls_init_config() passes H-1 check before ssl_set_hostname is reached.
+    // The DtlsMockOps mock does not actually load the file — only the field value matters.
+    {
+        uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.ca_file)) - 1U;
+        (void)strncpy(cfg.tls.ca_file, DTLS_TEST_CERT_FILE, path_max);
+        cfg.tls.ca_file[path_max] = '\0';
+    }
     const Result r = backend.init(cfg);
     assert(r == Result::ERR_IO);  // Verifies: REQ-6.4.6
     assert(mock.last_set_hostname[0] != '\0');  // hostname was attempted
@@ -1579,6 +1586,14 @@ static void test_mock_client_ssl_set_hostname_called()
                   sizeof(cfg.tls.peer_hostname) - 1U);
     cfg.tls.peer_hostname[sizeof(cfg.tls.peer_hostname) - 1U] = '\0';
     cfg.tls.verify_peer = true;
+    // REQ-6.3.6: ca_file must be non-empty when verify_peer=true so
+    // validate_dtls_init_config() passes H-1 check before ssl_set_hostname is reached.
+    // The DtlsMockOps mock does not actually load the file — only the field value matters.
+    {
+        uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.ca_file)) - 1U;
+        (void)strncpy(cfg.tls.ca_file, DTLS_TEST_CERT_FILE, path_max);
+        cfg.tls.ca_file[path_max] = '\0';
+    }
     (void)backend.init(cfg);
     assert(mock.last_set_hostname[0] != '\0');  // hostname was passed  // Verifies: REQ-6.4.6
     assert(strncmp(mock.last_set_hostname, "test.example.com",
@@ -2810,6 +2825,7 @@ static void test_client_verify_peer_empty_hostname()
     // Verifies: REQ-6.4.6
     // DtlsMockOps: all ops return success by default; setup_dtls_config() succeeds;
     // the hostname check (pure config validation) fires before any TLS handshake op.
+    // ca_file must be non-empty to pass the REQ-6.3.6 H-1 check first.
     DtlsMockOps mock;
 
     DtlsUdpBackend backend(mock);
@@ -2819,13 +2835,73 @@ static void test_client_verify_peer_empty_hostname()
     TransportConfig cfg;
     make_mock_client_cfg(cfg, port_15006);
     cfg.tls.verify_peer = true;  // enable peer verification
+    // Set a ca_file so the REQ-6.3.6 H-1 guard is satisfied; the mock does
+    // not actually load files so any non-empty path passes validate_dtls_init_config().
+    uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.ca_file)) - 1U;
+    (void)strncpy(cfg.tls.ca_file, DTLS_TEST_CERT_FILE, path_max);
+    cfg.tls.ca_file[path_max] = '\0';
     // peer_hostname remains "" (zero-initialised by transport_config_default)
+    // → REQ-6.4.6 check in client_connect_and_handshake() rejects with ERR_INVALID.
 
     Result res = backend.init(cfg);
     assert(res == Result::ERR_INVALID);
     assert(!backend.is_open());
 
     printf("PASS: test_client_verify_peer_empty_hostname\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REQ-6.3.7 (H-2): require_crl=true + crl_file empty → ERR_INVALID
+// Verifies: REQ-6.3.7
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_dtls_require_crl_empty_crl_file_rejected()
+{
+    // Verifies: REQ-6.3.7
+    // require_crl=true with an empty crl_file and verify_peer=true must return
+    // ERR_INVALID and log FATAL before any state mutation (REQ-6.3.7, H-2, HAZ-020).
+    const uint16_t port = alloc_ephemeral_port(SOCK_DGRAM);
+    DtlsUdpBackend backend;
+    TransportConfig cfg;
+    make_dtls_config(cfg, true, port, true);
+    cfg.tls.verify_peer = true;
+    cfg.tls.require_crl = true;
+    // Provide a valid ca_file so REQ-6.3.6 check passes.
+    uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.ca_file)) - 1U;
+    (void)strncpy(cfg.tls.ca_file, DTLS_TEST_CERT_FILE, path_max);
+    cfg.tls.ca_file[path_max] = '\0';
+    // crl_file remains "" → triggers H-2 rejection.
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_INVALID);
+    assert(!backend.is_open());
+    printf("PASS: test_dtls_require_crl_empty_crl_file_rejected\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REQ-6.3.9 (H-8): verify_peer=false + non-empty peer_hostname → ERR_INVALID
+// Verifies: REQ-6.3.9
+// ─────────────────────────────────────────────────────────────────────────────
+
+static void test_dtls_verify_peer_false_with_hostname_rejected()
+{
+    // Verifies: REQ-6.3.9
+    // verify_peer=false with a non-empty peer_hostname is an unsafe operator
+    // configuration (CWE-297); init must return ERR_INVALID and log WARNING_HI
+    // (REQ-6.3.9, H-8, HAZ-025).
+    const uint16_t port = alloc_ephemeral_port(SOCK_DGRAM);
+    DtlsUdpBackend backend;
+    TransportConfig cfg;
+    make_dtls_config(cfg, false, port, true);
+    cfg.tls.verify_peer = false;
+    uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.peer_hostname)) - 1U;
+    (void)strncpy(cfg.tls.peer_hostname, "example.com", path_max);
+    cfg.tls.peer_hostname[path_max] = '\0';
+
+    Result res = backend.init(cfg);
+    assert(res == Result::ERR_INVALID);
+    assert(!backend.is_open());
+    printf("PASS: test_dtls_verify_peer_false_with_hostname_rejected\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2911,6 +2987,10 @@ int main()
     test_init_max_channels_exceeded();
     test_init_ipv6_peer_rejected();
     test_client_verify_peer_empty_hostname();
+
+    // REQ-6.3.6/7/9 config validation guards (PR 3, HAZ-020/025)
+    test_dtls_require_crl_empty_crl_file_rejected();
+    test_dtls_verify_peer_false_with_hostname_rejected();
 
     printf("=== test_DtlsUdpBackend: ALL TESTS PASSED ===\n");
     return 0;

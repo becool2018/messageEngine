@@ -39,7 +39,8 @@
  *   - STL exempted in tests/ for test fixture setup only.
  *
  * Verifies: REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10,
- *           REQ-6.1.11, REQ-6.3.4, REQ-5.1.6
+ *           REQ-6.1.11, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9,
+ *           REQ-5.1.6
  *           (also covers: HAZ-017 try_load_client_session True branch via
  *            test_tls_session_resumption_load_path)
  *           M5 fault-injection (VVP-001 §4.3 e-i) via TlsMockOps: covers all
@@ -1352,6 +1353,11 @@ static void test_tls_bad_ca_file()
     TransportConfig cfg;
     make_transport_config(cfg, false, 0U, true);  // TLS client
     cfg.tls.verify_peer = true;
+    // SEC-021: set peer_hostname so validate_tls_init_config() passes the
+    // CLIENT+verify_peer+empty-hostname guard and we reach the CA-load failure.
+    static const uint32_t HLEN = static_cast<uint32_t>(sizeof(cfg.tls.peer_hostname)) - 1U;
+    (void)strncpy(cfg.tls.peer_hostname, "messageEngine-test", HLEN);
+    cfg.tls.peer_hostname[HLEN] = '\0';
 
     // Non-existent CA file: x509_crt_parse_file fails → L160 True → ERR_IO
     (void)strncpy(cfg.tls.ca_file, "/tmp/no_such_ca.pem",
@@ -3773,6 +3779,13 @@ static void test_tls_bad_ca_file_content()
     TransportConfig cfg;
     make_transport_config(cfg, false, 0U, true);  // TLS client; no connect yet
     cfg.tls.verify_peer = true;
+    // SEC-021: set peer_hostname so validate_tls_init_config() passes the
+    // CLIENT+verify_peer+empty-hostname guard and we reach the CA-load failure.
+    {
+        uint32_t hlen = static_cast<uint32_t>(sizeof(cfg.tls.peer_hostname)) - 1U;
+        (void)strncpy(cfg.tls.peer_hostname, "messageEngine-test", hlen);
+        cfg.tls.peer_hostname[hlen] = '\0';
+    }
 
     uint32_t path_max = static_cast<uint32_t>(sizeof(cfg.tls.ca_file)) - 1U;
     (void)strncpy(cfg.tls.ca_file, BAD_CA_FILE, path_max);
@@ -4008,6 +4021,13 @@ static void* sec021_client_func(void* raw_arg)
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, true);  // TLS client
     cfg.tls.verify_peer = true;
+    // REQ-6.3.6: provide a non-empty ca_file so validate_tls_init_config() passes
+    // (the file does not need to exist — SEC-021 fires in tls_connect_handshake
+    // before the CA parse step for the empty-hostname guard).
+    // Use TEST_CERT_FILE (valid PEM) so the CA load also succeeds and we reach SEC-021.
+    (void)strncpy(cfg.tls.ca_file, TEST_CERT_FILE,
+                  static_cast<uint32_t>(sizeof(cfg.tls.ca_file)) - 1U);
+    cfg.tls.ca_file[sizeof(cfg.tls.ca_file) - 1U] = '\0';
     // Leave peer_hostname empty ('\0') — SEC-021 guard must fire.
     cfg.tls.peer_hostname[0] = '\0';
 
@@ -6206,11 +6226,20 @@ static void test_i1_peer_hostname_nonnull()
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
-    // I-1: set a non-empty peer_hostname so the ternary at
-    // tls_connect_handshake() L824 takes the True branch
+    // I-1: set verify_peer=true + ca_file + non-empty peer_hostname so the
+    // ternary at tls_connect_handshake() takes the True branch
     // (hostname = m_cfg.tls.peer_hostname instead of nullptr).
-    // verify_peer=false (make_transport_config default) so SEC-021
-    // empty-hostname guard at L799 does not fire first.
+    // REQ-6.3.9: verify_peer=false + non-empty hostname is now rejected at
+    // config-validation time, so we must use verify_peer=true here.
+    // CA cert parsing (via TlsMockOps → real x509_crt_parse_file) succeeds
+    // because TEST_CERT_FILE exists and is a valid PEM; the handshake mock
+    // then fails before any real TLS verification occurs.
+    cfg.tls.verify_peer = true;
+    {
+        uint32_t len = static_cast<uint32_t>(sizeof(cfg.tls.ca_file)) - 1U;
+        (void)strncpy(cfg.tls.ca_file, TEST_CERT_FILE, len);
+        cfg.tls.ca_file[len] = '\0';
+    }
     static const uint32_t HLEN = TLS_PATH_MAX - 1U;
     (void)strncpy(cfg.tls.peer_hostname, "127.0.0.1", HLEN);
     cfg.tls.peer_hostname[HLEN] = '\0';
@@ -6324,6 +6353,123 @@ static void test_i3_session_ticket_zero_lifetime()
     assert(!server.is_open());
 
     printf("PASS: test_i3_session_ticket_zero_lifetime\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// J-series security config validation tests (PR 3 — REQ-6.3.6/7/8/9)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Test J-1: REQ-6.3.6 — verify_peer=true with empty ca_file → ERR_IO ───────
+// validate_tls_init_config() must reject this config before any state mutation
+// to prevent TLS sessions without a trust anchor (H-1, HAZ-020, CWE-295).
+// No server or thread needed — failure is in init() config validation.
+//
+// Verifies: REQ-6.3.6
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_j1_verify_peer_no_ca_init_rejected()
+{
+    // Verifies: REQ-6.3.6
+    TlsTcpBackend client;
+    TransportConfig cfg;
+    make_transport_config(cfg, false, 19980U, true);  // TLS client
+    cfg.tls.verify_peer   = true;
+    cfg.tls.ca_file[0]    = '\0';  // REQ-6.3.6: empty ca_file triggers FATAL guard
+
+    Result res = client.init(cfg);
+    assert(res == Result::ERR_IO);   // H-1: validate_tls_init_config → ERR_IO
+    assert(!client.is_open());       // backend must not be open after failure
+    printf("PASS: test_j1_verify_peer_no_ca_init_rejected\n");
+}
+
+// ── Test J-2: REQ-6.3.7 — require_crl=true with empty crl_file → ERR_INVALID ─
+// validate_tls_init_config() must reject this config before any state mutation
+// to prevent CRL enforcement without a revocation list (H-2, HAZ-020, CWE-295).
+// No server or thread needed — failure is in init() config validation.
+//
+// Verifies: REQ-6.3.7
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_j2_require_crl_no_crl_file_rejected()
+{
+    // Verifies: REQ-6.3.7
+    TlsTcpBackend client;
+    TransportConfig cfg;
+    make_transport_config(cfg, false, 19981U, true);  // TLS client
+    cfg.tls.verify_peer  = true;
+    // Provide a valid ca_file so REQ-6.3.6 passes first.
+    (void)strncpy(cfg.tls.ca_file, TEST_CERT_FILE,
+                  static_cast<uint32_t>(sizeof(cfg.tls.ca_file)) - 1U);
+    cfg.tls.ca_file[sizeof(cfg.tls.ca_file) - 1U] = '\0';
+    cfg.tls.require_crl  = true;
+    cfg.tls.crl_file[0]  = '\0';   // REQ-6.3.7: empty crl_file triggers FATAL guard
+
+    Result res = client.init(cfg);
+    assert(res == Result::ERR_INVALID);  // H-2: validate_tls_init_config → ERR_INVALID
+    assert(!client.is_open());
+    printf("PASS: test_j2_require_crl_no_crl_file_rejected\n");
+}
+
+// ── Test J-3: REQ-6.3.8 — check_forward_secrecy TLS 1.2 rejection paths ──────
+// Directly exercises TlsTcpBackend::check_forward_secrecy() (public static)
+// to cover the TLS 1.2 rejection branch (ERR_IO) and the three fast-exit paths
+// (feature_disabled / no_session / TLS_1.3) that return OK.
+//
+// The TLS 1.2 True path is unreachable in the loopback environment (which
+// negotiates TLS 1.3); this direct call is the Class B compliance mechanism.
+// See docs/COVERAGE_CEILINGS.md — enforce_forward_secrecy_if_required ceiling.
+//
+// Verifies: REQ-6.3.8
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_j3_check_forward_secrecy_branches()
+{
+    // Verifies: REQ-6.3.8
+    Result res = Result::OK;
+
+    // Fast-exit 1: feature disabled → OK (no session ticket check performed).
+    res = TlsTcpBackend::check_forward_secrecy("TLSv1.2", false, true);
+    assert(res == Result::OK);
+
+    // Fast-exit 2: no session presented → OK (no resumption to reject).
+    res = TlsTcpBackend::check_forward_secrecy("TLSv1.2", true, false);
+    assert(res == Result::OK);
+
+    // Fast-exit 3: TLS 1.3 session resumption → OK (forward secrecy holds).
+    res = TlsTcpBackend::check_forward_secrecy("TLSv1.3", true, true);
+    assert(res == Result::OK);
+
+    // Fast-exit 4: ver==nullptr (no version string) → OK (treated as TLS 1.3+).
+    res = TlsTcpBackend::check_forward_secrecy(nullptr, true, false);
+    assert(res == Result::OK);
+
+    // Rejection path: TLS 1.2 + feature_enabled + had_session → ERR_IO.
+    res = TlsTcpBackend::check_forward_secrecy("TLSv1.2", true, true);
+    assert(res == Result::ERR_IO);
+
+    printf("PASS: test_j3_check_forward_secrecy_branches\n");
+}
+
+// ── Test J-4: REQ-6.3.9 — verify_peer=false with non-empty hostname → ERR_INVALID
+// validate_tls_init_config() must reject this unsafe config before any state
+// mutation to prevent false-assurance states (H-8, HAZ-025, CWE-297).
+// No server or thread needed — failure is in init() config validation.
+//
+// Verifies: REQ-6.3.9
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_j4_verify_peer_false_hostname_set_rejected()
+{
+    // Verifies: REQ-6.3.9
+    TlsTcpBackend client;
+    TransportConfig cfg;
+    make_transport_config(cfg, false, 19982U, true);  // TLS client (verify_peer=false)
+    assert(cfg.tls.verify_peer == false);  // confirm default from make_transport_config
+    // Set a non-empty peer_hostname with verify_peer=false → unsafe state.
+    static const uint32_t HLEN = static_cast<uint32_t>(sizeof(cfg.tls.peer_hostname)) - 1U;
+    (void)strncpy(cfg.tls.peer_hostname, "messageEngine-test", HLEN);
+    cfg.tls.peer_hostname[HLEN] = '\0';
+
+    Result res = client.init(cfg);
+    assert(res == Result::ERR_INVALID);  // H-8: validate_tls_init_config → ERR_INVALID
+    assert(!client.is_open());
+    printf("PASS: test_j4_verify_peer_false_hostname_set_rejected\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6461,6 +6607,12 @@ int main()
     test_i1_peer_hostname_nonnull();
     test_i2_stale_ticket_warning_with_session();
     test_i3_session_ticket_zero_lifetime();
+
+    // J-series security config validation tests (PR 3 — REQ-6.3.6/7/8/9):
+    test_j1_verify_peer_no_ca_init_rejected();
+    test_j2_require_crl_no_crl_file_rejected();
+    test_j3_check_forward_secrecy_branches();
+    test_j4_verify_peer_false_hostname_set_rejected();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);

@@ -47,7 +47,7 @@
  *             REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4,
  *             REQ-6.4.5, REQ-7.1.1
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.1.10, REQ-6.2.4, REQ-6.3.4, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6, REQ-7.1.1, REQ-7.2.4
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.1.10, REQ-6.2.4, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.9, REQ-6.4.1, REQ-6.4.2, REQ-6.4.3, REQ-6.4.4, REQ-6.4.5, REQ-6.4.6, REQ-7.1.1, REQ-7.2.4
 
 #include "platform/DtlsUdpBackend.hpp"
 #include "platform/ISocketOps.hpp"
@@ -1102,6 +1102,58 @@ Result DtlsUdpBackend::run_tls_handshake_phase(const TransportConfig& config)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// validate_dtls_init_config() — REQ-6.3.6/7/9 config validation before init
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Validate TLS/DTLS-specific config constraints; called early in init() before
+/// any state mutation.  Returns OK immediately when tls_enabled=false.
+///
+/// REQ-6.3.6 (H-1, HAZ-020): verify_peer=true with no ca_file is meaningless
+/// certificate chain verification — reject immediately (CWE-295).
+/// REQ-6.3.7 (H-2, HAZ-020): require_crl=true with no crl_file bypasses
+/// revocation checking — reject immediately (CWE-295).
+/// REQ-6.3.9 (H-8, HAZ-025): verify_peer=false with a non-empty peer_hostname
+/// is an unsafe state (CWE-297).
+// Safety-critical (SC): HAZ-020, HAZ-025
+Result DtlsUdpBackend::validate_dtls_init_config(const TlsConfig& tls_cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.ca_file));  // Assert: NUL-terminated
+
+    if (!tls_cfg.tls_enabled) {
+        return Result::OK;  // All checks are TLS/DTLS-specific; skip when TLS is off.
+    }
+
+    // REQ-6.3.6 (H-1): ca_file must be non-empty when verify_peer=true.
+    if (tls_cfg.verify_peer && (tls_cfg.ca_file[0] == '\0')) {
+        Logger::log(Severity::FATAL, "DtlsUdpBackend",
+                    "REQ-6.3.6/HAZ-020: verify_peer=true but ca_file is empty — "
+                    "no trust anchor; init rejected (H-1, CWE-295)");
+        return Result::ERR_IO;
+    }
+
+    // REQ-6.3.7 (H-2): crl_file must be non-empty when require_crl=true and verify_peer=true.
+    if (tls_cfg.require_crl && tls_cfg.verify_peer && (tls_cfg.crl_file[0] == '\0')) {
+        Logger::log(Severity::FATAL, "DtlsUdpBackend",
+                    "REQ-6.3.7/HAZ-020: require_crl=true but crl_file is empty — "
+                    "CRL revocation check disabled; init rejected (H-2, CWE-295)");
+        return Result::ERR_INVALID;
+    }
+
+    // REQ-6.3.9 (H-8): verify_peer=false with a non-empty peer_hostname is an unsafe
+    // operator configuration — hostname set for SNI but cert validation disabled (CWE-297).
+    if ((!tls_cfg.verify_peer) && (tls_cfg.peer_hostname[0] != '\0')) {
+        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
+                    "REQ-6.3.9/HAZ-025: verify_peer=false but peer_hostname is non-empty — "
+                    "unsafe configuration; init rejected (H-8, CWE-297)");
+        return Result::ERR_INVALID;
+    }
+
+    // Post-condition: H-1 satisfied — verify_peer=true only when ca_file is set.
+    NEVER_COMPILED_OUT_ASSERT(!(tls_cfg.verify_peer && (tls_cfg.ca_file[0] == '\0')));
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // init()
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1116,6 +1168,14 @@ Result DtlsUdpBackend::init(const TransportConfig& config)
                     "init: num_channels=%u exceeds MAX_CHANNELS; rejecting config",
                     config.num_channels);
         return Result::ERR_INVALID;
+    }
+
+    // REQ-6.3.6/7/9: validate DTLS-specific config before any state mutation.
+    // validate_dtls_init_config() returns OK immediately when tls_enabled=false.
+    // Returns ERR_IO (H-1), ERR_INVALID (H-2, H-8), or OK.
+    {
+        Result vres = validate_dtls_init_config(config.tls);
+        if (!result_ok(vres)) { return vres; }
     }
 
     m_cfg         = config;

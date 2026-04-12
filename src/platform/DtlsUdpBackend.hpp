@@ -177,6 +177,14 @@ private:
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
+    /// Validate TLS-specific config constraints before state mutation in init().
+    /// REQ-6.3.6 (H-1): verify_peer=true requires non-empty ca_file → ERR_IO + FATAL.
+    /// REQ-6.3.7 (H-2): require_crl=true requires non-empty crl_file → ERR_INVALID + FATAL.
+    /// REQ-6.3.9 (H-8): verify_peer=false + non-empty peer_hostname → ERR_INVALID + WARNING_HI.
+    /// Only called when tls_enabled is true. Returns OK when all constraints are satisfied.
+    // Safety-critical (SC): HAZ-020 — incorrect TLS/DTLS config validation.
+    Result validate_dtls_init_config(const TlsConfig& tls_cfg);
+
     /// Configure the shared mbedTLS ssl_conf for DTLS (DATAGRAM transport).
     /// Loads certificates, keys, sets cookie callbacks (server), sets timeouts.
     /// Called once during init() when tls_enabled is true.
