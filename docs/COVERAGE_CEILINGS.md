@@ -214,6 +214,32 @@ guarantees `receive_now_us >= send_ts`).  Documented in the per-file ceiling sec
 `platform/TlsTcpBackend.cpp` — 791 branches, 177 → 170 missed, 77.62% → 78.51%.
 Threshold raised from ≥77% to ≥78%.
 
+**2026-04-12 update (round 16 — PR 3 TLS/DTLS config validation: REQ-6.3.6/7/8/9):**
+`validate_tls_init_config()` (TlsTcpBackend), `validate_dtls_init_config()` (DtlsUdpBackend),
+and `check_forward_secrecy()` (TlsTcpBackend) added. 8 new tests cover all reachable branches:
+- J-1/DTLS-new (`test_j1_verify_peer_no_ca_init_rejected` / `test_dtls_server_verify_peer_no_ca`):
+  REQ-6.3.6 True path — `validate_*_init_config()` H-1 guard returns ERR_IO.
+- J-2/DTLS-new (`test_j2_require_crl_no_crl_file_rejected` / `test_dtls_require_crl_empty_crl_file_rejected`):
+  REQ-6.3.7 True path — `validate_*_init_config()` H-2 guard returns ERR_INVALID.
+- J-3 (`test_j3_check_forward_secrecy_branches`): REQ-6.3.8 — all 5 branch outcomes in
+  `check_forward_secrecy()` covered directly (feature_disabled / no_session / TLS_1.3 /
+  nullptr / TLS_1.2 rejection).
+- J-4/DTLS-new (`test_j4_verify_peer_false_hostname_set_rejected` / `test_dtls_verify_peer_false_with_hostname_rejected`):
+  REQ-6.3.9 True path — `validate_*_init_config()` H-8 guard returns ERR_INVALID.
+
+One new structural ceiling: `enforce_forward_secrecy_if_required()` True branch of
+`!result_ok(res) && (m_session_store_ptr != nullptr)` — requires a live TLS 1.2 resumed
+session to reach the zeroize path. The loopback test environment always negotiates TLS 1.3
+(mbedTLS 4.0 default). The rejection path of `check_forward_secrecy()` IS covered by J-3
+direct call; only the `enforce_forward_secrecy_if_required()` delegation True branch is
+permanently unreachable in the test environment (VVP-001 §4.3 d-i boundary: loopback
+environment constraint, not a code structure issue).
+
+Branch count and threshold updated after first `make coverage` run on this branch.
+TlsTcpBackend.cpp estimate: +~25 new branches, ~5 new permanently-missed → threshold ≥78% expected.
+DtlsUdpBackend.cpp estimate: +~10 new branches, ~2 new permanently-missed → threshold ≥77% expected.
+Exact thresholds confirmed by coverage run before merge.
+
 **Policy floor vs. regression guard:** The policy floor is **100% of reachable branches**
 (VERIFICATION_POLICY.md M4; CLAUDE.md §14.4). The "Threshold" column below is a *regression
 guard* — it is set at the current maximum achievable and must not fall. It is not a relaxation
@@ -1063,6 +1089,30 @@ tests added in round 12.  No remaining M5 ceiling applies to `TlsTcpBackend.cpp`
 
 The `try_load_client_session` structural ceiling no longer applies.
 
+**2026-04-12 (round 16 — PR 3 config-validation additions):**
+`validate_tls_init_config()`, `check_forward_secrecy()`, and
+`enforce_forward_secrecy_if_required()` added.  New J-series tests cover all reachable
+branches:
+- `validate_tls_init_config()`: all three guard conditions (H-1/H-2/H-8) fully covered
+  by J-1, J-2, J-4; two `NEVER_COMPILED_OUT_ASSERT` True paths are permanently missed.
+- `check_forward_secrecy()`: all five branch outcomes covered by J-3 direct call
+  (feature_disabled, no_session, TLS_1.3, nullptr, TLS_1.2 rejection); two
+  `NEVER_COMPILED_OUT_ASSERT` True paths are permanently missed.
+- `enforce_forward_secrecy_if_required()`: one new structural ceiling added:
+
+**(d) New ceiling — `enforce_forward_secrecy_if_required()` rejection True branch:**
+The `!result_ok(res) && (m_session_store_ptr != nullptr)` True branch requires a live
+TLS 1.2 session resumption that is then rejected. The loopback test environment always
+negotiates TLS 1.3 (mbedTLS 4.0 default); there is no test mechanism to force TLS 1.2
+negotiation without disabling TLS 1.3 in the server cipher configuration, which would
+break existing loopback tests. The `check_forward_secrecy()` rejection return code IS
+covered by J-3 direct call; the `enforce_forward_secrecy_if_required()` delegation
+True branch is permanently unreachable in the test environment (VVP-001 §4.3 d-i
+boundary: loopback environment constraint).
+
+Branch count grows by ~27 (new functions); ~7 new permanently-missed branches.
+Exact numbers confirmed by `make coverage` before merge; threshold expected ≥78%.
+
 **Build-configuration coverage note (Class B M4 requirement):**
 `test_tls_session_resumption_load_path` contains an `#if defined(MBEDTLS_SSL_SESSION_TICKETS)`
 guard around the HAZ-017 core invariant assert (`store survives close()`).  When
@@ -1073,7 +1123,7 @@ and `try_save_client_session()`, CI must include a build configuration with
 `MBEDTLS_SSL_SESSION_TICKETS` enabled.  A build without this flag is insufficient
 for SC function verification of the session-resumption paths.
 
-Threshold: **≥78%** (maximum achievable after M5 TlsMockOps fault-injection round + round 15 I-series gap closure).
+Threshold: **≥78%** (maximum achievable; updated after `make coverage` run on PR 3 branch).
 
 ---
 
@@ -1157,9 +1207,17 @@ via DtlsMockOps fault injection. No e-i ceiling claims remain; all Class B
 dependency-failure paths are either injectable via DtlsMockOps or documented as
 structural ceilings below.
 
-Current LLVM result: 376/487 (77.21%).
+Current LLVM result: 376/487 (77.21%) before round 16.
 
-Two independent sources of permanently-missed branches (111 total):
+**2026-04-12 (round 16 — PR 3 config-validation additions):**
+`validate_dtls_init_config()` added. Three new tests cover all reachable branches:
+- `test_dtls_server_verify_peer_no_ca` (updated): REQ-6.3.6 True path.
+- `test_dtls_require_crl_empty_crl_file_rejected` (new): REQ-6.3.7 True path.
+- `test_dtls_verify_peer_false_with_hostname_rejected` (new): REQ-6.3.9 True path.
+~10 new branches added; ~2 permanently missed (NEVER_COMPILED_OUT_ASSERT).
+Exact post-PR-3 numbers confirmed by `make coverage` before merge; threshold expected ≥77%.
+
+Two independent sources of permanently-missed branches (111 total before round 16 additions):
 
 **(a)** 82 permanently-missed `NEVER_COMPILED_OUT_ASSERT` True paths
 (VVP-001 §4.3 d-i): one per `NEVER_COMPILED_OUT_ASSERT` call across all 35

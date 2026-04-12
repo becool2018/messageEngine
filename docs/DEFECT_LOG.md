@@ -1421,3 +1421,82 @@ Modified files:
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-04-12. No defects found. All entry and exit criteria satisfied. `make lint`, `make run_tests`, and `make check_traceability` all PASS. REQ-3.2.11 (HAZ-018, C-1/C-2) fully implemented: ConstantTime.hpp volatile XOR helpers + DuplicateFilter no-early-exit + AckTracker/OrderingBuffer ct comparators + DtlsUdpBackend C-2 annotation. Inspection INSP-025 closed PASS.
+
+---
+
+### INSP-026 — PR 3: TLS/DTLS config validation guards (REQ-6.3.6/7/8/9)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-12 |
+| Author      | Claude (AI) |
+| Moderator   | Don Jessup |
+| Reviewer    | Don Jessup |
+| Branch      | fix/security-pr3-tls-config-validation-2026-04 |
+| Related REQs | REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9 |
+| Related HAZs | HAZ-020, HAZ-025 |
+| Inspection scope | src/core/TlsConfig.hpp, src/platform/TlsTcpBackend.hpp, src/platform/TlsTcpBackend.cpp, src/platform/DtlsUdpBackend.hpp, src/platform/DtlsUdpBackend.cpp, tests/test_TlsTcpBackend.cpp, tests/test_DtlsUdpBackend.cpp, docs/check_traceability.sh, docs/COVERAGE_CEILINGS.md |
+
+#### Change summary
+
+Implements four TLS/DTLS configuration validation guards (H-1/H-2/H-4/H-8 from SEC_REPORT.txt):
+
+- **REQ-6.3.6 (H-1, HAZ-020, CWE-295):** `validate_tls_init_config()` / `validate_dtls_init_config()`
+  reject `verify_peer=true` + empty `ca_file` with `ERR_IO` + FATAL before any state mutation.
+  Prevents TLS session establishment without a trust anchor.
+
+- **REQ-6.3.7 (H-2, HAZ-020, CWE-295):** Same validation functions reject `require_crl=true`
+  + empty `crl_file` with `ERR_INVALID` + FATAL. New `require_crl` and `tls_require_forward_secrecy`
+  fields added to `TlsConfig` (default false for backward compatibility).
+
+- **REQ-6.3.8 (H-4, HAZ-020, CWE-295):** `check_forward_secrecy()` (public static — testable) +
+  `enforce_forward_secrecy_if_required()` reject TLS 1.2 session resumptions when
+  `tls_require_forward_secrecy=true`. All 5 branch outcomes covered by J-3 direct call test.
+  Fixed a logically-incorrect `NEVER_COMPILED_OUT_ASSERT` in `check_forward_secrecy()` that
+  would have fired for normal session-resumption tests.
+
+- **REQ-6.3.9 (H-8, HAZ-025, CWE-297):** Same validation functions reject `verify_peer=false`
+  + non-empty `peer_hostname` with `ERR_INVALID` + WARNING_HI. Prevents false-assurance state
+  where a hostname is configured but certificate verification is disabled.
+
+Also fixed `sec021_client_func` in `test_TlsTcpBackend.cpp` to add a valid `ca_file` so that
+REQ-6.3.6 passes in `validate_tls_init_config()` and the existing SEC-021 empty-hostname
+guard still fires (ERR_INVALID from `tls_connect_handshake()`).
+
+Modified files:
+- `src/core/TlsConfig.hpp` — new `require_crl` and `tls_require_forward_secrecy` bool fields.
+- `src/platform/TlsTcpBackend.hpp` — `check_forward_secrecy()` made public static for
+  testability; `validate_tls_init_config()`, `enforce_forward_secrecy_if_required()` added.
+- `src/platform/TlsTcpBackend.cpp` — three new functions; `init()` and `tls_connect_handshake()`
+  updated; incorrect second assert in `check_forward_secrecy()` replaced with post-gate asserts.
+- `src/platform/DtlsUdpBackend.hpp` — `validate_dtls_init_config()` private method added.
+- `src/platform/DtlsUdpBackend.cpp` — `validate_dtls_init_config()` implemented; `init()` updated.
+- `tests/test_TlsTcpBackend.cpp` — J-1/J-2/J-3/J-4 tests + `sec021_client_func` fixed.
+- `tests/test_DtlsUdpBackend.cpp` — test 17 updated (ERR_TIMEOUT→ERR_IO); two new tests added;
+  `test_client_verify_peer_empty_hostname` fixed to set ca_file.
+- `docs/check_traceability.sh` — REQ-6.3.6/7/8/9 removed from KNOWN_GAPS.
+- `docs/COVERAGE_CEILINGS.md` — round 16 update + `enforce_forward_secrecy_if_required()`
+  structural ceiling added.
+
+#### Entry criteria
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations | PASS |
+| `make run_tests` all tests green | PASS |
+| `make check_traceability` RESULT: PASS | PASS |
+| All new/modified `src/` files carry `// Implements:` tags | PASS |
+| All new/modified `tests/` files carry `// Verifies:` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+
+#### Defects found
+
+| ID | File : function | Description | Severity | Status | Disposition |
+|----|----------------|-------------|----------|--------|-------------|
+| D-026-1 | TlsTcpBackend.cpp : check_forward_secrecy | Second `NEVER_COMPILED_OUT_ASSERT` was logically incorrect — `!((!feature_enabled) && had_session && (ver != nullptr))` evaluates to false (assert fires) for valid inputs where `feature_enabled=false` and `had_session=true`. Would have caused abort in all session-resumption tests that use default `tls_require_forward_secrecy=false`. | CRITICAL | FIXED | Replaced with correct post-fast-exit assertions: `NEVER_COMPILED_OUT_ASSERT(feature_enabled)` and `NEVER_COMPILED_OUT_ASSERT(had_session)` placed after the early-return if-block. |
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-12. Critical defect D-026-1 found and fixed during inspection. All entry and exit criteria satisfied after fix. `make lint`, `make run_tests`, and `make check_traceability` all PASS. REQ-6.3.6/7/8/9 (HAZ-020/025, H-1/H-2/H-4/H-8) fully implemented with M1+M2+M4+M5 verification. Inspection INSP-026 closed PASS.

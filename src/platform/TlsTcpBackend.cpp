@@ -31,7 +31,7 @@
  *             REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10,
  *             REQ-6.3.4, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #include "platform/TlsTcpBackend.hpp"
 #include "platform/TlsSessionStore.hpp"
@@ -792,16 +792,9 @@ Result TlsTcpBackend::tls_connect_handshake()
     NEVER_COMPILED_OUT_ASSERT(m_tls_enabled);
     NEVER_COMPILED_OUT_ASSERT(m_client_net[0U].fd >= 0);
 
-    // SEC-021: REQ-6.4.6 analogue for TLS/TCP — refuse to connect when
-    // verify_peer is true but no peer_hostname is configured. An empty
-    // hostname means ssl_set_hostname(NULL) will not bind a CN/SAN check,
-    // defeating the certificate peer-identity verification entirely.
-    if (m_cfg.tls.verify_peer && (m_cfg.tls.peer_hostname[0] == '\0')) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "SEC-021: verify_peer=true but peer_hostname is empty;"
-                    " refusing handshake (REQ-6.4.6 analogue)");
-        return Result::ERR_INVALID;
-    }
+    // SEC-021 moved to validate_tls_init_config() (called in init() before connection):
+    // verify_peer=true + empty hostname on CLIENT is now caught at config-validation
+    // time, before any socket state is mutated.  No check needed here.
 
     // mbedtls_net_connect returns a blocking socket by default; set explicitly.
     int ret = m_tls_ops->net_set_block(&m_client_net[0U]);
@@ -873,6 +866,21 @@ Result TlsTcpBackend::tls_connect_handshake()
     Logger::log(Severity::INFO, "TlsTcpBackend",
                 "TLS handshake complete (client): cipher=%s",
                 mbedtls_ssl_get_ciphersuite(&m_ssl[0U]));
+
+    // REQ-6.3.8 / HAZ-020: if tls_require_forward_secrecy=true, reject TLS 1.2 resumptions.
+    // Extracted to enforce_forward_secrecy_if_required() for testability (check_forward_secrecy
+    // accepts the version string as a parameter, allowing unit tests to cover the TLS 1.2 path
+    // without a live TLS 1.2 connection; see COVERAGE_CEILINGS.md).
+    {
+        Result fs_res = enforce_forward_secrecy_if_required(had_session);
+        if (!result_ok(fs_res)) {
+            mbedtls_ssl_free(&m_ssl[0U]);
+            mbedtls_ssl_init(&m_ssl[0U]);
+            mbedtls_net_free(&m_client_net[0U]);
+            mbedtls_net_init(&m_client_net[0U]);
+            return fs_res;
+        }
+    }
 
     // Save session for future resumption (REQ-6.3.4). Non-fatal if unavailable.
     // Only attempted when a caller-owned TlsSessionStore was injected.
@@ -1815,6 +1823,147 @@ void TlsTcpBackend::poll_clients_once(uint32_t timeout_ms)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// validate_tls_init_config() — REQ-6.3.6/7/9 config validation before init
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Validate TLS-specific config constraints; called early in init() before
+/// any state mutation so failures are clean.  Returns OK immediately when
+/// tls_enabled=false (all checks are TLS-specific).
+///
+/// REQ-6.3.6 (H-1, HAZ-020): verify_peer=true with no ca_file is meaningless
+/// certificate chain verification — reject immediately (CWE-295).
+/// REQ-6.3.7 (H-2, HAZ-020): require_crl=true with no crl_file bypasses
+/// revocation checking — reject immediately (CWE-295).
+/// REQ-6.3.9 (H-8, HAZ-025): verify_peer=false with a non-empty peer_hostname
+/// is an unsafe state — hostname set for SNI but cert validation disabled,
+/// creating false assurance (CWE-297).
+/// SEC-021 (REQ-6.4.6 analogue): verify_peer=true with empty peer_hostname on
+/// a CLIENT role means SNI hostname check is disabled, defeating cert identity
+/// verification — reject immediately (CWE-297).
+// Safety-critical (SC): HAZ-020, HAZ-025
+Result TlsTcpBackend::validate_tls_init_config(const TlsConfig& tls_cfg)
+{
+    NEVER_COMPILED_OUT_ASSERT(tls_path_valid(tls_cfg.ca_file));  // Assert: NUL-terminated
+
+    if (!tls_cfg.tls_enabled) {
+        return Result::OK;  // All checks are TLS-specific; skip when TLS is off.
+    }
+
+    // REQ-6.3.6 (H-1): ca_file must be non-empty when verify_peer=true.
+    if (tls_cfg.verify_peer && (tls_cfg.ca_file[0] == '\0')) {
+        Logger::log(Severity::FATAL, "TlsTcpBackend",
+                    "REQ-6.3.6/HAZ-020: verify_peer=true but ca_file is empty — "
+                    "no trust anchor; init rejected (H-1, CWE-295)");
+        return Result::ERR_IO;
+    }
+
+    // REQ-6.3.7 (H-2): crl_file must be non-empty when require_crl=true and verify_peer=true.
+    if (tls_cfg.require_crl && tls_cfg.verify_peer && (tls_cfg.crl_file[0] == '\0')) {
+        Logger::log(Severity::FATAL, "TlsTcpBackend",
+                    "REQ-6.3.7/HAZ-020: require_crl=true but crl_file is empty — "
+                    "CRL revocation check disabled; init rejected (H-2, CWE-295)");
+        return Result::ERR_INVALID;
+    }
+
+    // REQ-6.3.9 (H-8): verify_peer=false with a non-empty peer_hostname is an unsafe
+    // operator configuration — the hostname would be passed to SNI but the cert would
+    // not be verified, creating a false sense of security (CWE-297).
+    if ((!tls_cfg.verify_peer) && (tls_cfg.peer_hostname[0] != '\0')) {
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "REQ-6.3.9/HAZ-025: verify_peer=false but peer_hostname is non-empty — "
+                    "unsafe configuration; init rejected (H-8, CWE-297)");
+        return Result::ERR_INVALID;
+    }
+
+    // SEC-021 (REQ-6.4.6 analogue): CLIENT + verify_peer=true + empty hostname means
+    // ssl_set_hostname(NULL) — no CN/SAN check, defeating peer certificate identity
+    // verification entirely (CWE-297).
+    if ((tls_cfg.role == TlsRole::CLIENT) &&
+        tls_cfg.verify_peer && (tls_cfg.peer_hostname[0] == '\0')) {
+        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                    "SEC-021: verify_peer=true but peer_hostname is empty on CLIENT — "
+                    "refusing to allow handshake without CN/SAN check (REQ-6.4.6 analogue)");
+        return Result::ERR_INVALID;
+    }
+
+    // Post-condition: H-1 satisfied — verify_peer=true only when ca_file is set.
+    NEVER_COMPILED_OUT_ASSERT(!(tls_cfg.verify_peer && (tls_cfg.ca_file[0] == '\0')));
+    return Result::OK;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// check_forward_secrecy() — REQ-6.3.8 testable core logic
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Testable pure decision function for REQ-6.3.8 forward secrecy enforcement.
+/// Accepts the negotiated TLS version string directly (not the ssl context)
+/// so unit tests can exercise the TLS 1.2 rejection path without a live
+/// TLS 1.2 session (Class B branch coverage; see COVERAGE_CEILINGS.md).
+///
+/// Returns ERR_IO when all three are true:
+///   - feature_enabled (tls_require_forward_secrecy=true)
+///   - had_session     (a session ticket was loaded before the handshake)
+///   - ver == "TLSv1.2" (the negotiated version is TLS 1.2)
+///
+/// Logs WARNING_HI on rejection.  Does NOT zeroize the session store — that
+/// is the responsibility of enforce_forward_secrecy_if_required().
+// Safety-critical (SC): HAZ-020
+Result TlsTcpBackend::check_forward_secrecy(const char* ver,
+                                             bool        feature_enabled,
+                                             bool        had_session)
+{
+    NEVER_COMPILED_OUT_ASSERT(ver != nullptr || !had_session);  // Assert: ver valid when session present
+
+    if (!feature_enabled || !had_session) {
+        return Result::OK;  // feature disabled or no session ticket presented
+    }
+
+    // Post fast-exit: both conditions must hold.
+    NEVER_COMPILED_OUT_ASSERT(feature_enabled);  // Assert: feature enabled (passed first gate)
+    NEVER_COMPILED_OUT_ASSERT(had_session);      // Assert: session present (passed first gate)
+
+    if (ver == nullptr || strncmp(ver, "TLSv1.2", 7U) != 0) {
+        return Result::OK;  // TLS 1.3+ — forward secrecy holds for resumed sessions
+    }
+
+    Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
+                "REQ-6.3.8/HAZ-020: TLS 1.2 session resumption rejected "
+                "(tls_require_forward_secrecy=true); zeroizing session "
+                "(H-4, CWE-295, RFC 5077)");
+    return Result::ERR_IO;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// enforce_forward_secrecy_if_required() — REQ-6.3.8 post-handshake enforcement
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Called from tls_connect_handshake() after a successful handshake when
+/// had_session=true (a session ticket was loaded before the handshake).
+/// Delegates the TLS 1.2 detection to check_forward_secrecy() and zeroizes
+/// the session store if the resumption is rejected.
+// Safety-critical (SC): HAZ-020
+Result TlsTcpBackend::enforce_forward_secrecy_if_required(bool had_session)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_tls_enabled);  // Assert: only called in TLS mode
+
+    const char* ver = mbedtls_ssl_get_version(&m_ssl[0U]);
+    Result res = check_forward_secrecy(ver,
+                                       m_cfg.tls.tls_require_forward_secrecy,
+                                       had_session);
+
+    if (!result_ok(res) && (m_session_store_ptr != nullptr)) {
+        // Zeroize so the rejected TLS 1.2 session is not reused on the next connect.
+        m_session_store_ptr->zeroize();
+    }
+
+    // Post-condition: if rejected, session store is now zeroized (session_valid = false).
+    NEVER_COMPILED_OUT_ASSERT(result_ok(res) ||
+                               m_session_store_ptr == nullptr ||
+                               (!m_session_store_ptr->session_valid.load()));
+    return res;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // init()
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1829,6 +1978,14 @@ Result TlsTcpBackend::init(const TransportConfig& config)
                     "init: num_channels=%u exceeds MAX_CHANNELS; rejecting config",
                     config.num_channels);
         return Result::ERR_INVALID;
+    }
+
+    // REQ-6.3.6/7/9: validate TLS-specific config before any state mutation.
+    // validate_tls_init_config() returns OK immediately when tls_enabled=false.
+    // Returns ERR_IO (H-1), ERR_INVALID (H-2, H-8, SEC-021), or OK.
+    {
+        Result vres = validate_tls_init_config(config.tls);
+        if (!result_ok(vres)) { return vres; }
     }
 
     m_cfg          = config;

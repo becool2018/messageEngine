@@ -65,9 +65,10 @@
  * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4,
  *             REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6,
  *             REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11,
- *             REQ-6.3.4, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
+ *             REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9,
+ *             REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.4, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #ifndef PLATFORM_TLS_TCP_BACKEND_HPP
 #define PLATFORM_TLS_TCP_BACKEND_HPP
@@ -156,6 +157,18 @@ public:
     /// NSC: logging helper only; no message-delivery policy.
     static bool log_fs_warning_if_tls12(const char* ver);
 
+    /// Visible for unit testing — REQ-6.3.8 forward secrecy rejection logic.
+    /// Returns ERR_IO when all three conditions hold: feature_enabled=true,
+    /// had_session=true, and ver=="TLSv1.2".
+    /// Exposed as public static so the TLS 1.2 rejection branch (unreachable
+    /// in a loopback environment that always negotiates TLS 1.3) can be driven
+    /// directly by a unit test without a live TLS 1.2 connection
+    /// (Class B branch coverage, REQ-6.3.8, HAZ-020).
+    // Safety-critical (SC): HAZ-020 — forward secrecy enforcement.
+    static Result check_forward_secrecy(const char* ver,
+                                        bool        feature_enabled,
+                                        bool        had_session);
+
 private:
     // ── mbedTLS contexts (fixed static allocation — Power of 10 Rule 3) ─────
     mbedtls_ssl_config  m_ssl_conf;                        ///< Shared TLS config
@@ -211,6 +224,20 @@ private:
     bool              m_client_slot_active[MAX_TCP_CONNECTIONS]; ///< Fix 5: true = slot in use; avoids ssl_context copy
 
     // ── Private helpers ──────────────────────────────────────────────────────
+
+    /// Validate TLS-specific config constraints before state mutation in init().
+    /// REQ-6.3.6 (H-1): verify_peer=true requires non-empty ca_file → ERR_IO + FATAL.
+    /// REQ-6.3.7 (H-2): require_crl=true requires non-empty crl_file → ERR_INVALID + FATAL.
+    /// REQ-6.3.9 (H-8): verify_peer=false + non-empty peer_hostname → ERR_INVALID + WARNING_HI.
+    /// Only called when tls_enabled is true. Returns OK when all constraints are satisfied.
+    // Safety-critical (SC): HAZ-020 — incorrect TLS config validation.
+    Result validate_tls_init_config(const TlsConfig& tls_cfg);
+
+    /// Enforce REQ-6.3.8 after a successful client handshake.
+    /// Calls check_forward_secrecy() and zeroizes the session store on rejection.
+    /// Returns ERR_IO if the resumption is rejected; OK otherwise.
+    // Safety-critical (SC): HAZ-020 — forward secrecy enforcement.
+    Result enforce_forward_secrecy_if_required(bool had_session);
 
     /// Load certificates and key; configure mbedTLS shared config object.
     /// Called once during init() when tls_enabled is true.

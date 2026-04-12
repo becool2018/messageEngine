@@ -29,9 +29,9 @@
  *   - MISRA C++:2023: plain struct; no STL, no templates, no exceptions.
  *   - F-Prime style: inline default function; no global mutable state.
  *
- * Implements: REQ-6.3.4
+ * Implements: REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9
  */
-// Implements: REQ-6.3.4
+// Implements: REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9
 
 #ifndef CORE_TLS_CONFIG_HPP
 #define CORE_TLS_CONFIG_HPP
@@ -100,6 +100,20 @@ struct TlsConfig {
     /// Leave empty ("") to skip CRL checking (e.g. in testing).
     char crl_file[TLS_PATH_MAX];
 
+    /// When true, init() MUST return ERR_INVALID and log FATAL if verify_peer
+    /// is true and crl_file is empty. Prevents silent deployment without CRL
+    /// revocation checking (REQ-6.3.7, H-2, HAZ-020, CWE-295).
+    /// Default: false for backward compatibility.
+    bool require_crl;
+
+    /// When true, the TLS backend MUST reject any TLS 1.2 session resumption
+    /// handshake after negotiation by zeroizing the session and returning
+    /// ERR_IO. TLS 1.2 resumed sessions lack forward secrecy — a stolen
+    /// server ticket key exposes all past resumed traffic (RFC 5077).
+    /// Applies to TlsTcpBackend only (REQ-6.3.8, H-4, HAZ-020, CWE-295).
+    /// Default: false for backward compatibility.
+    bool tls_require_forward_secrecy;
+
     /// Enable TLS session ticket resumption (REQ-6.3.4 extension point).
     /// Client: saves the session after a successful handshake and presents it
     ///         on reconnect to skip the full handshake (RFC 5077 / TLS 1.3 PSK).
@@ -131,9 +145,11 @@ inline void tls_config_default(TlsConfig& cfg)
     (void)memset(cfg.ca_file,       0, TLS_PATH_MAX);
     (void)memset(cfg.peer_hostname, 0, TLS_PATH_MAX);
     (void)memset(cfg.crl_file,      0, TLS_PATH_MAX);
-    cfg.verify_peer                = true;   // Secure default: always verify when TLS is on
-    cfg.session_resumption_enabled = false;  // Off by default — backward-compatible
-    cfg.session_ticket_lifetime_s  = 86400U; // 24 h default ticket lifetime
+    cfg.verify_peer                  = true;   // Secure default: always verify when TLS is on
+    cfg.require_crl                  = false;  // Off by default — backward-compatible (REQ-6.3.7)
+    cfg.tls_require_forward_secrecy  = false;  // Off by default — backward-compatible (REQ-6.3.8)
+    cfg.session_resumption_enabled   = false;  // Off by default — backward-compatible
+    cfg.session_ticket_lifetime_s    = 86400U; // 24 h default ticket lifetime
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
