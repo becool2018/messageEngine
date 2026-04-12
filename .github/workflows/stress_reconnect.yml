@@ -1,0 +1,50 @@
+name: Stress Tests — Peer Reconnect
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Manual-only workflow for the peer-reconnect ordering storm stress test.
+#
+# This workflow is intentionally NOT triggered by push or pull_request.
+# Run it manually from the GitHub Actions tab before any merge that touches:
+#   • OrderingBuffer::reset_peer()          (src/core/OrderingBuffer.*)
+#   • DeliveryEngine::reset_peer_ordering() (src/core/DeliveryEngine.*)
+#   • REQ-3.3.6 reconnect-reset logic
+#
+# Usage:
+#   GitHub Actions tab → "Stress Tests — Peer Reconnect" → Run workflow
+#   Local:  make run_stress_reconnect
+#           make run_stress_reconnect STRESS_DURATION=300   # 5-minute soak
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:   # manual trigger only — no push or pull_request triggers
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  stress_reconnect:
+    name: Stress Tests — reconnect
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libmbedtls-dev
+
+      - name: Build reconnect stress test
+        run: make build/test_stress_reconnect
+
+      - name: Run reconnect stress test — Peer reconnect ordering state reset
+        # Suppress INFO-level logger output so only PASS/FAIL lines are visible.
+        # Failures abort via non-zero exit from assert().
+        run: build/test_stress_reconnect 2>/dev/null

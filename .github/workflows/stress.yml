@@ -3,27 +3,31 @@ name: Stress Tests
 # ─────────────────────────────────────────────────────────────────────────────
 # When this workflow runs
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. Nightly (2 AM UTC) — catches any accumulated drift even when no
-#    capacity-relevant file was touched recently.
+# 1. workflow_dispatch — manual trigger from the GitHub Actions tab.
+#    Use this for on-demand runs (e.g., before a release, after a platform port,
+#    or when investigating a suspected sustained-load regression).
+#    Running stress tests manually avoids burning runner minutes on every push.
 #
 # 2. Push / PR to main when a capacity-relevant file changes — ensures that
 #    any edit to a compile-time constant, a loop-bound, or a slot-management
 #    algorithm is immediately stress-tested (per CLAUDE.md §1c).
 #    Covered files:
-#      • src/core/Types.hpp          — capacity constants
-#      • src/core/AckTracker.*       — slot fill/drain/sweep logic
-#      • src/core/RetryManager.*     — retry slot scheduling/exhaustion
-#      • src/core/RingBuffer.hpp     — SPSC ring index arithmetic
-#      • src/core/DuplicateFilter.*  — sliding-window eviction
-#      • tests/test_stress_capacity.cpp — the stress tests themselves
-#
-# 3. workflow_dispatch — manual trigger from the GitHub Actions tab for
-#    on-demand runs (e.g., before a release, after a platform port).
+#      • src/core/Types.hpp              — capacity constants
+#      • src/core/AckTracker.*           — slot fill/drain/sweep logic
+#      • src/core/RetryManager.*         — retry slot scheduling/exhaustion
+#      • src/core/RingBuffer.hpp         — SPSC ring index arithmetic
+#      • src/core/DuplicateFilter.*      — sliding-window eviction
+#      • src/core/OrderingBuffer.*       — ordered-delivery hold slots
+#      • src/core/ReassemblyBuffer.*     — fragment reassembly slots
+#      • src/core/Fragmentation.*        — fragment_message() splitter
+#      • src/platform/ImpairmentEngine.* — all six impairment types
+#      • tests/test_stress_capacity.cpp  — capacity/slot-recycling stress tests
+#      • tests/test_stress_e2e.cpp       — E2E, frag/reassembly, impairment tests
+#      • tests/test_stress_ordering.cpp  — OrderingBuffer gap-inject soak
 # ─────────────────────────────────────────────────────────────────────────────
 
 on:
-  schedule:
-    - cron: '0 2 * * *'   # nightly, 2 AM UTC
+  workflow_dispatch:   # manual trigger from the Actions tab
 
   push:
     branches: [ "main" ]
@@ -36,7 +40,17 @@ on:
       - 'src/core/RingBuffer.hpp'
       - 'src/core/DuplicateFilter.cpp'
       - 'src/core/DuplicateFilter.hpp'
+      - 'src/core/OrderingBuffer.cpp'
+      - 'src/core/OrderingBuffer.hpp'
+      - 'src/core/ReassemblyBuffer.cpp'
+      - 'src/core/ReassemblyBuffer.hpp'
+      - 'src/core/Fragmentation.cpp'
+      - 'src/core/Fragmentation.hpp'
+      - 'src/platform/ImpairmentEngine.cpp'
+      - 'src/platform/ImpairmentEngine.hpp'
       - 'tests/test_stress_capacity.cpp'
+      - 'tests/test_stress_e2e.cpp'
+      - 'tests/test_stress_ordering.cpp'
 
   pull_request:
     branches: [ "main" ]
@@ -49,9 +63,17 @@ on:
       - 'src/core/RingBuffer.hpp'
       - 'src/core/DuplicateFilter.cpp'
       - 'src/core/DuplicateFilter.hpp'
+      - 'src/core/OrderingBuffer.cpp'
+      - 'src/core/OrderingBuffer.hpp'
+      - 'src/core/ReassemblyBuffer.cpp'
+      - 'src/core/ReassemblyBuffer.hpp'
+      - 'src/core/Fragmentation.cpp'
+      - 'src/core/Fragmentation.hpp'
+      - 'src/platform/ImpairmentEngine.cpp'
+      - 'src/platform/ImpairmentEngine.hpp'
       - 'tests/test_stress_capacity.cpp'
-
-  workflow_dispatch:   # manual trigger from the Actions tab
+      - 'tests/test_stress_e2e.cpp'
+      - 'tests/test_stress_ordering.cpp'
 
 permissions:
   contents: read
@@ -61,8 +83,27 @@ env:
 
 jobs:
   stress_tests:
-    name: Stress Tests — Capacity Exhaustion and Slot Recycling
+    name: Stress Tests — ${{ matrix.suite }}
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false   # run all suites; don't cancel on first failure
+      matrix:
+        include:
+          # ── Original capacity/slot-recycling suite ──────────────────────────
+          - suite:  capacity
+            binary: build/test_stress_capacity
+            label:  "Capacity exhaustion and slot recycling"
+
+          # ── Session 1: E2E pipeline, frag/reassembly, impairment soak ───────
+          - suite:  e2e
+            binary: build/test_stress_e2e
+            label:  "E2E pipeline, fragmentation/reassembly, impairment"
+
+          # ── Session 1: OrderingBuffer gap-inject soak ────────────────────────
+          - suite:  ordering
+            binary: build/test_stress_ordering
+            label:  "OrderingBuffer gap-inject soak"
 
     steps:
       - name: Checkout
@@ -77,10 +118,10 @@ jobs:
             pkg-config \
             libmbedtls-dev
 
-      - name: Build stress tests
-        run: make stress_tests
+      - name: Build ${{ matrix.suite }} stress test
+        run: make ${{ matrix.binary }}
 
-      - name: Run stress tests
+      - name: Run ${{ matrix.suite }} stress test — ${{ matrix.label }}
         # Suppress INFO-level logger output so only PASS/FAIL lines are visible
         # in the Actions log.  Failures still abort via non-zero exit from assert().
-        run: make run_stress_tests 2>/dev/null
+        run: ${{ matrix.binary }} 2>/dev/null
