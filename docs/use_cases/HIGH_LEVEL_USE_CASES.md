@@ -258,6 +258,47 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 
 ---
 
+## HL-32: Large Message Fragmentation and Reassembly
+> User sends a message whose payload exceeds FRAG_MAX_PAYLOAD_BYTES; System transparently
+> splits it into up to FRAG_MAX_COUNT wire fragments on the send path, and reassembles
+> them back into the original logical message on the receive path before any delivery
+> logic sees it.
+
+- UC_69 — send_fragments: DeliveryEngine detects payload > FRAG_MAX_PAYLOAD_BYTES, calls fragment_message(), transmits each wire fragment individually
+- UC_70 — ReassemblyBuffer::ingest(): receive path collects wire fragments by (source_id, message_id) key, assembles them into a logical envelope on last-fragment arrival
+
+---
+
+## HL-33: Ordered Message Delivery (Sequence Gate)
+> User sends DATA messages with sequence_num > 0 (ORDERED channel); System buffers any
+> out-of-order arrivals in a bounded hold array and delivers them to the application
+> strictly in sequence order. Control messages and sequence_num == 0 (UNORDERED) bypass
+> the gate immediately.
+
+- UC_71 — OrderingBuffer::ingest() + try_release_next(): in-order messages delivered immediately; out-of-order messages held; gap-filling arrivals release the backlog
+- UC_74 — OrderingBuffer::sweep_expired_holds(): proactively evict expired held messages on every data-receive call to prevent permanent ordering stall on a lost gap (System Internal)
+
+---
+
+## HL-34: Peer Reconnect and Ordering State Reset
+> When a TCP or TLS peer reconnects (a HELLO frame arrives on an already-registered
+> channel), System clears the stale per-peer sequence state in the ordering gate before
+> the next message is delivered, so the new connection's messages (starting at seq=1)
+> are not stalled or discarded due to the prior session's next_expected_seq value.
+
+- UC_72 — drain_hello_reconnects() / reset_peer_ordering() / OrderingBuffer::reset_peer(): ordering state and hold buffer cleared on peer reconnect (REQ-3.3.6)
+
+---
+
+## HL-35: Stale Reassembly Slot Reclamation
+> System periodically reclaims ReassemblyBuffer slots that have been open longer than
+> recv_timeout_ms without completing, preventing slot exhaustion from peers that crash
+> after sending only the first fragment of a large message.
+
+- UC_73 — ReassemblyBuffer::sweep_stale(): frees slots open longer than stale_threshold_us; called from DeliveryEngine::sweep_ack_timeouts() (REQ-3.2.9)
+
+---
+
 ## Application Workflow (above system boundary)
 
 These use cases document patterns that combine multiple system calls and sit at
@@ -295,3 +336,11 @@ at the User → System boundary.
 - UC_66 — TCP server routes unicast frame to matched client slot — `flush_delayed_to_clients()` / `find_client_slot()` / `send_to_slot()` called internally by `TcpBackend::send_message()`; never by the user
 - UC_67 — TLS server routes unicast frame to matched TLS session — `flush_delayed_to_clients()` / `find_client_slot()` / `tls_send_frame()` called internally by `TlsTcpBackend::send_message()`; never by the user
 - UC_68 — Unicast send to unregistered NodeId — `find_client_slot()` returns `MAX_TCP_CONNECTIONS`; WARNING_HI logged; `ERR_INVALID` returned to caller
+- UC_69 — Large message fragmentation — `DeliveryEngine::send_fragments()` + `fragment_message()` called internally by `send()` when payload > FRAG_MAX_PAYLOAD_BYTES; never invoked directly by the user
+- UC_70 — Message reassembly — `ReassemblyBuffer::ingest()` called internally by `handle_fragment_ingest()` on every wire frame received; returns ERR_AGAIN until all fragments arrive
+- UC_71 — Ordered delivery gate — `OrderingBuffer::ingest()` + `try_release_next()` called internally by `handle_ordering_gate()` and `deliver_held_pending()`; never by the user
+- UC_72 — Peer reconnect ordering reset — `drain_hello_reconnects()` / `reset_peer_ordering()` / `OrderingBuffer::reset_peer()` called automatically at the top of `receive()`; never by the user
+- UC_73 — Stale reassembly slot reclamation — `ReassemblyBuffer::sweep_stale()` called internally from `sweep_ack_timeouts()`; never by the user
+- UC_74 — Ordering gap sweep — `OrderingBuffer::sweep_expired_holds()` called internally by `handle_ordering_gate()` on every data-receive call; never by the user
+- UC_75 — TlsSessionStore save/load — `try_save_client_session()` / `try_load_client_session()` / `zeroize()` called internally by `TlsTcpBackend`; the User owns and injects the store, but the save/load mechanism is System-internal
+- UC_76 — IPosixSyscalls / PosixSyscallsImpl — injectable POSIX syscall adapter used by `SocketUtils.cpp` for fault injection in tests; production code uses the singleton `PosixSyscallsImpl`; never called by the user
