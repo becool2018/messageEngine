@@ -361,6 +361,10 @@ Result DtlsUdpBackend::setup_cookie_if_server(const TlsConfig& tls_cfg)
             log_mbedtls_err("DtlsUdpBackend", "ssl_cookie_setup", ret);
             return Result::ERR_IO;
         }
+        // C-2 / REQ-3.2.11 / HAZ-018: mbedtls_ssl_cookie_check() uses
+        // mbedtls_ct_memcmp() internally for constant-time cookie comparison,
+        // satisfying the timing-safe equality requirement (CLAUDE.md §7d).
+        // No application-level ct wrapper is required here.
         mbedtls_ssl_conf_dtls_cookies(&m_ssl_conf,
                                       mbedtls_ssl_cookie_write,
                                       mbedtls_ssl_cookie_check,

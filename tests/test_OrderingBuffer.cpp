@@ -30,7 +30,7 @@
  *   - F-Prime style: assert() for test verification.
  */
 
-// Verifies: REQ-3.3.5, REQ-3.3.6
+// Verifies: REQ-3.3.5, REQ-3.3.6, REQ-3.2.11
 // Verification: M1 + M2 + M4
 
 #include <cstdio>

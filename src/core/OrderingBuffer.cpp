@@ -22,12 +22,13 @@
  *   - MISRA C++:2023: checked casts, no UB.
  *   - F-Prime style: explicit error codes.
  *
- * Implements: REQ-3.3.5, REQ-3.3.6
+ * Implements: REQ-3.3.5, REQ-3.3.6, REQ-3.2.11
  */
-// Implements: REQ-3.3.5, REQ-3.3.6
+// Implements: REQ-3.3.5, REQ-3.3.6, REQ-3.2.11
 
 #include "OrderingBuffer.hpp"
 #include "Assert.hpp"
+#include "ConstantTime.hpp"
 #include "Logger.hpp"
 #include "Timestamp.hpp"
 
@@ -89,8 +90,9 @@ uint32_t OrderingBuffer::find_peer(NodeId src) const
     NEVER_COMPILED_OUT_ASSERT(src != 0U);        // Assert: valid source
 
     // Power of 10 Rule 2: bounded loop
+    // REQ-3.2.11 / HAZ-018: use constant-time source_id comparison on peer lookup.
     for (uint32_t i = 0U; i < ORDERING_PEER_COUNT; ++i) {
-        if (m_peers[i].active && m_peers[i].src == src) {
+        if (m_peers[i].active && ct_node_id_equal(m_peers[i].src, src)) {
             return i;
         }
     }
@@ -108,8 +110,9 @@ uint32_t OrderingBuffer::count_holds_for_peer(NodeId src) const
 
     uint32_t count = 0U;
     // Power of 10 Rule 2: bounded loop
+    // REQ-3.2.11 / HAZ-018: constant-time source_id comparison on hold-slot scan.
     for (uint32_t i = 0U; i < ORDERING_HOLD_COUNT; ++i) {
-        if (m_hold[i].active && m_hold[i].env.source_id == src) {
+        if (m_hold[i].active && ct_node_id_equal(m_hold[i].env.source_id, src)) {
             ++count;
         }
     }
@@ -231,9 +234,11 @@ uint32_t OrderingBuffer::find_held(NodeId src, uint32_t seq) const
     NEVER_COMPILED_OUT_ASSERT(src != 0U);        // Assert: valid source
 
     // Power of 10 Rule 2: bounded loop
+    // REQ-3.2.11 / HAZ-018: constant-time source_id comparison; sequence_num
+    // is a positional counter, not a security-sensitive identifier.
     for (uint32_t i = 0U; i < ORDERING_HOLD_COUNT; ++i) {
         if (m_hold[i].active &&
-            m_hold[i].env.source_id == src &&
+            ct_node_id_equal(m_hold[i].env.source_id, src) &&
             m_hold[i].env.sequence_num == seq) {
             return i;
         }

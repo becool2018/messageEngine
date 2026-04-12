@@ -25,7 +25,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 ptr indirection.
  *   - F-Prime style: simple state machine (FREE/PENDING/ACKED), deterministic behavior.
  *
- * Implements: REQ-3.2.4, REQ-3.3.2, REQ-7.2.3
+ * Implements: REQ-3.2.4, REQ-3.3.2, REQ-7.2.3, REQ-3.2.11
  */
 
 #ifndef CORE_ACK_TRACKER_HPP

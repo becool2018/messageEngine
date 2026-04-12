@@ -28,7 +28,7 @@
  *     replay-after-flooding attacks (attacker floods 128 unique pairs to rotate the
  *     dedup window and re-enable a previously-recorded entry).
  *
- * Implements: REQ-3.2.6, REQ-3.3.3
+ * Implements: REQ-3.2.6, REQ-3.3.3, REQ-3.2.11
  */
 
 #ifndef CORE_DUPLICATE_FILTER_HPP

@@ -24,11 +24,12 @@
  *   - MISRA C++: no dynamic allocation, no exceptions.
  *   - F-Prime style: simple state machine (FREE/PENDING/ACKED), deterministic behavior.
  *
- * Implements: REQ-3.2.4, REQ-3.3.2, REQ-7.2.3
+ * Implements: REQ-3.2.4, REQ-3.3.2, REQ-7.2.3, REQ-3.2.11
  */
 
 #include "AckTracker.hpp"
 #include "Assert.hpp"
+#include "ConstantTime.hpp"
 #include "Logger.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,9 +106,11 @@ Result AckTracker::on_ack(NodeId src, uint64_t msg_id)
     // Find matching PENDING entry
     // Power of 10 rule 3: loop bound is provable constant
     for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        // REQ-3.2.11 / HAZ-018: use constant-time (source_id, message_id) comparison
+        // to prevent timing-oracle attacks on the ACK lookup path (CWE-208).
         if ((m_slots[i].state == EntryState::PENDING) &&
-            (m_slots[i].env.source_id == src) &&
-            (m_slots[i].env.message_id == msg_id)) {
+            ct_id_pair_equal(m_slots[i].env.source_id, src,
+                             m_slots[i].env.message_id, msg_id)) {
             // Found the matching entry; mark as ACKED
             m_slots[i].state = EntryState::ACKED;
             ++m_stats.acks_received;  // REQ-7.2.3: record PENDING→ACKED transition
@@ -139,9 +142,10 @@ Result AckTracker::cancel(NodeId src, uint64_t msg_id)
 
     // Power of 10 rule 2: bounded search (fixed loop, ACK_TRACKER_CAPACITY)
     for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        // REQ-3.2.11 / HAZ-018: constant-time (source_id, message_id) comparison.
         if ((m_slots[i].state == EntryState::PENDING) &&
-            (m_slots[i].env.source_id == src) &&
-            (m_slots[i].env.message_id == msg_id)) {
+            ct_id_pair_equal(m_slots[i].env.source_id, src,
+                             m_slots[i].env.message_id, msg_id)) {
             // Release slot directly to FREE; do NOT increment acks_received.
             // This is a rollback path: the message was never put on the wire,
             // so no phantom ACK stat should be recorded.
@@ -252,9 +256,10 @@ Result AckTracker::get_send_timestamp(NodeId src, uint64_t msg_id, uint64_t& out
 
     // Power of 10 rule 2: bounded search
     for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        // REQ-3.2.11 / HAZ-018: constant-time (source_id, message_id) comparison.
         if ((m_slots[i].state == EntryState::PENDING) &&
-            (m_slots[i].env.source_id == src) &&
-            (m_slots[i].env.message_id == msg_id)) {
+            ct_id_pair_equal(m_slots[i].env.source_id, src,
+                             m_slots[i].env.message_id, msg_id)) {
             out_ts = m_slots[i].env.timestamp_us;
             NEVER_COMPILED_OUT_ASSERT(out_ts > 0ULL);  // Assert: send timestamp recorded
             return Result::OK;
@@ -278,9 +283,10 @@ Result AckTracker::get_tracked_destination(NodeId our_id, uint64_t msg_id, NodeI
 
     // Power of 10 rule 2: bounded search
     for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        // REQ-3.2.11 / HAZ-018: constant-time (source_id, message_id) comparison.
         if ((m_slots[i].state == EntryState::PENDING) &&
-            (m_slots[i].env.source_id == our_id) &&
-            (m_slots[i].env.message_id == msg_id)) {
+            ct_id_pair_equal(m_slots[i].env.source_id, our_id,
+                             m_slots[i].env.message_id, msg_id)) {
             out_dst = m_slots[i].env.destination_id;
             NEVER_COMPILED_OUT_ASSERT(out_dst != NODE_ID_INVALID);  // Assert: valid destination
             return Result::OK;

@@ -27,11 +27,12 @@
  *     prevent replay-after-flooding (attacker floods 128 unique pairs to rotate the
  *     dedup window and re-enable a previously-recorded entry).
  *
- * Implements: REQ-3.2.6, REQ-3.3.3
+ * Implements: REQ-3.2.6, REQ-3.3.3, REQ-3.2.11
  */
 
 #include "DuplicateFilter.hpp"
 #include "Assert.hpp"
+#include "ConstantTime.hpp"
 
 // M-2: Guard the modulo wrap against a zero divisor — porting error / macro redefinition.
 static_assert(DEDUP_WINDOW_SIZE > 0U, "DEDUP_WINDOW_SIZE must be nonzero");
@@ -64,21 +65,30 @@ void DuplicateFilter::init()
 
 bool DuplicateFilter::is_duplicate(NodeId src, uint64_t msg_id) const
 {
+    // REQ-3.2.11 / HAZ-018: the loop MUST NOT early-exit on match.
+    // Early return on the first matching entry leaks the slot index via
+    // execution time (timing oracle, CWE-208).  Accumulate 'found' without
+    // branching on it; return after the full scan.
+    // ct_id_pair_equal() uses a volatile XOR accumulator so neither the
+    // source_id nor the message_id comparison can short-circuit (CLAUDE.md §7d).
+
     // Power of 10 rule 2: simple linear search over fixed bound
     // Power of 10 rule 3: loop bound is DEDUP_WINDOW_SIZE (static constant)
+    bool found = false;
     for (uint32_t i = 0U; i < DEDUP_WINDOW_SIZE; ++i) {
         // Power of 10 rule 5: assertion on loop invariant
         NEVER_COMPILED_OUT_ASSERT(i < DEDUP_WINDOW_SIZE);  // Assert: index in bounds
 
-        if (m_window[i].valid && m_window[i].src == src && m_window[i].msg_id == msg_id) {
-            return true;  // Found a matching entry
+        if (m_window[i].valid && ct_id_pair_equal(m_window[i].src, src,
+                                                  m_window[i].msg_id, msg_id)) {
+            found = true;  // REQ-3.2.11: accumulate; do NOT return here
         }
     }
 
     // Power of 10 rule 5: not found assertion
     NEVER_COMPILED_OUT_ASSERT(m_count <= DEDUP_WINDOW_SIZE);  // Assert: count is consistent with capacity
 
-    return false;
+    return found;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
