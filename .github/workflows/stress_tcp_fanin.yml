@@ -1,0 +1,64 @@
+name: Stress Tests — TCP Multi-Client Fan-In
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Manual-only workflow for the TCP multi-client fan-in stress test (Session 4).
+#
+# This workflow is intentionally NOT triggered by push or pull_request.
+# Run it manually from the GitHub Actions tab before any merge that touches:
+#   • TcpBackend connection management         (src/platform/TcpBackend.*)
+#   • Server-side HELLO registration           (REQ-6.1.8)
+#   • Server-side unicast routing              (REQ-6.1.9)
+#   • Source-ID validation / slot management   (REQ-6.1.11)
+#   • MAX_TCP_CONNECTIONS                      (src/core/Types.hpp)
+#
+# What the test exercises each round:
+#   • TCP_STRESS_CLIENTS (4) clients connect concurrently to one server.
+#   • Each client sends a HELLO (REQ-6.1.8), then 10 DATA messages.
+#   • Server receives all 40 DATA messages (fan-in).
+#   • Server echoes each DATA back to the originating client via unicast
+#     routing (REQ-6.1.9): destination_id = received source_id.
+#   • Each client verifies its echoes (message_id identity + source routing).
+#
+# Multiple instances are safe to run simultaneously: every round allocates
+# its own OS-assigned ephemeral port (alloc_ephemeral_port from
+# TestPortAllocator.hpp) so instances never share a port.
+#
+# Usage:
+#   GitHub Actions tab → "Stress Tests — TCP Multi-Client Fan-In" → Run workflow
+#   Local:  make run_stress_tcp_fanin
+#           make run_stress_tcp_fanin STRESS_DURATION=300   # 5-minute soak
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:   # manual trigger only — no push or pull_request triggers
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  stress_tcp_fanin:
+    name: Stress Tests — TCP multi-client fan-in
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libmbedtls-dev
+
+      - name: Build TCP fan-in stress test
+        run: make build/test_stress_tcp_fanin
+
+      - name: Run TCP fan-in stress test — multi-client fan-in + unicast routing
+        # Suppress INFO-level logger output so only PASS/FAIL lines are visible.
+        # Failures abort via non-zero exit from assert().
+        run: build/test_stress_tcp_fanin 2>/dev/null

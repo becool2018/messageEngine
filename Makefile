@@ -286,7 +286,7 @@ libdir     ?= $(prefix)/lib
 
 .PHONY: all clean install install-dev libs static_lib shared_lib package \
         tests stress_tests run_stress_tests run_tests server client \
-        run_stress_reconnect run_stress_ringbuffer \
+        run_stress_reconnect run_stress_ringbuffer run_stress_tcp_fanin \
         tls_demo dtls_demo demos \
         check_traceability \
         lint cppcheck cppcheck-misra pclint scan_build static_analysis \
@@ -322,7 +322,8 @@ help:
 	@echo "  run_stress_e2e       Run E2E suite only            (STRESS_DURATION=60)"
 	@echo "  run_stress_ordering  Run ordering suite only       (STRESS_DURATION=60)"
 	@echo "  run_stress_reconnect  Run reconnect suite only      (STRESS_DURATION=60)"
-	@echo "  run_stress_ringbuffer Run RingBuffer concurrent storm (STRESS_DURATION=60)"
+	@echo "  run_stress_ringbuffer  Run RingBuffer concurrent storm  (STRESS_DURATION=60)"
+	@echo "  run_stress_tcp_fanin   Run TCP multi-client fan-in     (STRESS_DURATION=60)"
 	@echo "  sanitize_tests      Build test suite with ASan + UBSan"
 	@echo "  run_sanitize        Build and run ASan + UBSan test suite"
 	@echo ""
@@ -410,7 +411,8 @@ build/test_%: $(ALL_LIB_OBJS) build/objs/tests/test_%.o
 #   make run_stress_e2e                    — E2E suite only       (default 60 s)
 #   make run_stress_ordering               — ordering suite only  (default 60 s)
 #   make run_stress_reconnect              — reconnect suite only  (default 60 s; manual-trigger only in CI)
-#   make run_stress_ringbuffer             — RingBuffer concurrent (default 60 s; manual-trigger only in CI)
+#   make run_stress_ringbuffer             — RingBuffer concurrent  (default 60 s; manual-trigger only in CI)
+#   make run_stress_tcp_fanin              — TCP multi-client fan-in (default 60 s; manual-trigger only in CI)
 #   make run_stress_capacity STRESS_DURATION=120  — run for 120 s instead
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -437,6 +439,11 @@ run_stress_ordering: build/test_stress_ordering
 	@echo "=== Stress: ordering ($(STRESS_DURATION) s) ==="
 	@build/test_stress_ordering $(STRESS_DURATION) 2>/dev/null
 	@echo "=== run_stress_ordering: PASSED ==="
+
+run_stress_tcp_fanin: build/test_stress_tcp_fanin
+	@echo "=== Stress: TCP fan-in ($(STRESS_DURATION) s) ==="
+	@build/test_stress_tcp_fanin $(STRESS_DURATION) 2>/dev/null
+	@echo "=== run_stress_tcp_fanin: PASSED ==="
 
 run_stress_ringbuffer: build/test_stress_ringbuffer
 	@echo "=== Stress: RingBuffer concurrent ($(STRESS_DURATION) s) ==="
