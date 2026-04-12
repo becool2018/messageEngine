@@ -36,9 +36,16 @@
  *   client.close();                   // store.session_valid remains true
  *   TlsTcpBackend client2;
  *   client2.set_session_store(&store); // same store — session_valid==true
- *   client2.init(cfg);                 // try_load_client_session() reachable now
+ *   client2.init(cfg);                 // try_load reachable now
  *   ...
  *   store.zeroize();                   // caller's responsibility (CLAUDE.md §7c)
+ *
+ * Thread safety (REQ-6.3.10 / HAZ-021 / CWE-362):
+ *   All accesses to the mbedtls_ssl_session struct (m_session) are serialised
+ *   by an internal POSIX mutex.  zeroize(), try_save(), and try_load() each
+ *   lock the mutex for their entire duration.  The std::atomic<bool>
+ *   session_valid flag is also re-checked under the lock in try_load() to
+ *   close the TOCTOU window between has_resumable_session() and try_load().
  *
  * Security contract (SECURITY_ASSUMPTIONS.md §13):
  *   The caller MUST call store.zeroize() when the session material is no longer
@@ -49,17 +56,20 @@
  * Power of 10 Rule 3: no heap allocation — mbedtls_ssl_session is embedded
  * directly in the struct as a fixed-size value member.
  *
- * Implements: REQ-6.3.4
- * Safety-critical (SC): HAZ-012, HAZ-017 (zeroize() method)
+ * Implements: REQ-6.3.4, REQ-6.3.10
+ * Safety-critical (SC): HAZ-012, HAZ-017, HAZ-021 (zeroize, try_save, try_load)
  * NSC: construction, valid flag read, set_session_store()
  */
-// Implements: REQ-6.3.4
+// Implements: REQ-6.3.4, REQ-6.3.10
 
 #ifndef PLATFORM_TLS_SESSION_STORE_HPP
 #define PLATFORM_TLS_SESSION_STORE_HPP
 
 #include <atomic>          // std::atomic<bool> — CLAUDE.md §1d carve-out
 #include <mbedtls/ssl.h>
+#include <pthread.h>       // POSIX mutex — REQ-6.3.10 (HAZ-021, CWE-362)
+
+#include "platform/IMbedtlsOps.hpp"  // try_save / try_load parameter type
 
 /**
  * @struct TlsSessionStore
@@ -69,49 +79,65 @@
  * pointers and must not be bitwise-copied (mbedTLS API constraint).
  *
  * Lifecycle:
- *   1. Default-construct: session zeroed, session_valid = false.
- *   2. TlsTcpBackend::try_save_client_session() writes session data and
- *      sets session_valid = true on success.
- *   3. TlsTcpBackend::try_load_client_session() reads session_valid and
- *      calls mbedtls_ssl_set_session() on the next init().
+ *   1. Default-construct: session zeroed, session_valid = false, mutex init.
+ *   2. try_save() — locks mutex, zeroizes, calls ssl_get_session, sets
+ *      session_valid = true on success (REQ-6.3.10).
+ *   3. try_load() — locks mutex, re-checks session_valid, calls
+ *      ssl_set_session if valid; returns bool (REQ-6.3.10).
  *   4. Caller calls zeroize() when the session is no longer needed.
- *   5. Destructor calls zeroize() as a safety net.
+ *   5. Destructor calls zeroize() as a safety net, then destroys the mutex.
  */
 struct TlsSessionStore {
-    /// Embedded TLS session — fixed size, no heap (Power of 10 Rule 3).
-    mbedtls_ssl_session session;
-
-    /// True when session contains usable, unspoiled TLS session material.
-    /// Set by try_save_client_session() on success; cleared by zeroize().
+    /// True when the store contains usable, unspoiled TLS session material.
+    /// Set by try_save() on success; cleared by zeroize() (under mutex).
     /// §7b: initialized at declaration via constructor.
     ///
     /// std::atomic<bool> — CLAUDE.md §1d carve-out (F-6):
-    /// Concurrent store.zeroize() (app thread) and try_load_client_session()
-    /// (backend thread) would be a data race on a plain bool (CWE-362).
-    /// Using std::atomic<bool> eliminates the race without requiring a mutex.
-    /// Callers must still avoid concurrent zeroize() + backend I/O at the
-    /// higher level (session data is not atomically swapped); atomic<bool>
-    /// guards the flag only.  Thread-safety contract: the caller must not
-    /// call zeroize() concurrently with any backend operation that
-    /// dereferences m_session_store_ptr.
+    /// Allows lock-free fast-path flag reads (has_resumable_session()) while
+    /// the session struct itself is protected by m_mutex.
+    /// The TOCTOU window between flag check and struct access is closed inside
+    /// try_load() by re-checking session_valid under the mutex lock.
     std::atomic<bool> session_valid;
 
-    /// Default constructor: zero-inits session struct, sets session_valid=false.
+    /// Default constructor: zero-inits session struct, inits mutex,
+    /// sets session_valid=false.
     TlsSessionStore();
 
-    /// Destructor: calls zeroize() to clear session material (§7c safety net).
+    /// Destructor: calls zeroize() to clear session material (§7c safety net),
+    /// then destroys the POSIX mutex.
     ~TlsSessionStore();
 
-    /// Zeroize TLS session material and reset to invalid state.
+    /// Zeroize TLS session material and reset to invalid state (mutex-protected).
     ///
-    /// Calls mbedtls_ssl_session_free(), then mbedtls_platform_zeroize() on the
-    /// entire session struct, then mbedtls_ssl_session_init() to return it to a
-    /// clean state.  Uses mbedtls_platform_zeroize (not memset) to prevent
-    /// compiler elision of the zeroing (CWE-14, CLAUDE.md §7c).
+    /// Acquires m_mutex, calls the internal zeroize sequence (session_free,
+    /// platform_zeroize, session_init, session_valid=false), then releases the
+    /// mutex.  Uses mbedtls_platform_zeroize (not memset) to prevent compiler
+    /// elision of the zeroing (CWE-14, CLAUDE.md §7c).
     ///
-    /// Safety-critical (SC): HAZ-012, HAZ-017
-    /// Callers must invoke this method when session material is no longer needed.
+    /// Safety-critical (SC): HAZ-012, HAZ-017, HAZ-021
     void zeroize();
+
+    /// Save the current TLS session from @p ssl into this store (mutex-protected).
+    ///
+    /// Acquires m_mutex; zeroizes any prior session; calls ops.ssl_get_session();
+    /// sets session_valid=true on success.  Returns the ssl_get_session return
+    /// code (0 = saved; non-zero = failure, session_valid remains false).
+    ///
+    /// Safety-critical (SC): HAZ-017, HAZ-021 (REQ-6.3.10)
+    // Safety-critical (SC): HAZ-017, HAZ-021
+    int try_save(const mbedtls_ssl_context* ssl, IMbedtlsOps& ops);
+
+    /// Load the stored session into @p ssl before the TLS handshake (mutex-protected).
+    ///
+    /// Acquires m_mutex; re-checks session_valid (TOCTOU prevention); calls
+    /// ops.ssl_set_session() when valid.  Returns true if the session was
+    /// loaded successfully; false if the session was not valid under the lock
+    /// or if ssl_set_session failed.  Failure is non-fatal — the caller
+    /// proceeds with a full TLS handshake.
+    ///
+    /// Safety-critical (SC): HAZ-017, HAZ-021 (REQ-6.3.10)
+    // Safety-critical (SC): HAZ-017, HAZ-021
+    bool try_load(mbedtls_ssl_context* ssl, IMbedtlsOps& ops);
 
     // Non-copyable — mbedtls_ssl_session bitwise copy is forbidden by mbedTLS API.
     // Power of 10 Rule 9: no function pointer declarations; vtable not used here.
@@ -119,6 +145,22 @@ struct TlsSessionStore {
     TlsSessionStore& operator=(const TlsSessionStore&) = delete;
     TlsSessionStore(TlsSessionStore&&)                  = delete;
     TlsSessionStore& operator=(TlsSessionStore&&)       = delete;
+
+private:
+    /// Embedded TLS session — fixed size, no heap (Power of 10 Rule 3).
+    /// Protected by m_mutex; accessed only via try_save(), try_load(), and
+    /// the internal zeroize_unlocked() helper.
+    mbedtls_ssl_session m_session;
+
+    /// POSIX mutex protecting m_session against concurrent access (REQ-6.3.10,
+    /// HAZ-021, CWE-362).  Locked for the full duration of zeroize(),
+    /// try_save(), and try_load().
+    pthread_mutex_t m_mutex;
+
+    /// Internal zeroize without acquiring the mutex (called by zeroize(),
+    /// try_save(), and ~TlsSessionStore() while the caller holds the lock or
+    /// in single-threaded destruction context).
+    void zeroize_unlocked();
 };
 
 #endif // PLATFORM_TLS_SESSION_STORE_HPP

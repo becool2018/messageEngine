@@ -40,7 +40,7 @@
  *
  * Verifies: REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10,
  *           REQ-6.1.11, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9,
- *           REQ-5.1.6
+ *           REQ-6.3.10, REQ-5.1.6
  *           (also covers: HAZ-017 try_load_client_session True branch via
  *            test_tls_session_resumption_load_path)
  *           M5 fault-injection (VVP-001 §4.3 e-i) via TlsMockOps: covers all
@@ -6473,6 +6473,45 @@ static void test_j4_verify_peer_false_hostname_set_rejected()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// K-series: REQ-6.3.10 — TlsSessionStore POSIX mutex branch coverage
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Test K-1: try_load() returns false when session_valid=false under lock ────
+// Covers the False branch of `if (session_valid.load())` inside
+// TlsSessionStore::try_load() — the TOCTOU path where session_valid became
+// false between has_resumable_session() and try_load() executing.
+// Directly calls store.try_load() with session_valid=false to exercise
+// the branch without requiring a real concurrent race (REQ-6.3.10, HAZ-021).
+//
+// Verifies: REQ-6.3.10
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_k1_try_load_no_session_returns_false()
+{
+    // Verifies: REQ-6.3.10
+    TlsSessionStore store;
+    // session_valid is false by default after construction (no session saved).
+    assert(!store.session_valid.load());
+
+    // Prepare a minimal ssl context (not connected, not configured — but non-null
+    // to satisfy the NEVER_COMPILED_OUT_ASSERT(ssl != nullptr) in try_load()).
+    // try_load() will not call ssl_set_session (session_valid=false under lock)
+    // so the unconfigured context is never dereferenced.
+    mbedtls_ssl_context ssl_ctx;
+    mbedtls_ssl_init(&ssl_ctx);
+
+    // Use the production ops instance; ssl_set_session is never called because
+    // session_valid is false → False branch exercised (REQ-6.3.10 / HAZ-021).
+    IMbedtlsOps& ops = MbedtlsOpsImpl::instance();
+    const bool loaded = store.try_load(&ssl_ctx, ops);
+
+    assert(!loaded);                      // False: session not valid under lock
+    assert(!store.session_valid.load());  // invariant: still false after try_load
+
+    mbedtls_ssl_free(&ssl_ctx);
+    printf("PASS: test_k1_try_load_no_session_returns_false\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -6613,6 +6652,9 @@ int main()
     test_j2_require_crl_no_crl_file_rejected();
     test_j3_check_forward_secrecy_branches();
     test_j4_verify_peer_false_hostname_set_rejected();
+
+    // K-series: TlsSessionStore POSIX mutex branch coverage (PR 4 — REQ-6.3.10):
+    test_k1_try_load_no_session_returns_false();
 
     // Cleanup
     (void)remove(TEST_CERT_FILE);
