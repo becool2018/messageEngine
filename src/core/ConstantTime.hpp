@@ -55,7 +55,7 @@
 // Safety-critical (SC): HAZ-018 — source_id equality on security-sensitive paths.
 static inline bool ct_node_id_equal(NodeId a, NodeId b)
 {
-    NEVER_COMPILED_OUT_ASSERT(sizeof(NodeId) == sizeof(uint32_t));  // Assert: NodeId is 32 bits
+    NEVER_COMPILED_OUT_ASSERT(sizeof(NodeId) == 4U);  // Assert: NodeId is 32 bits (4 bytes)
     // volatile prevents the compiler from short-circuiting the XOR before the
     // zero-test (CWE-208 timing oracle mitigation; CLAUDE.md §7d).
     volatile uint32_t diff = static_cast<uint32_t>(a) ^ static_cast<uint32_t>(b);
@@ -77,7 +77,7 @@ static inline bool ct_node_id_equal(NodeId a, NodeId b)
 static inline bool ct_id_pair_equal(NodeId src_a, NodeId src_b,
                                     uint64_t id_a, uint64_t id_b)
 {
-    NEVER_COMPILED_OUT_ASSERT(sizeof(NodeId) == sizeof(uint32_t));  // Assert: NodeId is 32 bits
+    NEVER_COMPILED_OUT_ASSERT(sizeof(NodeId) == 4U);  // Assert: NodeId is 32 bits (4 bytes)
     // Both fields are XORed and ORed into a single volatile accumulator so
     // the compiler cannot skip either comparison even when src already differs.
     volatile uint32_t src_diff = static_cast<uint32_t>(src_a) ^ static_cast<uint32_t>(src_b);
