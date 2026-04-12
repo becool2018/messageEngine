@@ -46,6 +46,19 @@ jobs:
         run: |
           make run_tests
 
+      - name: Verify ALLOW_WEAK_PRNG_SEED blocked in release builds (H-6, REQ-5.2.6)
+        run: |
+          # Confirm that compiling DeliveryEngine with both ALLOW_WEAK_PRNG_SEED and
+          # NDEBUG triggers the compile-time #error guard (REQ-5.2.6, H-6, HAZ-022).
+          # If the build succeeds the guard is broken — fail CI immediately.
+          if make EXTRA_CXXFLAGS="-DALLOW_WEAK_PRNG_SEED -DNDEBUG" \
+               build/objs/core/DeliveryEngine.o 2>/dev/null; then
+            echo "ERROR: ALLOW_WEAK_PRNG_SEED+NDEBUG compiled without error" \
+                 "— REQ-5.2.6 compile-time guard is broken" >&2
+            exit 1
+          fi
+          echo "ALLOW_WEAK_PRNG_SEED+NDEBUG guard PASS: compile-time #error fires as expected"
+
       - name: Build + run sanitizer tests (ASan + UBSan)
         run: |
           make run_sanitize

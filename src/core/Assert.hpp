@@ -83,6 +83,15 @@
                 std::memory_order_release);                                        \
             (void)assert_state::g_fatal_count.fetch_add(1U,                       \
                 std::memory_order_relaxed);                                        \
+            /* M-8: spin to prevent fall-through past a violated assertion. */    \
+            /* Terminates only via external watchdog or hardware reset.      */    \
+            /* Power of 10 Rule 2 deviation: intentional safety spin;        */    \
+            /* per-iteration work O(1); governed by hardware watchdog.       */    \
+            /* NDEBUG-only path — not instrumented by coverage (test builds  */    \
+            /* use the debug macro which calls ::abort() instead).           */    \
+            /* NOLINTNEXTLINE(cppcoreguidelines-avoid-do-while,altera-id-dependent-backward-branch) */ \
+            while (assert_state::g_fatal_fired.load(                              \
+                       std::memory_order_acquire)) { /* safety spin */ }          \
         }                                                                          \
     } while (false)
 #else
