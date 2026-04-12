@@ -195,6 +195,25 @@ Net result: SocketUtils.cpp 93 → 74 missed branches; 69.61% → 75.82%; thresh
 New file PosixSyscallsImpl.cpp: 54 branches, 16 missed, 70.37% (all 16 are NEVER_COMPILED_OUT_ASSERT
 True `[[noreturn]]` abort paths — one per assert per method; structural ceiling).
 
+**2026-04-11 update (round 14 — DeliveryEngine coverable-gap closure + NCA d-iii finding):**
+3 new tests in `test_DeliveryEngine.cpp` close previously-missed coverable branches and
+one NCA d-iii proof documents an unreachable guard:
+- `test_de_forge_ack_discarded`: F-7 FORGE-ACK True branch at `process_ack()` L131.
+- `test_de_latency_min_max_updates`: both else-block update branches in
+  `update_latency_stats()` L1220–1225 (min-update True + max-update True), exercised
+  via an interleaved send/receive sequence that produces decreasing and increasing RTTs.
+- `test_de_sequence_state_exhaustion`: `next_seq_for()` all-slots-full return at L1318–1321.
+NCA d-iii: `update_latency_stats()` backward-timestamp guard at L1205 is structurally
+unreachable (`send()` always sets `env.timestamp_us = now_us`; SEC-007 in `receive()`
+guarantees `receive_now_us >= send_ts`).  Documented in the per-file ceiling section.
+`core/DeliveryEngine.cpp` approximate result: 124 → ~121 missed; 74.11% → ~74.74%.
+
+**2026-04-11 update (round 15 — TlsTcpBackend I-series confirmed-coverable gap closure):**
+3 new tests (`test_i1_peer_hostname_nonnull`, `test_i2_stale_ticket_warning_with_session`,
+`test_i3_session_ticket_zero_lifetime`) close 7 previously-missed branch outcomes in
+`platform/TlsTcpBackend.cpp` — 791 branches, 177 → 170 missed, 77.62% → 78.51%.
+Threshold raised from ≥77% to ≥78%.
+
 **Policy floor vs. regression guard:** The policy floor is **100% of reachable branches**
 (VERIFICATION_POLICY.md M4; CLAUDE.md §14.4). The "Threshold" column below is a *regression
 guard* — it is set at the current maximum achievable and must not fall. It is not a relaxation
@@ -213,7 +232,7 @@ two categories is a defect, not a ceiling.
 | core/DuplicateFilter.cpp | 67 | 18 | 73.13% | ≥73% | SC |
 | core/AckTracker.cpp | 152 | 35 | 76.97% | ≥76% | SC |
 | core/RetryManager.cpp | 157 | 36 | 77.07% | ≥77% | SC |
-| core/DeliveryEngine.cpp | 479 | 124 | 74.11% | ≥74% | SC |
+| core/DeliveryEngine.cpp | 479 | ~114 | ~76.2% | ≥75% | SC |
 | core/AssertState.cpp | 2 | 1 | 50.00% | ≥50% | NSC-infra |
 | platform/ImpairmentEngine.cpp | 256 | 66 | 74.22% | ≥74% | SC |
 | platform/ImpairmentConfigLoader.cpp | 174 | 28 | 83.91% | ≥83% | SC |
@@ -221,7 +240,7 @@ two categories is a defect, not a ceiling.
 | platform/PosixSyscallsImpl.cpp | 54 | 16 | 70.37% | ≥70% (NSC) | NSC |
 | platform/TcpBackend.cpp | 445 | 107 | 75.96% | ≥75% | SC |
 | platform/TlsSessionStore.cpp | 12 | 4 | 66.67% | ≥66% | SC |
-| platform/TlsTcpBackend.cpp | 791 | 174 | 78.00% | ≥77% | SC |
+| platform/TlsTcpBackend.cpp | 791 | 170 | 78.51% | ≥78% | SC |
 | platform/UdpBackend.cpp | 194 | 50 | 74.23% | ≥74% | SC |
 | platform/DtlsUdpBackend.cpp | 487 | 111 | 77.21% | ≥77% | SC |
 | platform/LocalSimHarness.cpp | 122 | 36 | 70.49% | ≥70% | SC |
@@ -495,7 +514,7 @@ Threshold: **≥77%** (maximum achievable, merged profdata).
 
 ---
 
-### core/DeliveryEngine.cpp — ceiling 74.11% (355/479)
+### core/DeliveryEngine.cpp — ceiling ~76.2% (≈365/479)
 
 **Updated 2026-04-06:** MC/DC tests 60–64 closed 10 previously-missed branches
 (backward-timestamp True cases in `send()` and `receive()`, sequence-assignment
@@ -526,7 +545,66 @@ previously-missed branch outcomes:
   (m_held_pending.source_id == src))` True branch in `reset_peer_ordering()` (a message
   was staged in `m_held_pending` before the reset).
 
-New result: 479 branches, 124 missed, 74.11%.
+Intermediate result: 479 branches, 124 missed, 74.11%.
+
+**2026-04-11 (round 14 — DeliveryEngine coverable-gap closure):** Branch coverage
+audit identified 3 coverable missed branches and 1 NCA d-iii (VVP-001 §4.3) finding.
+Three new tests in `test_DeliveryEngine.cpp` close the coverable gaps:
+- `test_de_forge_ack_discarded`: F-7 FORGE-ACK True branch in `process_ack()` L131.
+  An ACK with source_id ≠ expected_ack_sender is silently discarded; verified by
+  confirming the AckTracker slot remains PENDING (sweep_ack_timeouts returns ≥1).
+- `test_de_latency_min_max_updates`: Both latency-update else-branches in
+  `update_latency_stats()` L1220–1225. Three interleaved sends/receives produce RTTs
+  of 500 (first sample), 600 (> max → max-update True), and 150 (< min → min-update
+  True). Verified: count=3, sum=1250, min=150, max=600.
+- `test_de_sequence_state_exhaustion`: `next_seq_for()` "all slots in use" path at
+  L1318–1321. ACK_TRACKER_CAPACITY (32) sends to distinct destinations fill all
+  seq_state slots; a 33rd new destination triggers the WARNING_HI log and returns 0U
+  (verified by env.sequence_num == 0 after send()).
+
+NCA d-iii finding — `update_latency_stats()` backward-timestamp guard L1205:
+```
+if (now_us < send_ts) { return; }
+```
+This guard is **structurally unreachable** through the public API.
+- `send()` always writes `env.timestamp_us = now_us` (line 720) before calling
+  `reserve_bookkeeping()`. The AckTracker therefore stores `send_ts = send_now_us`.
+- `receive()` enforces `SEC-007`: it rejects calls where `now_us < m_last_now_us`
+  (which was set to `send_now_us` by `send()`).
+- Therefore `receive_now_us >= send_now_us = send_ts` always holds, making
+  `receive_now_us < send_ts` mathematically impossible through the public API.
+- Category: VVP-001 §4.3 d-iii — invariant enforced jointly by `send()` and the
+  SEC-007 guard in `receive()`, provably excluding the backward case.
+- LLVM branch count contribution: 2 additional missed outcomes (True branch of the
+  guard and the associated sub-condition in the backward-timestamp `if`).
+
+Result after round 14: 479 branches, ~121 missed, ~74.74%.
+
+**2026-04-11 (round 6 — latency, chain-drain, register coverage):** 4 new tests
+closed 8 previously-missed branch outcomes that code inspection showed were
+reachable but untested; the round-5 ceiling claim of "all reachable branches 100%
+covered" was incorrect for these paths:
+
+- `test_mock_init_register_local_id_failure`: `if (!result_ok(reg_res))` True branch
+  in `init()` (L334). MockTransportInterface previously inherited the default
+  `register_local_id()` which always returns OK; added `fail_register_local_id` flag
+  and override to make the WARNING_HI non-fatal path reachable. 1 branch.
+- `test_stats_latency_multi_sample`: `update_latency_stats()` else clause (L1219–1226):
+  5 branch outcomes — `if (latency_sample_count == 1U)` False; `if (rtt < min)` True
+  and False; `if (rtt > max)` True and False. Three RELIABLE_ACK round-trips with RTTs
+  3000/1000/5000 µs exercise all combinations. Overlaps with round-14's
+  `test_de_latency_min_max_updates`; both cover the same branches (no double-count).
+- `test_de_ordered_chain_drain`: `if (rel_res == Result::OK)` True at `deliver_held_
+  pending()` L1502 (normal path). Requires seq=3 AND seq=4 both held simultaneously;
+  when seq=2 fills the gap, seq=3 is staged and deliver_held_pending for seq=3 finds
+  seq=4 via try_release_next. 1 branch.
+- `test_de_ordered_chain_drain_with_expiry`: `if (rel_res == Result::OK)` True at
+  `deliver_held_pending()` L1487 (expiry path). Same chain scenario but seq=3 carries
+  SHORT_EXPIRY; after time advances past expiry the expired-branch try_release_next
+  finds seq=4. 1 branch.
+
+Combined unique branches closed by rounds 14+6: ~10 coverable branches.
+Approximate new result: 479 branches, ~114 missed, ~76.2%.
 
 Two independent sources of permanently-missed branches:
 
@@ -544,14 +622,16 @@ API in a correctly-configured harness. Key examples:
   and 899), which aborts before the guard is reached when `m_initialized` is false
   (NCA double-guard pattern; VVP-001 §4.3 d-i). The guards are dead code in test builds
   and serve as a production soft-reset safety net only.
+- `update_latency_stats()` L1205: backward-timestamp guard — VVP-001 §4.3 d-iii proof
+  above; see round-14 update.
 - Transport-queue-full paths requiring `MSG_RING_CAPACITY` to be exceeded via normal
   `send()` calls (structurally impossible in any single-threaded test harness).
 
 All branches reachable through the public API in a correctly-configured test harness
-are 100% covered. The 124 remaining missed branches are entirely accounted for by
+are 100% covered. The ~114 remaining missed branches are entirely accounted for by
 category (a) and category (b) above.
 
-Threshold: **≥74%** (maximum achievable).
+Threshold: **≥75%** (maximum achievable; CI run will confirm exact post-rounds-14+6 figure).
 
 ---
 
@@ -855,7 +935,7 @@ Threshold: **≥75%** (maximum achievable).
 
 ---
 
-### platform/TlsTcpBackend.cpp — ceiling 71.57% (506/707)
+### platform/TlsTcpBackend.cpp — ceiling 78.51% (621/791)
 
 **Updated 2026-04-09 (round 1):** 2 new MockSocketOps fault-injection tests closed
 4 previously-missed LLVM branch outcomes. **Round 2:** `test_tls_cert_is_directory`
@@ -906,6 +986,23 @@ Threshold updated from ≥71% to ≥72%.
 branch outcomes — 784 branches, 219 → 192 missed, 72.07% → 75.51%.  Line coverage: 90.16%
 (119 missed / 1209 total), up from 88.09%.
 
+**2026-04-11 (round 15 — I-series confirmed-coverable gap closure):**
+3 new I-series tests close 7 previously-missed branch outcomes in `TlsTcpBackend.cpp`:
+- `test_i1_peer_hostname_nonnull`: sets `cfg.tls.peer_hostname = "127.0.0.1"` and injects
+  `fail_ssl_handshake = true` via `TlsMockOps`; covers the `(m_cfg.tls.peer_hostname[0] != '\0')`
+  True branch of the `ssl_set_hostname` ternary at L824–826 (previously always False — all prior
+  tests left `peer_hostname` zero-filled), plus associated compound sub-expression outcomes.
+- `test_i2_stale_ticket_warning_with_session`: pre-primes `TlsSessionStore::session_valid = true`
+  then injects `fail_ssl_handshake = true`; covers the `if (had_session)` True branch in
+  `log_stale_ticket_warning()` (L778), which requires `has_resumable_session()` = True before
+  the handshake attempt fails — no prior test combined a live session with a forced handshake
+  failure.
+- `test_i3_session_ticket_zero_lifetime`: sets `session_ticket_lifetime_s = 0U` on a server
+  init; covers the `(tls_cfg.session_ticket_lifetime_s > 0U)` False branch of the ternary
+  at L542–544 in `maybe_setup_session_tickets()` (previously always True because the default
+  lifetime is 86400U > 0).
+Net: 791 branches, 177 → 170 missed, 77.62% → 78.51%.  Threshold raised from ≥77% to ≥78%.
+
 **2026-04-10 (round 12 — M5 TlsMockOps fault-injection closes 15 branch outcomes):**
 22 M5 fault-injection tests added via `TlsMockOps` (implements `IMbedtlsOps`), covering
 all hard mbedTLS/POSIX dependency-failure branches previously listed in section (b):
@@ -926,15 +1023,16 @@ The M5 architectural ceiling claim (VVP-001 §4.3 e-i) for section (b) below is
 `test_tcp_full_frame_deserialize_fail` and `test_tcp_client_receives_hello_from_server`
 (added in TcpBackend round 15) incidentally exercise 3 additional branch outcomes in
 `TlsTcpBackend.cpp` via merged-profdata attribution. Current authoritative numbers:
-791 branches, 174 missed, 78.00%, threshold ≥77%.
+791 branches, 170 missed, 78.49%, threshold ≥77%.
 
-SC file meeting policy floor. Remaining 174 missed branches are:
+SC file meeting policy floor. Remaining 170 missed branches are:
 
 **(a) NEVER_COMPILED_OUT_ASSERT True paths (135 branches):** `TlsTcpBackend.cpp` contains
 135 `NEVER_COMPILED_OUT_ASSERT` calls; each generates one permanently-missed LLVM True path
-(the `[[noreturn]]` abort branch). A further ~12 branches arise from compound-condition
+(the `[[noreturn]]` abort branch). A further ~5 branches arise from compound-condition
 sub-expressions in several error-check sequences where only one sub-expression outcome is
-reachable during normal or M5-fault-injection execution.
+reachable during normal or M5-fault-injection execution (reduced from ~12 after the round 15
+I-series tests covered the peer_hostname and session_ticket_lifetime_s ternary sub-expressions).
 All are `[[noreturn]]` abort paths or equivalent structural one-way conditions; VVP-001 §4.3 d-i.
 
 **(b) [RETRACTED — covered by M5 TlsMockOps tests]:** The ~120-branch M5 gap documented
@@ -973,7 +1071,7 @@ and `try_save_client_session()`, CI must include a build configuration with
 `MBEDTLS_SSL_SESSION_TICKETS` enabled.  A build without this flag is insufficient
 for SC function verification of the session-resumption paths.
 
-Threshold: **≥77%** (maximum achievable after M5 TlsMockOps fault-injection round).
+Threshold: **≥78%** (maximum achievable after M5 TlsMockOps fault-injection round + round 15 I-series gap closure).
 
 ---
 
