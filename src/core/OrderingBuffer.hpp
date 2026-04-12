@@ -39,9 +39,9 @@
  *   HELD → DELIVERED (on try_release_next() when sequence matches)
  *   DELIVERED → FREE
  *
- * Implements: REQ-3.3.5
+ * Implements: REQ-3.3.5, REQ-3.2.11
  */
-// Implements: REQ-3.3.5
+// Implements: REQ-3.3.5, REQ-3.2.11
 
 #ifndef CORE_ORDERING_BUFFER_HPP
 #define CORE_ORDERING_BUFFER_HPP

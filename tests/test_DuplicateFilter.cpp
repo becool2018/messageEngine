@@ -25,7 +25,7 @@
  *   - F-Prime style: simple test framework using assert() and printf().
  */
 
-// Verifies: REQ-3.2.6
+// Verifies: REQ-3.2.6, REQ-3.2.11
 // Verification: M1 + M2 + M4 + M5 (fault injection not required — pure logic, no external dependency)
 
 #include <cstdio>
@@ -39,7 +39,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1: Basic dedup detection
 // ─────────────────────────────────────────────────────────────────────────────
-// Verifies: REQ-3.2.6
+// Verifies: REQ-3.2.6, REQ-3.2.11
 static bool test_basic_dedup()
 {
     DuplicateFilter filter;

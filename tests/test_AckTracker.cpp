@@ -23,7 +23,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: simple test framework using assert() and printf().
  *
- * Verifies: REQ-3.2.4, REQ-3.3.2, REQ-7.2.3
+ * Verifies: REQ-3.2.4, REQ-3.3.2, REQ-7.2.3, REQ-3.2.11
  */
 // Verification: M1 + M2 + M4 + M5 (fault injection not required — no injectable dependency)
 

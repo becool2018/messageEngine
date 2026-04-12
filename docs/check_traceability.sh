@@ -21,7 +21,7 @@ TESTS_DIR="$REPO_ROOT/tests"
 #                Implemented in: PR 1 (SocketUtils.cpp, ReassemblyBuffer.cpp)
 #   REQ-3.2.11 — C-1/C-2: constant-time equality comparator
 #                Implemented in: PR 2 (AckTracker, DuplicateFilter, OrderingBuffer,
-#                                      DtlsUdpBackend)
+#                                      DtlsUdpBackend) — DONE
 #   REQ-5.2.6  — H-6: entropy source failure → FATAL in production
 #                Implemented in: PR 5 (DeliveryEngine.cpp)
 #   REQ-6.1.12 — H-5: HELLO timeout slot eviction
@@ -38,7 +38,7 @@ TESTS_DIR="$REPO_ROOT/tests"
 #                Implemented in: PR 3 (TlsTcpBackend.cpp, DtlsUdpBackend.cpp)
 #   REQ-6.3.10 — H-3: TlsSessionStore POSIX mutex for concurrent access
 #                Implemented in: PR 4 (TlsSessionStore.cpp)
-KNOWN_GAPS="REQ-3.2.11 REQ-5.2.6 REQ-6.1.12 REQ-6.2.5 REQ-6.3.6 REQ-6.3.7 REQ-6.3.8 REQ-6.3.9 REQ-6.3.10"
+KNOWN_GAPS="REQ-5.2.6 REQ-6.1.12 REQ-6.2.5 REQ-6.3.6 REQ-6.3.7 REQ-6.3.8 REQ-6.3.9 REQ-6.3.10"
 
 PASS=0
 FAIL=0
