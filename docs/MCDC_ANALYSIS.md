@@ -215,6 +215,23 @@ payload-range checks; its internal decisions are analysed here as DS-D5/DS-D6.
 
 **MC/DC status: DEMONSTRATED** — all single-condition decisions covered T and F.
 
+### Additional single-condition guards (DS-D7 through DS-D10)
+
+The following four guards were added to `deserialize()` after the initial MC/DC analysis was
+written. Each is a single-condition decision: by DO-178C / NASA-STD-8739.8A, a single-condition
+decision trivially satisfies MC/DC as soon as both the True and False outcomes are exercised.
+The existing test suite covers both outcomes for each guard.
+
+| Decision | Condition | Location | Test — True outcome (rejected) | Test — False outcome (accepted) | MC/DC note |
+|---|---|---|---|---|---|
+| DS-D7 | `!message_type_in_range(mt_raw)` | `deserialize()` | `test_deserialize_rejects_invalid_message_type` | `test_serialize_deserialize_basic` | Single condition — trivially MC/DC |
+| DS-D8 | `!reliability_class_in_range(rc_raw)` | `deserialize()` | `test_deserialize_rejects_invalid_reliability_class` | `test_serialize_deserialize_basic` | Single condition — trivially MC/DC |
+| DS-D9 | `env.source_id == NODE_ID_INVALID` | `deserialize()` | `test_deserialize_rejects_source_id_zero` | `test_serialize_deserialize_basic` | Single condition — trivially MC/DC (SEC-027) |
+| DS-D10 | `!fragment_header_valid(env)` | `deserialize()` | `test_v2_fragment_index_out_of_range_rejected` or `test_v2_fragment_count_too_large_rejected` | `test_serialize_deserialize_basic` | Single condition — trivially MC/DC |
+
+**MC/DC status for DS-D7 through DS-D10: DEMONSTRATED** — both outcomes exercised for each
+guard by the existing test suite; no compound conditions require independence pairing.
+
 ---
 
 ## Summary
@@ -225,8 +242,8 @@ payload-range checks; its internal decisions are analysed here as DS-D5/DS-D6.
 | `DeliveryEngine::receive` | 8 (1 unreachable) | 9 | 1 (`A&&B` at L907) | **DEMONSTRATED** | 0 |
 | `DuplicateFilter::check_and_record` | 3 | 5 | 1 (`A&&B&&C` at L73) | **DEMONSTRATED** | 0 |
 | `Serializer::serialize` | 3 | 3 | 0 | **DEMONSTRATED** | 0 |
-| `Serializer::deserialize` | 6 | 6 | 0 | **DEMONSTRATED** | 0 |
-| **Total** | **29 (2 unreachable)** | **36** | **5** | **ALL DEMONSTRATED** | **0** |
+| `Serializer::deserialize` | 10 | 10 | 0 | **DEMONSTRATED** | 0 |
+| **Total** | **33 (2 unreachable)** | **40** | **5** | **ALL DEMONSTRATED** | **0** |
 
 All MC/DC requirements are satisfied by the existing test suite. The two architecturally-unreachable True-outcome branches of `!m_initialized` in `send()` and `receive()` are excluded from the demonstration on the same basis as the ceiling branches documented in CLAUDE.md §14.
 

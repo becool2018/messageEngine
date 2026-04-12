@@ -43,7 +43,7 @@ Config:
 Key checks enabled:
 - `readability-function-cognitive-complexity` (threshold: 10, per Rule 4)
 - `cppcoreguidelines-no-malloc` (Rule 3)
-- `fuchsia-restrict-system-includes` (no STL in `src/`)
+- `fuchsia-restrict-system-includes` (not currently enabled in src/.clang-tidy)
 - `misc-no-recursion` (Rule 1)
 - `bugprone-*`, `performance-*`, `portability-*`
 
@@ -57,8 +57,26 @@ Role: Second-pass analysis; catches patterns Clang-Tidy misses — integer
 overflow, uninitialised variables, out-of-bounds array access, and MISRA
 C++:2023 rules via the bundled `misra.py` addon.
 
-Config: `--addon=misra --misra-c++-version=2023` on `src/` only.
+Config: `make cppcheck` (CI-safe target) does **not** pass `--addon=misra`; it runs
+Cppcheck without the MISRA addon for fast CI feedback. Only the separate
+`make cppcheck-misra` target passes `--addon=misra --misra-c++-version=2023` on `src/`.
 Use `.cppcheck-suppress` for documented deviations.
+
+Status: **ACTIVE**
+
+### Clang Static Analyzer — ACTIVE
+
+Makefile target: `make scan_build` (also included in `make static_analysis` umbrella)
+
+Role: Path-sensitive interprocedural analysis for null dereference, dead store,
+uninitialized values, and memory leaks. Complementary to Clang-Tidy (which is
+primarily pattern-based) because the Static Analyzer tracks values across calls.
+
+Config: `scan-build` wrapper over the standard build; reports written to
+`build/scan-build-report/`.
+
+Checks: All default Clang Static Analyzer checkers (null dereference, dead store,
+uninitialized values, memory leaks).
 
 Status: **ACTIVE**
 
@@ -119,7 +137,7 @@ Status: **NOT REQUIRED** — revisit if classification is raised.
 - [x] Add `make cppcheck` target invoking Cppcheck + MISRA addon on `src/`.
 - [ ] Procure PC-lint Plus licence; create `pclint/` config directory.
 - [ ] Add `make pclint` target for formal MISRA C++:2023 compliance report.
-- [ ] Add `make static_analysis` umbrella target running `lint` + `cppcheck` in sequence.
+- [x] Add `make static_analysis` umbrella target running `lint` + `cppcheck` + `scan_build` in sequence.
 - [ ] Document all tool-reported deviations in `docs/DEFECT_LOG.md` with WAIVE
       disposition and the specific MISRA rule reference.
 - [ ] Add Clang-Tidy or cppcheck rule to flag any remaining `assert()` in `src/`

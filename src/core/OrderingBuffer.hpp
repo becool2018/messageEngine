@@ -81,7 +81,7 @@ public:
     ///         ERR_AGAIN if no held message matches next_expected for this src.
     Result try_release_next(NodeId src, MessageEnvelope& out);
 
-    // Safety-critical (SC): HAZ-001 — resets the ordering gate state for a peer.
+    // Safety-critical (SC): HAZ-001, HAZ-016 — resets the ordering gate state for a peer.
     /// Reset ordering state for @p src: clear next_expected_seq to 1 and free all
     /// held messages belonging to this peer. Called when a peer reconnects so that
     /// stale sequence state from a prior connection does not stall delivery of the

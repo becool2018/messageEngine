@@ -149,7 +149,7 @@ public:
      */
     uint32_t sweep_ack_timeouts(uint64_t now_us);
 
-    // Safety-critical (SC): HAZ-001 — resets per-peer ordering gate state on reconnect.
+    // Safety-critical (SC): HAZ-001, HAZ-016 — resets per-peer ordering gate state on reconnect.
     /**
      * @brief Reset ordering state for @p src on peer reconnection (REQ-3.3.6).
      *

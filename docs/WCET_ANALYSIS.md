@@ -85,6 +85,7 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 | `AckTracker::track()` | Linear scan for FREE slot | O(A) = O(32) | |
 | `AckTracker::on_ack()` | Linear scan for matching PENDING | O(A) = O(32) | |
 | `AckTracker::sweep_expired()` | Full scan of all slots | O(A) = O(32) | Calls sweep_one_slot per slot |
+| `AckTracker::cancel()` | Linear scan for matching slot + mark FREE | O(A) = O(32) | SC: HAZ-002. Cancels tracking for a given message_id; used on reliable-send cancellation or peer disconnect path. |
 
 ### src/core/DuplicateFilter.hpp
 
@@ -100,16 +101,20 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 |----------|----------------------|-------|-------|
 | `RetryManager::schedule()` | Linear scan for free slot | O(A) = O(32) | Uses ACK_TRACKER_CAPACITY slots |
 | `RetryManager::on_ack()` | Linear scan for matching entry | O(A) = O(32) | |
-| `RetryManager::collect_due()` | Full scan; envelope_copy per due entry | O(A × P) = O(32 × 4096) | **Worst case: 32 due entries each copied** |
+| `RetryManager::collect_due()` | Full scan; envelope_copy per due entry | O(A × P) = O(32 × 4096) | **Worst case: 32 due entries each copied.** Two-phase implementation: Phase 1 `reap_terminated_slots()` O(A) marks completed/expired slots FREE; Phase 2 collect O(A×P) copies due entries to caller. Dominant bound O(A×P) is unchanged. |
 
 ### src/core/DeliveryEngine.hpp
 
 | Function | Worst-case operations | Bound | Notes |
 |----------|----------------------|-------|-------|
-| `DeliveryEngine::send()` | 1 monotonic guard (SEC-007) + serialize + process_outbound + track + schedule | O(P + I + A) | SEC-007 adds O(1) guard at entry: `if (now_us < m_last_now_us) return ERR_INVALID`. Dominated by serialize O(P). |
+| `DeliveryEngine::send()` | 1 monotonic guard (SEC-007) + serialize + `send_fragments()` + process_outbound + track + schedule | O(P + I + A) | SEC-007 adds O(1) guard at entry: `if (now_us < m_last_now_us) return ERR_INVALID`. Actual call is `send_fragments()` (not `send_via_transport()` directly). For messages > FRAG_MAX_PAYLOAD_BYTES (1024 B), per-send cost multiplies by FRAG_MAX_COUNT=4: O(FRAG_MAX_COUNT × P) = O(16,384). O(P) asymptotic bound is unchanged but the constant factor is noted. Dominated by serialize O(P). |
 | `DeliveryEngine::receive()` | 1 monotonic guard (SEC-007) + drain_hello_reconnects (O(N)) + receive_message + is_duplicate + check_and_record | O(P + D + N) | SEC-007 adds O(1) guard at entry. `drain_hello_reconnects()` adds O(N) = O(ORDERING_PEER_COUNT=16) per call (bounded poll loop). Dominated by deserialize O(P) and dedup O(D). |
-| `DeliveryEngine::pump_retries()` | 1 monotonic guard (SEC-007) + collect_due (O(A)) + per-due: send_via_transport → serialize (O(P)) + process_outbound + collect_deliverable (O(I)) | O(A × (P + I)) = O(32 × 4128) = O(132096) | **Worst case: all 32 slots due simultaneously; each retry traverses Serializer + ImpairmentEngine.** SEC-007 adds O(1) guard at entry. DEF-002-1 resolved: output buffer is now member `m_retry_buf` (init-phase allocated). |
-| `DeliveryEngine::sweep_ack_timeouts()` | 1 monotonic guard (SEC-007) + sweep_expired O(A) | O(A) = O(32) | SEC-007 adds O(1) guard at entry. DEF-002-1 resolved: output buffer is now member `m_timeout_buf` (init-phase allocated). |
+| `DeliveryEngine::pump_retries()` | 1 monotonic guard (SEC-007) + collect_due (O(A)) + per-due: `send_fragments()` → `fragment_message()` O(FRAG_MAX_COUNT × P) + serialize (O(P)) + process_outbound + collect_deliverable (O(I)) | O(A × FRAG_MAX_COUNT × P) = O(32 × 4 × 4096) = O(524,288) | **Worst case: all 32 slots due simultaneously; retry loop calls `send_fragments()` (not `send_via_transport()` directly); for max-size messages this adds `fragment_message()` cost O(FRAG_MAX_COUNT × P) = O(4 × 4096) = O(16,384) per retry slot.** SEC-007 adds O(1) guard at entry. DEF-002-1 resolved: output buffer is now member `m_retry_buf` (init-phase allocated). |
+| `DeliveryEngine::sweep_ack_timeouts()` | 1 monotonic guard (SEC-007) + `AckTracker::sweep_expired` O(A) + `m_reassembly.sweep_expired()` O(REASSEMBLY_SLOT_COUNT=8) + `m_reassembly.sweep_stale()` O(8) + `m_ordering.sweep_expired_holds()` O(ORDERING_HOLD_COUNT²=64) | O(A + ORDERING_HOLD_COUNT²) = O(32 + 64) = O(96) | SEC-007 adds O(1) guard at entry. Three additional calls beyond AckTracker: reassembly expired sweep O(8), reassembly stale sweep O(8), ordering hold expiry O(ORDERING_HOLD_COUNT²)=O(64). Dominant term is O(ORDERING_HOLD_COUNT²)=O(64). DEF-002-1 resolved: output buffer is now member `m_timeout_buf` (init-phase allocated). |
+| `DeliveryEngine::handle_data_path()` | dedup check O(D) + ordering gate O(ORDERING_HOLD_COUNT) + deliver to queue | O(D + ORDERING_HOLD_COUNT) = O(128 + 8) = O(136) | SC: HAZ-001, HAZ-003. Private helper called from `receive()` on each inbound DATA frame; handles dedup delegation and ordering buffer insertion. |
+| `DeliveryEngine::deliver_held_pending()` | 1 check + 1 queue push | O(1) | SC: HAZ-001, HAZ-004. Private helper; delivers the staged `m_held_pending` buffer to the application queue after ordering gate releases it. |
+| `DeliveryEngine::send_fragments()` | `needs_fragmentation()` check O(1) + `fragment_message()` O(FRAG_MAX_COUNT × P) + per-fragment: serialize O(P) + transport send O(P) | O(FRAG_MAX_COUNT × P) = O(4 × 4096) = O(16,384) | SC (on send/retry path). Called from both `send()` and `pump_retries()`. For non-fragmenting messages (payload ≤ 1024 B) degenerates to O(P) single-fragment path. |
+| `DeliveryEngine::handle_data_dedup()` | delegates to `DuplicateFilter::check_and_record()` | O(D) = O(128) | SC: HAZ-003. Private helper that wraps the dedup call and emits WARNING_HI on duplicate detection. Cost is entirely O(D) from the underlying scan. |
 | `DeliveryEngine::reset_peer_ordering()` | 1 held_pending check (O(1)) + `reset_peer()` (O(N + H)) | O(N + H) = O(16 + 8) = O(24) | N = ORDERING_PEER_COUNT=16 (peer table scan in find_peer); H = ORDERING_HOLD_COUNT=8 (hold slot scan). SC: HAZ-001, HAZ-016. Called per HELLO event from drain_hello_reconnects(). |
 
 ### src/core/TransportInterface.hpp (concrete implementations)
@@ -185,15 +190,15 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 
 ## Dominant Cost Paths
 
-The three highest-cost operations in the system:
+The four highest-cost operations in the system:
 
-1. **`DeliveryEngine::pump_retries()` with all slots due:** O(A × (P + I)) = O(32 × (4096 + 32)) = O(132 096 operations). Each retry slot invokes the full `TcpBackend::send_message()` path including `Serializer::serialize()` O(P) and `ImpairmentEngine::process_outbound()` + `collect_deliverable()` O(I). In practice, exponential backoff and `max_retries` prevent all slots from firing simultaneously.
+1. **`DeliveryEngine::pump_retries()` with all slots due:** O(A × FRAG_MAX_COUNT × P) = O(32 × 4 × 4096) = O(524,288 operations). The retry loop calls `send_fragments()` (not `send_via_transport()` directly); for max-size messages this adds `fragment_message()` cost O(FRAG_MAX_COUNT × P) = O(16,384) per retry slot. True worst-case is O(A × FRAG_MAX_COUNT × P). In practice, exponential backoff and `max_retries` prevent all slots from firing simultaneously.
 
 2. **`TcpBackend::send_message()` with full delay buffer due:** O(P × C + I × P) = O(4096 × 8 + 32 × 4096) = O(163 840 operations). The `collect_deliverable()` flush after every send can release up to I=32 buffered messages, each requiring a wire write. This bound is loose; in practice, the delay buffer rarely reaches capacity.
 
 3. **`TcpBackend::receive_message()` at maximum poll depth:** O(50 × 8 × 4096) = O(1 638 400 operations). This bound is loose; in practice, receive returns early on first message.
 
-3. **`Serializer::serialize()` / `deserialize()`:** O(P) = O(4096) byte operations per call, which is the payload copy. Unavoidable for maximum-sized messages.
+4. **`Serializer::serialize()` / `deserialize()`:** O(P) = O(4096) byte operations per call, which is the payload copy. Unavoidable for maximum-sized messages.
 
 ---
 
@@ -204,7 +209,7 @@ To derive a true WCET on a deterministic target:
 1. Replace each `timestamp_now_us()` syscall with the target's hardware timer read latency.
 2. Replace O(P) byte-copy bounds with `P × (cycles per byte copy)` for the target's bus width.
 3. Replace O(A), O(D), O(I) loop bounds with the constant values above × (cycles per iteration body).
-4. The worst-case call chain by **frame depth** is Chain 3 (retry pump) or Chain 5 (DTLS outbound) from STACK_ANALYSIS.md (10 frames each); sum the per-function WCETs along that chain. The worst-case **stack size** is ~764 B (Chain 5). DEF-002-1 resolved: output buffers in `pump_retries()` and `sweep_ack_timeouts()` are now init-phase member allocations.
+4. Worst-case frame depth: Chain 3 (retry pump) at 12 frames (STACK_ANALYSIS.md §Chain 3 — includes `send_fragments()` frame); Chain 5 (DTLS outbound) at 10 frames. System worst-case stack: ~259 KB (Chain 5 DTLS outbound, dual `delayed[]` buffers — see STACK_ANALYSIS.md Critical Warning). Non-flush worst case: ~764 B. DEF-002-1 resolved: `pump_retries()` and `sweep_ack_timeouts()` output buffers are member-level allocations.
 
 ---
 

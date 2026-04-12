@@ -179,6 +179,10 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `envelope_is_data()` | — | SC | HAZ-001, HAZ-004 |
 | `envelope_is_control()` | — | SC | HAZ-001 |
 | `envelope_make_ack()` | — | SC | HAZ-002 |
+| `envelope_needs_ack_response()` | — | SC | HAZ-002 |
+| `envelope_addressed_to()` | — | SC | HAZ-001 |
+
+`envelope_needs_ack_response()` is SC (HAZ-002): it determines whether an inbound message requires an ACK reply; an incorrect result causes a missing ACK, which leaves the sender in PENDING state indefinitely, triggering the retry-storm hazard. `envelope_addressed_to()` is SC (HAZ-001): it is the routing decision helper used by `DeliveryEngine::receive()` via `check_routing()`; an incorrect result allows misrouted delivery to reach the wrong node.
 
 ### src/core/MessageId.hpp
 
@@ -220,7 +224,10 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `cancel()` | `AckTracker` | SC | HAZ-002 |
 | `sweep_expired()` | `AckTracker` | SC | HAZ-002, HAZ-006 |
 | `get_send_timestamp()` | `AckTracker` | NSC | — |
+| `get_tracked_destination()` | `AckTracker` | SC | HAZ-002 |
 | `get_stats()` | `AckTracker` | NSC | — |
+
+`get_tracked_destination()` is SC (HAZ-002): forge-ACK prevention — it verifies that the destination NodeId carried in an inbound ACK matches the tracked sender stored in the slot; a mismatch must be rejected to prevent forged ACKs from prematurely clearing retry slots and causing the sender to believe a message was delivered when it was not.
 
 ### src/core/DuplicateFilter.hpp
 
@@ -239,14 +246,19 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `schedule()` | `RetryManager` | SC | HAZ-002 |
 | `on_ack()` | `RetryManager` | SC | HAZ-002 |
 | `collect_due()` | `RetryManager` | SC | HAZ-002 |
+| `cancel()` | `RetryManager` | NSC | — |
 | `get_stats()` | `RetryManager` | NSC | — |
+
+`cancel()` is NSC: bookkeeping correction only; it deactivates a scheduled retry slot when the caller no longer needs it (e.g., on send rollback), but it does not itself determine whether a message is delivered or retried — it only prevents a future spurious retry attempt. No delivery state change occurs as a direct result of `cancel()`.
 
 ### src/core/Fragmentation.hpp
 
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
 | `needs_fragmentation()` | — | NSC | — |
-| `fragment_message()` | — | SC | HAZ-001, HAZ-006 |
+| `fragment_message()` | — | SC | HAZ-005 |
+
+Rationale: Fragment splitting is a wire-format operation; incorrect splitting corrupts the deserialized message (HAZ-005). HAZ-001 and HAZ-006 do not directly apply — the fragmentation function does not route or exhaust message-ring capacity.
 
 ### src/core/ReassemblyBuffer.hpp
 
@@ -255,6 +267,9 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `init()` | `ReassemblyBuffer` | NSC | — |
 | `ingest()` | `ReassemblyBuffer` | SC | HAZ-003, HAZ-006 |
 | `sweep_expired()` | `ReassemblyBuffer` | NSC | — |
+| `sweep_stale()` | `ReassemblyBuffer` | NSC | — |
+
+`sweep_stale()` is NSC: housekeeping sweep that reclaims reassembly slots open longer than `recv_timeout_ms` without a completed fragment set (REQ-3.2.9); it prevents resource exhaustion from peers that send partial fragment sets, but it does not itself make any delivery decision — it only frees incomplete slots that would otherwise never complete.
 
 ### src/core/OrderingBuffer.hpp
 
@@ -457,11 +472,12 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `setup_session_tickets()` | `TlsTcpBackend` | NSC | — |
 | `maybe_setup_session_tickets()` | `TlsTcpBackend` | NSC | — |
 | `apply_cipher_policy()` | `TlsTcpBackend` | NSC | — |
+| `log_fs_warning_if_tls12()` | `TlsTcpBackend` | NSC | — |
 | `close()` | `TlsTcpBackend` | NSC | — |
 | `is_open()` | `TlsTcpBackend` | NSC | — |
 | `get_transport_stats()` | `TlsTcpBackend` | NSC | — |
 
-`TlsTcpBackend` is a drop-in replacement for `TcpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `TcpBackend`. The TLS layer (when enabled) is an init-phase concern (cert/key loading, handshake) and does not alter the SC classification of the send/receive path. `classify_inbound_frame()` is SC (HAZ-009) because it enforces the one-HELLO-per-slot rule and rejects data from unregistered slots — failure here allows NodeId hijack or pre-registration data injection. **`handle_hello_frame()` reclassified SC (HAZ-009) as of SEC-012 (commit 4cda101):** it now performs a cross-slot scan for duplicate NodeId and evicts the newcomer; failure to scan allows a second connection to hijack an active peer's routing table entry. **`tls_connect_handshake()` reclassified SC (HAZ-008) as of SEC-021 (commit 4cda101):** it enforces `verify_peer=true` + non-empty `peer_hostname` before the TLS handshake, closing CWE-297 for the TLS TCP client path. **`try_save_client_session()` added SC (HAZ-012, HAZ-017):** saves TLS session material into the caller-injected `TlsSessionStore`; must call `store.zeroize()` first to release prior session allocations (HAZ-012) and sets `session_valid` atomically only on successful save, preventing partial/corrupt state from being loaded on reconnect (HAZ-017 — caller's cleanup responsibility begins once `session_valid == true`). **`try_load_client_session()` added SC (HAZ-017):** presents the saved session to mbedTLS for abbreviated resumption; if `session_valid` is true but the session data is stale (e.g., ticket expired server-side), the handshake falls back to a full exchange — the SC concern is that a successful load of compromised session material would bypass the full forward-secrecy handshake (HAZ-017 / RFC 5077 limitation). `set_session_store()` and `has_resumable_session()` are NSC: `set_session_store()` is called once during lifecycle configuration before `init()` and carries no runtime delivery policy; `has_resumable_session()` is a pure boolean predicate with no side effects. `setup_session_tickets()`, `maybe_setup_session_tickets()`, and `apply_cipher_policy()` are NSC: all three are called exclusively during `init()` to configure cipher suite policy and session ticket keying; they carry no runtime message-delivery policy.
+`TlsTcpBackend` is a drop-in replacement for `TcpBackend` (REQ-6.3.4). Its `send_message()` and `receive_message()` carry the same message-delivery hazards as `TcpBackend`. The TLS layer (when enabled) is an init-phase concern (cert/key loading, handshake) and does not alter the SC classification of the send/receive path. `classify_inbound_frame()` is SC (HAZ-009) because it enforces the one-HELLO-per-slot rule and rejects data from unregistered slots — failure here allows NodeId hijack or pre-registration data injection. **`handle_hello_frame()` reclassified SC (HAZ-009) as of SEC-012 (commit 4cda101):** it now performs a cross-slot scan for duplicate NodeId and evicts the newcomer; failure to scan allows a second connection to hijack an active peer's routing table entry. **`tls_connect_handshake()` reclassified SC (HAZ-008) as of SEC-021 (commit 4cda101):** it enforces `verify_peer=true` + non-empty `peer_hostname` before the TLS handshake, closing CWE-297 for the TLS TCP client path. **`try_save_client_session()` added SC (HAZ-012, HAZ-017):** saves TLS session material into the caller-injected `TlsSessionStore`; must call `store.zeroize()` first to release prior session allocations (HAZ-012) and sets `session_valid` atomically only on successful save, preventing partial/corrupt state from being loaded on reconnect (HAZ-017 — caller's cleanup responsibility begins once `session_valid == true`). **`try_load_client_session()` added SC (HAZ-017):** presents the saved session to mbedTLS for abbreviated resumption; if `session_valid` is true but the session data is stale (e.g., ticket expired server-side), the handshake falls back to a full exchange — the SC concern is that a successful load of compromised session material would bypass the full forward-secrecy handshake (HAZ-017 / RFC 5077 limitation). `set_session_store()` and `has_resumable_session()` are NSC: `set_session_store()` is called once during lifecycle configuration before `init()` and carries no runtime delivery policy; `has_resumable_session()` is a pure boolean predicate with no side effects. `setup_session_tickets()`, `maybe_setup_session_tickets()`, and `apply_cipher_policy()` are NSC: all three are called exclusively during `init()` to configure cipher suite policy and session ticket keying; they carry no runtime message-delivery policy. `log_fs_warning_if_tls12()` is NSC: a logging helper that emits a forward-secrecy advisory warning when the negotiated TLS version is 1.2; it has no effect on safety-relevant state and does not influence any delivery or authentication decision.
 
 ### src/platform/DtlsUdpBackend.hpp
 
@@ -494,6 +510,7 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `ssl_cookie_setup()` | `MbedtlsOpsImpl` | NSC | — |
 | `ssl_setup()` | `MbedtlsOpsImpl` | NSC | — |
 | `ssl_set_client_transport_id()` | `MbedtlsOpsImpl` | NSC | — |
+| `ssl_set_hostname()` | `MbedtlsOpsImpl` | SC | HAZ-008 |
 | `ssl_handshake()` | `MbedtlsOpsImpl` | SC | HAZ-004, HAZ-005, HAZ-006 |
 | `ssl_write()` | `MbedtlsOpsImpl` | SC | HAZ-005, HAZ-006 |
 | `ssl_read()` | `MbedtlsOpsImpl` | SC | HAZ-004, HAZ-005 |
@@ -501,7 +518,7 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `net_connect()` | `MbedtlsOpsImpl` | NSC | — |
 | `inet_pton_ipv4()` | `MbedtlsOpsImpl` | NSC | — |
 
-`MbedtlsOpsImpl` implements `IMbedtlsOps` and is injected into `DtlsUdpBackend` via its `init()` constructor parameter. `ssl_handshake()`, `ssl_write()`, `ssl_read()`, and `recvfrom_peek()` are SC: `ssl_handshake()` establishes the DTLS session — failure to complete the handshake (or silent success without proper certificate validation) directly enables HAZ-005 (data delivered without encryption integrity) and HAZ-004/HAZ-006 (connection not established → stale/dropped delivery); `ssl_write()` and `ssl_read()` are on the run-time send/receive path; `recvfrom_peek()` determines the peer address for DTLS cookie binding. All other methods are called exclusively during `init()` (certificate loading, cookie setup, session configuration) and are NSC. `MbedtlsOpsImpl` is a pure delegation layer — each method is a precondition assertion plus one library call passthrough; no message-delivery policy is encoded here.
+`MbedtlsOpsImpl` implements `IMbedtlsOps` and is injected into `DtlsUdpBackend` via its `init()` constructor parameter. `ssl_handshake()`, `ssl_write()`, `ssl_read()`, and `recvfrom_peek()` are SC: `ssl_handshake()` establishes the DTLS session — failure to complete the handshake (or silent success without proper certificate validation) directly enables HAZ-005 (data delivered without encryption integrity) and HAZ-004/HAZ-006 (connection not established → stale/dropped delivery); `ssl_write()` and `ssl_read()` are on the run-time send/receive path; `recvfrom_peek()` determines the peer address for DTLS cookie binding. `ssl_set_hostname()` is SC (HAZ-008): it binds the expected certificate CN/SAN before the DTLS handshake; omitting this call means CA-chain validation passes but hostname is unbound, constituting incomplete peer verification (CWE-297 / MitM — REQ-6.4.6). All other methods are called exclusively during `init()` (certificate loading, cookie setup, session configuration) and are NSC. `MbedtlsOpsImpl` is a pure delegation layer — each method is a precondition assertion plus one library call passthrough; no message-delivery policy is encoded here.
 
 ### src/core/AssertState.hpp
 

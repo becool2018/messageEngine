@@ -631,8 +631,9 @@ Security assumptions and invariants: docs/SECURITY_ASSUMPTIONS.md
 15. Stack Depth Analysis (NASA-STD-8719.13C)
 
 Analysis artifact and current worst-case call chains: docs/STACK_ANALYSIS.md.
-Current worst case: 10 frames, ~764 bytes (Chains 3 and 5 — retry pump and DTLS
-outbound send). Platform headroom: >10 000× on macOS/Linux.
+Current worst case: 12 frames (Chain 3 — retry pump with send_fragments); ~259 KB stack
+dominated by DtlsUdpBackend dual delayed[] buffers (Chain 5 DTLS outbound). Non-flush
+worst case: ~764 bytes. Platform headroom: >10 000× on macOS/Linux (non-DTLS flush path).
 
 Update trigger: update docs/STACK_ANALYSIS.md when any function introduces a
 stack-allocated buffer >256 bytes, a new call chain exceeds 10 frames, or a new

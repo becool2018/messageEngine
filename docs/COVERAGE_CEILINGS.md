@@ -18,7 +18,7 @@ branch. This mechanism is identical across all files and is not re-explained bel
 
 ---
 
-## Thresholds (current run: 2026-04-10)
+## Thresholds (current run: 2026-04-11)
 
 **Methodology note (2026-04-06 re-baseline):** LLVM source-based coverage now
 counts each branch outcome (True and False) as a separate branch entry, doubling
@@ -407,26 +407,26 @@ Threshold: **≥78%** (maximum achievable, merged profdata).
 
 ---
 
-### core/Serializer.cpp — ceiling 74.36% (58/78)
+### core/Serializer.cpp — ceiling 73.76% (104/141), threshold ≥73%
 
-20 permanently-missed branches from `NEVER_COMPILED_OUT_ASSERT` calls — one per
+37 permanently-missed branches from `NEVER_COMPILED_OUT_ASSERT` calls — one per
 assert across the 14 functions (2 public: `serialize` × 4 + `deserialize` × 4;
 8 private I/O helpers × 2 asserts each; 4 file-local validators × 0 NCAs —
-these use `return`-based guards rather than assertions). All 58 reachable
+these use `return`-based guards rather than assertions). All 104 reachable
 decision-level branches (actual serialization/deserialization logic) are 100%
 covered.
 
-Threshold: **74%** (maximum achievable).
+Threshold: **≥73%** (maximum achievable).
 
 ---
 
-### core/DuplicateFilter.cpp — ceiling 76.19% (32/42)
+### core/DuplicateFilter.cpp — ceiling 73.13% (49/67), threshold ≥73%
 
-10 permanently-missed branches from `NEVER_COMPILED_OUT_ASSERT` calls across the
+18 permanently-missed branches from `NEVER_COMPILED_OUT_ASSERT` calls across the
 5 functions (`init`, `is_duplicate`, `record`, `check_and_record`, private
-`find_evict_idx`). All 32 reachable decision-level branches are 100% covered.
+`find_evict_idx`). All 49 reachable decision-level branches are 100% covered.
 
-Threshold: **75%** (maximum achievable rounds to 76%).
+Threshold: **≥73%** (maximum achievable).
 
 ---
 
@@ -922,7 +922,13 @@ The M5 architectural ceiling claim (VVP-001 §4.3 e-i) for section (b) below is
 **retracted** — these branches are now fully exercised by TlsMockOps fault injection
 (VVP-001 M5 satisfied for TlsTcpBackend dependency-failure paths).
 
-SC file meeting policy floor. Remaining 177 missed branches are:
+**2026-04-11 (round 15 — TcpBackend HELLO echo tests cover 3 additional branch outcomes):**
+`test_tcp_full_frame_deserialize_fail` and `test_tcp_client_receives_hello_from_server`
+(added in TcpBackend round 15) incidentally exercise 3 additional branch outcomes in
+`TlsTcpBackend.cpp` via merged-profdata attribution. Current authoritative numbers:
+791 branches, 174 missed, 78.00%, threshold ≥77%.
+
+SC file meeting policy floor. Remaining 174 missed branches are:
 
 **(a) NEVER_COMPILED_OUT_ASSERT True paths (135 branches):** `TlsTcpBackend.cpp` contains
 135 `NEVER_COMPILED_OUT_ASSERT` calls; each generates one permanently-missed LLVM True path
@@ -1008,7 +1014,7 @@ permanently missed).
 
 ---
 
-### platform/UdpBackend.cpp — ceiling 75.51% (74/98)
+### platform/UdpBackend.cpp — ceiling 74.23% (144/194), threshold ≥74%
 
 **Updated 2026-04-09 (round 1):** 4 new MockSocketOps fault-injection tests closed
 6 previously-missed LLVM branch outcomes. **Round 2:** 2 additional tests closed
@@ -1110,7 +1116,7 @@ direct mbedTLS cert/key parsing and Serializer injection).
 
 ---
 
-### platform/LocalSimHarness.cpp — ceiling 72.46% (50/69)
+### platform/LocalSimHarness.cpp — ceiling 70.49% (86/122), threshold ≥70%
 
 Two independent sources:
 
@@ -1156,10 +1162,10 @@ Threshold: **≥69%** (maximum achievable).
 
 ---
 
-### platform/SocketOpsImpl.cpp — NSC; threshold ≥64%
+### platform/SocketOpsImpl.cpp — NSC; threshold ≥66%
 
 NSC (thin POSIX socket wrappers; no message-delivery policy). Line coverage
-sufficient per CLAUDE.md §14 item 3. Current: 68.57% (48/70).
+sufficient per CLAUDE.md §14 item 3. Current: 66.67% (48/72).
 
 ---
 

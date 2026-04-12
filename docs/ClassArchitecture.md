@@ -75,9 +75,9 @@ Shared enumerations, compile-time constants, and `NodeId` typedef. Foundation fo
 |---|---|
 | **Key API** | `enum class Result` (OK, ERR_TIMEOUT, ERR_FULL, …) |
 | | `enum class Severity` (INFO, WARNING_LO, WARNING_HI, FATAL) |
-| | `enum class MessageType` (DATA, ACK, NAK, HEARTBEAT, INVALID) |
+| | `enum class MessageType` (DATA, ACK, NAK, HEARTBEAT, HELLO=4, INVALID) |
 | | `enum class ReliabilityClass` (BEST_EFFORT, RELIABLE_ACK, RELIABLE_RETRY) |
-| | `enum class TransportKind` (TCP, UDP, LOCAL_SIM) |
+| | `enum class TransportKind` (TCP, UDP, LOCAL_SIM, DTLS_UDP) |
 | | Constants: `MSG_MAX_PAYLOAD_BYTES`, `MSG_RING_CAPACITY`, `DEDUP_WINDOW_SIZE`, … |
 | **Depends on** | — (no dependencies) |
 | **Used by** | All files |
@@ -129,7 +129,7 @@ Pure-virtual abstract base class defining the single transport API. All concrete
 | | `virtual bool is_open() const` |
 | | `virtual Result register_local_id(NodeId id)` — default returns OK; overridden by TCP/UDP/DTLS backends to send HELLO frame (REQ-6.1.10) |
 | | `virtual NodeId pop_hello_peer()` — default returns NODE_ID_INVALID (no-op); overridden by TcpBackend and TlsTcpBackend to drain a bounded HELLO reconnect FIFO; polled by `DeliveryEngine::drain_hello_reconnects()` on every `receive()` call (REQ-3.3.6) |
-| | `virtual void get_transport_stats(TransportStats&) const` — default no-op; overridden by all backends (REQ-7.2.4) |
+| | `virtual void get_transport_stats(TransportStats&) const = 0` — pure virtual; all backends must implement (REQ-7.2.4) |
 | **Depends on** | `Types.hpp`, `MessageEnvelope.hpp`, `ChannelConfig.hpp`, `DeliveryStats.hpp` |
 | **Used by** | `DeliveryEngine`, `TcpBackend`, `UdpBackend`, `TlsTcpBackend`, `DtlsUdpBackend`, `LocalSimHarness` |
 
@@ -228,8 +228,8 @@ Sliding-window duplicate suppression. Maintains a ring of 128 `(source_id, messa
 |---|---|
 | **Key API** | `void init()` |
 | | `bool is_duplicate(NodeId src, uint64_t msg_id)` |
-| | `void record(NodeId src, uint64_t msg_id)` |
-| | `Result check_and_record(NodeId, uint64_t)` → `ERR_DUPLICATE` or `OK` |
+| | `void record(NodeId src, uint64_t msg_id, uint64_t now_us)` |
+| | `Result check_and_record(NodeId src, uint64_t msg_id, uint64_t now_us)` → `ERR_DUPLICATE` or `OK` |
 | **Depends on** | `Types.hpp` |
 | **Used by** | `DeliveryEngine` |
 
@@ -247,6 +247,9 @@ Fixed-capacity (32-slot) table tracking messages awaiting acknowledgement. Each 
 | | `Result on_ack(NodeId src, uint64_t msg_id)` |
 | | `bool is_pending(NodeId src, uint64_t msg_id)` |
 | | `uint32_t sweep_expired(now_us, expired_buf[], buf_cap)` |
+| | `Result cancel(NodeId src, uint64_t msg_id)` |
+| | `Result get_send_timestamp(NodeId src, uint64_t msg_id, uint64_t& out_ts)` |
+| | `Result get_tracked_destination(NodeId src, uint64_t msg_id, NodeId& out_dest)` |
 | **Depends on** | `Types.hpp`, `MessageEnvelope.hpp`, `Timestamp.hpp` |
 | **Used by** | `DeliveryEngine` |
 
@@ -263,6 +266,8 @@ Retry scheduler with per-message exponential backoff (initial interval doubles e
 | | `Result schedule(env, max_retries, backoff_ms, now_us)` |
 | | `Result on_ack(NodeId src, uint64_t msg_id)` |
 | | `uint32_t collect_due(now_us, out_buf[], buf_cap)` |
+| | `Result cancel(NodeId src, uint64_t msg_id)` |
+| | `const RetryStats& get_stats() const` |
 | **Depends on** | `Types.hpp`, `MessageEnvelope.hpp`, `Timestamp.hpp` |
 | **Used by** | `DeliveryEngine` |
 
@@ -275,7 +280,7 @@ Per-channel coordinator. Owns and orchestrates `AckTracker`, `RetryManager`, `Du
 
 | | |
 |---|---|
-| **Key API** | `Result init(TransportInterface*, const ChannelConfig&, NodeId local_id)` |
+| **Key API** | `void init(TransportInterface*, const ChannelConfig&, NodeId local_id)` |
 | | `Result send(MessageEnvelope&, uint64_t now_us)` |
 | | `Result receive(MessageEnvelope&, uint32_t timeout_ms, uint64_t now_us)` |
 | | `uint32_t pump_retries(uint64_t now_us)` |
@@ -325,10 +330,8 @@ Bounded reassembly table. Collects incoming fragments keyed on `(source_id, mess
 | | |
 |---|---|
 | **Key API** | `void init(uint32_t recv_timeout_ms)` |
-| | `Result add_fragment(const MessageEnvelope& frag, uint64_t now_us)` → `OK` (stored), `ERR_FULL` (slot complete or evicted), `ERR_DUPLICATE` |
-| | `bool is_complete(NodeId src, uint64_t msg_id) const` |
-| | `Result get_complete(NodeId src, uint64_t msg_id, MessageEnvelope& out)` |
-| | `uint32_t sweep_stale(uint64_t now_us)` |
+| | `Result ingest(const MessageEnvelope& frag, MessageEnvelope& logical_out, uint64_t now_us)` → `OK` (complete, logical_out populated), `ERR_IO` (stored, more fragments pending), `ERR_DUPLICATE`, `ERR_FULL` |
+| | `uint32_t sweep_stale(uint64_t now_us, uint64_t stale_threshold_us)` |
 | **Depends on** | `Types.hpp`, `MessageEnvelope.hpp` |
 | **Used by** | `DeliveryEngine` (receive path) |
 
@@ -603,7 +606,9 @@ Drop-in `TransportInterface` replacement for `TcpBackend` that adds optional mbe
 
 | | |
 |---|---|
-| **Key API** | `Result init(const TransportConfig&)` |
+| **Key API** | `TlsTcpBackend(ISocketOps& sock_ops)` — injection constructor for ISocketOps |
+| | `TlsTcpBackend(ISocketOps& sock_ops, IMbedtlsOps& tls_ops)` — injection constructor for both ISocketOps and IMbedtlsOps |
+| | `Result init(const TransportConfig&)` |
 | | `Result send_message(const MessageEnvelope&)` |
 | | `Result receive_message(MessageEnvelope&, uint32_t timeout_ms)` |
 | | `void close()` / `bool is_open() const` |
@@ -639,13 +644,26 @@ Injectable interface for all mbedTLS library calls used by `DtlsUdpBackend`. `Mb
 | **Key API** | `virtual int crypto_init()` |
 | | `virtual int ssl_config_defaults(cfg, endpoint, transport, preset)` |
 | | `virtual int x509_crt_parse_file(cert, path)` |
-| | `virtual int pk_parse_keyfile(pk, path, password, rng, ctx)` |
+| | `virtual int pk_parse_keyfile(mbedtls_pk_context*, const char* path, const char* pwd)` |
 | | `virtual int ssl_setup(ssl, cfg)` |
 | | `virtual int ssl_handshake(ssl)` |
 | | `virtual int ssl_read(ssl, buf, len)` / `ssl_write` |
 | | `MbedtlsOpsImpl& MbedtlsOpsImpl::instance()` — singleton |
 | **Depends on** | mbedTLS 4.0 PSA Crypto, `Types.hpp` |
 | **Used by** | `DtlsUdpBackend` (inject at construction) |
+
+---
+
+### `IPosixSyscalls` / `PosixSyscallsImpl`
+**Files:** `IPosixSyscalls.hpp`, `PosixSyscallsImpl.hpp`
+
+Injectable interface for POSIX system calls (e.g., `getpid`, `clock_gettime`, or other OS primitives). `IPosixSyscalls` is the pure-virtual seam; `PosixSyscallsImpl` is the singleton production implementation that delegates to real POSIX calls. In tests, a mock implementation can be substituted to exercise POSIX error paths (M5 fault injection).
+
+| | |
+|---|---|
+| **Key API** | `PosixSyscallsImpl& PosixSyscallsImpl::instance()` — singleton |
+| **Depends on** | POSIX OS APIs, `Types.hpp` |
+| **Used by** | Platform layer components requiring POSIX system call injection |
 
 ---
 
