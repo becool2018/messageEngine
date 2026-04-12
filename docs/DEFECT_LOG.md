@@ -1500,3 +1500,66 @@ Modified files:
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-04-12. Critical defect D-026-1 found and fixed during inspection. All entry and exit criteria satisfied after fix. `make lint`, `make run_tests`, and `make check_traceability` all PASS. REQ-6.3.6/7/8/9 (HAZ-020/025, H-1/H-2/H-4/H-8) fully implemented with M1+M2+M4+M5 verification. Inspection INSP-026 closed PASS.
+
+---
+
+### INSP-027 — PR 4: TlsSessionStore POSIX mutex for concurrent access (REQ-6.3.10)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-12 |
+| Author      | Claude Sonnet 4.6 (AI-assisted) |
+| Moderator   | Don Jessup |
+| Reviewer    | Don Jessup |
+| Branch      | fix/security-pr4-tls-session-store-mutex-2026-04 |
+| Scope       | src/platform/TlsSessionStore.hpp, TlsSessionStore.cpp, TlsTcpBackend.hpp, TlsTcpBackend.cpp; tests/test_TlsTcpBackend.cpp |
+
+#### Summary of change
+
+Implements REQ-6.3.10 (H-3, HAZ-021, CWE-362): adds POSIX `pthread_mutex_t` to
+`TlsSessionStore` to protect the `mbedtls_ssl_session` struct against concurrent access.
+
+Before this change, `zeroize()` in one thread and `try_save_client_session()` /
+`try_load_client_session()` in another thread could race on the same `mbedtls_ssl_session`
+struct, causing `ssl_set_session()` to operate on partially-zeroed session material —
+completing a TLS handshake with corrupt or predictable session keys (HAZ-021, CWE-362).
+
+Changes:
+- `TlsSessionStore`: `session` member made private (`m_session`); `pthread_mutex_t m_mutex`
+  added; `try_save(ssl, ops)` and `try_load(ssl, ops)` new public SC methods that lock the
+  mutex for their full duration; `zeroize_unlocked()` private helper; `zeroize()` now
+  acquires the mutex before calling `zeroize_unlocked()`.
+- `TlsTcpBackend::try_save_client_session()`: delegates to `store->try_save()` instead of
+  direct struct access.
+- `TlsTcpBackend::try_load_client_session()`: delegates to `store->try_load()` instead of
+  direct struct access; removes old assertion that fired in TOCTOU window.
+- Test K-1 (`test_k1_try_load_no_session_returns_false`): covers the `try_load()` False
+  branch (session_valid=false under lock — the TOCTOU path).
+- `docs/check_traceability.sh`: REQ-6.3.10 removed from KNOWN_GAPS.
+
+Existing M5-15 (`test_m5_ssl_get_session_fail`) and M5-16 (`test_m5_ssl_set_session_fail`)
+tests still pass unchanged — TlsMockOps injection still works because `try_save()` and
+`try_load()` accept `IMbedtlsOps& ops` as a parameter.
+
+#### Entry criteria
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations | PASS |
+| `make run_tests` all tests green | PASS |
+| `make check_traceability` RESULT: PASS | PASS |
+| All new/modified `src/` files carry `// Implements:` tags | PASS |
+| All new/modified `tests/` files carry `// Verifies:` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+
+#### Defects found
+
+| ID | File : function | Description | Severity | Status | Disposition |
+|----|----------------|-------------|----------|--------|-------------|
+| (none) | — | No defects found during inspection. | — | — | — |
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-12. No defects found during inspection. All entry and exit criteria satisfied. `make lint`, `make run_tests`, and `make check_traceability` all PASS. REQ-6.3.10 (HAZ-021, H-3) fully implemented with M1+M2+M4 verification. try_load() False branch (TOCTOU path) covered by K-1. Inspection INSP-027 closed PASS.

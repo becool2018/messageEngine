@@ -31,7 +31,7 @@
  *             REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10,
  *             REQ-6.3.4, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-6.3.10, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #include "platform/TlsTcpBackend.hpp"
 #include "platform/TlsSessionStore.hpp"
@@ -708,23 +708,24 @@ bool TlsTcpBackend::log_fs_warning_if_tls12(const char* ver)
 /// resumed sessions — RFC 5077, SECURITY_ASSUMPTIONS.md §13; system-wide
 /// impact per CLAUDE.md §4 WARNING_HI taxonomy).
 /// Extracted from tls_connect_handshake() to keep its CC ≤ 10 (REQ-6.3.4).
+/// REQ-6.3.10 (HAZ-021): session struct access is now mutex-protected inside
+/// TlsSessionStore::try_save() — this function only handles logging and the
+/// one-time forward-secrecy advisory.
 #if defined(MBEDTLS_SSL_SESSION_TICKETS)
 void TlsTcpBackend::try_save_client_session()
 {
     NEVER_COMPILED_OUT_ASSERT(m_tls_enabled);
     NEVER_COMPILED_OUT_ASSERT(m_session_store_ptr != nullptr);
 
-    // Release any stale session before overwriting with the fresh one.
-    m_session_store_ptr->zeroize();  // free + zeroize + re-init via TlsSessionStore
-
-    int ret = m_tls_ops->ssl_get_session(&m_ssl[0U], &m_session_store_ptr->session);
+    // REQ-6.3.10: delegate to mutex-protected try_save(); it zeroizes the stale
+    // session, calls ssl_get_session, and updates session_valid atomically under
+    // the store's internal POSIX mutex (HAZ-021, CWE-362).
+    const int ret = m_session_store_ptr->try_save(&m_ssl[0U], *m_tls_ops);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_get_session", ret);
         Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
                     "Session save failed; resumption not attempted on next connect");
-        m_session_store_ptr->session_valid.store(false);
     } else {
-        m_session_store_ptr->session_valid.store(true);
         Logger::log(Severity::INFO, "TlsTcpBackend",
                     "TLS session saved for resumption on next connect");
 
@@ -742,23 +743,27 @@ void TlsTcpBackend::try_save_client_session()
 /// to enable abbreviated session resumption (RFC 5077, REQ-6.3.4).
 /// Non-fatal on failure: logs WARNING_LO and full handshake proceeds.
 /// Extracted from tls_connect_handshake() to reduce its CC.
+/// REQ-6.3.10 (HAZ-021): session struct access is mutex-protected inside
+/// TlsSessionStore::try_load() — session_valid is re-checked under the lock
+/// to close the TOCTOU window (H-3, CWE-362).
 void TlsTcpBackend::try_load_client_session()
 {
     NEVER_COMPILED_OUT_ASSERT(m_tls_enabled);
     NEVER_COMPILED_OUT_ASSERT(m_session_store_ptr != nullptr);
 
-#if defined(MBEDTLS_SSL_SESSION_TICKETS)
-    NEVER_COMPILED_OUT_ASSERT(m_session_store_ptr->session_valid.load());
-    int ret = m_tls_ops->ssl_set_session(&m_ssl[0U], &m_session_store_ptr->session);
-    if (ret != 0) {
-        log_mbedtls_err("TlsTcpBackend", "ssl_set_session", ret);
+    // REQ-6.3.10: try_load() acquires the store's mutex, re-checks session_valid
+    // under the lock, and calls ssl_set_session only when valid — preventing the
+    // concurrent zeroize() race (HAZ-021, CWE-362).
+    // The outer has_resumable_session() check may have a TOCTOU race; try_load()
+    // handles this gracefully (returns false without calling ssl_set_session).
+    const bool loaded = m_session_store_ptr->try_load(&m_ssl[0U], *m_tls_ops);
+    if (!loaded) {
         Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                    "Session load failed; performing full handshake");
+                    "Session load skipped or failed; performing full handshake");
     } else {
         Logger::log(Severity::INFO, "TlsTcpBackend",
                     "Attempting TLS session resumption");
     }
-#endif /* MBEDTLS_SSL_SESSION_TICKETS */
 }
 
 /// Log WARNING_HI when a handshake fails and a session ticket was in use.

@@ -68,7 +68,7 @@
  *             REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9,
  *             REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-6.3.10, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #ifndef PLATFORM_TLS_TCP_BACKEND_HPP
 #define PLATFORM_TLS_TCP_BACKEND_HPP
@@ -328,8 +328,9 @@ private:
     /// for resumed sessions — RFC 5077, SECURITY_ASSUMPTIONS.md §13; system-wide
     /// impact per CLAUDE.md §4 WARNING_HI taxonomy).
     /// Extracted from tls_connect_handshake() to keep its CC ≤ 10 (REQ-6.3.4).
-    // Safety-critical (SC): HAZ-012, HAZ-017 — stores TLS session material; must
-    // zeroize prior session before saving; session_valid set atomically on success only.
+    // Safety-critical (SC): HAZ-012, HAZ-017, HAZ-021 — stores TLS session
+    // material; delegates to TlsSessionStore::try_save() which is mutex-protected
+    // per REQ-6.3.10 (CWE-362).
     void try_save_client_session();
 #endif /* MBEDTLS_SSL_SESSION_TICKETS */
 
@@ -339,8 +340,9 @@ private:
     /// non-null, and m_session_store_ptr->session_valid is true.
     /// Failure is non-fatal: logs WARNING_LO and full handshake proceeds.
     /// Extracted from tls_connect_handshake() to reduce its CC.
-    // Safety-critical (SC): HAZ-017 — loads session material into mbedTLS context;
-    // a stale/compromised ticket bypasses forward-secrecy (RFC 5077 limitation).
+    // Safety-critical (SC): HAZ-017, HAZ-021 — delegates to
+    // TlsSessionStore::try_load() which re-checks session_valid under the
+    // mutex lock (TOCTOU prevention) per REQ-6.3.10 (CWE-362).
     void try_load_client_session();
 
     /// Accept one pending connection and optionally perform TLS handshake.
