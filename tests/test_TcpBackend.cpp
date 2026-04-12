@@ -44,7 +44,7 @@
  *           REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9,
  *           REQ-6.1.10, REQ-6.1.11, REQ-6.3.5, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.3.5, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
+// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.4, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.1.12, REQ-6.3.5, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
 // Verification: M1 + M2 + M4 + M5 (fault injection via ISocketOps)
 
 #include <cstdio>
@@ -3154,6 +3154,113 @@ static void test_tcp_client_receives_hello_from_server()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: HELLO timeout slot eviction (REQ-6.1.12)
+//
+// A raw TCP client connects but never sends a HELLO.  The server's
+// channels[0].recv_timeout_ms is set to 10 ms so the sweep fires quickly.
+// After receive_message() runs two poll_clients_once() iterations, the slot
+// is evicted and the server closes the client fd (server sends FIN).
+// The client thread detects EOF (recv() == 0) within a bounded wait.
+//
+// Covers:
+//   TcpBackend::sweep_hello_timeouts() True branch
+//     (slot active, !hello_received, timeout expired → close_and_evict_slot)
+//   The False branches (slot already received HELLO / timeout not expired)
+//     are covered by all other server tests where normal HELLO exchange occurs.
+//
+// Verifies: REQ-6.1.12
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct HelloTimeoutArg {
+    uint16_t port;
+    bool     server_closed;  ///< Set to true when client detects server-side FIN
+};
+
+static void* hello_timeout_no_hello_thread(void* raw)
+{
+    HelloTimeoutArg* a = static_cast<HelloTimeoutArg*>(raw);
+    assert(a != nullptr);
+
+    usleep(30000U);  // 30 ms: let server bind and enter receive_message poll
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) { return nullptr; }
+
+    struct sockaddr_in addr;
+    (void)memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(a->port);
+    (void)inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+
+    // MISRA C++:2023 5.2.4: reinterpret_cast required by POSIX connect() signature
+    if (connect(fd, reinterpret_cast<const struct sockaddr*>(&addr),
+                static_cast<socklen_t>(sizeof(addr))) != 0) {
+        (void)close(fd);
+        return nullptr;
+    }
+
+    // Connected but intentionally NOT sending a HELLO — wait for eviction.
+    // Power of 10 Rule 2: fixed loop bound — at most 30 × 10 ms = 300 ms.
+    a->server_closed = false;
+    for (uint32_t iter = 0U; iter < 30U; ++iter) {
+        usleep(10000U);  // 10 ms per iteration
+        uint8_t buf[1];
+        // MSG_PEEK|MSG_DONTWAIT: check if FIN arrived without consuming data
+        const ssize_t n = recv(fd, static_cast<void*>(buf), sizeof(buf),
+                               MSG_PEEK | MSG_DONTWAIT);
+        if (n == 0) {
+            // recv()=0 means server closed the connection (FIN received)
+            a->server_closed = true;
+            break;
+        }
+    }
+    (void)close(fd);
+    return nullptr;
+}
+
+// Verifies: REQ-6.1.12
+static void test_tcp_hello_timeout_evicts_slot()
+{
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
+
+    TcpBackend server;
+    TransportConfig srv_cfg;
+    make_tcp_server_cfg(srv_cfg, PORT);
+    // Set a very short HELLO timeout so the sweep fires quickly.
+    // recv_timeout_ms is the default HELLO timeout per REQ-6.1.12.
+    srv_cfg.channels[0U].recv_timeout_ms = 10U;
+
+    Result init_r = server.init(srv_cfg);
+    assert(init_r == Result::OK);
+    assert(server.is_open());
+
+    HelloTimeoutArg arg;
+    arg.port         = PORT;
+    arg.server_closed = false;
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t tid;
+    (void)pthread_create(&tid, &attr, hello_timeout_no_hello_thread, &arg);
+
+    // run receive_message long enough for the sweep to fire
+    // (accept → sleep past 10 ms timeout → sweep → evict)
+    // Power of 10 Rule 2: fixed poll loop — receive_message runs at most 6 × 100 ms.
+    MessageEnvelope env;
+    Result recv_r = server.receive_message(env, 600U);
+    assert(recv_r != Result::OK);  // nothing was delivered (no valid data frame)
+
+    (void)pthread_join(tid, nullptr);
+    (void)pthread_attr_destroy(&attr);
+    server.close();
+
+    // Primary assertion: server closed the connection after HELLO timeout.
+    assert(arg.server_closed);
+    printf("PASS: test_tcp_hello_timeout_evicts_slot\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3241,6 +3348,9 @@ int main()
 
     // Client-mode HELLO echo consumed at line 387 (REQ-6.1.8, M5)
     test_tcp_client_receives_hello_from_server();
+
+    // HELLO timeout slot eviction (REQ-6.1.12)
+    test_tcp_hello_timeout_evicts_slot();
 
     printf("=== ALL PASSED ===\n");
     return 0;

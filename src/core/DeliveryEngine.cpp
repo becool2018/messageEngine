@@ -20,10 +20,9 @@
  * checked return values, bounded resource usage.
  *
  * Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5,
- *             REQ-5.2.4, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+ *             REQ-5.2.4, REQ-5.2.6, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
  */
-// Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5,
-//             REQ-3.3.6, REQ-5.2.4, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
+// Implements: REQ-3.2.7, REQ-3.3.1, REQ-3.3.2, REQ-3.3.3, REQ-3.3.4, REQ-3.3.5, REQ-3.3.6, REQ-5.2.4, REQ-5.2.6, REQ-6.1.10, REQ-7.2.1, REQ-7.2.3, REQ-7.2.4, REQ-7.2.5
 
 #include "DeliveryEngine.hpp"
 #include "Assert.hpp"
@@ -42,6 +41,12 @@ static_assert(Serializer::WIRE_HEADER_SIZE + FRAG_MAX_PAYLOAD_BYTES <= SOCKET_RE
 // REQ-5.2.4: OS entropy for message ID seed (prevents ID-prediction attacks).
 // arc4random_buf is available on macOS/BSD without a separate header;
 // getrandom() requires <sys/random.h> on Linux.
+// REQ-5.2.6 / CERT: Prevent ALLOW_WEAK_PRNG_SEED from being compiled into release builds.
+// NDEBUG is set by production/release build profiles; a weak seed in production violates
+// REQ-5.2.6 (H-6 / HAZ-022 / CWE-338).
+#if defined(ALLOW_WEAK_PRNG_SEED) && defined(NDEBUG)
+#error "ALLOW_WEAK_PRNG_SEED must not be defined in release/production builds (REQ-5.2.6)"
+#endif
 #include <ctime>
 #if !defined(__APPLE__)
 #include <sys/random.h>
@@ -269,9 +274,25 @@ void DeliveryEngine::init(TransportInterface* transport,
     NEVER_COMPILED_OUT_ASSERT(entropy != 0ULL ||
         (static_cast<uint64_t>(local_id) << 32U) != 0ULL);  // Assert: seed will be non-zero
 #else
-    // REQ-5.2.4: delegate all entropy-gathering to get_seed_entropy() to keep
+    // REQ-5.2.4 / REQ-5.2.6: delegate entropy-gathering to get_seed_entropy() to keep
     // init() within CC ≤ 10.  getrandom() → /dev/urandom → clock/pid/ts mix.
-    (void)get_seed_entropy(entropy);
+    // REQ-5.2.6 (H-6 / HAZ-022 / CWE-338): if both getrandom() and /dev/urandom fail,
+    // production builds MUST NOT continue with a weak seed.
+    const bool strong_entropy = get_seed_entropy(entropy);
+#if !defined(ALLOW_WEAK_PRNG_SEED)
+    if (!strong_entropy) {
+        Logger::log(Severity::FATAL, "DeliveryEngine",
+                    "OS entropy sources exhausted; cannot seed PRNG securely "
+                    "(REQ-5.2.6). Build with -DALLOW_WEAK_PRNG_SEED to override "
+                    "in non-production environments.");
+        NEVER_COMPILED_OUT_ASSERT(false);  // Assert: unreachable in production (REQ-5.2.6)
+        return;
+    }
+#else
+    // ALLOW_WEAK_PRNG_SEED defined: weak fallback already logged WARNING_HI inside
+    // get_seed_entropy(); tolerate it here for non-production / test builds only.
+    (void)strong_entropy;
+#endif  // !defined(ALLOW_WEAK_PRNG_SEED)
     NEVER_COMPILED_OUT_ASSERT(entropy != 0ULL || local_id != NODE_ID_INVALID);  // Assert: entropy obtained
 #endif
     // Mix in local_id for node-scoping (keeps IDs node-distinct even with same entropy).

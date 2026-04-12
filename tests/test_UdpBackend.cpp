@@ -40,7 +40,7 @@
  * Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4,
  *           REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1
  */
-// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.6, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1
+// Verifies: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.6, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-6.2.5, REQ-7.1.1
 
 #include <cstdio>
 #include <cstring>
@@ -1133,25 +1133,41 @@ static void test_mock_udp_send_hello_send_to_fail()
 
 static void test_mock_udp_send_hello_no_peer()
 {
-    // Verifies: REQ-6.1.10
-    // Covers: UdpBackend::send_hello_datagram() no-peer guard
-    //         (peer_ip[0]=='\0' || peer_port==0 → ERR_INVALID)
-    // Strategy: configure with no peer; init still succeeds (bind only);
-    //           register_local_id → send_hello_datagram → ERR_INVALID.
-    UdpBackend backend;
+    // Verifies: REQ-6.2.5
+    // Covers: UdpBackend::init() wildcard peer_ip rejection (REQ-6.2.5 / H-7).
+    //   Branch True: peer_ip[0] == '\0' → ERR_INVALID (never opened).
+    //   Branch True: peer_ip == "0.0.0.0" → ERR_INVALID.
+    //   Branch True: peer_ip == "::" → ERR_INVALID.
+    // NOTE: The old send_hello_datagram() peer_ip guard (peer_ip[0] == '\0') is now
+    // an architectural ceiling — init() prevents empty peer_ip from reaching
+    // send_hello_datagram. Documented in COVERAGE_CEILINGS.md.
+    UdpBackend backend_empty, backend_v4, backend_v6;
 
-    TransportConfig cfg;
-    const uint16_t bind_p19714 = alloc_ephemeral_port(SOCK_DGRAM);
-    make_udp_cfg(cfg, bind_p19714, 0U);  // peer_port = 0 triggers the guard
-    cfg.peer_ip[0] = '\0';               // also clear peer_ip for belt-and-braces
+    TransportConfig cfg_empty, cfg_v4, cfg_v6;
+    const uint16_t p1 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t p2 = alloc_ephemeral_port(SOCK_DGRAM);
+    const uint16_t p3 = alloc_ephemeral_port(SOCK_DGRAM);
 
-    assert(backend.init(cfg) == Result::OK);
-    assert(backend.is_open());
+    // Case 1: empty peer_ip → ERR_INVALID
+    make_udp_cfg(cfg_empty, p1, 9000U);
+    cfg_empty.peer_ip[0] = '\0';
+    assert(backend_empty.init(cfg_empty) == Result::ERR_INVALID);
+    assert(!backend_empty.is_open());
 
-    Result r = backend.register_local_id(2U);
-    assert(r == Result::ERR_INVALID);
+    // Case 2: IPv4 wildcard "0.0.0.0" → ERR_INVALID
+    make_udp_cfg(cfg_v4, p2, 9000U);
+    (void)strncpy(cfg_v4.peer_ip, "0.0.0.0", sizeof(cfg_v4.peer_ip) - 1U);
+    cfg_v4.peer_ip[sizeof(cfg_v4.peer_ip) - 1U] = '\0';
+    assert(backend_v4.init(cfg_v4) == Result::ERR_INVALID);
+    assert(!backend_v4.is_open());
 
-    backend.close();
+    // Case 3: IPv6 wildcard "::" → ERR_INVALID
+    make_udp_cfg(cfg_v6, p3, 9000U);
+    (void)strncpy(cfg_v6.peer_ip, "::", sizeof(cfg_v6.peer_ip) - 1U);
+    cfg_v6.peer_ip[sizeof(cfg_v6.peer_ip) - 1U] = '\0';
+    assert(backend_v6.init(cfg_v6) == Result::ERR_INVALID);
+    assert(!backend_v6.is_open());
+
     printf("PASS: test_mock_udp_send_hello_no_peer\n");
 }
 

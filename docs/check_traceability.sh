@@ -38,7 +38,7 @@ TESTS_DIR="$REPO_ROOT/tests"
 #                Implemented in: PR 3 (TlsTcpBackend.cpp, DtlsUdpBackend.cpp)
 #   REQ-6.3.10 — H-3: TlsSessionStore POSIX mutex for concurrent access
 #                Implemented in: PR 4 (TlsSessionStore.cpp)
-KNOWN_GAPS="REQ-5.2.6 REQ-6.1.12 REQ-6.2.5"
+KNOWN_GAPS=""
 
 PASS=0
 FAIL=0

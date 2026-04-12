@@ -55,28 +55,13 @@
 // Safety-critical (SC): HAZ-018 — source_id equality on security-sensitive paths.
 static inline bool ct_node_id_equal(NodeId a, NodeId b)
 {
-    NEVER_COMPILED_OUT_ASSERT(sizeof(NodeId) == sizeof(uint32_t));  // Assert: NodeId is 32 bits
+    NEVER_COMPILED_OUT_ASSERT(sizeof(NodeId) == 4U);  // Assert: NodeId is 32 bits (4 bytes)
     // volatile prevents the compiler from short-circuiting the XOR before the
     // zero-test (CWE-208 timing oracle mitigation; CLAUDE.md §7d).
     volatile uint32_t diff = static_cast<uint32_t>(a) ^ static_cast<uint32_t>(b);
-    NEVER_COMPILED_OUT_ASSERT(diff == 0U || diff != 0U);  // Assert: diff is always defined
+    // Assert 2: postcondition — result is consistent with the XOR accumulator.
+    NEVER_COMPILED_OUT_ASSERT((diff == 0U) == (static_cast<uint32_t>(a) == static_cast<uint32_t>(b)));
     return (diff == 0U);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// ct_msg_id_equal — constant-time message_id (uint64_t) equality
-// HAZ-018: timing-oracle mitigation for message_id comparisons.
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Compare two 64-bit message IDs without early-exit on the first differing bit.
-/// Returns true iff a == b.
-// Safety-critical (SC): HAZ-018 — message_id equality on security-sensitive paths.
-static inline bool ct_msg_id_equal(uint64_t a, uint64_t b)
-{
-    NEVER_COMPILED_OUT_ASSERT(sizeof(uint64_t) == 8U);  // Assert: 64-bit type is 8 bytes
-    volatile uint64_t diff = a ^ b;
-    NEVER_COMPILED_OUT_ASSERT(diff == 0ULL || diff != 0ULL);  // Assert: diff is always defined
-    return (diff == 0ULL);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -92,13 +77,14 @@ static inline bool ct_msg_id_equal(uint64_t a, uint64_t b)
 static inline bool ct_id_pair_equal(NodeId src_a, NodeId src_b,
                                     uint64_t id_a, uint64_t id_b)
 {
-    NEVER_COMPILED_OUT_ASSERT(sizeof(NodeId) == sizeof(uint32_t));  // Assert: NodeId is 32 bits
+    NEVER_COMPILED_OUT_ASSERT(sizeof(NodeId) == 4U);  // Assert: NodeId is 32 bits (4 bytes)
     // Both fields are XORed and ORed into a single volatile accumulator so
     // the compiler cannot skip either comparison even when src already differs.
     volatile uint32_t src_diff = static_cast<uint32_t>(src_a) ^ static_cast<uint32_t>(src_b);
     volatile uint64_t id_diff  = id_a ^ id_b;
     volatile uint64_t combined = static_cast<uint64_t>(src_diff) | id_diff;
-    NEVER_COMPILED_OUT_ASSERT(combined == 0ULL || combined != 0ULL);  // Assert: result defined
+    // Assert 3: postcondition — combined == 0 iff both fields matched.
+    NEVER_COMPILED_OUT_ASSERT((combined == 0ULL) == ((src_diff == 0U) && (id_diff == 0ULL)));
     return (combined == 0ULL);
 }
 

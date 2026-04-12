@@ -24,7 +24,7 @@
  *   - MISRA C++: no exceptions, all return values checked.
  *   - F-Prime style: event logging via Logger.
  *
- * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.1.10, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-7.1.1, REQ-7.2.4
+ * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-5.1.5, REQ-5.1.6, REQ-6.1.10, REQ-6.2.1, REQ-6.2.2, REQ-6.2.3, REQ-6.2.4, REQ-6.2.5, REQ-7.1.1, REQ-7.2.4
  */
 
 #include "platform/UdpBackend.hpp"
@@ -87,6 +87,19 @@ Result UdpBackend::init(const TransportConfig& config)
         Logger::log(Severity::WARNING_HI, "UdpBackend",
                     "init: num_channels=%u exceeds MAX_CHANNELS; rejecting config",
                     config.num_channels);
+        return Result::ERR_INVALID;
+    }
+
+    // REQ-6.2.5 (H-7 / HAZ-024 / CWE-290): reject wildcard or empty peer_ip.
+    // Plaintext UDP requires a specific peer address for source binding to be effective;
+    // a wildcard address allows spoofed source addresses from any peer.
+    if (config.peer_ip[0] == '\0' ||
+        strcmp(config.peer_ip, "0.0.0.0") == 0 ||
+        strcmp(config.peer_ip, "::") == 0) {
+        Logger::log(Severity::FATAL, "UdpBackend",
+                    "init: peer_ip is wildcard or empty ('%s'); "
+                    "plaintext UDP requires a specific peer address (REQ-6.2.5)",
+                    config.peer_ip);
         return Result::ERR_INVALID;
     }
 
