@@ -1,0 +1,20 @@
+# messageengine.pc.in — pkg-config template for messageEngine C++ library.
+# Placeholders substituted by `make install-dev` or `make package`:
+#   @PREFIX@     — installation prefix (e.g. /usr)
+#   @LIBDIR@     — library directory   (e.g. /usr/lib)
+#   @INCLUDEDIR@ — header directory    (e.g. /usr/include)
+#   @VERSION@    — library version string (e.g. 2.0.1)
+
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=@LIBDIR@
+includedir=@INCLUDEDIR@
+
+Name: messageengine
+Description: Safety-critical C++ network messaging library (TCP, TLS, UDP, DTLS, impairment engine)
+Version: @VERSION@
+URL: https://github.com/becool2018/messageEngine
+Requires: mbedtls >= 2.28
+Libs: -L${libdir} -lmessageengine
+Libs.private: -lpthread
+Cflags: -I${includedir} -std=c++17

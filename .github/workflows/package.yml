@@ -1,0 +1,138 @@
+name: Package
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    branches: [ "main" ]
+    types: [ completed ]
+
+permissions:
+  contents: write
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Only run when CI passed on main.
+  # ─────────────────────────────────────────────────────────────────────────────
+  guard:
+    name: Guard — CI must have succeeded
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: CI conclusion OK
+        run: echo "CI passed — proceeding with package build."
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Build tarballs on Linux (glibc) and macOS.
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-package:
+    name: Build package — ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    needs: guard
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, macos-latest ]
+
+    steps:
+      - name: Checkout (at the commit that triggered CI)
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      # ── Linux toolchain ────────────────────────────────────────────────────
+      - name: Install toolchain (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libmbedtls-dev
+
+      # ── macOS toolchain ────────────────────────────────────────────────────
+      - name: Install toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install mbedtls pkg-config
+
+      # ── Read version from source (once) ───────────────────────────────────
+      - name: Extract version
+        id: ver
+        run: |
+          VER=$(grep 'ME_VERSION_STRING\[\]' src/core/Version.hpp \
+                | sed 's/.*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      # ── Build static + shared libraries ───────────────────────────────────
+      - name: Build release libraries
+        run: make RELEASE=1 libs
+
+      # ── Stage and pack ─────────────────────────────────────────────────────
+      - name: Create distribution tarball
+        run: make RELEASE=1 package
+
+      # ── Rename for matrix disambiguation ──────────────────────────────────
+      - name: Rename tarball
+        id: tarball
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          OS_TAG="${{ runner.os == 'Linux' && 'linux-x86_64' || 'macos-arm64' }}"
+          SRC="build/messageengine-${VER}.tar.gz"
+          DST="build/messageengine-${VER}-${OS_TAG}.tar.gz"
+          mv "$SRC" "$DST"
+          echo "path=$DST" >> "$GITHUB_OUTPUT"
+          echo "name=messageengine-${VER}-${OS_TAG}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # ── Upload as workflow artifact ────────────────────────────────────────
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.tarball.outputs.name }}
+          path: ${{ steps.tarball.outputs.path }}
+          retention-days: 30
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Create a version-tagged GitHub Release and attach both tarballs.
+  # Runs once; downloads both artifacts uploaded above.
+  # ─────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-package
+
+    steps:
+      - name: Checkout (for version read)
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Extract version
+        id: ver
+        run: |
+          VER=$(grep 'ME_VERSION_STRING\[\]' src/core/Version.hpp \
+                | sed 's/.*"\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Download all tarballs
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Flatten artifact subdirs
+        run: |
+          find dist/ -name "*.tar.gz" -exec mv {} dist/ \; 2>/dev/null || true
+          find dist/ -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} + 2>/dev/null || true
+          ls -lh dist/
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: messageEngine v${{ steps.ver.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: dist/*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

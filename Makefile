@@ -192,7 +192,100 @@ ALL_LIB_OBJS := $(CORE_OBJS) $(PLATFORM_OBJS)
 # ─────────────────────────────────────────────────────────────────────────────
 # Targets
 # ─────────────────────────────────────────────────────────────────────────────
-.PHONY: all clean install tests stress_tests run_stress_tests run_tests server client \
+# ─────────────────────────────────────────────────────────────────────────────
+# Library version — extracted from src/core/Version.hpp at eval time.
+# Used by static_lib, shared_lib, and package targets.
+# ─────────────────────────────────────────────────────────────────────────────
+ME_VERSION := $(shell grep 'ME_VERSION_STRING\[\]' src/core/Version.hpp \
+                      | sed 's/.*"\(.*\)".*/\1/')
+ME_MAJOR   := $(shell grep 'ME_VERSION_MAJOR  *=' src/core/Version.hpp \
+                      | sed 's/.*=[ ]*\([0-9]*\)U.*/\1/')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared library naming — platform-specific.
+#   Linux:  libmessageengine.so.MAJOR.MINOR.PATCH  (soname = .so.MAJOR)
+#   macOS:  libmessageengine.MAJOR.MINOR.PATCH.dylib  (compatibility name = .MAJOR.dylib)
+# ─────────────────────────────────────────────────────────────────────────────
+ifeq ($(UNAME_S),Darwin)
+SHARED_LIB      := build/libmessageengine.$(ME_VERSION).dylib
+SHARED_SONAME   := libmessageengine.$(ME_MAJOR).dylib
+SHARED_LDFLAGS  := -dynamiclib \
+                   -install_name @rpath/$(SHARED_SONAME) \
+                   -compatibility_version $(ME_MAJOR).0.0 \
+                   -current_version $(ME_VERSION)
+SHARED_SYMLINK1 := build/libmessageengine.$(ME_MAJOR).dylib
+SHARED_SYMLINK2 := build/libmessageengine.dylib
+else
+SHARED_LIB      := build/libmessageengine.so.$(ME_VERSION)
+SHARED_SONAME   := libmessageengine.so.$(ME_MAJOR)
+SHARED_LDFLAGS  := -shared -Wl,-soname,$(SHARED_SONAME)
+SHARED_SYMLINK1 := build/libmessageengine.so.$(ME_MAJOR)
+SHARED_SYMLINK2 := build/libmessageengine.so
+endif
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PIC object tree — used exclusively for the shared library.
+# Separate from build/objs/ (non-PIC) to avoid polluting executable objects.
+# Power of 10 Rule 2 deviation: infrastructure build loop, bounded by ALL_LIB_SRC.
+# ─────────────────────────────────────────────────────────────────────────────
+PIC_OBJ_DIR      := build/pic-objs
+PIC_CXXFLAGS     := $(filter-out -fPIE,$(CXXFLAGS)) -fPIC -DMESSAGEENGINE_BUILD_SHARED
+PIC_CORE_OBJS    := $(patsubst src/%.cpp,$(PIC_OBJ_DIR)/%.o,$(CORE_SRC))
+PIC_PLATFORM_OBJS := $(patsubst src/%.cpp,$(PIC_OBJ_DIR)/%.o,$(PLATFORM_SRC))
+ALL_PIC_LIB_OBJS := $(PIC_CORE_OBJS) $(PIC_PLATFORM_OBJS)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public header lists — used by install-dev and package targets.
+# ─────────────────────────────────────────────────────────────────────────────
+PUBLIC_HEADERS_CORE := \
+    src/core/messageengine_export.h \
+    src/core/MessageEnvelope.hpp \
+    src/core/TransportInterface.hpp \
+    src/core/DeliveryEngine.hpp \
+    src/core/Serializer.hpp \
+    src/core/Types.hpp \
+    src/core/ChannelConfig.hpp \
+    src/core/ImpairmentConfig.hpp \
+    src/core/TlsConfig.hpp \
+    src/core/Logger.hpp \
+    src/core/ProtocolVersion.hpp \
+    src/core/Version.hpp \
+    src/core/Assert.hpp \
+    src/core/AssertState.hpp \
+    src/core/IResetHandler.hpp \
+    src/core/AbortResetHandler.hpp \
+    src/core/DeliveryEvent.hpp \
+    src/core/DeliveryEventRing.hpp \
+    src/core/DeliveryStats.hpp \
+    src/core/RingBuffer.hpp \
+    src/core/MessageId.hpp \
+    src/core/Timestamp.hpp \
+    src/core/RequestReplyEngine.hpp \
+    src/core/RequestReplyHeader.hpp
+
+PUBLIC_HEADERS_PLATFORM := \
+    src/platform/TcpBackend.hpp \
+    src/platform/TlsTcpBackend.hpp \
+    src/platform/TlsSessionStore.hpp \
+    src/platform/DtlsUdpBackend.hpp \
+    src/platform/LocalSimHarness.hpp \
+    src/platform/ImpairmentEngine.hpp \
+    src/platform/ImpairmentConfigLoader.hpp \
+    src/platform/PrngEngine.hpp
+
+TESTING_HEADERS := \
+    src/platform/ISocketOps.hpp \
+    src/platform/IPosixSyscalls.hpp \
+    src/platform/IMbedtlsOps.hpp
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Installation paths for library + headers (extends existing bindir install).
+# ─────────────────────────────────────────────────────────────────────────────
+includedir ?= $(prefix)/include
+libdir     ?= $(prefix)/lib
+
+.PHONY: all clean install install-dev libs static_lib shared_lib package \
+        tests stress_tests run_stress_tests run_tests server client \
         tls_demo dtls_demo demos \
         check_traceability \
         lint cppcheck cppcheck-misra pclint scan_build static_analysis \
@@ -211,7 +304,12 @@ help:
 	@echo "  tls_demo            Build TLS/TCP demo     (build/tls_demo)"
 	@echo "  dtls_demo           Build DTLS-UDP demo    (build/dtls_demo)"
 	@echo "  demos               Build tls_demo and dtls_demo"
+	@echo "  libs                Build static + shared libraries"
+	@echo "  static_lib          Build static library (build/libmessageengine.a)"
+	@echo "  shared_lib          Build shared library (build/libmessageengine.so / .dylib)"
 	@echo "  install             Install server+client to prefix/bin  (override: DESTDIR, prefix, bindir)"
+	@echo "  install-dev         Install headers + libs + pkg-config  (override: DESTDIR, prefix, includedir, libdir)"
+	@echo "  package             Build distributable tarball  (build/messageengine-vVER-OS-ARCH.tar.gz)"
 	@echo "  clean               Remove all build artifacts"
 	@echo ""
 	@echo "Test:"
@@ -831,6 +929,110 @@ coverage_report: coverage
 	@echo ""
 	@echo "  See CLAUDE.md §14 for full policy and ceiling justifications."
 	@echo "================================================================"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PIC object compilation rule (shared library only).
+# Power of 10 Rule 2 deviation: infrastructure pattern rule — bounded by
+# ALL_PIC_LIB_OBJS which is derived from the finite ALL_LIB_SRC list.
+# ─────────────────────────────────────────────────────────────────────────────
+$(PIC_OBJ_DIR)/%.o: src/%.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(PIC_CXXFLAGS) -c -o $@ $<
+
+# ─────────────────────────────────────────────────────────────────────────────
+# static_lib — archives all library objects into libmessageengine.a.
+# Reuses the existing non-PIC build/objs/ objects (fine for static linking).
+# ─────────────────────────────────────────────────────────────────────────────
+static_lib: $(ALL_LIB_OBJS)
+	ar rcs build/libmessageengine.a $^
+	@echo "=== static_lib: build/libmessageengine.a ==="
+
+# ─────────────────────────────────────────────────────────────────────────────
+# shared_lib — links PIC objects into a versioned shared library.
+# Platform-aware: .so on Linux, .dylib on macOS.
+# ─────────────────────────────────────────────────────────────────────────────
+shared_lib: $(ALL_PIC_LIB_OBJS)
+	$(CXX) $(SHARED_LDFLAGS) -o $(SHARED_LIB) $^ $(LDFLAGS)
+	ln -sf $(notdir $(SHARED_LIB)) $(SHARED_SYMLINK1)
+	ln -sf $(notdir $(SHARED_SYMLINK1)) $(SHARED_SYMLINK2)
+	@echo "=== shared_lib: $(SHARED_LIB) ==="
+
+# ─────────────────────────────────────────────────────────────────────────────
+# libs — builds both static and shared libraries.
+# ─────────────────────────────────────────────────────────────────────────────
+libs: static_lib shared_lib
+
+# ─────────────────────────────────────────────────────────────────────────────
+# install-dev — installs library headers + static lib + shared lib + pkg-config
+# into $(DESTDIR)$(includedir) and $(DESTDIR)$(libdir).
+# Yocto do_install calls: make install-dev DESTDIR=${D} prefix=${prefix}
+# ─────────────────────────────────────────────────────────────────────────────
+install-dev: libs
+	install -d $(DESTDIR)$(includedir)/messageengine/testing
+	install -m 0644 $(PUBLIC_HEADERS_CORE) $(PUBLIC_HEADERS_PLATFORM) \
+	    $(DESTDIR)$(includedir)/messageengine/
+	install -m 0644 $(TESTING_HEADERS) \
+	    $(DESTDIR)$(includedir)/messageengine/testing/
+	install -d $(DESTDIR)$(libdir)/pkgconfig
+	install -m 0644 build/libmessageengine.a $(DESTDIR)$(libdir)/
+	install -m 0755 $(SHARED_LIB) $(DESTDIR)$(libdir)/
+	ln -sf $(notdir $(SHARED_LIB)) \
+	    $(DESTDIR)$(libdir)/$(notdir $(SHARED_SYMLINK1))
+	ln -sf $(notdir $(SHARED_SYMLINK1)) \
+	    $(DESTDIR)$(libdir)/$(notdir $(SHARED_SYMLINK2))
+	sed -e 's|@PREFIX@|$(DESTDIR)$(prefix)|g' \
+	    -e 's|@LIBDIR@|$(DESTDIR)$(libdir)|g' \
+	    -e 's|@INCLUDEDIR@|$(DESTDIR)$(includedir)|g' \
+	    -e 's|@VERSION@|$(ME_VERSION)|g' \
+	    packaging/messageengine.pc.in \
+	    > $(DESTDIR)$(libdir)/pkgconfig/messageengine.pc
+	@echo "=== install-dev: headers + libs installed to $(DESTDIR)$(prefix) ==="
+
+# ─────────────────────────────────────────────────────────────────────────────
+# package — builds a self-contained distributable tarball.
+# Output: build/messageengine-vVERSION-OS-ARCH.tar.gz
+# Does NOT require a matching git tag (use check_version + release job for that).
+# ─────────────────────────────────────────────────────────────────────────────
+PACKAGE_OS   := $(shell uname -s | tr '[:upper:]' '[:lower:]' | sed 's/darwin/darwin/')
+PACKAGE_ARCH := $(shell uname -m)
+PACKAGE_NAME := messageengine-v$(ME_VERSION)-$(PACKAGE_OS)-$(PACKAGE_ARCH)
+STAGE        := build/pkg/$(PACKAGE_NAME)
+
+package: libs
+	@echo "=== Staging package: $(PACKAGE_NAME) ==="
+	rm -rf $(STAGE)
+	mkdir -p $(STAGE)/include/messageengine/testing
+	mkdir -p $(STAGE)/lib/pkgconfig
+	mkdir -p $(STAGE)/lib/cmake/MessageEngine
+	install -m 0644 $(PUBLIC_HEADERS_CORE) $(PUBLIC_HEADERS_PLATFORM) \
+	    $(STAGE)/include/messageengine/
+	install -m 0644 $(TESTING_HEADERS) \
+	    $(STAGE)/include/messageengine/testing/
+	install -m 0644 build/libmessageengine.a $(STAGE)/lib/
+	install -m 0755 $(SHARED_LIB) $(STAGE)/lib/
+	ln -sf $(notdir $(SHARED_LIB)) \
+	    $(STAGE)/lib/$(notdir $(SHARED_SYMLINK1))
+	ln -sf $(notdir $(SHARED_SYMLINK1)) \
+	    $(STAGE)/lib/$(notdir $(SHARED_SYMLINK2))
+	sed -e 's|@PREFIX@|/usr|g' \
+	    -e 's|@LIBDIR@|/usr/lib|g' \
+	    -e 's|@INCLUDEDIR@|/usr/include|g' \
+	    -e 's|@VERSION@|$(ME_VERSION)|g' \
+	    packaging/messageengine.pc.in \
+	    > $(STAGE)/lib/pkgconfig/messageengine.pc
+	sed 's|@VERSION@|$(ME_VERSION)|g' \
+	    packaging/cmake/MessageEngineConfig.cmake.in \
+	    > $(STAGE)/lib/cmake/MessageEngine/MessageEngineConfig.cmake
+	sed 's|@VERSION@|$(ME_VERSION)|g' \
+	    packaging/cmake/MessageEngineConfigVersion.cmake.in \
+	    > $(STAGE)/lib/cmake/MessageEngine/MessageEngineConfigVersion.cmake
+	sed -e 's|@VERSION@|$(ME_VERSION)|g' \
+	    -e 's|@SHARED_LIB_NAME@|$(notdir $(SHARED_LIB))|g' \
+	    packaging/cmake/MessageEngineTargets.cmake.in \
+	    > $(STAGE)/lib/cmake/MessageEngine/MessageEngineTargets.cmake
+	install -m 0644 LICENSE $(STAGE)/
+	tar -czf build/$(PACKAGE_NAME).tar.gz -C build/pkg $(PACKAGE_NAME)
+	@echo "=== Package ready: build/$(PACKAGE_NAME).tar.gz ==="
 
 # ─────────────────────────────────────────────────────────────────────────────
 # install — Yocto do_install calls: make install DESTDIR=${D}
