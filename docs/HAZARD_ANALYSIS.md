@@ -27,6 +27,14 @@
 | HAZ-014 | Ordering gate permanent stall via UINT32_MAX sequence number — sweep_expired_holds() computed sequence_num + 1U as uint32_t; UINT32_MAX+1 wraps to 0 (the UNORDERED sentinel), advance_sequence() no-ops, and the gate never unblocks. | Cat II | Unsigned overflow in sweep_expired_holds() on sequence_num == UINT32_MAX | seq_next_guarded() helper wraps to 1 (not 0) on UINT32_MAX overflow, consistent with advance_next_expected(); CERT INT30-C (DEF-016-5). |
 | HAZ-015 | **Source_id rotation via plaintext UDP — capacity exhaustion** — a peer at the correct IP:port sends envelopes with arbitrary `source_id` values; each novel `source_id` opens a fresh `DuplicateFilter` slot and `OrderingBuffer` peer table entry, exhausting both fixed-capacity tables and causing `ERR_FULL` drops for legitimate traffic. Prior to this fix, `UdpBackend::validate_source()` checked IP:port only and never enforced HELLO-before-data or source_id binding (same class as HAZ-011 but on the plaintext UDP path — no DTLS MAC to bound the attacker). | Cat I | `UdpBackend::recv_one_datagram()` passed envelopes with arbitrary `source_id` to `DeliveryEngine`; no HELLO registration step on the plaintext path | `UdpBackend::process_hello_or_validate()` added (mirrors `DtlsUdpBackend::process_hello_or_validate()`): first HELLO locks `m_peer_node_id`; data frames before HELLO are discarded with WARNING_HI; data frames whose `source_id` != `m_peer_node_id` are discarded with WARNING_HI. Duplicate HELLO frames are also rejected. `m_peer_node_id` and `m_peer_hello_received` reset on `close()`. Verified by `test_udp_data_before_hello_dropped`, `test_udp_source_id_rotation_rejected`, `test_udp_duplicate_hello_dropped`, `test_udp_hello_registration` (REQ-6.2.4 / REQ-6.1.8). |
 | HAZ-016 | **Ordering gate permanent stall on peer reconnect** — when a peer disconnects and reconnects, `OrderingBuffer` retains the old `next_expected_seq` (e.g., 847) for that peer's slot. The new connection starts sending from seq=1; every message is discarded as `seq < next_expected`, permanently stalling the ordered delivery channel for that peer for the lifetime of the new session. | Cat II | `OrderingBuffer::ingest()` discards `seq < next_expected_seq` as a duplicate; on reconnect the new session's messages start from seq=1, which is always below the retained value from the prior session | `OrderingBuffer::reset_peer(src)` resets `next_expected_seq` to 1 and frees all held slots for `src`. `DeliveryEngine::reset_peer_ordering(src)` additionally discards any staged `m_held_pending` message belonging to `src`. `DeliveryEngine::drain_hello_reconnects()` polls `TransportInterface::pop_hello_peer()` at the top of every `receive()` call and triggers `reset_peer_ordering()` for each reconnecting peer (REQ-3.3.6). |
+| HAZ-018 | **Variable-time equality comparisons on (source_id, message_id) — timing oracle** — AckTracker, DuplicateFilter, and OrderingBuffer perform equality comparisons that can short-circuit on the first differing byte. An attacker who can measure response latency can distinguish partial-match from full-match, enabling a timing oracle attack on ACK forgery and replay detection (CWE-208). | Cat I | Loopback or controlled-latency path where an attacker can issue probe messages with known prefixes and measure ACK latency differences | `ct_bytes_equal()` constant-time comparator (no short-circuit) added to all security-sensitive identity comparisons per REQ-3.2.11 | Constant-time comparator eliminates the timing side-channel; attacker cannot distinguish a prefix match from a full match regardless of identity length |
+| HAZ-019 | **Integer overflow on wire-supplied length fields** — `frame_len` in `tcp_recv_frame()` and `total_payload_length` in `ReassemblyBuffer::open_slot()` are 32-bit values sourced directly from the wire. Values near UINT32_MAX bypass bounds checks (e.g., `frame_len > max` wraps after overflow) or corrupt slot calculations, enabling heap or stack overflows downstream (CWE-190). | Cat I | Malformed TCP frame or fragment datagram with length field 0xFFFFFFFF or similar near-overflow value | Ceiling guard: `frame_len > WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES` before any arithmetic; same guard in `open_slot()` per REQ-3.2.10 | Guard fires on the first arithmetic step; values exceeding the ceiling return ERR_INVALID immediately; NEVER_COMPILED_OUT_ASSERT enforces the post-condition |
+| HAZ-020 | **CA certificate absent when verify_peer=true** — with no trust anchor, `MBEDTLS_SSL_VERIFY_REQUIRED` becomes a no-op and any certificate presented by a peer is accepted regardless of issuer. The TLS handshake completes successfully against an impersonator (CWE-295). | Cat I | `verify_peer=true` with `ca_file=""` in `TlsConfig`; operator misconfiguration or deployment tooling that omits the CA file | `init()` returns `ERR_IO` and logs FATAL when `verify_peer=true && ca_file.empty()` per REQ-6.3.6 | Fail-fast before any socket is opened; the impersonation window cannot be reached |
+| HAZ-021 | **TlsSessionStore race condition — concurrent zeroize() and ssl_set_session()** — `TlsSessionStore::zeroize()` and `TlsTcpBackend::try_save_client_session()` / `try_load_client_session()` can race on the `mbedtls_ssl_session` struct in multi-threaded deployments. A zeroize-during-load race causes `ssl_set_session()` to operate on partially-zeroed session material, potentially completing a TLS handshake with corrupt session keys (CWE-362). | Cat I | Two threads: one calls `close()` → `zeroize()`, the other re-uses the same `TlsSessionStore` for a new connection → `try_load_client_session()` concurrently | POSIX `pthread_mutex_t` serialises all `try_save`, `try_load`, and `zeroize` accesses per REQ-6.3.10 | Mutex prevents the race; `session_valid` flag is checked under lock; no partial-state access possible |
+| HAZ-022 | **Weak PRNG entropy in production DeliveryEngine (entropy source failure)** — if both `getrandom()` and `/dev/urandom` fail in `DeliveryEngine::init()`, the seed falls back to timestamp XOR local_id. On a system under attack (e.g., entropy pool depletion), `message_id` values become predictable from clock and PID, enabling ACK forgery via HAZ-010. The fallback is unguarded: the code continues without logging a fatal condition (CWE-338). | Cat I | Entropy source failure (exhausted pool, restricted sandbox, compromised kernel module) during `DeliveryEngine::init()` in a production build | FATAL + reset handler triggered if both entropy sources fail and `ALLOW_WEAK_PRNG_SEED` is not defined per REQ-5.2.6 | Fail-fast prevents operation with predictable message IDs; no ACK forgery window |
+| HAZ-023 | **TCP slow-connect slot exhaustion DoS** — a client that completes the TCP 3-way handshake but never sends a HELLO frame holds a connection slot indefinitely. An attacker who opens `MAX_TCP_CONNECTIONS` such connections exhausts all server slots and permanently denies service to legitimate clients (CWE-400). | Cat II | Attacker opens `MAX_TCP_CONNECTIONS` TCP connections without sending HELLO; each slot is held until the server is restarted | Per-slot accept timestamp; slots not sending HELLO within `hello_timeout_ms` are evicted and closed with WARNING_HI per REQ-6.1.12 | Attacker cannot hold slots longer than `hello_timeout_ms`; legitimate clients always have slots available |
+| HAZ-024 | **UDP wildcard peer_ip allows NodeId hijack before legitimate peer connects** — `UdpBackend` with `peer_ip="0.0.0.0"` or empty accepts HELLO frames from any sender. The first sender to send a HELLO becomes the registered peer (`m_peer_node_id`), binding to that NodeId. A legitimate peer that connects afterward is rejected as a duplicate HELLO (CWE-290). | Cat I | Attacker sends HELLO before the legitimate peer on a network path where attacker can race the legitimate peer; wildcard `peer_ip` configuration | `UdpBackend::init()` rejects wildcard `peer_ip` with ERR_INVALID and FATAL log per REQ-6.2.5 | Configuration is rejected before any socket is opened; no wildcard binding possible |
+| HAZ-025 | **verify_peer=false + non-empty peer_hostname creates a silent MitM trap** — a developer or operator sets `peer_hostname="expected.host"` (intending hostname verification) but sets `verify_peer=false`. Hostname verification silently does not run. The operator believes the endpoint is verified; it is not. Any peer can connect and be accepted (CWE-297). | Cat I | Misconfiguration: `verify_peer=false` with non-empty `peer_hostname` in `TlsConfig`; UI or deployment tooling that sets hostname independently of the verify flag | `init()` returns ERR_INVALID and logs WARNING_HI when `verify_peer=false && !peer_hostname.empty()` per REQ-6.3.9 | Fail-fast prevents silent misconfiguration; operator is forced to either enable peer verification or clear the hostname |
 | HAZ-017 | **TLS session material persists in caller memory after close() — caller does not call store.zeroize()** — `TlsSessionStore` holds the TLS session snapshot (including master-secret-derived material) between close() and the next init(). If the caller does not invoke `store.zeroize()` before process exit, core dump, or memory scan, session master-secret material is readable from memory. A party that recovers the session material can decrypt any recorded traffic from the resumed session. Extension of HAZ-012 to the TlsSessionStore lifetime contract (CWE-316). | Cat II | Caller forgets to call `store.zeroize()` when the TlsSessionStore goes out of scope or is reused; session material survives in stack or heap memory | `TlsSessionStore::~TlsSessionStore()` calls `zeroize()` as a destructor safety net (§7c). `TlsTcpBackend::close()` logs `WARNING_HI` when `store.session_valid == true` to alert the caller that material remains live (F-4: upgraded from WARNING_LO — system-wide impact matches CLAUDE.md §4 WARNING_HI taxonomy). `TlsSessionStore::zeroize()` uses `mbedtls_platform_zeroize()` (not `memset`) to prevent compiler elision (CWE-14, CLAUDE.md §7c). `SECURITY_ASSUMPTIONS.md §13` documents the caller contract. Verified by `test_tls_session_resumption_load_path()` which exercises explicit `store.zeroize()` on cleanup. **Cat II rationale (F-7):** impact is time-limited (session tickets expire, typically ≤24 h) and scope-limited (resumed sessions using that specific ticket only); does not enable server impersonation; direct mitigation exists (`store.zeroize()`); TLS 1.3 preserves forward secrecy for resumed sessions. Impact is less severe than HAZ-012 (private key exposure — permanent, enables impersonation, Cat I). Cat I would apply only if deployment uses TLS 1.2 exclusively on safety-critical command channels without a key rotation schedule; Cat II is correct for this general-purpose library. |
 
 ---
@@ -70,6 +78,12 @@
 | `reset_peer()` not called on peer reconnect | New session's seq=1 messages discarded as `seq < next_expected`; ordered channel permanently stalled for that peer | Cat II HAZ-016 | `DeliveryEngine::drain_hello_reconnects()` calls `reset_peer_ordering()` on every HELLO event | `TransportInterface::pop_hello_peer()` queues HELLO events; `drain_hello_reconnects()` drains the queue at the top of every `receive()` call; `reset_peer()` resets `next_expected_seq` to 1 and frees held slots |
 | `m_held_pending` not discarded on reset | Stale staged message from prior session delivered to caller on next `receive()` call | Cat II HAZ-001 | `reset_peer_ordering()` checks `m_held_pending.source_id == src` before clearing | `reset_peer_ordering()` invalidates `m_held_pending_valid` and logs WARNING_LO when the staged message belongs to the reconnecting peer |
 
+### AckTracker — timing-oracle extension (HAZ-018)
+
+| Failure Mode | System Effect | Severity | Detection | Mitigation |
+|---|---|---|---|---|
+| `on_ack()` uses variable-time comparison for (source_id, message_id) matching | Attacker can distinguish partial-match from full-match via ACK response latency; timing oracle enables forged-ACK attacks | Cat I HAZ-018 | Loopback or controlled-latency measurement; crafted partial-prefix probes | `ct_bytes_equal()` constant-time comparator replaces direct field equality in `on_ack()` slot scan per REQ-3.2.11 |
+
 ### DuplicateFilter
 
 | Failure Mode | System Effect | Severity | Detection | Mitigation |
@@ -77,6 +91,7 @@
 | `check_and_record()` false negative (misses duplicate) | Duplicate delivered and acted on | Cat II HAZ-003 | Window-based FIFO with `(source_id, message_id)` pairs | `DEDUP_WINDOW_SIZE` ≥ `max_retries`; uniqueness guaranteed by `MessageIdGen::next()` |
 | `check_and_record()` false positive (drops unique) | Valid message silently lost | Cat III | Message ID monotonicity | Monotone IDs; window slides forward only; no wraparound in flight window |
 | `init()` not called before use | Undefined state; assertions fire | Cat II | `NEVER_COMPILED_OUT_ASSERT(m_initialized)` | Called in `DeliveryEngine::init()` before any message processing |
+| `is_duplicate()` early-exit on match leaks timing — HAZ-018 | Variable-time iteration allows attacker to distinguish duplicate from unique via latency measurement; timing oracle for replay detection bypass | Cat I HAZ-018 | Controlled-latency measurement; crafted probes with known (source_id, message_id) prefixes | `ct_bytes_equal()` constant-time comparator; loop must not short-circuit per REQ-3.2.11 |
 
 ### Serializer
 
@@ -88,14 +103,23 @@
 | Payload length mismatch | Truncated payload delivered | Cat I HAZ-005 | `payload_length` field vs. actual bytes copied | `payload_length <= MSG_MAX_PAYLOAD_BYTES` enforced in both directions |
 | Protocol version or magic mismatch silently accepted | Frame from incompatible wire format decoded with wrong field layout; corrupt data delivered to caller | Cat I HAZ-005 | `proto_ver != PROTO_VERSION` check at byte 3; `magic_word != (PROTO_MAGIC << 16)` check at bytes 40–43 in `deserialize()` | `ERR_INVALID` returned immediately on version or magic mismatch before any field is read; logged at `WARNING_HI` (REQ-3.2.8) |
 
+### DeliveryEngine — entropy-fallback extension (HAZ-022)
+
+| Failure Mode | System Effect | Severity | Detection | Mitigation |
+|---|---|---|---|---|
+| `init()` entropy sources (getrandom / /dev/urandom) both fail without fatal guard | `MessageIdGen` seeded with low-entropy value; message IDs become predictable from clock + PID; ACK forgery enabled (HAZ-010 extended) | Cat I HAZ-022 | Entropy source failure in restricted sandbox or under entropy-pool attack | FATAL + reset handler if both sources fail and `ALLOW_WEAK_PRNG_SEED` undefined per REQ-5.2.6 |
+
 ### TcpBackend / UdpBackend
 
 | Failure Mode | System Effect | Severity | Detection | Mitigation |
 |---|---|---|---|---|
 | Partial TCP frame accepted as complete message | Corrupt fields delivered | Cat I HAZ-005 | `tcp_recv_frame` uses `socket_recv_exact` | `socket_recv_exact` loops until all bytes received or error |
+| `frame_len` near UINT32_MAX bypasses bounds check (HAZ-019) | Arithmetic overflow after check; oversized allocation or buffer overrun | Cat I HAZ-019 | Wire-level injection of malformed frame with near-UINT32_MAX length field | Ceiling guard: `frame_len > WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES` → ERR_INVALID + WARNING_HI per REQ-3.2.10 |
 | `send_message()` called with no connected client | Message silently discarded | Cat III HAZ-006 | `m_client_count == 0` check; `WARNING_LO` logged | Logged; upper layer should verify connectivity before sending |
 | `receive_message()` returns `ERR_TIMEOUT` spuriously | Upper layer delays message processing | Cat IV | Bounded `poll_count` loop | Caller retries; `RECV_TIMEOUT_MS` tunable per channel |
 | validate_source_id() fails (allows spoofed frame through) | Source_id mismatch not caught | DeliveryEngine processes forged frame | HAZ-009 | validate_source_id() verifies m_client_node_ids[slot] before dispatch; WARNING_HI on mismatch | TcpBackend |
+| TCP client holds slot without sending HELLO — slow-connect DoS (HAZ-023) | All `MAX_TCP_CONNECTIONS` slots occupied by unauthenticated connections; legitimate clients denied service | Cat II HAZ-023 | No client traffic for `hello_timeout_ms` after accept; slot never evicted without timeout guard | Per-slot accept timestamp; evict slots without HELLO after `hello_timeout_ms` per REQ-6.1.12 |
+| UdpBackend configured with wildcard `peer_ip` (HAZ-024) | First sender to HELLO becomes registered peer; legitimate peer denied registration | Cat I HAZ-024 | `peer_ip=""` or `"0.0.0.0"` accepted in init() | `init()` rejects wildcard `peer_ip` with ERR_INVALID + FATAL per REQ-6.2.5 |
 | **Non-HELLO data frame accepted from unregistered slot (Fix 3 — fixed)** — `recv_from_client()` previously passed data frames to DeliveryEngine before a HELLO had been received for that slot, allowing data injection before NodeId binding. Tied to HAZ-009 / REQ-6.1.11. | Forged source_id reaches DeliveryEngine before routing table entry is established; ACK cancellation or dedup state corrupted | Cat I HAZ-009 | Absence of registration check; frame accepted without slot NodeId binding | **Fixed (commit 4c714bd, Fix 3):** `is_unregistered_slot()` rejects any non-HELLO frame from a slot where `m_client_node_ids[slot] == NODE_ID_INVALID`; WARNING_HI logged; frame silently discarded. |
 | **HELLO replay mid-session allows NodeId hijack (Fix 4 — fixed)** — A second HELLO from an already-registered slot was accepted, silently overwriting the routing-table entry and enabling NodeId substitution. Tied to HAZ-009. | Attacker replaces binding for a live slot; subsequent frames are attributed to wrong NodeId; ACK/retry state corrupted | Cat I HAZ-009 | No guard on duplicate HELLO; routing table entry mutable after first registration | **Fixed (commit 4c714bd, Fix 4):** `m_client_hello_received[]` added; `process_hello_frame()` rejects duplicate HELLO with WARNING_HI; routing table entry immutable after first registration. |
 
@@ -116,6 +140,10 @@
 | **Non-HELLO data frame accepted from unregistered slot (Fix 3 — fixed)** — `recv_from_client()` previously passed data frames to DeliveryEngine before a HELLO had been received for that slot. Tied to HAZ-009 / REQ-6.1.11. | Forged source_id reaches DeliveryEngine before routing table entry is established | Cat I HAZ-009 | Absence of registration check | **Fixed (commit 0057d56, Fix 3):** `classify_inbound_frame()` rejects any non-HELLO frame from a slot where `m_client_node_ids[slot] == NODE_ID_INVALID`; WARNING_HI logged; frame discarded. |
 | **HELLO replay mid-session allows NodeId hijack (Fix 4 — fixed)** — A second HELLO from an already-registered slot was accepted, overwriting the routing-table entry. Tied to HAZ-009. | Attacker replaces binding for a live slot; ACK/retry state corrupted | Cat I HAZ-009 | No guard on duplicate HELLO | **Fixed (commit 0057d56, Fix 4):** `m_client_hello_received[]` added; `classify_inbound_frame()` rejects duplicate HELLO with WARNING_HI; entry immutable after first registration. |
 | **ssl_context shallow copy causes undefined behavior on slot compaction (Fix 5 — fixed)** — `remove_client()` used array compaction (memmove / struct assignment) on `m_ssl[]`; bitwise copy of opaque `mbedtls_ssl_context` is prohibited by the mbedTLS API and produces use-after-free of internal pointers. | Undefined behavior on any client disconnect; internal ssl context pointers invalid after move; potential memory corruption and arbitrary code execution | Cat I HAZ-005 | Defect triggered on every client disconnect that leaves a gap in the slot table; no runtime signal in normal operation | **Fixed (commit 0057d56, Fix 5):** `m_client_slot_active[MAX_TCP_CONNECTIONS]` flag array added. `remove_client()` marks slot inactive and calls `mbedtls_ssl_free()` + `mbedtls_ssl_init()` in-place; all iteration loops skip inactive slots. No ssl context is ever copied or moved. |
+| **CA certificate absent with verify_peer=true (HAZ-020)** — `setup_tls_config()` or `init()` accepted `verify_peer=true` without checking that `ca_file` is non-empty; `MBEDTLS_SSL_VERIFY_REQUIRED` is set but mbedTLS accepts any certificate when the CA trust store is empty. | MitM attacker with any certificate is accepted; encrypted channel established to wrong peer; HAZ-005 mitigation bypassed | Cat I HAZ-020 | `init()` does not fail; TLS handshake completes silently with empty CA | `init()` returns ERR_IO + FATAL when `verify_peer=true && ca_file.empty()` per REQ-6.3.6 |
+| **require_crl=true with empty crl_file accepted silently** — when `require_crl=true` and `crl_file` is empty, no CRL is loaded but the verify flag is armed; revoked certificates cannot be detected. | Revoked peer certificate accepted; attacker with a stolen revoked certificate can authenticate | Cat II | No CRL loaded; no runtime signal | `init()` returns ERR_INVALID + FATAL when `require_crl=true && verify_peer=true && crl_file.empty()` per REQ-6.3.7 |
+| **tls_require_forward_secrecy not enforced on TLS 1.2 session resumption** — TLS 1.2 session resumption bypasses the full handshake; a resumed session does not provide forward secrecy even when `tls_require_forward_secrecy=true`. | Resumed TLS 1.2 sessions lack forward secrecy; recorded traffic decryptable if session master secret is later compromised | Cat II | Resumed session accepted without FS check | When `tls_require_forward_secrecy=true`, zeroize and reject session resumption after negotiation per REQ-6.3.8 |
+| **verify_peer=false + non-empty peer_hostname — silent MitM trap (HAZ-025)** | Operator believes hostname is verified; it is not; any peer accepted | Cat I HAZ-025 | No error or warning on misconfigured combination | `init()` returns ERR_INVALID + WARNING_HI when `!verify_peer && !peer_hostname.empty()` per REQ-6.3.9 |
 | **Cross-slot duplicate NodeId not rejected in TlsTcpBackend (SEC-012 — fixed)** — `handle_hello_frame()` did not scan other active slots before recording a new NodeId; a second TLS connection could claim an already-registered NodeId, overwriting the routing table entry and hijacking the active peer's routing slot. Tied to HAZ-009. | Second attacker connection silently replaces legitimate peer's NodeId binding; subsequent frames attributed to attacker; ACK/retry state corrupted | Cat I HAZ-009 | No cross-slot scan in `handle_hello_frame()`; defect latent until two connections claim the same NodeId | **Fixed (SEC-012 / DEF-018-4, commit 4cda101):** `handle_hello_frame()` now scans all active slots for NodeId collision; evicts the **new** connection (calls `remove_client(idx_new)`) if the NodeId is already registered elsewhere; existing binding preserved. Mirrors TcpBackend G-3 + F-13. |
 | **TLS client accepted verify_peer=true with empty peer_hostname (SEC-021 — fixed / CWE-297)** — `tls_connect_handshake()` proceeded with the TLS handshake even when `verify_peer=true` and `peer_hostname` was empty. CA-chain validation succeeded but no CN/SAN binding was enforced, allowing any certificate from the trusted CA to be accepted — a MitM window. Same defect class as SEC-001 in DtlsUdpBackend. Tied to HAZ-008. | MitM attacker with a certificate from the same trusted CA can impersonate the server; encrypted session established to the wrong peer | Cat I HAZ-008 | `verify_peer=true` with empty `peer_hostname` accepted without error; no hostname binding before handshake | **Fixed (SEC-021 / DEF-018-13, commit 4cda101):** `tls_connect_handshake()` rejects `verify_peer=true` with empty `peer_hostname` before the handshake begins (WARNING_HI + `ERR_INVALID`). Both TLS-capable backends (TlsTcpBackend and DtlsUdpBackend) now enforce identical invariants per SECURITY_ASSUMPTIONS.md §8/§11. |
 
@@ -136,6 +164,7 @@
 
 | Failure Mode | System Effect | Severity | Detection | Mitigation |
 |---|---|---|---|---|
+| **Concurrent zeroize() and try_save/try_load race (HAZ-021)** — `zeroize()` and `try_save_client_session()` / `try_load_client_session()` race on the `mbedtls_ssl_session` struct in multi-threaded deployments; a zeroize-during-load produces a TLS handshake using partially-zeroed session keys | TLS handshake completes with corrupt session material; encrypted channel may use known or guessable key material | Cat I HAZ-021 | Data race detected by thread sanitizer; race window is small (~μs) but deterministically reproducible under a two-thread test | POSIX `pthread_mutex_t` serialises all `try_save`, `try_load`, and `zeroize` accesses; `session_valid` checked under lock per REQ-6.3.10 |
 | Caller does not invoke `store.zeroize()` before scope exit / process shutdown | TLS session master-secret-derived material persists in stack or heap memory; recoverable from core dump, swap file, or heap scan (CWE-316) | Cat II HAZ-017 | `TlsSessionStore::~TlsSessionStore()` calls `zeroize()` as destructor safety net; `TlsTcpBackend::close()` logs `WARNING_HI` when `session_valid == true` after close | `mbedtls_platform_zeroize()` called in destructor and in `zeroize()` (compiler-barrier prevents elision); `SECURITY_ASSUMPTIONS.md §13` documents caller contract |
 | `zeroize()` called while mbedTLS holds internal allocations in the session struct | Internal pointers in freed session memory point to already-freed storage; subsequent `mbedtls_ssl_session_init()` overwrites dangling pointers, leaving the struct in a defined-safe state | Cat II HAZ-017 | `zeroize()` calls `mbedtls_ssl_session_free()` before `mbedtls_platform_zeroize()` to release any ticket or cert chain allocations first | `zeroize()` order: (1) `session_free`, (2) `platform_zeroize`, (3) `session_init`; order is documented and asserted via `NEVER_COMPILED_OUT_ASSERT(!session_valid)` post-condition |
 | `TlsSessionStore` copied or moved (mbedTLS internal pointer aliasing) | Internal pointers aliased across two sessions; `mbedtls_ssl_session_free()` on one copy double-frees allocations owned by the other | Cat I HAZ-005 | Copy and move constructors and assignment operators are `= delete`; attempt to copy or move fails at compile time | All four special members (`TlsSessionStore(const TlsSessionStore&)`, `operator=`, move ctor, move assign) explicitly deleted; no workaround possible without cast |
@@ -204,7 +233,7 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
 | `serialize()` | `Serializer` | SC | HAZ-005 |
-| `deserialize()` | `Serializer` | SC | HAZ-001, HAZ-005 |
+| `deserialize()` | `Serializer` | SC | HAZ-001, HAZ-005, HAZ-019 |
 
 ### src/core/RingBuffer.hpp
 
@@ -220,11 +249,11 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 |---|---|---|---|
 | `init()` | `AckTracker` | NSC | — |
 | `track()` | `AckTracker` | SC | HAZ-002, HAZ-006 |
-| `on_ack()` | `AckTracker` | SC | HAZ-002 |
+| `on_ack()` | `AckTracker` | SC | HAZ-002, HAZ-018 |
 | `cancel()` | `AckTracker` | SC | HAZ-002 |
 | `sweep_expired()` | `AckTracker` | SC | HAZ-002, HAZ-006 |
 | `get_send_timestamp()` | `AckTracker` | NSC | — |
-| `get_tracked_destination()` | `AckTracker` | SC | HAZ-002 |
+| `get_tracked_destination()` | `AckTracker` | SC | HAZ-002, HAZ-018 |
 | `get_stats()` | `AckTracker` | NSC | — |
 
 `get_tracked_destination()` is SC (HAZ-002): forge-ACK prevention — it verifies that the destination NodeId carried in an inbound ACK matches the tracked sender stored in the slot; a mismatch must be rejected to prevent forged ACKs from prematurely clearing retry slots and causing the sender to believe a message was delivered when it was not.
@@ -234,9 +263,9 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
 | `init()` | `DuplicateFilter` | NSC | — |
-| `is_duplicate()` | `DuplicateFilter` | SC | HAZ-003 |
+| `is_duplicate()` | `DuplicateFilter` | SC | HAZ-003, HAZ-018 |
 | `record()` | `DuplicateFilter` | SC | HAZ-003 |
-| `check_and_record()` | `DuplicateFilter` | SC | HAZ-003 |
+| `check_and_record()` | `DuplicateFilter` | SC | HAZ-003, HAZ-018 |
 
 ### src/core/RetryManager.hpp
 
@@ -265,7 +294,7 @@ Rationale: Fragment splitting is a wire-format operation; incorrect splitting co
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
 | `init()` | `ReassemblyBuffer` | NSC | — |
-| `ingest()` | `ReassemblyBuffer` | SC | HAZ-003, HAZ-006 |
+| `ingest()` | `ReassemblyBuffer` | SC | HAZ-003, HAZ-006, HAZ-019 |
 | `sweep_expired()` | `ReassemblyBuffer` | NSC | — |
 | `sweep_stale()` | `ReassemblyBuffer` | NSC | — |
 
@@ -276,7 +305,7 @@ Rationale: Fragment splitting is a wire-format operation; incorrect splitting co
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
 | `init()` | `OrderingBuffer` | NSC | — |
-| `ingest()` | `OrderingBuffer` | SC | HAZ-001, HAZ-006 |
+| `ingest()` | `OrderingBuffer` | SC | HAZ-001, HAZ-006, HAZ-018 |
 | `try_release_next()` | `OrderingBuffer` | SC | HAZ-001 |
 | `reset_peer()` | `OrderingBuffer` | SC | HAZ-001, HAZ-016 |
 | `advance_sequence()` | `OrderingBuffer` | NSC | — |
@@ -286,7 +315,7 @@ Rationale: Fragment splitting is a wire-format operation; incorrect splitting co
 
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
-| `init()` | `DeliveryEngine` | NSC | — |
+| `init()` | `DeliveryEngine` | SC | HAZ-022 |
 | `send()` | `DeliveryEngine` | SC | HAZ-001, HAZ-002, HAZ-006 |
 | `receive()` | `DeliveryEngine` | SC | HAZ-001, HAZ-003, HAZ-004, HAZ-005 |
 | `pump_retries()` | `DeliveryEngine` | SC | HAZ-002 |
@@ -372,14 +401,15 @@ All `SocketUtils` functions are **NSC** — raw POSIX I/O primitives with no mes
 
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
-| `init()` | `TcpBackend` | NSC | — |
+| `init()` | `TcpBackend` | SC | HAZ-023 |
 | `send_message()` | `TcpBackend` | SC | HAZ-005, HAZ-006 |
 | `receive_message()` | `TcpBackend` | SC | HAZ-004, HAZ-005 |
 | `register_local_id()` | `TcpBackend` | NSC | — |
 | `send_hello_frame()` | `TcpBackend` | NSC | — |
 | `find_client_slot()` | `TcpBackend` | NSC | — |
 | `handle_hello_frame()` | `TcpBackend` | NSC | — |
-| `recv_from_client()` | `TcpBackend` | SC | HAZ-009 |
+| `recv_from_client()` | `TcpBackend` | SC | HAZ-009, HAZ-023 |
+| `evict_hello_timeout_slots()` | `TcpBackend` | SC | HAZ-023 |
 | `send_to_slot()` | `TcpBackend` | NSC | — |
 | `validate_source_id()` | `TcpBackend` | SC | HAZ-009 |
 | `close()` | `TcpBackend` | NSC | — |
@@ -407,7 +437,7 @@ Classification: NSC. `flush_delayed_to_clients()` as a whole remains SC (HAZ-005
 
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
-| `init()` | `UdpBackend` | NSC | — |
+| `init()` | `UdpBackend` | SC | HAZ-024 |
 | `register_local_id()` | `UdpBackend` | SC | HAZ-005 |
 | `send_hello_datagram()` | `UdpBackend` | SC | HAZ-005 |
 | `send_message()` | `UdpBackend` | SC | HAZ-005, HAZ-006 |
@@ -445,7 +475,9 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 |---|---|---|---|
 | `TlsSessionStore()` (constructor) | `TlsSessionStore` | NSC | — |
 | `~TlsSessionStore()` (destructor) | `TlsSessionStore` | NSC | — |
-| `zeroize()` | `TlsSessionStore` | SC | HAZ-012, HAZ-017 |
+| `zeroize()` | `TlsSessionStore` | SC | HAZ-012, HAZ-017, HAZ-021 |
+| `try_save()` | `TlsSessionStore` | SC | HAZ-017, HAZ-021 |
+| `try_load()` | `TlsSessionStore` | SC | HAZ-017, HAZ-021 |
 
 `zeroize()` is SC (HAZ-012, HAZ-017): it is the primary mechanism for clearing TLS session master-secret material from memory before the struct goes out of scope or is reused. Failure to call it (or compiler elision of a plain `memset`) leaves key-derived material readable from freed memory (CWE-316, CWE-14). `zeroize()` uses `mbedtls_platform_zeroize()` — which includes a compiler barrier — and calls `mbedtls_ssl_session_free()` before zeroing to release any internal mbedTLS allocations first (see SECURITY_ASSUMPTIONS.md §13). The destructor calls `zeroize()` as a safety net but is itself NSC: the hazard is only active if the caller relies solely on the destructor (i.e., does not call `zeroize()` explicitly before the struct goes out of scope); the destructor's invocation is automatic and not on the safety-critical message-delivery path. The constructor is NSC: it initialises the struct to a known-safe state; no security material is present at construction time.
 
@@ -453,18 +485,19 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
-| `init()` | `TlsTcpBackend` | NSC | — |
+| `init()` | `TlsTcpBackend` | SC | HAZ-020, HAZ-025 |
 | `send_message()` | `TlsTcpBackend` | SC | HAZ-005, HAZ-006 |
 | `receive_message()` | `TlsTcpBackend` | SC | HAZ-004, HAZ-005 |
 | `register_local_id()` | `TlsTcpBackend` | NSC | — |
 | `send_hello_frame()` | `TlsTcpBackend` | NSC | — |
 | `find_client_slot()` | `TlsTcpBackend` | NSC | — |
 | `handle_hello_frame()` | `TlsTcpBackend` | SC | HAZ-009 |
-| `recv_from_client()` | `TlsTcpBackend` | SC | HAZ-009 |
+| `recv_from_client()` | `TlsTcpBackend` | SC | HAZ-009, HAZ-023 |
 | `send_to_slot()` | `TlsTcpBackend` | NSC | — |
 | `validate_source_id()` | `TlsTcpBackend` | SC | HAZ-009 |
 | `classify_inbound_frame()` | `TlsTcpBackend` | SC | HAZ-009 |
-| `tls_connect_handshake()` | `TlsTcpBackend` | SC | HAZ-008 |
+| `tls_connect_handshake()` | `TlsTcpBackend` | SC | HAZ-008, HAZ-020, HAZ-025 |
+| `evict_hello_timeout_slots()` | `TlsTcpBackend` | SC | HAZ-023 |
 | `try_save_client_session()` | `TlsTcpBackend` | SC | HAZ-012, HAZ-017 |
 | `try_load_client_session()` | `TlsTcpBackend` | SC | HAZ-017 |
 | `set_session_store()` | `TlsTcpBackend` | NSC | — |
@@ -483,12 +516,12 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 
 | Function | Class | SC/NSC | HAZ IDs |
 |---|---|---|---|
-| `init()` | `DtlsUdpBackend` | NSC | — |
+| `init()` | `DtlsUdpBackend` | SC | HAZ-020, HAZ-025 |
 | `register_local_id()` | `DtlsUdpBackend` | SC | HAZ-005 |
 | `send_hello_datagram()` | `DtlsUdpBackend` | SC | HAZ-005 |
 | `send_message()` | `DtlsUdpBackend` | SC | HAZ-005, HAZ-006 |
 | `receive_message()` | `DtlsUdpBackend` | SC | HAZ-004, HAZ-005 |
-| `client_connect_and_handshake()` | `DtlsUdpBackend` | SC | HAZ-008 |
+| `client_connect_and_handshake()` | `DtlsUdpBackend` | SC | HAZ-008, HAZ-020, HAZ-025 |
 | `deserialize_and_dispatch()` | `DtlsUdpBackend` | SC | HAZ-005 |
 | `process_hello_or_validate()` | `DtlsUdpBackend` | SC | HAZ-009, HAZ-011 |
 | `load_crl_if_configured()` | `DtlsUdpBackend` | NSC | — |
@@ -560,6 +593,21 @@ The following hazards are mitigated exclusively in init-phase initialisation or 
 | HAZ-012 | `TlsTcpBackend::~TlsTcpBackend()` and `DtlsUdpBackend::~DtlsUdpBackend()` — call `mbedtls_platform_zeroize()` before `mbedtls_pk_free()` (DEF-016-2/3) | Teardown/destructor; executes after the transport is closed and no further message traffic can occur. Key zeroing is a residual-data concern, not a runtime message-delivery concern. |
 | HAZ-014 | `OrderingBuffer::seq_next_guarded()` private helper — wraps UINT32_MAX+1 to 1, preventing the UNORDERED sentinel collision (DEF-016-5) | `seq_next_guarded()` is called only from `sweep_expired_holds()` and `advance_next_expected()`, both of which are classified NSC (sequence advancement is a lifecycle bookkeeping function; the SC delivery decision is in `ingest()` and `try_release_next()`). |
 | HAZ-017 | `TlsSessionStore::~TlsSessionStore()` — calls `zeroize()` as a destructor safety net; `TlsTcpBackend::close()` logs `WARNING_HI` when `store.session_valid == true` after close | Destructor safety-net path only. The primary HAZ-017 mitigation is `TlsSessionStore::zeroize()` (SC — see classification table above); the destructor is a last-resort backstop that triggers automatically if the caller does not invoke `zeroize()` explicitly. It executes after `TlsTcpBackend` is closed, not on the active message-delivery path. |
+
+---
+
+### HAZ-018 through HAZ-025 — SC classification rationale
+
+| HAZ ID | Newly-SC function(s) | Rationale |
+|--------|----------------------|-----------|
+| HAZ-018 | `AckTracker::on_ack()`, `AckTracker::get_tracked_destination()`, `DuplicateFilter::is_duplicate()`, `DuplicateFilter::check_and_record()`, `OrderingBuffer::ingest()` | Timing-oracle attack vector: variable-time equality comparison in these functions allows an attacker to distinguish partial-match from full-match via response latency, enabling ACK forgery and replay detection bypass. Constant-time comparator (`ct_bytes_equal()`) required per REQ-3.2.11. |
+| HAZ-019 | `Serializer::deserialize()`, `ReassemblyBuffer::ingest()` | Wire-supplied length overflow: `frame_len` and `total_payload_length` near UINT32_MAX bypass bounds checks; ceiling guard required per REQ-3.2.10 before any arithmetic. |
+| HAZ-020 | `TlsTcpBackend::init()`, `DtlsUdpBackend::init()`, `TlsTcpBackend::tls_connect_handshake()`, `DtlsUdpBackend::client_connect_and_handshake()` | Empty CA with `verify_peer=true` makes certificate verification a no-op; fail-fast required per REQ-6.3.6. Reclassified from NSC because `init()` now makes a security enforcement decision. |
+| HAZ-021 | `TlsSessionStore::zeroize()`, `TlsSessionStore::try_save()`, `TlsSessionStore::try_load()` | Concurrent access race on TLS session struct; POSIX mutex required per REQ-6.3.10. `try_save` and `try_load` added as new SC functions. |
+| HAZ-022 | `DeliveryEngine::init()` | Entropy source failure without fail-fast guard enables predictable `MessageIdGen` seeding and ACK forgery (extends HAZ-010); FATAL + reset required per REQ-5.2.6. Reclassified from NSC. |
+| HAZ-023 | `TcpBackend::init()`, `TcpBackend::recv_from_client()`, `TcpBackend::evict_hello_timeout_slots()`, `TlsTcpBackend::init()`, `TlsTcpBackend::recv_from_client()`, `TlsTcpBackend::evict_hello_timeout_slots()` | Slow-connect slot exhaustion DoS; per-slot HELLO timeout required per REQ-6.1.12. `evict_hello_timeout_slots()` is a new SC function in both TCP backends. |
+| HAZ-024 | `UdpBackend::init()` | Wildcard `peer_ip` enables NodeId hijack; init must reject wildcard per REQ-6.2.5. Reclassified from NSC. |
+| HAZ-025 | `TlsTcpBackend::init()`, `DtlsUdpBackend::init()`, `TlsTcpBackend::tls_connect_handshake()`, `DtlsUdpBackend::client_connect_and_handshake()` | Silent MitM trap when `verify_peer=false` and `peer_hostname` is non-empty; fail-fast required per REQ-6.3.9. |
 
 ---
 

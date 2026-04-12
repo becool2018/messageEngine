@@ -173,6 +173,19 @@ The message layer must provide helpers for:
   - The reassembly buffer must not hold slots indefinitely. Slots open longer
     than `recv_timeout_ms` without completing must be reclaimed by a periodic
     sweep to prevent resource exhaustion from peers that send partial fragment sets.
+- [REQ-3.2.10] Wire-supplied length field overflow guard:
+  - Wire-supplied length fields (frame_len in tcp_recv_frame(), total_payload_length in
+    fragment reassembly) must be validated against a compile-time ceiling before any
+    arithmetic involving those values is performed. The ceiling is defined as
+    WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES. Violation must return ERR_INVALID and log
+    WARNING_HI (C-3, C-4 from SEC_REPORT.txt; CERT INT30-C; HAZ-019).
+- [REQ-3.2.11] Constant-time equality for security-sensitive identifiers:
+  - All security-sensitive (source_id, message_id) equality comparisons in AckTracker,
+    DuplicateFilter, and OrderingBuffer must use a constant-time comparator that does not
+    short-circuit on the first differing byte or field. The loop in
+    DuplicateFilter::is_duplicate() must not early-exit on match (C-1). DTLS cookie
+    comparisons must also be verified constant-time (C-2). Mitigation per HAZ-018
+    (CWE-208 timing oracle).
 
 3.3 Delivery semantics
 The system must support multiple delivery semantics, including:
@@ -248,6 +261,11 @@ The impairment engine must be able to apply, per channel or globally:
     deployment configuration. Rationale: a known seed combined with a known message
     sequence allows prediction of all impairment decisions (see SECURITY_ASSUMPTIONS.md §7).
   - [REQ-5.2.5] A way to snapshot or log impairment decisions for debugging tests.
+  - [REQ-5.2.6] Entropy source failure must be fatal in production builds:
+    In production builds (ALLOW_WEAK_PRNG_SEED undefined), if both getrandom() and
+    /dev/urandom fail, the PRNG seed path MUST log FATAL and trigger the reset handler
+    rather than continuing with a weak seed. This applies to both ImpairmentEngine and
+    DeliveryEngine (H-6 from SEC_REPORT.txt; HAZ-022; CWE-338).
 
 5.3 Determinism and testability
 - Design the impairment engine so:
@@ -302,6 +320,12 @@ The impairment engine must be able to apply, per channel or globally:
     and a WARNING_HI log entry; the mismatched envelope must never reach the DeliveryEngine.
     Rationale: prevents source_id spoofing attacks that could corrupt ordering state,
     trigger spurious ACKs, or exhaust dedup window slots (see SECURITY_ASSUMPTIONS.md §4).
+  - [REQ-6.1.12] HELLO timeout — slow-connect slot eviction:
+    The TCP and TLS servers MUST track a per-slot accept timestamp for every connected
+    client. Any client slot that has not sent a HELLO frame within hello_timeout_ms
+    (default: recv_timeout_ms) of acceptance MUST be evicted and its socket closed, with a
+    WARNING_HI log entry. This prevents slot-exhaustion DoS via slow-connect (H-5 from
+    SEC_REPORT.txt; HAZ-023; CWE-400).
 
 6.2 UDP (connectionless) backend
 - Reliability:
@@ -319,6 +343,10 @@ The impairment engine must be able to apply, per channel or globally:
     received datagram is consistent with the source_id field in the deserialized envelope
     before passing it to DeliveryEngine::receive(). A mismatch must result in silent
     discard and a WARNING_HI log entry. This is the UDP equivalent of REQ-6.1.11.
+  - [REQ-6.2.5] UdpBackend must reject wildcard peer_ip:
+    UdpBackend init() MUST reject a wildcard peer_ip ("0.0.0.0", "::", or empty string)
+    with ERR_INVALID and log FATAL. Plaintext UDP requires a specific peer address for
+    source binding to be effective (H-7 from SEC_REPORT.txt; HAZ-024; CWE-290).
 
 6.3 Common socket requirements (TCP and UDP)
 - Addressing:
@@ -337,6 +365,31 @@ The impairment engine must be able to apply, per channel or globally:
 - Buffering and scalability:
   - [REQ-6.3.5] Do not assume unbounded buffers; make buffer sizes explicit and configurable.
   - Choose concurrency models that can scale to expected connection/message volumes.
+- TLS/DTLS configuration validation:
+  - [REQ-6.3.6] CA certificate required when verify_peer=true:
+    When verify_peer=true, a non-empty ca_file is mandatory. init() MUST return ERR_IO
+    and log FATAL if verify_peer=true and ca_file is empty. A trust anchor is required
+    for certificate verification to be meaningful (H-1 from SEC_REPORT.txt; HAZ-020;
+    CWE-295).
+  - [REQ-6.3.7] CRL enforcement when require_crl=true:
+    When require_crl=true (TlsConfig field), init() MUST return ERR_INVALID and log
+    FATAL if verify_peer=true and crl_file is empty. Default: require_crl=false for
+    backward compatibility (H-2 from SEC_REPORT.txt; CWE-295).
+  - [REQ-6.3.8] Forward secrecy enforcement when tls_require_forward_secrecy=true:
+    When tls_require_forward_secrecy=true (TlsConfig field), the TLS backend MUST reject
+    any TLS 1.2 session resumption handshake after negotiation by zeroizing the session
+    and returning ERR_IO. Default: false for backward compatibility (H-4 from
+    SEC_REPORT.txt; CWE-295).
+  - [REQ-6.3.9] Hostname/verification mismatch must be rejected:
+    When verify_peer=false and peer_hostname is non-empty, init() MUST return ERR_INVALID
+    and log WARNING_HI. An operator who configures a hostname but disables peer
+    verification is in an unsafe state that cannot be reached silently (H-8 from
+    SEC_REPORT.txt; HAZ-025; CWE-297).
+  - [REQ-6.3.10] TlsSessionStore concurrent-access mutex:
+    TlsSessionStore internal state (the mbedtls_ssl_session struct) MUST be protected by
+    a POSIX mutex against concurrent access from zeroize() and try_save/try_load calls.
+    The std::atomic session_valid flag alone is insufficient (H-3 from SEC_REPORT.txt;
+    HAZ-021; CWE-362).
 
 6.4 DTLS (Datagram TLS over UDP) backend
 - DTLS mode:

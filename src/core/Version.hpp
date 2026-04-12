@@ -52,6 +52,12 @@
  *            library Makefile targets, install-dev target, pkg-config template,
  *            CMakeLists.txt (root), and automated package.yml CI workflow.
  *            No API, wire format, or ABI change.
+ *   2.1.0 — security hardening (MINOR: new TlsConfig fields are additive API):
+ *            New TlsConfig fields: require_crl, tls_require_forward_secrecy.
+ *            New REQ IDs: REQ-3.2.10, REQ-3.2.11, REQ-5.2.6, REQ-6.1.12,
+ *            REQ-6.2.5, REQ-6.3.6–REQ-6.3.10.
+ *            New HAZ IDs: HAZ-018 through HAZ-025.
+ *            Wire format unchanged; ABI additive only (new fields with defaults).
  *
  * NSC-infrastructure: compile-time version constants only; no requirement
  *   implementation belongs here. No REQ-x.x tag applies.
@@ -68,8 +74,8 @@
 #include <cstdint>
 
 static const uint32_t ME_VERSION_MAJOR  = 2U;
-static const uint32_t ME_VERSION_MINOR  = 0U;
-static const uint32_t ME_VERSION_PATCH  = 1U;
+static const uint32_t ME_VERSION_MINOR  = 1U;
+static const uint32_t ME_VERSION_PATCH  = 0U;
 
 /// Packed single integer for compile-time range checks: (major<<16)|(minor<<8)|patch
 static const uint32_t ME_VERSION_NUMBER =
@@ -77,6 +83,6 @@ static const uint32_t ME_VERSION_NUMBER =
 
 /// Human-readable version string — must match the git tag vMAJOR.MINOR.PATCH exactly.
 /// The `make check_version` target verifies this at release time.
-static const char ME_VERSION_STRING[] = "2.0.1";
+static const char ME_VERSION_STRING[] = "2.1.0";
 
 #endif // CORE_VERSION_HPP
