@@ -23,7 +23,7 @@ A C++ networking library for building and testing systems that must survive unre
 | Retry manager | 32 pending slots |
 | Inbound ring | 64 messages per backend |
 | Concurrent clients (TCP/TLS) | 8 (configurable via `MAX_TCP_CONNECTIONS` in `Types.hpp`) |
-| Worst-case stack depth | ~764 bytes / 10 frames (DTLS outbound send path) |
+| Worst-case stack depth | ~259 KB / 12 frames (DTLS flush path); non-flush: ~764 bytes / 10 frames |
 
 **Written to:** JPL Power of 10 · MISRA C++:2023 · F-Prime style subset · NASA Class C (voluntary Class B test rigor). No exceptions, no templates, no RTTI. STL is excluded from production code with one deliberate exception: `std::atomic<T>` for integral types is permitted and used for shared state — it has no dynamic allocation, maps directly to hardware primitives, and is what MISRA C++:2023 endorses for lock-free concurrency. All other STL containers, algorithms, and headers are absent from `src/`.
 
@@ -35,26 +35,86 @@ A C++ networking library for building and testing systems that must survive unre
 
 ## Table of Contents
 
-1. [Requirements Overview](#requirements-overview)
-2. [Architecture](#architecture)
-3. [Directory Structure](#directory-structure)
-4. [Building](#building)
-5. [Running the Tests](#running-the-tests)
-6. [Coverage Analysis](#coverage-analysis)
-7. [Static Analysis](#static-analysis)
-8. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
-9. [Using the Library](#using-the-library)
-10. [Use Cases](#use-cases)
-11. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
-12. [Safety & Assurance Documents](#safety--assurance-documents)
-13. [Design Patterns](#design-patterns)
-14. [Coding Standards](#coding-standards)
-15. [Standards Sources and Conflicts](#standards-sources-and-conflicts)
-16. [Project Standards Files](#project-standards-files)
-17. [Claude Skills](#claude-skills)
-18. [Release History](#release-history)
-19. [Code Statistics](#code-statistics)
-20. [Security Check](SNYK.IO.SECURITY_CHECK.md)
+1. [Getting Started for New Contributors](#getting-started-for-new-contributors)
+2. [Requirements Overview](#requirements-overview)
+3. [Architecture](#architecture)
+4. [Directory Structure](#directory-structure)
+5. [Building](#building)
+6. [Running the Tests](#running-the-tests)
+7. [Coverage Analysis](#coverage-analysis)
+8. [Static Analysis](#static-analysis)
+9. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
+10. [Using the Library](#using-the-library)
+11. [Use Cases](#use-cases)
+12. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
+13. [Safety & Assurance Documents](#safety--assurance-documents)
+14. [Design Patterns](#design-patterns)
+15. [Coding Standards](#coding-standards)
+16. [Standards Sources and Conflicts](#standards-sources-and-conflicts)
+17. [Project Standards Files](#project-standards-files)
+18. [Claude Skills](#claude-skills)
+19. [Release History](#release-history)
+20. [Code Statistics](#code-statistics)
+21. [Security Check](SNYK.IO.SECURITY_CHECK.md)
+
+---
+
+## Getting Started for New Contributors
+
+If you are new to this codebase, the fastest path to understanding it is:
+
+**Step 1 — Orient yourself (15 minutes)**
+
+```
+README.md                     ← you are here; read the Architecture and Directory Structure sections
+docs/DEMO_WALKTHROUGH.md      ← line-by-line walkthrough of a real client/server exchange
+docs/use_cases/HIGH_LEVEL_USE_CASES.md  ← all 76 capabilities in one index (HL-1 through HL-35)
+```
+
+**Step 2 — Build and run (5 minutes)**
+
+```bash
+brew install gcc make llvm cppcheck pkg-config mbedtls   # macOS
+make all && make run_tests                                # build + verify all tests pass
+build/server &; build/client                              # watch a real exchange
+```
+
+**Step 3 — Write your first test with LocalSimHarness (no sockets needed)**
+
+The `LocalSimHarness` lets you exercise the full send/receive/retry/dedup pipeline entirely in-process. See "Testing with LocalSimHarness" in the [Using the Library](#using-the-library) section below, or look at any test in `tests/test_LocalSim.cpp` or `tests/test_DeliveryEngine.cpp` for working examples.
+
+**Mental model: four layers, one direction**
+
+```
+Your app code
+    ↓  DeliveryEngine (reliability, dedup, expiry, ACK, retry, ordering, fragmentation)
+    ↓  TransportInterface (abstract: send/receive/init/close)
+    ↓  Backend (TcpBackend / TlsTcpBackend / UdpBackend / DtlsUdpBackend / LocalSimHarness)
+    ↓  ImpairmentEngine (optional: loss, jitter, latency, duplication, reordering, partitions)
+    ↓  OS sockets (or in-process ring buffer for LocalSimHarness)
+```
+
+Dependencies flow downward only. `src/core/` never touches sockets; `src/platform/` never touches application logic.
+
+**Key files for a first reading**
+
+| File | What it teaches |
+|---|---|
+| `src/core/Types.hpp` | Every capacity constant and enum in the system |
+| `src/core/MessageEnvelope.hpp` | The one data structure everything passes through |
+| `src/core/DeliveryEngine.hpp` | The main API your application calls |
+| `src/core/TransportInterface.hpp` | The abstract contract all backends implement |
+| `tests/test_DeliveryEngine.cpp` | The most comprehensive integration-style test suite |
+
+**Coding standards check (before your first change)**
+
+```bash
+/read-standards         # inside Claude Code — internalizes CLAUDE.md + .claude/CLAUDE.md
+make lint               # must pass with zero warnings before any commit
+make run_tests          # must pass with zero failures before any commit
+```
+
+Every public function in `src/` must have a `// Safety-critical (SC): HAZ-NNN` annotation (if SC) and a `// Implements: REQ-x.x` tag. See `CLAUDE.md §11–§13` for the full rules. When in doubt, read the existing code — the pattern is consistent throughout.
 
 ---
 
@@ -328,14 +388,20 @@ messageEngine/
 │   │   ├── TcpBackend.hpp/cpp
 │   │   ├── UdpBackend.hpp/cpp
 │   │   ├── TlsTcpBackend.hpp/cpp           # TLS over TCP (mbedTLS 4.0 PSA)
+│   │   ├── TlsSessionStore.hpp/cpp         # Caller-owned TLS session persistence (RFC 5077)
 │   │   ├── DtlsUdpBackend.hpp/cpp          # DTLS over UDP (mbedTLS 4.0 PSA)
+│   │   ├── IPosixSyscalls.hpp              # Injectable POSIX syscall interface (fault injection)
+│   │   ├── PosixSyscallsImpl.hpp/cpp       # Production POSIX syscall singleton
 │   │   └── LocalSimHarness.hpp/cpp
 │   └── app/              # Demo programs
 │       ├── Server.cpp
-│       └── Client.cpp
+│       ├── Client.cpp
+│       ├── TlsTcpDemo.cpp                  # TLS client/server demo
+│       └── DtlsUdpDemo.cpp                 # DTLS client/server demo
 ├── tests/                # Unit tests (one binary per module)
 │   ├── MockSocketOps.hpp           # Injectable ISocketOps stub for all four transport backend M5 tests
 │   ├── MockTransportInterface.hpp  # Injectable TransportInterface stub for DeliveryEngine M5 tests
+│   ├── TestPortAllocator.hpp       # Port allocation helper for concurrent backend tests
 │   ├── test_MessageEnvelope.cpp
 │   ├── test_MessageId.cpp
 │   ├── test_Timestamp.cpp
@@ -514,27 +580,30 @@ make coverage_show
 
 Policy floor: 100% of all reachable branches for SC files (CLAUDE.md §14). Per-file ceilings below 100% are documented in `docs/COVERAGE_CEILINGS.md`; every missed branch is individually justified.
 
-> **Methodology note (2026-04-06 rebaseline):** LLVM source-based coverage counts each branch outcome (True and False) as a separate entry, roughly doubling the raw branch count relative to prior decision-level counts. All thresholds below reflect the current LLVM output. MC/DC tests 60–64 (added 2026-04-06) closed 10 previously-missed branches in `DeliveryEngine.cpp`. **2026-04-09 (rounds 1–3):** 19 `MockSocketOps`/`DtlsMockOps` fault-injection tests (M5) added across all four transport backends, plus 4 targeted branch-coverage tests closing remaining reachable gaps. Phase-2 LRU eviction dead code removed from `OrderingBuffer.cpp`. **2026-04-09 (round 4 — REQ-3.3.6):** `pop_hello_peer()` and HELLO reconnect queue added to `TcpBackend.cpp` and `TlsTcpBackend.cpp`; `drain_hello_reconnects()` / `reset_peer_ordering()` added to `DeliveryEngine.cpp`; `reset_peer()` added to `OrderingBuffer.cpp`. Two new loopback tests cover both `pop_hello_peer()` branches in each backend. All files are at their architectural maxima (see `docs/COVERAGE_CEILINGS.md`).
+> **Methodology note:** LLVM source-based coverage counts each branch outcome (True and False) as a separate entry. All thresholds reflect LLVM output. Numbers are kept current in `docs/COVERAGE_CEILINGS.md` (single source of truth); the table below is a snapshot. All files are at their architectural maxima — see `docs/COVERAGE_CEILINGS.md` for per-file justifications.
 
 | File | Branch % | SC? | Status |
 |---|---|---|---|
-| `core/Serializer.cpp` | 73.79% | SC | Ceiling — assert `[[noreturn]]` branches |
+| `core/Serializer.cpp` | 73.76% | SC | Ceiling — assert `[[noreturn]]` branches |
 | `core/DuplicateFilter.cpp` | 73.13% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `core/AckTracker.cpp` | 64.47% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `core/RetryManager.cpp` | 73.25% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `core/DeliveryEngine.cpp` | 71.82% | SC | Ceiling — assert `[[noreturn]]` branches + init-guard paths |
+| `core/AckTracker.cpp` | 76.97% | SC | Ceiling — assert `[[noreturn]]` branches |
+| `core/RetryManager.cpp` | 77.07% | SC | Ceiling — assert `[[noreturn]]` branches |
+| `core/DeliveryEngine.cpp` | ~76.2% | SC | Ceiling — assert `[[noreturn]]` branches + init-guard paths |
 | `core/OrderingBuffer.cpp` | 79.33% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `core/RequestReplyEngine.cpp` | 74.09% | SC | Ceiling — assert `[[noreturn]]` branches + payload-guard dead code |
+| `core/Fragmentation.cpp` | 78.12% | SC | Ceiling — assert `[[noreturn]]` branches |
+| `core/RequestReplyEngine.cpp` | 78.10% | SC | Ceiling — assert `[[noreturn]]` branches + payload-guard dead code |
 | `core/AssertState.cpp` | 50.00% | NSC-infra | Ceiling — abort() False branch untestable |
-| `platform/ImpairmentEngine.cpp` | 71.88% | SC | Ceiling — assert + unreachable branches |
-| `platform/ImpairmentConfigLoader.cpp` | 80.46% | SC | Ceiling — assert + unreachable branches |
-| `platform/TcpBackend.cpp` | 70.56% | SC | Ceiling — assert `[[noreturn]]` branches + hard mbedTLS/POSIX error paths |
+| `platform/ImpairmentEngine.cpp` | 74.22% | SC | Ceiling — assert + unreachable branches |
+| `platform/ImpairmentConfigLoader.cpp` | 83.91% | SC | Ceiling — assert + unreachable branches |
+| `platform/TcpBackend.cpp` | 75.96% | SC | Ceiling — assert `[[noreturn]]` branches + hard POSIX error paths |
 | `platform/UdpBackend.cpp` | 74.23% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `platform/TlsTcpBackend.cpp` | 71.29% | SC | Ceiling — assert + hard mbedTLS/POSIX error paths |
-| `platform/DtlsUdpBackend.cpp` | 76.59% | SC | Ceiling — assert + mbedTLS/POSIX error paths |
+| `platform/TlsTcpBackend.cpp` | 78.51% | SC | Ceiling — assert + hard mbedTLS/POSIX error paths |
+| `platform/TlsSessionStore.cpp` | 66.67% | SC | Ceiling — assert `[[noreturn]]` branches |
+| `platform/DtlsUdpBackend.cpp` | 77.21% | SC | Ceiling — assert + mbedTLS/POSIX error paths |
 | `platform/LocalSimHarness.cpp` | 70.49% | SC | Ceiling — assert + structurally-unreachable branches |
-| `platform/MbedtlsOpsImpl.cpp` | 70.33% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `platform/SocketUtils.cpp` | 66.01% | NSC | Ceiling — POSIX errors unreachable on loopback |
+| `platform/MbedtlsOpsImpl.cpp` | 69.33% | SC | Ceiling — assert `[[noreturn]]` branches |
+| `platform/SocketUtils.cpp` | 75.82% | NSC | Ceiling — POSIX errors unreachable on loopback |
+| `platform/PosixSyscallsImpl.cpp` | 70.37% | NSC | Line coverage sufficient |
 | `platform/SocketOpsImpl.cpp` | 66.67% | NSC | Line coverage sufficient |
 
 Ceiling files are at the maximum achievable coverage: `NEVER_COMPILED_OUT_ASSERT` generates permanently-missed branch outcomes (the `[[noreturn]]` `abort()` path), and certain POSIX/mbedTLS error paths cannot be triggered in a loopback test environment. All are documented deviations, not defects. Full per-file justifications are in `docs/COVERAGE_CEILINGS.md`.
@@ -718,6 +787,74 @@ transport.close();
 
 ---
 
+### 8. Large message fragmentation
+
+Payloads larger than `FRAG_MAX_PAYLOAD_BYTES` (1,024 bytes, defined in `src/core/Types.hpp`) are automatically fragmented by `DeliveryEngine::send()` and reassembled on the receive side by `ReassemblyBuffer::ingest()`. Fragmentation is transparent to both sides — the caller always works with a single `MessageEnvelope`, up to `MSG_MAX_PAYLOAD_BYTES` (4,096 bytes).
+
+```cpp
+// Any payload > 1024 bytes is automatically split into ≤4 fragments.
+// The receive side reassembles them and delivers a single envelope.
+env.payload_length = 3000U;   // 3 fragments on wire; caller sees nothing special
+Result res = engine.send(env, now_us);
+// res == OK    — all fragments transmitted
+// res == ERR_IO_PARTIAL — ≥1 fragment sent but not all; AckTracker/RetryManager
+//                         slots are still active; do NOT cancel them manually
+```
+
+Reassembly has a bounded slot pool (`REASSEMBLY_SLOT_COUNT` slots, each keyed by `(source_id, msg_id)`). Slots that do not complete within `recv_timeout_ms` are reclaimed automatically by `sweep_ack_timeouts()` — no manual cleanup is needed (REQ-3.2.9).
+
+---
+
+### 9. Ordered delivery
+
+Set `sequence_num > 0` on each outbound `DATA` envelope and configure the channel with `OrderingMode::ORDERED` to enable per-peer in-order delivery enforcement. The `OrderingBuffer` holds out-of-order envelopes until all earlier sequence numbers from the same peer have been delivered.
+
+```cpp
+// Channel config:
+cfg.channels[0].ordering = OrderingMode::ORDERED;
+
+// On each send, assign a monotonically increasing sequence number:
+env.sequence_num = ++my_seq;     // 1, 2, 3, … (0 means unordered/control)
+
+// On receive, engine.receive() returns envelopes in sequence order.
+// ERR_AGAIN means a held envelope is waiting for a gap to fill — not an error.
+```
+
+Out-of-order envelopes are held in a bounded pool (`ORDERING_HOLD_COUNT` = 8 slots per peer). When a peer reconnects (new session), call `engine.drain_hello_reconnects()` or simply continue calling `engine.receive()` — the ordering state is reset automatically when the backend detects a reconnect HELLO (REQ-3.3.6).
+
+---
+
+### 10. TLS session resumption
+
+`TlsTcpBackend` supports abbreviated TLS reconnects (RFC 5077 session tickets) via `TlsSessionStore`. Inject one before `init()` to persist session material across `close()` / `init()` cycles.
+
+```cpp
+#include "platform/TlsSessionStore.hpp"
+#include "platform/TlsTcpBackend.hpp"
+
+// Create a store that outlives all backends that reference it.
+TlsSessionStore store;
+
+TlsTcpBackend client;
+client.set_session_store(&store);    // must be called BEFORE init()
+cfg.tls.tls_enabled                  = true;
+cfg.tls.session_resumption_enabled   = true;
+(void)client.init(cfg);              // full handshake; session saved in store
+client.close();
+
+// Second connection: same store, session_valid == true → abbreviated handshake.
+TlsTcpBackend client2;
+client2.set_session_store(&store);
+(void)client2.init(cfg);             // session resumption (no full cert exchange)
+client2.close();
+
+store.zeroize();                      // secure wipe; zeros key material (HAZ-017)
+```
+
+`TlsSessionStore` is non-copyable, stack-safe, and owns no heap. The `zeroize()` call uses `mbedtls_platform_zeroize()` (not `memset`) to prevent compiler-elision of the wipe.
+
+---
+
 ### Testing with LocalSimHarness
 
 `LocalSimHarness` runs entirely in-process — no sockets, no threads, deterministic. Link two instances together and they exchange messages through a `RingBuffer`.
@@ -804,8 +941,8 @@ All functions return a `Result` enum. Never ignore a return value.
 
 The [`docs/use_cases/`](docs/use_cases/) directory contains detailed use case documents that trace every user-facing capability and system-internal sub-function through the live source code.
 
-- **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 61 use cases, grouped by high-level capability (HL-1 through HL-29), Application Workflow patterns, and System Internal sub-functions.
-- **[USE_CASE_FREQUENCY.md](docs/use_cases/USE_CASE_FREQUENCY.md)** — frequency classification of all 61 use cases (hottest path → high → medium → low → system internals); use this to guide performance analysis, profiling focus, and code review prioritisation.
+- **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 76 use cases, grouped by high-level capability (HL-1 through HL-35), Application Workflow patterns, and System Internal sub-functions.
+- **[USE_CASE_FREQUENCY.md](docs/use_cases/USE_CASE_FREQUENCY.md)** — frequency classification of all 76 use cases (hottest path → high → medium → low → system internals); use this to guide performance analysis, profiling focus, and code review prioritisation.
   - [Hottest path](docs/use_cases/USE_CASE_FREQUENCY.md#hottest-path--called-on-every-message-and-every-event-loop-tick) — 7 use cases on every send / receive / event-loop tick
   - [High frequency](docs/use_cases/USE_CASE_FREQUENCY.md#high-frequency--called-frequently-during-active-messaging) — per-message use cases when reliability modes or impairments are active
 
@@ -822,7 +959,7 @@ NASA-STD-8719.13C / NASA-STD-8739.8A compliance artifacts maintained in [`docs/`
 | [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md) | Software Safety Hazard Analysis (HAZ-001–HAZ-007), Failure Mode and Effects Analysis (FMEA) for every major component, and Safety-Critical (SC) vs Non-Safety-Critical (NSC) classification for every public function in `src/`. |
 | [STATE_MACHINES.md](docs/STATE_MACHINES.md) | Formal state-transition tables and invariants for the three safety-critical state machines: `AckTracker`, `RetryManager`, and `ImpairmentEngine` (including the partition sub-state). |
 | [TRACEABILITY_MATRIX.md](docs/TRACEABILITY_MATRIX.md) | Bidirectional requirements traceability matrix mapping every `[REQ-x.x]` ID from `CLAUDE.md` to the `src/` file that implements it and the `tests/` file that verifies it. |
-| [STACK_ANALYSIS.md](docs/STACK_ANALYSIS.md) | Worst-case stack depth analysis across five call chains; worst-case frame depth is 10 frames, worst-case stack size is ~764 bytes (DTLS outbound send). |
+| [STACK_ANALYSIS.md](docs/STACK_ANALYSIS.md) | Worst-case stack depth analysis across six call chains; flush-path worst case is 12 frames / ~259 KB (dominated by `DtlsUdpBackend` dual `delayed[]` arrays); non-flush worst case is 10 frames / ~764 bytes. |
 | [WCET_ANALYSIS.md](docs/WCET_ANALYSIS.md) | Worst-case execution time analysis expressed as closed-form operation counts for every SC function, derived from the compile-time capacity constants in `src/core/Types.hpp`. |
 | [MCDC_ANALYSIS.md](docs/MCDC_ANALYSIS.md) | MC/DC coverage analysis for the five highest-hazard SC functions: `DeliveryEngine::send`, `DeliveryEngine::receive`, `DuplicateFilter::check_and_record`, `Serializer::serialize`, `Serializer::deserialize`. |
 | [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md) | Moderator-led formal inspection checklist (NPR 7150.2D §3 / NASA-STD-8739.8); entry/exit criteria, severity definitions, and waiver policy for all `src/` changes. |
@@ -1093,11 +1230,11 @@ All nine documents are validated simultaneously using three dependency-ordered w
 
 | Category | Lines |
 |---|---|
-| `src/` (production + headers) | 19,400 |
-| `tests/` | 25,039 |
-| **Total** | **44,439** |
+| `src/` (production + headers) | 21,763 |
+| `tests/` | 34,046 |
+| **Total** | **55,809** |
 
-68 source files across 3 layers; 23 test suites + 1 stress suite + 2 shared mock headers (26 test files).
+75 source files across 3 layers; 23 test suites + 1 stress suite + 3 shared mock/helper headers (27 test files).
 
 ---
 
