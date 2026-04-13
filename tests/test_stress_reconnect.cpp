@@ -172,7 +172,7 @@ static void make_reconnect_env(MessageEnvelope& env,
 // loop.  Per-iteration work is bounded by RECONNECT_OB_CYCLES (compile-time);
 // loop terminates when the wall-clock reaches the deadline.
 // Verifies: REQ-3.3.6
-static uint32_t test_ordering_buffer_reconnect_storm(time_t deadline)
+static uint64_t test_ordering_buffer_reconnect_storm(time_t deadline)
 {
     // Static arrays — Power of 10 Rule 3: no dynamic allocation.
     static MessageEnvelope sweep_freed[ORDERING_HOLD_COUNT];
@@ -181,7 +181,7 @@ static uint32_t test_ordering_buffer_reconnect_storm(time_t deadline)
     // init() once; reset_peer() handles per-cycle cleanup.
     buf.init(1U);
 
-    uint32_t total_cycles = 0U;
+    uint64_t total_cycles = 0ULL;
 
     // Power of 10 Rule 2 deviation: duration-bounded outer loop.
     while (time(nullptr) < deadline) {
@@ -193,9 +193,10 @@ static uint32_t test_ordering_buffer_reconnect_storm(time_t deadline)
                                     + static_cast<uint64_t>(cycle) * 1000ULL;
             // Each cycle uses a disjoint msg_id space to ensure no confusion
             // between Phase B (hold) and Phase E (reconnect) message IDs.
-            // CERT INT30-C: total_cycles × 1 000 000 + cycle × 10 000 fits in uint64_t.
-            assert(total_cycles <= UINT32_MAX / 1000U);
-            const uint64_t id_base = static_cast<uint64_t>(total_cycles) * 1000000ULL
+            // CERT INT30-C: total_cycles fits in uint64_t; product with 1 000 000
+            // cannot overflow until ~1.8 × 10^13 rounds (unreachable in practice).
+            assert(total_cycles <= UINT64_MAX / 1000000ULL);
+            const uint64_t id_base = total_cycles * 1000000ULL
                                      + static_cast<uint64_t>(cycle) * 10000ULL;
 
             // ── Step A: reset state left from previous cycle (idempotent). ────
@@ -291,9 +292,9 @@ static uint32_t test_ordering_buffer_reconnect_storm(time_t deadline)
 // loop.  Per-iteration work is bounded by RECONNECT_DE_CYCLES (compile-time);
 // loop terminates when the wall-clock reaches the deadline.
 // Verifies: REQ-3.3.6
-static uint32_t test_delivery_engine_reconnect_storm(time_t deadline)
+static uint64_t test_delivery_engine_reconnect_storm(time_t deadline)
 {
-    uint32_t total_cycles = 0U;
+    uint64_t total_cycles = 0ULL;
     // msg_id is monotonically increasing across ALL rounds — CERT INT30-C:
     // max = 64-bit counter, incremented at most once per envelope; no overflow risk.
     uint64_t msg_id = 1ULL;
@@ -434,18 +435,20 @@ int main(int argc, char* argv[])
            RECONNECT_OB_CYCLES, RECONNECT_DE_CYCLES);
 
     printf("  Test 1: OrderingBuffer reconnect storm...");
-    const uint32_t ob_total = test_ordering_buffer_reconnect_storm(
+    const uint64_t ob_total = test_ordering_buffer_reconnect_storm(
                                   time(nullptr) + duration_secs);
-    assert(ob_total > 0U);
-    printf(" PASS (%u total cycles across %u rounds)\n",
-           ob_total, ob_total / RECONNECT_OB_CYCLES);
+    assert(ob_total > 0ULL);
+    printf(" PASS (%llu total cycles across %llu rounds)\n",
+           static_cast<unsigned long long>(ob_total),
+           static_cast<unsigned long long>(ob_total / RECONNECT_OB_CYCLES));
 
     printf("  Test 2: DeliveryEngine reconnect storm...");
-    const uint32_t de_total = test_delivery_engine_reconnect_storm(
+    const uint64_t de_total = test_delivery_engine_reconnect_storm(
                                   time(nullptr) + duration_secs);
-    assert(de_total > 0U);
-    printf(" PASS (%u total cycles across %u rounds)\n",
-           de_total, de_total / RECONNECT_DE_CYCLES);
+    assert(de_total > 0ULL);
+    printf(" PASS (%llu total cycles across %llu rounds)\n",
+           static_cast<unsigned long long>(de_total),
+           static_cast<unsigned long long>(de_total / RECONNECT_DE_CYCLES));
 
     printf("=== test_stress_reconnect: ALL PASSED ===\n");
     return 0;
