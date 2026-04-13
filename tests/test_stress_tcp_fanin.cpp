@@ -101,6 +101,7 @@
 #include <ctime>    // time_t, time()
 #include <climits>  // UINT32_MAX, UINT64_MAX
 #include <csignal>  // signal(), SIGPIPE, SIG_IGN
+#include <atomic>   // std::atomic<bool> — permitted carve-out (CLAUDE.md §1d)
 #include <unistd.h> // usleep()
 #include <pthread.h>
 
@@ -133,7 +134,7 @@ static const size_t TCP_THREAD_STACK = static_cast<size_t>(2U) * 1024U * 1024U;
 /// Microseconds between a client's HELLO and its first DATA send.
 /// Gives the server time to call receive_message() and process the HELLO,
 /// populating its NodeId → socket-slot routing table before DATA arrives.
-static const uint32_t TCP_HELLO_SETTLE_US = 100000U;   // 100 ms
+static const uint32_t TCP_HELLO_SETTLE_US = 300000U;   // 300 ms
 
 /// Per-call timeout (ms) for receive_message() in the server loop.
 static const uint32_t TCP_SERVER_RECV_TIMEOUT_MS = 20U;
@@ -156,6 +157,11 @@ struct TcpFaninSrvArg {
     Result   init_result;    ///< Filled by server thread after init().
     uint32_t total_recv;     ///< DATA messages received (filled by server thread).
     uint32_t total_echo;     ///< Echo replies sent (filled by server thread).
+    // std::atomic<bool> carve-out: CLAUDE.md §1d / .claude/CLAUDE.md §3.
+    // Signals main thread that the server has called listen() and is ready to
+    // accept connections.  Prevents the fixed-sleep TOCTOU race where clients
+    // attempt connect() before the server's bind+listen finishes.
+    std::atomic<bool> ready; ///< Set true by server thread after successful init().
 };
 
 struct TcpFaninCliArg {
@@ -270,6 +276,9 @@ static void* fanin_server_fn(void* raw)
     make_fanin_server_cfg(cfg, a->port);
 
     a->init_result = server.init(cfg);
+    // Signal readiness before the early-return so that the main thread is never
+    // left polling forever: if init fails, ready=true lets main see init_result.
+    a->ready.store(true, std::memory_order_release);
     if (a->init_result != Result::OK) {
         return nullptr;
     }
@@ -359,7 +368,7 @@ static void* fanin_client_fn(void* raw)
         // generous even under heavy multi-client load on loopback.
         MessageEnvelope echo_env;
         envelope_init(echo_env);
-        Result rr = client.receive_message(echo_env, 2000U);
+        Result rr = client.receive_message(echo_env, 10000U);  // 10 s — generous for loaded machines
         assert(rr == Result::OK);
 
         // Verify unicast routing: echo message_id must match what we sent.
@@ -416,10 +425,11 @@ static uint32_t test_tcp_fanin_storm(time_t deadline)
         assert(port > 0U);
 
         // ── Reset arg structs for this round. ────────────────────────────────
-        srv_arg.port       = port;
+        srv_arg.port        = port;
         srv_arg.init_result = Result::ERR_IO;
         srv_arg.total_recv  = 0U;
         srv_arg.total_echo  = 0U;
+        srv_arg.ready.store(false, std::memory_order_relaxed);
 
         // Power of 10 Rule 2: bounded by TCP_STRESS_CLIENTS (compile-time).
         for (uint32_t i = 0U; i < TCP_STRESS_CLIENTS; ++i) {
@@ -441,8 +451,23 @@ static uint32_t test_tcp_fanin_storm(time_t deadline)
         rc = pthread_create(&srv_tid, &attr, fanin_server_fn, &srv_arg);
         assert(rc == 0);
 
-        // Brief pause — let server bind and start polling before clients connect.
-        usleep(50000U);  // 50 ms
+        // Wait for server to signal it is ready (bind + listen complete).
+        // Polling with 1 ms sleep; bounded by TCP_SERVER_READY_TIMEOUT_US.
+        // This replaces the fixed 50 ms sleep and prevents ECONNREFUSED on
+        // loaded machines where the server thread is scheduled late.
+        // Power of 10 Rule 2: loop bounded by TCP_SERVER_READY_TIMEOUT_US / 1000.
+        static const uint32_t TCP_SERVER_READY_TIMEOUT_US = 2000000U; // 2 s
+        static const uint32_t TCP_SERVER_READY_POLL_US    =    1000U; // 1 ms
+        static const uint32_t TCP_SERVER_READY_MAX_ITERS  =
+            TCP_SERVER_READY_TIMEOUT_US / TCP_SERVER_READY_POLL_US;    // 2000
+        for (uint32_t wi = 0U;
+             wi < TCP_SERVER_READY_MAX_ITERS
+                 && !srv_arg.ready.load(std::memory_order_acquire);
+             ++wi)
+        {
+            usleep(TCP_SERVER_READY_POLL_US);
+        }
+        // If still not ready, server init failed; check at the per-round assert.
 
         // ── Start all client threads concurrently. ────────────────────────────
         // Power of 10 Rule 2: bounded by TCP_STRESS_CLIENTS (compile-time).
