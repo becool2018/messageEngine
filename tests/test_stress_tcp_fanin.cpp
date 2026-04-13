@@ -206,8 +206,10 @@ static void make_fanin_server_cfg(TransportConfig& cfg, uint16_t port)
     cfg.is_server     = true;
     cfg.bind_port     = port;
     cfg.local_node_id = TCP_SERVER_NODE;
-    // Receive timeout must be 0 so receive_message() uses our caller-supplied value.
-    cfg.channels[0U].recv_timeout_ms = 0U;
+    // recv_timeout_ms also governs the HELLO-eviction timeout (REQ-6.1.12).
+    // Use 5 s to give clients ample time to deliver their HELLO on loaded machines.
+    // receive_message() uses its own caller-supplied timeout_ms argument, not this field.
+    cfg.channels[0U].recv_timeout_ms = 5000U;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
