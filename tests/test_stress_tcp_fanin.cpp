@@ -100,6 +100,7 @@
 #include <cstdint>
 #include <ctime>    // time_t, time()
 #include <climits>  // UINT32_MAX, UINT64_MAX
+#include <csignal>  // signal(), SIGPIPE, SIG_IGN
 #include <unistd.h> // usleep()
 #include <pthread.h>
 
@@ -492,6 +493,15 @@ static uint32_t test_tcp_fanin_storm(time_t deadline)
 
 int main(int argc, char* argv[])
 {
+    // Ignore SIGPIPE process-wide — send() to a closed socket returns EPIPE
+    // instead of killing the process.  TcpBackend checks all return values and
+    // logs a warning on EPIPE; per-round correctness asserts catch any mismatch.
+    // Rationale: at high round counts the OS may reuse ports with residual
+    // connections still in TIME_WAIT, causing a write to a closing socket.
+    // POSIX: signal() returns SIG_ERR on failure; assert to catch mis-configuration.
+    // NOLINTNEXTLINE(cert-msc54-cpp,bugprone-signal-handler)
+    assert(signal(SIGPIPE, SIG_IGN) != SIG_ERR);  // NOLINT(cert-msc54-cpp)
+
     const time_t duration_secs = parse_duration_secs(argc, argv);
     assert(duration_secs > 0);
 
