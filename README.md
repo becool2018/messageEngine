@@ -445,7 +445,7 @@ messageEngine/
 | **GCC** or **Clang** | GCC 8+ / Clang 7+ | C++17 compiler; must support `-std=c++17 -fno-exceptions -fno-rtti` |
 | **GNU Make** | 3.81+ | Build system; no CMake required |
 | **pthreads** | POSIX | TCP/UDP receiver threads; linked via `-lpthread` |
-| **mbedTLS** | 4.0 (PSA Crypto) | TLS and DTLS backends (`TlsTcpBackend`, `DtlsUdpBackend`); located via `pkg-config` with Homebrew fallback; the code targets the mbedTLS 4.0 PSA Crypto API |
+| **mbedTLS** | 4.0 (PSA Crypto) | **Optional** (required only when `TLS=1`, which is the default). TLS and DTLS backends (`TlsTcpBackend`, `DtlsUdpBackend`); located via `pkg-config` with Homebrew fallback. Build without it using `make TLS=0` — see [Building without TLS/DTLS](#building-without-tlsdtls). |
 
 ### Optional Tools (static analysis and coverage)
 
@@ -472,6 +472,29 @@ sudo apt install build-essential clang clang-tidy clang-tools cppcheck llvm pkg-
 ```
 
 > **Linux note:** `clang-tools` provides `scan-build`. All LLVM tools fall back to PATH automatically. The `scan-build` analyzer path is resolved via `which clang` at build time; no manual path configuration is needed.
+
+### Building without TLS/DTLS
+
+If mbedTLS is not available in your environment, or you only need TCP/UDP without encryption, pass `TLS=0` to any Make target:
+
+```bash
+# Install only the base tools (no mbedtls / libmbedtls-dev required)
+# macOS:  brew install gcc make llvm cppcheck pkg-config
+# Linux:  sudo apt install build-essential clang clang-tidy clang-tools cppcheck llvm
+
+make all TLS=0           # server, client, all non-TLS tests
+make run_tests TLS=0     # runs 21 tests; TlsTcpBackend and DtlsUdpBackend skipped
+make lint TLS=0          # lints only non-TLS source files
+make cppcheck TLS=0      # checks only non-TLS source files
+```
+
+When `TLS=0`:
+- `TlsTcpBackend`, `TlsSessionStore`, `DtlsUdpBackend`, and `MbedtlsOpsImpl` are excluded from compilation.
+- `-DMESSAGEENGINE_NO_TLS` is injected so any conditional code in headers can guard TLS-only APIs.
+- `tls_demo`, `dtls_demo`, and the `demos` target print an error and exit if invoked.
+- All install and package targets omit TLS headers (`TlsConfig.hpp`, `TlsTcpBackend.hpp`, `TlsSessionStore.hpp`, `DtlsUdpBackend.hpp`, `IMbedtlsOps.hpp`).
+
+The default (`TLS=1`) requires mbedTLS and builds all five transport backends.
 
 ### Building
 
