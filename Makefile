@@ -40,6 +40,24 @@ endif
 EXTRA_CXXFLAGS ?=
 EXTRA_LDFLAGS  ?=
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TLS/DTLS support — set TLS=0 to build without mbedTLS.
+# When TLS=0:
+#   • TlsTcpBackend, TlsSessionStore, DtlsUdpBackend, MbedtlsOpsImpl are
+#     excluded from compilation and linking.
+#   • mbedTLS include/link flags are omitted entirely.
+#   • -DMESSAGEENGINE_NO_TLS is injected so source/headers can guard TLS APIs.
+#   • test_TlsTcpBackend and test_DtlsUdpBackend are excluded from all targets.
+#   • tls_demo, dtls_demo, and the demos umbrella target are disabled.
+# Default: TLS=1 (mbedTLS required).
+# ─────────────────────────────────────────────────────────────────────────────
+TLS ?= 1
+ifeq ($(TLS),1)
+$(info [messageEngine] TLS/DTLS: ENABLED  — TlsTcpBackend + DtlsUdpBackend compiled in, mbedTLS linked)
+else
+$(info [messageEngine] TLS/DTLS: DISABLED — TlsTcpBackend + DtlsUdpBackend excluded, no mbedTLS required)
+endif
+
 # Optional tool for discovering system-provided mbedTLS flags.
 PKG_CONFIG ?= pkg-config
 
@@ -66,6 +84,7 @@ LLVM_COV     := $(if $(LLVM_BIN),$(LLVM_BIN)/llvm-cov,llvm-cov)
 # Compiler
 CXX       ?= g++
 
+ifeq ($(TLS),1)
 # mbedTLS include/lib discovery:
 # 1) Prefer pkg-config when available (Linux distros, some macOS setups)
 # 2) On macOS, fall back to Homebrew's opt prefix when pkg-config data is absent
@@ -88,6 +107,12 @@ endif
 endif
 
 MBEDTLS_CFLAGS ?= $(if $(strip $(MBEDTLS_PKG_CFLAGS)),$(MBEDTLS_PKG_CFLAGS),$(MBEDTLS_FALLBACK_CFLAGS))
+else
+# TLS=0: mbedTLS not used; clear all TLS-related flags so nothing leaks into
+# CXXFLAGS or LDFLAGS and the build succeeds without mbedTLS installed.
+MBEDTLS_CFLAGS :=
+MBEDTLS_LIBS   :=
+endif
 
 # Include path: do NOT hardcode /opt/homebrew/include by default
 CXXFLAGS  := -std=c++17 -fno-exceptions -fno-rtti \
@@ -105,9 +130,14 @@ CXXFLAGS  := -std=c++17 -fno-exceptions -fno-rtti \
 #   -D_FORTIFY_SOURCE=2       ACTIVE when RELEASE=1 (requires -O2, set via RELEASE_CXXFLAGS).
 #   -pie                      Applied per-executable in EXE_LDFLAGS below.
 #   -Wl,-z,relro -Wl,-z,now   Linux-only; applied per-executable in EXE_LDFLAGS below.
+ifneq ($(TLS),1)
+# TLS=0: tell all translation units that TLS/DTLS APIs are compiled out.
+CXXFLAGS += -DMESSAGEENGINE_NO_TLS
+endif
 
 # mbedTLS linking (portable default). Users can override.
 # On Ubuntu with libmbedtls-dev installed, these libs are on the default linker path.
+# When TLS=0 MBEDTLS_LIBS was already set to empty above; ?= is a no-op.
 MBEDTLS_LIBS ?= $(if $(strip $(MBEDTLS_PKG_LIBS)),$(MBEDTLS_PKG_LIBS),$(if $(strip $(MBEDTLS_FALLBACK_LIBS)),$(MBEDTLS_FALLBACK_LIBS),-lmbedtls -lmbedx509 -lmbedcrypto))
 LDFLAGS      := -lpthread $(MBEDTLS_LIBS) $(EXTRA_LDFLAGS)
 
@@ -170,16 +200,61 @@ PLATFORM_SRC := \
     src/platform/ImpairmentConfigLoader.cpp \
     src/platform/SocketUtils.cpp \
     src/platform/TcpBackend.cpp \
-    src/platform/TlsTcpBackend.cpp \
-    src/platform/TlsSessionStore.cpp \
     src/platform/UdpBackend.cpp \
-    src/platform/DtlsUdpBackend.cpp \
     src/platform/LocalSimHarness.cpp \
-    src/platform/MbedtlsOpsImpl.cpp \
     src/platform/SocketOpsImpl.cpp \
     src/platform/PosixSyscallsImpl.cpp
 
+ifeq ($(TLS),1)
+# TLS/DTLS backends and the shared mbedTLS ops implementation.
+PLATFORM_SRC += \
+    src/platform/TlsTcpBackend.cpp \
+    src/platform/TlsSessionStore.cpp \
+    src/platform/DtlsUdpBackend.cpp \
+    src/platform/MbedtlsOpsImpl.cpp
+endif
+
 ALL_LIB_SRC := $(CORE_SRC) $(PLATFORM_SRC)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TLS/DTLS test and sanitizer bin lists — empty when TLS=0.
+# Used by: tests, sanitize_tests, run_tests, run_sanitize.
+# ─────────────────────────────────────────────────────────────────────────────
+ifeq ($(TLS),1)
+RUN_TESTS_FOOTER    := === ALL TESTS PASSED (23/23) ===
+RUN_SANITIZE_FOOTER := === SANITIZER TESTS PASSED (23/23) ===
+TLS_TEST_BINS  := build/test_TlsTcpBackend build/test_DtlsUdpBackend
+TLS_SAN_BINS   := build/san/test_TlsTcpBackend build/san/test_DtlsUdpBackend
+TLS_TEST_NAMES := TlsTcpBackend DtlsUdpBackend
+# lint: no exclusions needed when TLS=1 (mbedTLS headers present).
+TLS_LINT_EXCL_SRC  :=
+TLS_LINT_EXCL_TEST :=
+# cppcheck: no -i exclusions needed when TLS=1.
+CPPCHECK_TLS_EXCL  :=
+else
+RUN_TESTS_FOOTER    := === ALL TESTS PASSED (21/23 — TLS=0: test_TlsTcpBackend + test_DtlsUdpBackend skipped) ===
+RUN_SANITIZE_FOOTER := === SANITIZER TESTS PASSED (21/23 — TLS=0: test_TlsTcpBackend + test_DtlsUdpBackend skipped) ===
+TLS_TEST_BINS  :=
+TLS_SAN_BINS   :=
+TLS_TEST_NAMES :=
+# lint: exclude TLS source and demo files so clang-tidy does not require
+# mbedTLS headers on systems where mbedTLS is not installed.
+TLS_LINT_EXCL_SRC  := src/platform/TlsTcpBackend.cpp \
+                       src/platform/TlsSessionStore.cpp \
+                       src/platform/DtlsUdpBackend.cpp \
+                       src/platform/MbedtlsOpsImpl.cpp \
+                       src/app/TlsTcpDemo.cpp \
+                       src/app/DtlsUdpDemo.cpp
+TLS_LINT_EXCL_TEST := tests/test_TlsTcpBackend.cpp \
+                       tests/test_DtlsUdpBackend.cpp
+# cppcheck: -i flags exclude TLS files from the directory scan.
+CPPCHECK_TLS_EXCL  := -i src/platform/TlsTcpBackend.cpp \
+                       -i src/platform/TlsSessionStore.cpp \
+                       -i src/platform/DtlsUdpBackend.cpp \
+                       -i src/platform/MbedtlsOpsImpl.cpp \
+                       -i src/app/TlsTcpDemo.cpp \
+                       -i src/app/DtlsUdpDemo.cpp
+endif
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Object files
@@ -246,7 +321,6 @@ PUBLIC_HEADERS_CORE := \
     src/core/Types.hpp \
     src/core/ChannelConfig.hpp \
     src/core/ImpairmentConfig.hpp \
-    src/core/TlsConfig.hpp \
     src/core/Logger.hpp \
     src/core/ProtocolVersion.hpp \
     src/core/Version.hpp \
@@ -263,20 +337,31 @@ PUBLIC_HEADERS_CORE := \
     src/core/RequestReplyEngine.hpp \
     src/core/RequestReplyHeader.hpp
 
+ifeq ($(TLS),1)
+PUBLIC_HEADERS_CORE += src/core/TlsConfig.hpp
+endif
+
 PUBLIC_HEADERS_PLATFORM := \
     src/platform/TcpBackend.hpp \
-    src/platform/TlsTcpBackend.hpp \
-    src/platform/TlsSessionStore.hpp \
-    src/platform/DtlsUdpBackend.hpp \
     src/platform/LocalSimHarness.hpp \
     src/platform/ImpairmentEngine.hpp \
     src/platform/ImpairmentConfigLoader.hpp \
     src/platform/PrngEngine.hpp
 
+ifeq ($(TLS),1)
+PUBLIC_HEADERS_PLATFORM += \
+    src/platform/TlsTcpBackend.hpp \
+    src/platform/TlsSessionStore.hpp \
+    src/platform/DtlsUdpBackend.hpp
+endif
+
 TESTING_HEADERS := \
     src/platform/ISocketOps.hpp \
-    src/platform/IPosixSyscalls.hpp \
-    src/platform/IMbedtlsOps.hpp
+    src/platform/IPosixSyscalls.hpp
+
+ifeq ($(TLS),1)
+TESTING_HEADERS += src/platform/IMbedtlsOps.hpp
+endif
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Installation paths for library + headers (extends existing bindir install).
@@ -346,6 +431,7 @@ help:
 	@echo ""
 	@echo "Options:"
 	@echo "  RELEASE=1           Enable -O2 -D_FORTIFY_SOURCE=2 (production build)"
+	@echo "  TLS=0               Build without TLS/DTLS (omits mbedTLS; injects -DMESSAGEENGINE_NO_TLS)"
 	@echo "  DESTDIR=<path>      Install prefix  (Yocto: set to staging dir in do_install)"
 	@echo "  CXX=<compiler>      Override compiler (default: g++)"
 	@echo ""
@@ -358,6 +444,7 @@ server: $(ALL_LIB_OBJS) build/objs/app/Server.o
 client: $(ALL_LIB_OBJS) build/objs/app/Client.o
 	$(CXX) $(CXXFLAGS) -o build/client $^ $(LDFLAGS) $(EXE_LDFLAGS)
 
+ifeq ($(TLS),1)
 tls_demo: $(ALL_LIB_OBJS) build/objs/app/TlsTcpDemo.o
 	$(CXX) $(CXXFLAGS) -o build/tls_demo $^ $(LDFLAGS)
 
@@ -365,6 +452,11 @@ dtls_demo: $(ALL_LIB_OBJS) build/objs/app/DtlsUdpDemo.o
 	$(CXX) $(CXXFLAGS) -o build/dtls_demo $^ $(LDFLAGS)
 
 demos: tls_demo dtls_demo
+else
+tls_demo dtls_demo demos:
+	@echo "ERROR: $@ requires TLS=1 (mbedTLS). Re-run: make $@ TLS=1"
+	@exit 1
+endif
 
 tests: \
     build/test_MessageEnvelope \
@@ -376,8 +468,7 @@ tests: \
     build/test_RetryManager \
     build/test_DeliveryEngine \
     build/test_ImpairmentConfigLoader \
-    build/test_TlsTcpBackend \
-    build/test_DtlsUdpBackend \
+    $(TLS_TEST_BINS) \
     build/test_TcpBackend \
     build/test_UdpBackend \
     build/test_SocketUtils \
@@ -492,8 +583,7 @@ sanitize_tests: \
     build/san/test_RetryManager \
     build/san/test_DeliveryEngine \
     build/san/test_ImpairmentConfigLoader \
-    build/san/test_TlsTcpBackend \
-    build/san/test_DtlsUdpBackend \
+    $(TLS_SAN_BINS) \
     build/san/test_TcpBackend \
     build/san/test_UdpBackend \
     build/san/test_SocketUtils \
@@ -518,8 +608,8 @@ run_sanitize: sanitize_tests
 	@$(SAN_RUN_ENV) build/san/test_RetryManager
 	@$(SAN_RUN_ENV) build/san/test_DeliveryEngine
 	@$(SAN_RUN_ENV) build/san/test_ImpairmentConfigLoader
-	@$(SAN_RUN_ENV) build/san/test_TlsTcpBackend
-	@$(SAN_RUN_ENV) build/san/test_DtlsUdpBackend
+	@if [ "$(TLS)" = "1" ]; then $(SAN_RUN_ENV) build/san/test_TlsTcpBackend; fi
+	@if [ "$(TLS)" = "1" ]; then $(SAN_RUN_ENV) build/san/test_DtlsUdpBackend; fi
 	@$(SAN_RUN_ENV) build/san/test_TcpBackend
 	@$(SAN_RUN_ENV) build/san/test_UdpBackend
 	@$(SAN_RUN_ENV) build/san/test_SocketUtils
@@ -532,7 +622,7 @@ run_sanitize: sanitize_tests
 	@$(SAN_RUN_ENV) build/san/test_OrderingBuffer
 	@$(SAN_RUN_ENV) build/san/test_PrngEngine
 	@$(SAN_RUN_ENV) build/san/test_RingBuffer
-	@echo "=== SANITIZER TESTS PASSED ==="
+	@echo "$(RUN_SANITIZE_FOOTER)"
 
 build/san/test_%: $(SAN_LIB_OBJS) $(SAN_OBJ_DIR)/tests/test_%.o
 	@mkdir -p build/san
@@ -615,9 +705,9 @@ check_traceability:
 # clang-tidy discovers the nearest .clang-tidy by searching up from each source file.
 lint:
 	@echo "=== Clang-Tidy: src/ (strict) ==="
-	@$(CLANG_TIDY) $(shell find src -name '*.cpp') -- $(CXXFLAGS)
+	@$(CLANG_TIDY) $(filter-out $(TLS_LINT_EXCL_SRC),$(shell find src -name '*.cpp')) -- $(CXXFLAGS)
 	@echo "=== Clang-Tidy: tests/ (relaxed) ==="
-	@$(CLANG_TIDY) $(shell find tests -name '*.cpp') -- $(CXXFLAGS)
+	@$(CLANG_TIDY) $(filter-out $(TLS_LINT_EXCL_TEST),$(shell find tests -name '*.cpp')) -- $(CXXFLAGS)
 	@echo "=== Clang-Tidy: PASS ==="
 
 # Tier 2b: Cppcheck flow/style analysis (CI-safe; no addon required).
@@ -632,6 +722,7 @@ cppcheck:
 	    --suppress=checkersReport \
 	    --suppressions-list=/tmp/.cppcheck-supp.$$$$.tmp \
 	    --std=c++17 -I src \
+	    $(CPPCHECK_TLS_EXCL) \
 	    src/ 2>&1
 	@echo "=== Cppcheck: PASS ==="
 
@@ -648,6 +739,7 @@ cppcheck-misra:
 	    --addon=misra \
 	    --suppressions-list=/dev/stdin \
 	    --std=c++17 -I src \
+	    $(CPPCHECK_TLS_EXCL) \
 	    src/ 2>&1
 	@echo "=== Cppcheck + MISRA addon: PASS ==="
 
@@ -722,7 +814,19 @@ COV_CXXFLAGS  := $(filter-out -Werror,$(CXXFLAGS)) \
                  -fprofile-instr-generate -fcoverage-mapping -O0
 COV_LDFLAGS   := -fprofile-instr-generate $(LDFLAGS)
 COV_LIB_OBJS  := $(patsubst src/%.cpp,$(COV_OBJ_DIR)/%.o,$(ALL_LIB_SRC))
-TEST_NAMES    := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader TlsTcpBackend DtlsUdpBackend TcpBackend UdpBackend SocketUtils AssertState MessageId Timestamp RequestReplyEngine Fragmentation ReassemblyBuffer OrderingBuffer RingBuffer PrngEngine
+TEST_NAMES_BASE := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader TcpBackend UdpBackend SocketUtils AssertState MessageId Timestamp RequestReplyEngine Fragmentation ReassemblyBuffer OrderingBuffer RingBuffer PrngEngine
+TEST_NAMES      := $(TEST_NAMES_BASE) $(TLS_TEST_NAMES)
+
+# TLS-conditional profraw and object-flag fragments for llvm-profdata / llvm-cov.
+ifeq ($(TLS),1)
+COV_TLS_PROFRAW := build/cov/TlsTcpBackend.profraw \
+                   build/cov/DtlsUdpBackend.profraw
+COV_TLS_OBJECTS := -object build/cov_test_TlsTcpBackend \
+                   -object build/cov_test_DtlsUdpBackend
+else
+COV_TLS_PROFRAW :=
+COV_TLS_OBJECTS :=
+endif
 COV_TESTS     := $(patsubst %,build/cov_test_%,$(TEST_NAMES))
 
 $(COV_OBJ_DIR)/core/%.o: src/core/%.cpp
@@ -752,8 +856,8 @@ coverage: $(COV_TESTS)
 	@LLVM_PROFILE_FILE="build/cov/RetryManager.profraw"  build/cov_test_RetryManager  >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/DeliveryEngine.profraw" build/cov_test_DeliveryEngine >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/ImpairmentConfigLoader.profraw" build/cov_test_ImpairmentConfigLoader >/dev/null 2>&1
-	@LLVM_PROFILE_FILE="build/cov/TlsTcpBackend.profraw" build/cov_test_TlsTcpBackend >/dev/null 2>&1
-	@LLVM_PROFILE_FILE="build/cov/DtlsUdpBackend.profraw" build/cov_test_DtlsUdpBackend >/dev/null 2>&1
+	@if [ "$(TLS)" = "1" ]; then LLVM_PROFILE_FILE="build/cov/TlsTcpBackend.profraw" build/cov_test_TlsTcpBackend >/dev/null 2>&1; fi
+	@if [ "$(TLS)" = "1" ]; then LLVM_PROFILE_FILE="build/cov/DtlsUdpBackend.profraw" build/cov_test_DtlsUdpBackend >/dev/null 2>&1; fi
 	@LLVM_PROFILE_FILE="build/cov/TcpBackend.profraw"    build/cov_test_TcpBackend    >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/UdpBackend.profraw"    build/cov_test_UdpBackend    >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/SocketUtils.profraw"  build/cov_test_SocketUtils   >/dev/null 2>&1
@@ -776,8 +880,7 @@ coverage: $(COV_TESTS)
 	    build/cov/RetryManager.profraw \
 	    build/cov/DeliveryEngine.profraw \
 	    build/cov/ImpairmentConfigLoader.profraw \
-	    build/cov/TlsTcpBackend.profraw \
-	    build/cov/DtlsUdpBackend.profraw \
+	    $(COV_TLS_PROFRAW) \
 	    build/cov/TcpBackend.profraw \
 	    build/cov/UdpBackend.profraw \
 	    build/cov/SocketUtils.profraw \
@@ -803,8 +906,7 @@ coverage: $(COV_TESTS)
 	    -object build/cov_test_RetryManager \
 	    -object build/cov_test_DeliveryEngine \
 	    -object build/cov_test_ImpairmentConfigLoader \
-	    -object build/cov_test_TlsTcpBackend \
-	    -object build/cov_test_DtlsUdpBackend \
+	    $(COV_TLS_OBJECTS) \
 	    -object build/cov_test_TcpBackend \
 	    -object build/cov_test_UdpBackend \
 	    -object build/cov_test_SocketUtils \
@@ -836,8 +938,7 @@ coverage_show:
 	    -object build/cov_test_RetryManager \
 	    -object build/cov_test_DeliveryEngine \
 	    -object build/cov_test_ImpairmentConfigLoader \
-	    -object build/cov_test_TlsTcpBackend \
-	    -object build/cov_test_DtlsUdpBackend \
+	    $(COV_TLS_OBJECTS) \
 	    -object build/cov_test_TcpBackend \
 	    -object build/cov_test_UdpBackend \
 	    -object build/cov_test_SocketUtils \
@@ -876,8 +977,7 @@ coverage_report: coverage
 	    -object build/cov_test_RetryManager \
 	    -object build/cov_test_DeliveryEngine \
 	    -object build/cov_test_ImpairmentConfigLoader \
-	    -object build/cov_test_TlsTcpBackend \
-	    -object build/cov_test_DtlsUdpBackend \
+	    $(COV_TLS_OBJECTS) \
 	    -object build/cov_test_TcpBackend \
 	    -object build/cov_test_UdpBackend \
 	    -object build/cov_test_SocketUtils \
@@ -905,8 +1005,7 @@ coverage_report: coverage
 	    -object build/cov_test_RetryManager \
 	    -object build/cov_test_DeliveryEngine \
 	    -object build/cov_test_ImpairmentConfigLoader \
-	    -object build/cov_test_TlsTcpBackend \
-	    -object build/cov_test_DtlsUdpBackend \
+	    $(COV_TLS_OBJECTS) \
 	    -object build/cov_test_TcpBackend \
 	    -object build/cov_test_UdpBackend \
 	    -object build/cov_test_SocketUtils \
@@ -1109,8 +1208,8 @@ run_tests: tests
 	@echo "=== test_RetryManager ===";  build/test_RetryManager
 	@echo "=== test_DeliveryEngine ==="; build/test_DeliveryEngine
 	@echo "=== test_ImpairmentConfigLoader ==="; build/test_ImpairmentConfigLoader
-	@echo "=== test_TlsTcpBackend ==="; build/test_TlsTcpBackend
-	@echo "=== test_DtlsUdpBackend ==="; build/test_DtlsUdpBackend
+	@if [ "$(TLS)" = "1" ]; then echo "=== test_TlsTcpBackend ==="; build/test_TlsTcpBackend; fi
+	@if [ "$(TLS)" = "1" ]; then echo "=== test_DtlsUdpBackend ==="; build/test_DtlsUdpBackend; fi
 	@echo "=== test_TcpBackend ==="; build/test_TcpBackend
 	@echo "=== test_UdpBackend ==="; build/test_UdpBackend
 	@echo "=== test_SocketUtils ==="; build/test_SocketUtils
@@ -1123,4 +1222,4 @@ run_tests: tests
 	@echo "=== test_OrderingBuffer ==="; build/test_OrderingBuffer
 	@echo "=== test_PrngEngine ==="; build/test_PrngEngine
 	@echo "=== test_RingBuffer ==="; build/test_RingBuffer
-	@echo "=== ALL TESTS PASSED ==="
+	@echo "$(RUN_TESTS_FOOTER)"

@@ -84,6 +84,11 @@ else()
 endif()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Threads — must be found before any target that links Threads::Threads.
+# ─────────────────────────────────────────────────────────────────────────────
+find_package(Threads REQUIRED)
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Source lists — mirrors CORE_SRC and PLATFORM_SRC in the Makefile exactly.
 # ─────────────────────────────────────────────────────────────────────────────
 set(CORE_SRC
@@ -161,8 +166,6 @@ else()
     add_library(MessageEngine::messageengine ALIAS messageengine_static)
 endif()
 
-find_package(Threads REQUIRED)
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Application executables.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -213,6 +216,28 @@ foreach(TEST_NAME
     target_include_directories(${TEST_NAME}
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+endforeach()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stress tests — mirrors STRESS_TEST_BINS in the Makefile.
+# Built with identical flags to unit tests; labelled "stress" so they can be
+# run selectively:  ctest -L stress
+# Excluded from the default ctest run: ctest -LE stress
+# ─────────────────────────────────────────────────────────────────────────────
+foreach(STRESS_NAME
+        test_stress_capacity
+        test_stress_e2e
+        test_stress_ordering
+        test_stress_reconnect
+        test_stress_ringbuffer
+        test_stress_tcp_fanin
+)
+    add_executable(${STRESS_NAME} tests/${STRESS_NAME}.cpp)
+    target_link_libraries(${STRESS_NAME} PRIVATE MessageEngine::static)
+    target_include_directories(${STRESS_NAME}
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    add_test(NAME ${STRESS_NAME} COMMAND ${STRESS_NAME})
+    set_tests_properties(${STRESS_NAME} PROPERTIES LABELS "stress")
 endforeach()
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -69,6 +69,8 @@ make check_traceability  # no orphaned REQ IDs
 
 Run `make static_analysis` to run lint + cppcheck + scan-build together.
 
+> **No mbedTLS?** If your environment does not have mbedTLS installed, append `TLS=0` to every `make` command above. This excludes `TlsTcpBackend`, `TlsSessionStore`, `DtlsUdpBackend`, and `MbedtlsOpsImpl` from all targets and skips the two TLS/DTLS test binaries. PRs that touch TLS/DTLS source files must be validated with `TLS=1` (mbedTLS installed) before merge.
+
 For changes to capacity constants or slot-management algorithms, also run:
 
 ```bash
