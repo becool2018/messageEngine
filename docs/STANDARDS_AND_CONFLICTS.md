@@ -28,7 +28,7 @@
 | **Availability** | Free — publicly available at NASA/JPL and IEEE |
 | **Used in** | `.claude/CLAUDE.md §2`, `CLAUDE.md §9` |
 
-**What it is:** Ten concise rules for writing safety-critical C code that can be statically analysed, reviewed, and proven correct. Originally developed at JPL for flight software and widely adopted in aerospace and safety-critical systems. The rules are intentionally restrictive — anything they prohibit is either hard to analyse or has caused real failures in deployed systems.
+**What it is:** Ten concise rules for writing safety-critical C code that can be statically analysed, reviewed, and proven correct. Originally developed at JPL for flight software and widely adopted in aerospace and safety-critical systems. The rules are intentionally restrictive — anything they prohibit is either hard to analyse or has caused real failures in deployed systems. In this project, the JPL Power of 10 rules are applied to C++ by combining the core safety constraints with a specific "F' (F-Prime) style" subset of the language. This ensures the code remains deterministic, analyzable, and suitable for safety-critical environments.
 
 **The ten rules:**
 1. Simple control flow only — no `goto`, no recursion.
