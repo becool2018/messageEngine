@@ -121,6 +121,7 @@ CXXFLAGS  := -std=c++17 -fno-exceptions -fno-rtti \
              -Wcast-align -Wformat=2 -Wnull-dereference \
              -Wdouble-promotion -Wno-unknown-pragmas \
              -Wno-gnu-zero-variadic-macro-arguments \
+             -Wno-variadic-macros \
              -fstack-protector-strong -fPIE \
              $(RELEASE_CXXFLAGS) \
              -Isrc $(MBEDTLS_CFLAGS) -g \
