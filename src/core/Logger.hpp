@@ -105,6 +105,13 @@ public:
     /// Initialize the logger. Must be called once before any log() or log_wall()
     /// call. Stores clock, sink, and min_level; captures getpid() into s_pid.
     /// Returns ERR_INVALID if clock or sink is nullptr.
+    ///
+    /// SECURITY: clock and sink must be trusted, application-controlled
+    /// components. Logger performs no integrity verification of the supplied
+    /// implementations. A malicious or compromised sink could exfiltrate all
+    /// log output; a malicious clock could corrupt timestamps. Never accept
+    /// clock or sink pointers from untrusted input (network data, plugins,
+    /// or dynamically loaded modules without integrity verification).
     static Result init(Severity min_level, ILogClock* clock, ILogSink* sink);
 
     // ─────────────────────────────────────────────────────────────────────

@@ -151,6 +151,18 @@ CXXFLAGS  := -std=c++17 -fno-exceptions -fno-rtti \
 ifneq ($(TLS),1)
 # TLS=0: tell all translation units that TLS/DTLS APIs are compiled out.
 CXXFLAGS += -DMESSAGEENGINE_NO_TLS
+# SEC: warn if TLS is disabled in a release build — this is not suitable for
+# production deployments. An operator must explicitly suppress this warning
+# (ALLOW_TLS_DISABLED_RELEASE=1) to confirm the opt-out is intentional.
+ifeq ($(RELEASE),1)
+ifneq ($(ALLOW_TLS_DISABLED_RELEASE),1)
+$(info )
+$(info WARNING: TLS=0 with RELEASE=1 — TLS/DTLS backends are compiled out.)
+$(info          This build is NOT suitable for production use without TLS.)
+$(info          To suppress: make RELEASE=1 TLS=0 ALLOW_TLS_DISABLED_RELEASE=1)
+$(info )
+endif
+endif
 endif
 
 # mbedTLS linking (portable default). Users can override.

@@ -32,6 +32,7 @@
 
 #include "core/Logger.hpp"
 #include "core/Assert.hpp"  // NEVER_COMPILED_OUT_ASSERT
+#include <atomic>           // std::atomic — permitted carve-out (.claude/CLAUDE.md §2.3)
 #include <cstdio>           // snprintf, vsnprintf
 #include <unistd.h>         // getpid()
 
@@ -57,7 +58,13 @@ static_assert(Logger::LOG_MSG_WALL_MAX_SIZE    >= 256U,
 // init() time and remain valid for program lifetime.
 // ─────────────────────────────────────────────────────────────────────────────
 // NOLINTBEGIN(cppcoreguidelines-avoid-non-const-global-variables)
-static Severity   s_min_level = Severity::INFO;
+// s_min_level is std::atomic so concurrent log() calls racing against init()
+// on a multi-threaded init path see a consistent severity threshold without
+// UB. std::atomic<Severity> is explicitly permitted (CLAUDE.md §1d /
+// .claude/CLAUDE.md §2.3 carve-out). memory_order_relaxed is sufficient:
+// no happens-before relationship with other data is required for a severity
+// filter — a brief window of stale level is acceptable.
+static std::atomic<Severity> s_min_level{Severity::INFO};
 static ILogClock* s_clock     = nullptr;
 static ILogSink*  s_sink      = nullptr;
 static uint32_t   s_pid       = 0U;
@@ -77,7 +84,7 @@ Result Logger::init(Severity min_level, ILogClock* clock, ILogSink* sink)
     if (sink == nullptr) {
         return Result::ERR_INVALID;
     }
-    s_min_level = min_level;
+    s_min_level.store(min_level, std::memory_order_relaxed);
     s_clock     = clock;
     s_sink      = sink;
     // Capture PID once at init time — zero per-call overhead.
@@ -107,7 +114,7 @@ void Logger::log(Severity sev,  // NOLINT(misc-no-recursion)
     NEVER_COMPILED_OUT_ASSERT(s_sink  != nullptr);
 
     // Severity filter: skip below-threshold messages.
-    if (sev < s_min_level) {
+    if (sev < s_min_level.load(std::memory_order_relaxed)) {
         return;
     }
 
@@ -189,7 +196,7 @@ void Logger::log_wall(Severity sev,  // NOLINT(misc-no-recursion)
     NEVER_COMPILED_OUT_ASSERT(s_sink  != nullptr);
 
     // Severity filter.
-    if (sev < s_min_level) {
+    if (sev < s_min_level.load(std::memory_order_relaxed)) {
         return;
     }
 
