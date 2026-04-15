@@ -45,16 +45,16 @@ A C++ networking library for building and testing systems that must survive unre
 4. [Building](#building)
 5. [Testing and Analysis](#testing-and-analysis) — unit tests, stress tests, coverage, static analysis
 6. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
-7. [Documentation Maintenance](docs/DOC_MAINTENANCE.md) — what to update and when for every type of code change
-8. [Using the Library](#using-the-library)
+7. [Using the Library](#using-the-library)
     - [Logging](docs/LOGGING.md) — format, architecture, severity levels, extending, testing
-9. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
-10. [Project Standards](#project-standards)
+8. [Project Standards](#project-standards)
     - [Safety & Assurance Documents](#safety--assurance-documents)
-11. [Claude Skills](#claude-skills)
-12. [Release History](#release-history)
-13. [Code Statistics](#code-statistics)
-14. [Security Check](SNYK.IO.SECURITY_CHECK.md)
+9. [Claude Skills](#claude-skills)
+10. [Release History](#release-history)
+11. [Code Statistics](#code-statistics)
+12. [Security Check](SNYK.IO.SECURITY_CHECK.md)
+13. [Documentation Maintenance](docs/DOC_MAINTENANCE.md) — what to update and when for every type of code change
+14. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
 
 ---
 

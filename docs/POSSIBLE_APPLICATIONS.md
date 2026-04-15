@@ -16,6 +16,21 @@ the ability to inject realistic network faults without a real broken network.
   without OS sockets; seedable PRNG reproduces fault scenarios exactly
 - **CubeSat onboard messaging between subsystems** — no heap after init; MISRA C++:2023 and
   Power of 10 compliance is a strong head start toward flight software certification
+- **Remote firmware update over RF** — fragment large firmware images across 4 KB frames using
+  the fragmentation layer; reliable-retry with expiry guarantees all fragments arrive before a
+  maintenance window closes, and expired partial updates are discarded cleanly
+- **RTOS task IPC simulation layer** — use `LocalSimHarness` as an in-process message bus
+  between tasks in a POSIX simulation of an RTOS; validate message flows and fault handling
+  before porting IPC to bare-metal shared-memory or mailbox primitives
+- **Embedded health monitor / watchdog messaging** — subsystems send periodic heartbeats using
+  `RELIABLE_ACK`; a missing ACK within the deadline detects silent process death or bus lockup
+  without polling loops or shared-memory flags
+- **Hardware-in-the-loop fault replay** — record the PRNG seed and impairment config that
+  triggered a field failure; replay the exact fault sequence against hardware under test to
+  reproduce intermittent bugs without physical RF interference equipment
+- **Edge gateway sensor aggregation** — high-rate sensor readings use `BEST_EFFORT` channels to
+  avoid backpressure; critical alarms use `RELIABLE_RETRY` with short expiry; the observability
+  ring tracks per-channel drop rates for field diagnostics without dynamic allocation
 
 ---
 
