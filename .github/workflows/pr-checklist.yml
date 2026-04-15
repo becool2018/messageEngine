@@ -1,0 +1,112 @@
+name: PR Documentation Checklist
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    types: [ opened, edited, synchronize, reopened ]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  checklist:
+    name: Verify pre-merge documentation checklist
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check required items are checked in PR body
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          echo "=== PR Documentation Checklist Validation ==="
+          echo ""
+
+          FAIL=0
+
+          # Helper: returns 0 (true) if the pattern appears as an UNCHECKED item.
+          # An unchecked item looks like "- [ ] <text>" anywhere in the body.
+          # A checked item looks like "- [x] <text>" or "- [X] <text>".
+          is_unchecked() {
+            echo "$PR_BODY" | grep -iq "^\s*- \[ \].*${1}"
+          }
+
+          is_checked() {
+            echo "$PR_BODY" | grep -iq "^\s*- \[x\].*${1}"
+          }
+
+          has_item() {
+            echo "$PR_BODY" | grep -iq "${1}"
+          }
+
+          # ── 1. Verify the checklist section is present ───────────────────────
+          if ! has_item "Pre-merge checklist"; then
+            echo "FAIL: PR description is missing the 'Pre-merge checklist' section."
+            echo "      Copy the template from docs/DOC_MAINTENANCE.md §7 or use"
+            echo "      the PR template (.github/PULL_REQUEST_TEMPLATE.md)."
+            FAIL=1
+          else
+            echo "OK:   Pre-merge checklist section found."
+          fi
+
+          # ── 2. Required CI gates ─────────────────────────────────────────────
+          # These must be checked (not unchecked) for every PR.
+
+          check_required() {
+            local LABEL="$1"
+            local PATTERN="$2"
+            if is_unchecked "$PATTERN"; then
+              echo "FAIL: Required item is not checked: $LABEL"
+              FAIL=1
+            elif is_checked "$PATTERN"; then
+              echo "OK:   $LABEL"
+            else
+              # Item is absent entirely — also a failure for required items.
+              echo "FAIL: Required item is missing from PR description: $LABEL"
+              FAIL=1
+            fi
+          }
+
+          check_required "make lint — PASS"                  "make lint"
+          check_required "make run_tests — all tests green"  "make run_tests"
+          check_required "make check_traceability — PASS"    "make check_traceability"
+          check_required "Implements/Verifies tags present"  "Implements.*Verifies\|Verifies.*Implements\|tags present"
+          check_required "No raw assert() in src/"           "raw.*assert\(\)\|assert.*src"
+          check_required "TRACEABILITY_MATRIX.md regenerated" "TRACEABILITY_MATRIX"
+
+          # ── 3. Conditional gates ─────────────────────────────────────────────
+          # These must be either checked OR explicitly marked N/A.
+          # An unchecked item with no N/A annotation is a failure.
+
+          check_conditional() {
+            local LABEL="$1"
+            local PATTERN="$2"
+            if is_checked "$PATTERN"; then
+              echo "OK:   $LABEL"
+            elif echo "$PR_BODY" | grep -iq "${PATTERN}.*N/A\|N/A.*${PATTERN}"; then
+              echo "OK:   $LABEL — marked N/A"
+            elif is_unchecked "$PATTERN"; then
+              echo "FAIL: Conditional item is unchecked and not marked N/A: $LABEL"
+              echo "      Either check it (task done) or append '-- N/A: <reason>' to the line."
+              FAIL=1
+            fi
+            # If absent entirely, skip — older PRs may not have all items.
+          }
+
+          check_conditional "make coverage / COVERAGE_CEILINGS.md"  "make coverage"
+          check_conditional "make run_stress_tests"                  "make run_stress_tests"
+          check_conditional "HAZARD_ANALYSIS.md reviewed"            "HAZARD_ANALYSIS"
+          check_conditional "STATE_MACHINES.md updated"              "STATE_MACHINES"
+          check_conditional "MCDC_ANALYSIS.md updated"               "MCDC_ANALYSIS"
+          check_conditional "DEFECT_LOG.md INSP record"              "DEFECT_LOG"
+
+          # ── 4. Result ────────────────────────────────────────────────────────
+          echo ""
+          if [ "$FAIL" -eq 1 ]; then
+            echo "RESULT: FAIL — one or more required checklist items are incomplete."
+            echo "        Update the PR description and re-push or edit the PR body."
+            echo "        See docs/DOC_MAINTENANCE.md for the full update guide."
+            exit 1
+          else
+            echo "RESULT: PASS — all required checklist items are satisfied."
+          fi

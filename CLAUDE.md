@@ -83,6 +83,16 @@ Before every git commit, run `make lint` and `make run_tests`. Both must pass wi
 before the commit is created. If either fails, fix the issue first — do not commit broken or
 lint-failing code. These checks are also entry criteria for the formal inspection process (§12).
 
+Before creating or updating a pull request, consult docs/DOC_MAINTENANCE.md and complete
+the following steps:
+1. Identify the change type in docs/DOC_MAINTENANCE.md §2 (trigger table).
+2. Work through every document in that change type's ordered checklist.
+3. Copy the §7 pre-merge checklist into the PR description and check each item.
+The GitHub Actions workflow `.github/workflows/pr-checklist.yml` will fail the PR if any
+required checklist item (make lint, make run_tests, make check_traceability, traceability
+tags, no raw assert, TRACEABILITY_MATRIX regenerated) is left unchecked, or if any
+conditional item is neither checked nor explicitly marked N/A.
+
 Branch coverage report (`make coverage`) is required **before any merge to main** for SC
 function verification; it is a pre-merge review gate, not a CI automation gate. CI
 automatically verifies M1 (lint), M2 (static analysis), and M4 dynamic test paths (via
