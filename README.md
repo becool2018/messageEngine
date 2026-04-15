@@ -46,18 +46,18 @@ A C++ networking library for building and testing systems that must survive unre
 9. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
 10. [Logging](docs/LOGGING.md) — format, architecture, severity levels, extending, testing
 11. [Documentation Maintenance](docs/DOC_MAINTENANCE.md) — what to update and when for every type of code change
-11. [Using the Library](#using-the-library)
-11. [Use Cases](#use-cases)
-12. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
-13. [Safety & Assurance Documents](#safety--assurance-documents)
-14. [Design Patterns](#design-patterns)
-15. [Coding Standards](#coding-standards)
-16. [Standards Sources and Conflicts](#standards-sources-and-conflicts)
-17. [Project Standards Files](#project-standards-files)
-18. [Claude Skills](#claude-skills)
-19. [Release History](#release-history)
-20. [Code Statistics](#code-statistics)
-21. [Security Check](SNYK.IO.SECURITY_CHECK.md)
+12. [Using the Library](#using-the-library)
+13. [Use Cases](#use-cases)
+14. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
+15. [Safety & Assurance Documents](#safety--assurance-documents)
+16. [Design Patterns](#design-patterns)
+17. [Coding Standards](#coding-standards)
+18. [Standards Sources and Conflicts](#standards-sources-and-conflicts)
+19. [Project Standards Files](#project-standards-files)
+20. [Claude Skills](#claude-skills)
+21. [Release History](#release-history)
+22. [Code Statistics](#code-statistics)
+23. [Security Check](SNYK.IO.SECURITY_CHECK.md)
 
 ---
 
@@ -425,6 +425,7 @@ messageEngine/
 │   ├── test_UdpBackend.cpp
 │   ├── test_TlsTcpBackend.cpp
 │   ├── test_DtlsUdpBackend.cpp
+│   ├── test_Logger.cpp
 │   ├── test_PrngEngine.cpp
 │   ├── test_RingBuffer.cpp
 │   └── test_stress_capacity.cpp    # Stress suite (run via make run_stress_tests)
@@ -485,7 +486,7 @@ If mbedTLS is not available in your environment, or you only need TCP/UDP withou
 # Linux:  sudo apt install build-essential clang clang-tidy clang-tools cppcheck llvm
 
 make all TLS=0           # server, client, all non-TLS tests
-make run_tests TLS=0     # runs 21 tests; TlsTcpBackend and DtlsUdpBackend skipped
+make run_tests TLS=0     # runs 22 tests; TlsTcpBackend and DtlsUdpBackend skipped
 make lint TLS=0          # lints only non-TLS source files
 make cppcheck TLS=0      # checks only non-TLS source files
 ```
@@ -547,6 +548,7 @@ build/test_TcpBackend
 build/test_UdpBackend
 build/test_TlsTcpBackend
 build/test_DtlsUdpBackend
+build/test_Logger
 build/test_PrngEngine
 build/test_RingBuffer
 ```

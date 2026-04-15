@@ -65,11 +65,12 @@ make run_tests        # all tests green
 make lint             # zero clang-tidy violations
 make cppcheck         # zero cppcheck violations
 make check_traceability  # no orphaned REQ IDs
+make pr-audit         # detect triggered doc items; output block for PR description
 ```
 
 Run `make static_analysis` to run lint + cppcheck + scan-build together.
 
-> **No mbedTLS?** If your environment does not have mbedTLS installed, append `TLS=0` to every `make` command above. This excludes `TlsTcpBackend`, `TlsSessionStore`, `DtlsUdpBackend`, and `MbedtlsOpsImpl` from all targets and skips the two TLS/DTLS test binaries. PRs that touch TLS/DTLS source files must be validated with `TLS=1` (mbedTLS installed) before merge.
+> **No mbedTLS?** If your environment does not have mbedTLS installed, append `TLS=0` to every `make` command above. This injects `-DMESSAGEENGINE_NO_TLS`, excludes `TlsTcpBackend`, `TlsSessionStore`, `DtlsUdpBackend`, and `MbedtlsOpsImpl` from all targets, and skips the two TLS/DTLS test binaries (`test_TlsTcpBackend`, `test_DtlsUdpBackend`). The `tls_demo` and `dtls_demo` targets print an error and exit when `TLS=0`. PRs that touch TLS/DTLS source files must be validated with `TLS=1` (mbedTLS installed) before merge.
 
 For changes to capacity constants or slot-management algorithms, also run:
 
@@ -118,7 +119,7 @@ If your change touches any function classified SC in `docs/HAZARD_ANALYSIS.md §
 | Return values | Every non-void return must be checked |
 | Pointer indirection | ≤ 1 level per expression; no explicit function pointers |
 | STL | Forbidden in `src/`; `std::atomic<T>` for integral types is the only exception |
-| Warnings | Zero — `-Wall -Wextra -Wpedantic -Werror` |
+| Warnings | Zero — `-Wall -Wextra -Werror` (plus `-Wpedantic` on Clang; omitted on GCC — see `docs/STATIC_ANALYSIS_TOOLCHAIN.md`) |
 
 ---
 

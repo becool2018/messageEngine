@@ -48,7 +48,7 @@
 - **No hidden state:** every piece of mutable state is owned explicitly by a named class; no globals except the signal flag in the demo server.
 - **Fail loud, fail safe:** `NEVER_COMPILED_OUT_ASSERT` fires in every build; it never silently degrades.
 - **Fixed resources:** all buffer sizes are compile-time constants; capacity overflow is a returned error, never undefined behavior.
-- **Shallow call depth:** no recursion; worst-case call chain is 10 frames / ~764 bytes of stack (DTLS outbound send path; see `docs/STACK_ANALYSIS.md`).
+- **Shallow call depth:** no recursion; worst-case frame depth is 11 frames (Chain 3 — retry pump with send_fragments); worst-case stack allocation is ~130 KB (single `delayed[]` buffer on the DTLS/TLS flush path; non-flush worst case ~764 bytes — see `docs/STACK_ANALYSIS.md`).
 - **Dependency injection over globals:** `DeliveryEngine` receives a `TransportInterface*` at `init()` time, enabling any backend — or a mock — to be substituted without changing core code.
 
 ---
@@ -70,7 +70,8 @@
                      └──────────────┬───────────────────────┘
                                     │ TransportInterface*
                      ┌──────────────▼───────────────────────┐
-                     │   TcpBackend │ UdpBackend │ LocalSim  │
+                     │  TcpBackend │ UdpBackend │ LocalSim  │
+                     │  TlsTcpBackend │ DtlsUdpBackend     │
                      │   • Serialization (Serializer)        │
                      │   • Impairment simulation             │
                      │   • Inbound ring buffer               │
@@ -137,6 +138,7 @@ The central data structure. Every message — DATA, ACK, NAK, or HEARTBEAT — i
 ```
 Result:           OK  ERR_TIMEOUT  ERR_FULL  ERR_EMPTY  ERR_INVALID
                   ERR_IO  ERR_IO_PARTIAL  ERR_DUPLICATE  ERR_EXPIRED  ERR_OVERRUN
+                  ERR_AGAIN  (reassembly/ordering: more fragments needed — not an error)
 
 MessageType:      DATA  ACK  NAK  HEARTBEAT  HELLO  INVALID
 
@@ -218,7 +220,7 @@ main → run_client_iteration → send_test_message → DeliveryEngine::send
      → ImpairmentEngine::process_outbound → ImpairmentEngine::queue_to_delay_buf
 ```
 
-**Worst case: 10 frames, ~764 bytes** (Chain 5 — DTLS outbound send, dominated by `payload_buf[256]`). Well within any POSIX default thread stack (≥ 8 MB). Full per-chain breakdown: `docs/STACK_ANALYSIS.md`.
+**Worst-case frame depth: 11 frames** (Chain 3 — retry pump with `send_fragments`). **Worst-case stack allocation: ~130 KB** (single `MessageEnvelope delayed[32]` on DTLS/TLS flush paths; non-flush worst case ~764 bytes, Chain 5 — DTLS outbound send). Well within any POSIX default thread stack (≥ 8 MB). Full per-chain breakdown: `docs/STACK_ANALYSIS.md`.
 
 ---
 
@@ -539,6 +541,12 @@ Primary use: deterministic unit and integration tests.
 
 #### 8.2.7 TlsTcpBackend (`TlsTcpBackend.hpp / .cpp`)
 
+> **Compile-time optional:** `TlsTcpBackend`, `TlsSessionStore`, `DtlsUdpBackend`, and
+> `MbedtlsOpsImpl` are excluded from the build when `TLS=0` is passed to `make`. The macro
+> `MESSAGEENGINE_NO_TLS` is injected so any conditional code in headers can guard TLS-only
+> APIs. `test_TlsTcpBackend` and `test_DtlsUdpBackend` are also excluded. The default build
+> is `TLS=1` (mbedTLS required). PRs that touch TLS/DTLS files must be validated with `TLS=1`.
+
 Drop-in replacement for `TcpBackend` that adds mbedTLS 4.0 TLS encryption. When `tls_enabled = false` in `TlsConfig`, it operates identically to `TcpBackend` — no handshake, no certificate loading. When `tls_enabled = true`: loads PEM certificate and private key via PSA Crypto, performs TLS 1.2+ handshake on each accepted or initiated connection, and maintains per-client `mbedtls_ssl_context` objects in a fixed-size array (up to `MAX_TCP_CONNECTIONS` = 8).
 
 HELLO frame registration (REQ-6.1.8) and source_id validation (REQ-6.1.11) mirror `TcpBackend` behavior. SC functions are annotated with HAZ-004, HAZ-005, HAZ-006.
@@ -619,10 +627,12 @@ FREE ─────────────────────────
 ```
                     schedule()
 INACTIVE ─────────────────────────► WAITING
-    ▲                                  │  │
-    │                                  │  │ next_retry_us ≤ now_us
-    │  on_ack() OR exhausted           │  │  AND count < max_retries
-    │  OR expired                      │  ▼
+    ▲   ▲                              │  │
+    │   │ cancel()                     │  │ next_retry_us ≤ now_us
+    │   └──────────────────────────────┘  │  AND count < max_retries
+    │                                     │
+    │  on_ack() OR exhausted           │  ▼
+    │  OR expired                      │
     └──────────────────────────────── DUE
                                        │
                                        │ collect_due() → buf full
@@ -821,7 +831,7 @@ Every impairment decision is driven by `PrngEngine`. Tests pass a known seed at 
 
 ### 13.4 Test Suite
 
-The project has 24 test binaries. The stress test (`test_stress_capacity`) is run separately from the main suite (`make run_stress_tests`); all others run under `make run_tests`.
+The project has 25 test binaries. The stress test (`test_stress_capacity`) is run separately from the main suite (`make run_stress_tests`); all others run under `make run_tests`. When built with `TLS=0`, `test_TlsTcpBackend` and `test_DtlsUdpBackend` are excluded (23 binaries).
 
 | Test Binary | Module Under Test | Tests |
 |---|---|---|
@@ -847,6 +857,7 @@ The project has 24 test binaries. The stress test (`test_stress_capacity`) is ru
 | `test_UdpBackend` | `UdpBackend` | 30 |
 | `test_TlsTcpBackend` | `TlsTcpBackend` | 47 |
 | `test_DtlsUdpBackend` | `DtlsUdpBackend` | 52 |
+| `test_Logger` | `Logger` (injectable clock/sink) | 33 |
 | `test_LocalSim` | `LocalSimHarness` | 11 |
 | `test_stress_capacity` | Stress: capacity limits under load | 8 |
 
