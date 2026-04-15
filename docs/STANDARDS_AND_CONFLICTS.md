@@ -227,7 +227,7 @@
 
 ## 5. Contradictions and Tensions Between Standards
 
-The standards above are largely complementary, but several genuine conflicts exist. Four are formally documented and resolved in the project's `CLAUDE.md` files; three are real but only partially addressed.
+The standards above are largely complementary, but several genuine conflicts exist. Four are formally documented and resolved in the project's `CLAUDE.md` files; five are real but only partially addressed.
 
 ---
 
@@ -281,6 +281,22 @@ The standards above are largely complementary, but several genuine conflicts exi
 **Standards in tension:** NPR 7150.2D classifies this project as Class C (infrastructure software, no direct actuator or safety-barrier control). Class C mandates only a baseline set of verification methods. The project voluntarily applies Class B obligations from NASA-STD-8739.8A: MC/DC coverage, FMEA, hazard analysis, formal state machine documentation, WCET analysis, and full inspection records.
 **Current state:** The project sits between classifications — it exceeds Class C requirements but still has documented gaps before it could formally claim Class B (no TLA+/SPIN model checking, no Frama-C WP proofs, no independent V&V). See `TODO_FOR_CLASS_B_CERT.txt`.
 **Practical impact:** Medium. A strict Class C audit would treat many safety artifacts as optional over-engineering. A Class B audit would find the gaps. The project's intent is to provide "flight-like" assurance without committing to a full Class B certification program; this intent is documented in `CLAUDE.md §17` but the boundary between what is required and what is voluntary is not always clear to new contributors.
+
+---
+
+#### Tension 4 — `ALLOW_WEAK_PRNG_SEED` escape hatch vs. "secure by default"
+**Standards in tension:** `.claude/CLAUDE.md §7` ("secure by default — prefer safe defaults, e.g., encryption enabled") and `CLAUDE.md REQ-5.2.4 / REQ-5.2.6` (production PRNG seeds must come from `getrandom()` or `/dev/urandom`; if both fail the path must log `FATAL` and trigger the reset handler rather than continuing with a weak seed) vs. the testability need for a deterministic, reproducible seed in simulation and CI builds.
+**Where documented:** `CLAUDE.md REQ-5.2.4`, `CLAUDE.md REQ-5.2.6`, and the `ALLOW_WEAK_PRNG_SEED` guard in `ImpairmentEngine` and `DeliveryEngine`.
+**Resolution:** `ALLOW_WEAK_PRNG_SEED` is explicitly prohibited in production builds. It is a compile-time escape hatch valid **only** in test or simulation build configurations (i.e., when the resulting binary has no path to a production deployment). The default build never defines this macro; any CI or release build system that defines it must document the justification. Any production binary that ships with `ALLOW_WEAK_PRNG_SEED` defined is a non-compliance defect.
+**Practical impact:** Low provided build configurations are correctly maintained. The risk is a misconfigured release build silently carrying the macro. The mitigation is a build-system audit step — verify the macro is absent from any production artifact.
+
+---
+
+#### Tension 5 — `TLS=0` optional build flag vs. "encryption enabled" default
+**Standards in tension:** `.claude/CLAUDE.md §7` ("prefer safe defaults, e.g., encryption enabled") vs. the `TLS=0` build flag, which defines `MESSAGEENGINE_NO_TLS` and removes all TLS/DTLS compilation from the library, allowing the engine to run over plaintext TCP and UDP.
+**Where documented:** `CLAUDE.md REQ-6.3.4` (TLS extension point), `CLAUDE.md REQ-6.4.5` (DTLS plaintext fallback), and the `TLS=0` target in the `Makefile`.
+**Resolution:** `TLS=0` is an explicit, documented opt-out — not a default. The default `make` invocation (no `TLS` variable) always builds with TLS enabled (`TLS=1`). The opt-out exists for two legitimate use cases: (1) functional testing in environments where mbedTLS is unavailable or where test speed matters more than security posture, and (2) resource-constrained embedded targets where the TLS stack is genuinely too large. Any deployment of a `TLS=0` binary in a context where network traffic is externally accessible constitutes an insecure configuration that must be documented and approved at the deployment level — it is not sanctioned by this project's default security posture.
+**Practical impact:** Medium. The plaintext build path is useful and tested. The risk is that a developer or integrator takes a `TLS=0` binary and deploys it to a networked environment assuming it is production-ready. Mitigation: the `Makefile` prints a visible warning when `TLS=0` is specified, and any packaging or release artifact built with `TLS=0` must carry an explicit label.
 
 ---
 

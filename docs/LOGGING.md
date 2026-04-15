@@ -78,6 +78,8 @@ Example:
 
 The wall timestamp (`CLOCK_REALTIME`) is **prepended** before the monotonic one. Use these when you need to correlate a log line with an external system clock — for example, at connection establishment or a fatal event. For all routine logging prefer the standard monotonic-only variants: they are immune to `settimeofday` and NTP jumps.
 
+Note: the `wall_sec` field is formatted with `%llu` (no zero-padding), so its width grows with the epoch value (e.g. `1744900000` today). The `mono_sec` field is zero-padded to 7 digits (`%07llu`). The two fields therefore have different visual widths in mixed-format output.
+
 ---
 
 ## 3. Architecture Overview
@@ -242,7 +244,7 @@ Logger::init(Severity::INFO, &clock, &sink);
 Logger::init(Severity::FATAL, &clock, &sink);
 ```
 
-**Runtime level changes:** There is no `Logger::set_level()` API. The `s_min_level` static is a plain (non-atomic) variable. Adding a runtime setter would require making it `std::atomic<uint32_t>` to be safe across the concurrent logging threads common in this library. That is straightforward to add if needed — file a requirement and it can be implemented with a test in one round.
+**Runtime level changes:** There is no `Logger::set_level()` API. The `s_min_level` static is declared as `std::atomic<Severity>`, so reads in concurrent `log()` calls are safe. However, `Logger::init()` as a whole is not thread-safe (it also writes `s_clock`, `s_sink`, and `s_pid` non-atomically), so changing the level by calling `init()` again must still be done during a quiescent phase.
 
 **Workaround for now:** If you need to dynamically change verbosity, call `Logger::init()` again with the new level. This is safe as long as no other thread is concurrently inside `Logger::log()` at that moment (i.e. do it during a quiescent phase of your application).
 
