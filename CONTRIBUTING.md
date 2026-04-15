@@ -93,6 +93,7 @@ If your change touches any function classified SC in `docs/HAZARD_ANALYSIS.md §
   A regression on any SC function branch is a blocking defect per `CLAUDE.md §14`.
 - A peer review (not self-merge) is mandatory — see `CLAUDE.md §12`.
 - Update `docs/DEFECT_LOG.md` with an inspection record per `docs/INSPECTION_CHECKLIST.md`.
+- Consult `docs/DOC_MAINTENANCE.md` to identify all other documentation that needs updating for your change type.
 
 ### 6. Open the PR
 
