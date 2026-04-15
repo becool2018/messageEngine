@@ -233,3 +233,9 @@ nullPointerRedundantCheck:src/platform/MbedtlsOpsImpl.cpp
 # Deviation: false positive from conditional-compilation call-site visibility.
 constParameterPointer:src/platform/TlsSessionStore.cpp
 constParameterReference:src/platform/TlsSessionStore.cpp
+
+# Justification: Logger::log_wall() is called via LOG_*_WALL macros defined in
+# src/core/Logger.hpp from any translation unit that includes it. Cppcheck analyses
+# src/ in isolation and cannot see macro call sites in src/app/ or tests/. Not dead code.
+# Deviation: false positive -- cppcheck does not see cross-TU macro call sites.
+unusedFunction:src/core/Logger.cpp
