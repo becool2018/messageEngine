@@ -36,7 +36,7 @@ A C++ networking library for building and testing systems that must survive unre
 ## Table of Contents
 
 1. [Getting Started for New Contributors](#getting-started-for-new-contributors)
-2. [Requirements Overview](#requirements-overview)
+2. [System Overview](#system-overview)
 3. [Architecture](#architecture)
 4. [Directory Structure](#directory-structure)
 5. [Building](#building)
@@ -47,12 +47,12 @@ A C++ networking library for building and testing systems that must survive unre
     - [Logging](docs/LOGGING.md) — format, architecture, severity levels, extending, testing
 10. [Use Cases](#use-cases)
 11. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
-12. [Safety & Assurance Documents](#safety--assurance-documents)
-13. [Design Patterns](#design-patterns)
-14. [Coding Standards](#coding-standards)
-15. [Claude Skills](#claude-skills)
-16. [Release History](#release-history)
-17. [Code Statistics](#code-statistics)
+12. [Design Patterns](#design-patterns)
+13. [Project Standards](#project-standards)
+    - [Safety & Assurance Documents](#safety--assurance-documents)
+14. [Claude Skills](#claude-skills)
+15. [Release History](#release-history)
+16. [Code Statistics](#code-statistics)
 18. [Security Check](SNYK.IO.SECURITY_CHECK.md)
 
 ---
@@ -116,7 +116,7 @@ Every public function in `src/` must have a `// Safety-critical (SC): HAZ-NNN` a
 
 ---
 
-## Requirements Overview
+## System Overview
 
 ### 1. Message Envelope
 Every message is carried in a standard `MessageEnvelope` containing:
@@ -864,14 +864,6 @@ Each individual `UC_*.md` document follows a 15-section flow-of-control format c
 
 ---
 
-## Safety & Assurance Documents
-
-Ten NASA-STD-8719.13C / NASA-STD-8739.8A compliance artifacts are maintained in [`docs/`](docs/), covering hazard analysis (HAZ-001–HAZ-025), FMEA, SC/NSC function classification, formal state machines, requirements traceability, stack and WCET analysis, MC/DC coverage, inspection records, verification policy, and security assumptions.
-
-Full document index, descriptions, and dependency graph: **[`docs/SAFETY_ASSURANCE.md`](docs/SAFETY_ASSURANCE.md)**
-
----
-
 ## Design Patterns
 
 [`docs/DESIGN_PATTERNS.md`](docs/DESIGN_PATTERNS.md) documents every design pattern used in the codebase — where each pattern appears (file, class, method), and why it was chosen given the project's Power of 10 / MISRA C++:2023 / F-Prime constraints.
@@ -880,7 +872,7 @@ Patterns in use: Strategy, Adapter/Bridge, Facade, State Machine, Observer/Event
 
 ---
 
-## Coding Standards
+## Project Standards
 
 All production code (`src/`) targets the following standards. Deviations are recorded at the point of use; significant ones are catalogued in `.claude/CLAUDE.md`. MISRA C++:2023 is proprietary (purchase required); NASA standards are public. Neither imposes a software license on compliant code.
 
@@ -904,6 +896,12 @@ All production code (`src/`) targets the following standards. Deviations are rec
 | `docs/VERIFICATION_POLICY.md` | Verification policy (VVP-001) — M1–M7 methods, classification levels, ceiling argument rules |
 
 Full standard sources, all known conflicts and resolutions, `std::atomic` exception table, and Class B gap analysis: **[`docs/STANDARDS_AND_CONFLICTS.md`](docs/STANDARDS_AND_CONFLICTS.md)**
+
+### Safety & Assurance Documents
+
+Ten NASA-STD-8719.13C / NASA-STD-8739.8A compliance artifacts are maintained in [`docs/`](docs/), covering hazard analysis (HAZ-001–HAZ-025), FMEA, SC/NSC function classification, formal state machines, requirements traceability, stack and WCET analysis, MC/DC coverage, inspection records, verification policy, and security assumptions.
+
+Full document index, descriptions, and dependency graph: **[`docs/SAFETY_ASSURANCE.md`](docs/SAFETY_ASSURANCE.md)**
 
 ---
 
