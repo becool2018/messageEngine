@@ -84,6 +84,23 @@ LLVM_COV     := $(if $(LLVM_BIN),$(LLVM_BIN)/llvm-cov,llvm-cov)
 # Compiler
 CXX       ?= g++
 
+# Detect compiler family to handle ##__VA_ARGS__ zero-arg extension.
+# Clang: -Wpedantic + -Wno-gnu-zero-variadic-macro-arguments suppresses just
+#   the GNU-extension warning while keeping all other pedantic checks.
+# GCC:   -Wpedantic has no subcategory flag for the zero-arg ##__VA_ARGS__
+#   warning; the only option is to omit -Wpedantic on GCC builds.
+#   -Wno-variadic-macros is kept on GCC to silence the non-pedantic form.
+CXX_IS_CLANG := $(findstring clang,$(shell $(CXX) --version 2>/dev/null))
+ifeq ($(CXX_IS_CLANG),)
+  # GCC path: no -Wpedantic, suppress variadic-macros warning non-pedantically
+  PEDANTIC_FLAG        :=
+  VARIADIC_MACROS_FLAG := -Wno-variadic-macros
+else
+  # Clang path: keep -Wpedantic, suppress just the GNU ##__VA_ARGS__ extension
+  PEDANTIC_FLAG        := -Wpedantic
+  VARIADIC_MACROS_FLAG := -Wno-gnu-zero-variadic-macro-arguments
+endif
+
 ifeq ($(TLS),1)
 # mbedTLS include/lib discovery:
 # 1) Prefer pkg-config when available (Linux distros, some macOS setups)
@@ -116,12 +133,11 @@ endif
 
 # Include path: do NOT hardcode /opt/homebrew/include by default
 CXXFLAGS  := -std=c++17 -fno-exceptions -fno-rtti \
-             -Wall -Wextra -Wpedantic -Werror \
+             -Wall -Wextra $(PEDANTIC_FLAG) -Werror \
              -Wshadow -Wconversion -Wsign-conversion \
              -Wcast-align -Wformat=2 -Wnull-dereference \
              -Wdouble-promotion -Wno-unknown-pragmas \
-             -Wno-gnu-zero-variadic-macro-arguments \
-             -Wno-variadic-macros \
+             $(VARIADIC_MACROS_FLAG) \
              -fstack-protector-strong -fPIE \
              $(RELEASE_CXXFLAGS) \
              -Isrc $(MBEDTLS_CFLAGS) -g \
