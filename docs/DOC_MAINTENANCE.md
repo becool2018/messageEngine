@@ -241,6 +241,10 @@ must be true before review begins) are listed in CLAUDE.md §12.2.
 | `docs/Design.md` | Manual — updated per architectural change | Chief architect |
 | `docs/STATIC_ANALYSIS_TOOLCHAIN.md` | Manual — updated per tool adoption | Build engineer |
 | `docs/TESTING_AND_ANALYSIS.md` | Manual — updated when make targets, test binaries, or coverage ceilings change | Build engineer |
+| `docs/ARCHITECTURE.md` | Manual — updated when layer structure, directory rules, or project goals change | Chief architect |
+| `docs/PROTOCOL.md` | Manual — updated when message envelope fields, wire format, or delivery semantics change (triggers: §2.4) | Core architect |
+| `docs/TRANSPORT.md` | Manual — updated when transport API or any backend requirement changes (triggers: §2.5, §2.6) | Core/platform architect |
+| `docs/IMPAIRMENT.md` | Manual — updated when ImpairmentEngine requirements or config format change | Platform architect |
 | `docs/STANDARDS_AND_CONFLICTS.md` | Manual — updated per standards adoption | Project maintainer |
 | `CLAUDE.md` | Manual — primary requirements source | Project maintainer |
 | `README.md` | Manual — updated per feature/capacity change | Project maintainer |
