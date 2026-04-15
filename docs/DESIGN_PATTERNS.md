@@ -246,12 +246,12 @@ The base class provides a no-op default that returns `NODE_ID_INVALID`. Only TCP
 
 Each backend exposes two constructors:
 
-| Backend | Default constructor | Injection constructor |
+| Backend | Default constructor | Injection constructor(s) |
 |---|---|---|
 | `src/platform/TcpBackend.hpp` | `TcpBackend()` — uses `SocketOpsImpl` singleton | `TcpBackend(ISocketOps& ops)` |
-| `src/platform/TlsTcpBackend.hpp` | `TlsTcpBackend()` — uses `SocketOpsImpl` singleton | `TlsTcpBackend(ISocketOps& sock_ops)` |
+| `src/platform/TlsTcpBackend.hpp` | `TlsTcpBackend()` — uses both singletons | `TlsTcpBackend(ISocketOps&)` — socket only; `TlsTcpBackend(ISocketOps&, IMbedtlsOps&)` — full injection |
 | `src/platform/UdpBackend.hpp` | `UdpBackend()` — uses `SocketOpsImpl` singleton | `UdpBackend(ISocketOps& ops)` |
-| `src/platform/DtlsUdpBackend.hpp` | `DtlsUdpBackend()` — uses both singletons | `DtlsUdpBackend(ISocketOps&, IMbedtlsOps&)` |
+| `src/platform/DtlsUdpBackend.hpp` | `DtlsUdpBackend()` — uses both singletons | `DtlsUdpBackend(IMbedtlsOps&)` — TLS only; `DtlsUdpBackend(ISocketOps&, IMbedtlsOps&)` — full injection |
 
 Test files (e.g. `tests/test_TlsTcpBackend.cpp`, `tests/test_DtlsUdpBackend.cpp`) use the injection constructors to inject mock implementations that simulate socket errors, connection failures, and TLS faults.
 
