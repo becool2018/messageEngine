@@ -33,7 +33,7 @@ Called by the User. Expiry detection is an internal branch within `receive()`.
 3. `m_transport->receive_message(raw, timeout_ms)` — pops one envelope from the `RingBuffer` (which was previously pushed by `recv_from_client()`). Returns `Result::OK` with `raw` populated.
 4. `envelope_is_data(raw)` — true for `MessageType::DATA`.
 5. **`timestamp_expired(raw.expiry_time_us, now_us)`** is called (`Timestamp.hpp`). Returns `true` because `raw.expiry_time_us != 0 && now_us >= raw.expiry_time_us`.
-6. `Logger::log(WARNING_LO, "DeliveryEngine", "Received expired DATA message; dropping. id=%llu ...")`.
+6. `LOG_WARN_LO("DeliveryEngine", "Received expired DATA message; dropping. id=%llu ...")`.
 7. Returns `Result::ERR_EXPIRED` immediately. No dedup check, no ACK auto-send, no copy to `out`.
 
 ---
@@ -46,7 +46,7 @@ DeliveryEngine::receive(out, timeout_ms, now_us)   [DeliveryEngine.cpp]
  │    └── RingBuffer::pop(raw)                     [RingBuffer.hpp]
  ├── envelope_is_data(raw)                         [MessageEnvelope.hpp]
  ├── timestamp_expired(raw.expiry_time_us, now_us) [Timestamp.hpp]  <- true
- └── Logger::log(WARNING_LO, ...)                  [Logger.hpp]
+ └── LOG_WARN_LO(...)                  [Logger.hpp]
      [returns ERR_EXPIRED; dedup/ACK paths NOT entered]
 ```
 
@@ -96,7 +96,7 @@ DeliveryEngine::receive(out, timeout_ms, now_us)   [DeliveryEngine.cpp]
 
 ## 10. External Interactions
 
-- **`stderr`:** `Logger::log()` writes one WARNING_LO line.
+- **`stderr`:** `LOG_*()` writes one WARNING_LO line.
 - No network calls on the expired-drop path (the envelope was already consumed from the ring buffer by the transport receive call).
 
 ---
@@ -122,7 +122,7 @@ User
             <- Result::OK; raw populated
        -> envelope_is_data(raw)                 <- true
        -> timestamp_expired(expiry_time_us, now_us)  <- true (expired)
-       -> Logger::log(WARNING_LO, "expired...")
+       -> LOG_WARN_LO("expired...")
        <- ERR_EXPIRED
   <- ERR_EXPIRED
 ```

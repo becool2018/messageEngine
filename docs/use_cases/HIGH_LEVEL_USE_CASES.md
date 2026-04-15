@@ -122,7 +122,8 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 > System emits structured log entries at INFO / WARNING_LO / WARNING_HI / FATAL severity for all connection events, state changes, and errors; User reads log output to diagnose issues.
 
 - UC_27 — Configuration defaults applied and logged at init time
-- UC_46 — Logger::log() called directly by User application code to record application-level events
+- UC_46 — Caller emits a structured log line via LOG_* macros; Logger routes through injected ILogSink (e.g., StderrLogSink) using timestamps from injected ILogClock (e.g., PosixLogClock)
+- UC_77 — Logger::init(): User injects ILogClock and ILogSink implementations before first log call; System stores the pointers and captures PID
 
 ---
 
@@ -299,6 +300,27 @@ Actors: **User** (application / developer) | **System** (messageEngine — grey 
 
 ---
 
+## HL-36: Injectable Logger Initialization
+> Before any log output is produced, User calls Logger::init() once, supplying concrete
+> ILogClock and ILogSink implementations. System stores the pointers and uses them for
+> all subsequent LOG_* macro invocations. Test code injects MockLogClock / VectorLogSink
+> to capture and assert on log output without writing to stderr.
+
+- UC_77 — Logger::init(): User injects ILogClock and ILogSink implementations before first log call; System stores the pointers and captures PID
+
+---
+
+## HL-37: TLS=0 Optional Build (MESSAGEENGINE_NO_TLS)
+> User builds messageEngine with TLS=0 (injects -DMESSAGEENGINE_NO_TLS) to produce a
+> binary with no mbedTLS dependency. The TlsTcpBackend, DtlsUdpBackend, TlsSessionStore,
+> and MbedtlsOpsImpl translation units are excluded from compilation. tls_demo and
+> dtls_demo print an error and exit when invoked. All plaintext transports (TcpBackend,
+> UdpBackend, LocalSimHarness) and all non-TLS tests remain fully operational.
+
+- UC_78 — Build with TLS=0: User passes TLS=0 to make; System compiles without mbedTLS; TLS/DTLS backends and demos are excluded; all other functionality is unaffected
+
+---
+
 ## Application Workflow (above system boundary)
 
 These use cases document patterns that combine multiple system calls and sit at
@@ -344,3 +366,5 @@ at the User → System boundary.
 - UC_74 — Ordering gap sweep — `OrderingBuffer::sweep_expired_holds()` called internally by `handle_ordering_gate()` on every data-receive call; never by the user
 - UC_75 — TlsSessionStore save/load — `try_save_client_session()` / `try_load_client_session()` / `zeroize()` called internally by `TlsTcpBackend`; the User owns and injects the store, but the save/load mechanism is System-internal
 - UC_76 — IPosixSyscalls / PosixSyscallsImpl — injectable POSIX syscall adapter used by `SocketUtils.cpp` for fault injection in tests; production code uses the singleton `PosixSyscallsImpl`; never called by the user
+- UC_77 — Logger::init() — called once by the user (in `main()` or test `Setup()`) before any `LOG_*` macro is used; stores `ILogClock*`, `ILogSink*`, min_level, and PID
+- UC_78 — TLS=0 build — `make TLS=0` injects `-DMESSAGEENGINE_NO_TLS`; excludes `TlsTcpBackend`, `DtlsUdpBackend`, `TlsSessionStore`, `MbedtlsOpsImpl` and the two TLS test binaries; `tls_demo` and `dtls_demo` print an error and exit

@@ -42,7 +42,7 @@ Called by the User or at destruction (destructor calls `close()` if `m_open`).
 6. **Close listen socket (server only):**
    - If `m_is_server && m_listen_fd >= 0`: `m_sock_ops->do_close(m_listen_fd)`. `m_listen_fd = -1`.
 7. `m_open = false`.
-8. `Logger::log(INFO, "TcpBackend", "Closed")`.
+8. `LOG_INFO("TcpBackend", "Closed")`.
 
 ---
 
@@ -126,7 +126,7 @@ User
        [loop: close all client fds]
             -> ISocketOps::do_close(fd)      [::close()]
        -> ISocketOps::do_close(m_listen_fd)  [server only]
-       -> Logger::log(INFO, "Closed")
+       -> LOG_INFO("Closed")
        [m_open = false]
 ```
 

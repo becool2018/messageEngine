@@ -41,10 +41,10 @@ Called by `DeliveryEngine::init()` after a successful `transport->init()`. Not c
 7. Client path — **`send_hello_frame()`** is called:
    a. Build `MessageEnvelope hello`: `message_type = MessageType::HELLO`, `source_id = id`, `destination_id = 0`, `payload_length = 0`, `message_id = 0`, `timestamp_us = 0`, `reliability_class = BEST_EFFORT`.
    b. **`Serializer::serialize(hello, m_wire_buf, sizeof(m_wire_buf), &hello_len)`** — encodes the envelope into `m_wire_buf`. Includes PROTO_VERSION and PROTO_MAGIC per REQ-3.2.8.
-   c. If `serialize()` fails: `Logger::log(WARNING_HI, "TcpBackend", "HELLO serialize failed")`. Return `ERR_IO`.
+   c. If `serialize()` fails: `LOG_WARN_HI("TcpBackend", "HELLO serialize failed")`. Return `ERR_IO`.
    d. **`m_sock_ops->send_frame(m_client_fds[0], m_wire_buf, hello_len, m_cfg.send_timeout_ms)`** — writes the length-prefixed HELLO frame to the server socket.
-   e. If `send_frame()` returns false: `Logger::log(WARNING_HI, "TcpBackend", "HELLO send failed")`. Return `ERR_IO`.
-   f. `Logger::log(INFO, "TcpBackend", "Sent HELLO NodeId %u to server")`. Return `Result::OK`.
+   e. If `send_frame()` returns false: `LOG_WARN_HI("TcpBackend", "HELLO send failed")`. Return `ERR_IO`.
+   f. `LOG_INFO("TcpBackend", "Sent HELLO NodeId %u to server")`. Return `Result::OK`.
 8. `register_local_id()` returns `Result::OK` on success, `ERR_IO` on error.
 
 ---
@@ -135,7 +135,7 @@ DeliveryEngine::init()
                       -> socket_send_all(fd, hdr, 4)   [4-byte length prefix]
                       -> socket_send_all(fd, buf, len) [HELLO payload]
                  <- true
-            -> Logger::log(INFO, "Sent HELLO NodeId N to server")
+            -> LOG_INFO("Sent HELLO NodeId N to server")
        <- Result::OK
   <- Result::OK
 ```

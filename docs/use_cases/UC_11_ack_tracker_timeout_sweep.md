@@ -51,7 +51,7 @@ DeliveryEngine::sweep_ack_timeouts(now_us)                     [DeliveryEngine.c
  │    └── [for each PENDING entry past deadline: copy to buf; FREE slot; count++]
  │    returns uint32_t count
  └── [for each expired entry in m_timeout_buf:]
-      Logger::log(WARNING_HI, ...)                             [Logger.hpp]
+      LOG_WARN_HI(...)                             [Logger.hpp]
 ```
 
 ---
@@ -99,7 +99,7 @@ DeliveryEngine::sweep_ack_timeouts(now_us)                     [DeliveryEngine.c
 
 ## 10. External Interactions
 
-- **`stderr`:** `Logger::log(WARNING_HI)` for each timed-out entry.
+- **`stderr`:** `LOG_WARN_HI()` for each timed-out entry.
 - No network calls, file I/O, or hardware interaction.
 
 ---
@@ -125,7 +125,7 @@ User
             [copy env to m_timeout_buf[count]; entry.state = FREE; count++]
             <- uint32_t count = N
        [for i in 0..N-1:]
-       -> Logger::log(WARNING_HI, "ACK timeout for message_id=... to node=...")
+       -> LOG_WARN_HI("ACK timeout for message_id=... to node=...")
   <- N
 ```
 

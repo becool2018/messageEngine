@@ -8,7 +8,7 @@
 
 ## 1. Use Case Overview
 
-- **Trigger:** `DeliveryEngine::receive()` processes an incoming `ACK` envelope and calls `m_retry_mgr.on_ack(src, message_id)` (via `process_ack()`). File: `src/core/RetryManager.cpp`.
+- **Trigger:** `DeliveryEngine::receive()` processes an incoming `ACK` envelope and calls `m_retry_manager.on_ack(src, message_id)` (via `process_ack()`). File: `src/core/RetryManager.cpp`.
 - **Goal:** Cancel all pending retries for the acknowledged `message_id` by setting the active `RetryEntry` to `inactive`.
 - **Success outcome:** The matching active `RetryEntry` has `active` set to `false`. The slot is immediately available for a new `schedule()` call. Returns `Result::OK`.
 - **Error outcomes:**
@@ -32,7 +32,7 @@ Not called directly by the User.
 1. `DeliveryEngine::receive()` pops an `ACK` envelope from the ring buffer.
 2. `envelope_is_control(raw)` — true; `raw.message_type == ACK` — true.
 3. **`m_ack_tracker.on_ack(env.destination_id, env.message_id)`** is called first (see UC_08 for AckTracker side).
-4. **`m_retry_mgr.on_ack(env.destination_id, env.message_id)`** is called (`RetryManager.cpp`) inside `process_ack()`.
+4. **`m_retry_manager.on_ack(env.destination_id, env.message_id)`** is called (`RetryManager.cpp`) inside `process_ack()`.
 5. Inside `RetryManager::on_ack(src, msg_id)`:
    a. `NEVER_COMPILED_OUT_ASSERT(msg_id != 0)`.
    b. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]`:
@@ -40,7 +40,7 @@ Not called directly by the User.
         - `entry.active = false`.
         - Returns `Result::OK`.
    c. If no match: returns `Result::ERR_INVALID`.
-6. Back in `process_ack()`: result is checked; if `ERR_INVALID`: `Logger::log(INFO, ...)` ("ACK has no matching retry slot").
+6. Back in `process_ack()`: result is checked; if `ERR_INVALID`: `LOG_INFO(...)` ("ACK has no matching retry slot").
 7. `receive()` copies `raw` to `out`, returns `Result::OK`.
 
 ---
@@ -100,7 +100,7 @@ DeliveryEngine::receive()                            [DeliveryEngine.cpp]
 ## 10. External Interactions
 
 - None — this flow operates entirely in process memory.
-- `Logger::log()` writes to `stderr` only on `ERR_INVALID`.
+- `LOG_*()` writes to `stderr` only on `ERR_INVALID`.
 
 ---
 

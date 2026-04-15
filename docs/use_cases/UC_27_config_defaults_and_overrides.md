@@ -47,7 +47,7 @@ Also referenced in UC_47.
    f. `ch.recv_timeout_ms = 5000`.
 3. User overrides specific fields as needed (e.g., `cfg.is_server = true`; `cfg.local_node_id = 1`).
 4. `TcpBackend::init(cfg)` or `DeliveryEngine::init(transport, cfg.channels[0], node_id)` is called.
-5. During init, `Logger::log(INFO, ...)` logs the key configuration values.
+5. During init, `LOG_INFO(...)` logs the key configuration values.
 
 ---
 
@@ -60,7 +60,7 @@ transport_config_default(cfg)               [ChannelConfig.hpp]
 [User customizes cfg]
 
 TcpBackend::init(cfg)                       [TcpBackend.cpp]
- └── Logger::log(INFO, "TcpBackend", "init: ip=%s port=%u ...")
+ └── LOG_INFO("TcpBackend", "init: ip=%s port=%u ...")
 ```
 
 ---
@@ -101,7 +101,7 @@ No branching in the default functions themselves — they are unconditional assi
 ## 10. External Interactions
 
 - None during the default-setting phase.
-- `Logger::log(INFO, ...)` during the subsequent `init()` call writes to `stderr`.
+- `LOG_INFO(...)` during the subsequent `init()` call writes to `stderr`.
 
 ---
 
@@ -119,7 +119,7 @@ User
        -> channel_config_default(cfg.channels[i]) [×8]
   [User overrides: cfg.is_server=true; cfg.local_node_id=1; etc.]
   -> TcpBackend::init(cfg)
-       -> Logger::log(INFO, "init: ip=%s port=%u is_server=%d ...")
+       -> LOG_INFO("init: ip=%s port=%u is_server=%d ...")
 ```
 
 ---
@@ -135,7 +135,7 @@ User
 ## 14. Known Risks / Observations
 
 - **`NODE_ID_INVALID = 0` as default:** `local_node_id` defaults to 0 (invalid). The user MUST set a valid non-zero `local_node_id` before passing to `DeliveryEngine::init()`.
-- **Logging of sensitive fields:** `Logger::log(INFO)` in `init()` may log IP addresses and port numbers to stderr. REQ-7.1.4 restricts payload logging but configuration values are considered metadata.
+- **Logging of sensitive fields:** `LOG_INFO()` in `init()` may log IP addresses and port numbers to stderr. REQ-7.1.4 restricts payload logging but configuration values are considered metadata.
 
 ---
 

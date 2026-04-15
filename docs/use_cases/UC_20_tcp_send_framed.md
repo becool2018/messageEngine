@@ -38,7 +38,7 @@ Not called directly by the User.
       - `socket_send_all(fd, (uint8_t*)&hdr, 4, timeout_ms)` — `::send()` retry loop until all 4 bytes sent or error.
       - `socket_send_all(fd, buf, len, timeout_ms)` — `::send()` retry loop until all `len` bytes sent or error.
       - Returns `true` on full success; `false` on partial or error.
-   b. If `send_frame` returns `false`: `Logger::log(WARNING_LO, "TcpBackend", "send failed to client %u")`, `remove_client(idx)`, `idx--` (re-check same index after compaction), `m_client_count--`.
+   b. If `send_frame` returns `false`: `LOG_WARN_LO("TcpBackend", "send failed to client %u")`, `remove_client(idx)`, `idx--` (re-check same index after compaction), `m_client_count--`.
 4. Loop completes.
 
 ---

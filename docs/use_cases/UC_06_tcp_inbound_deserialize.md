@@ -42,7 +42,7 @@ Called internally by the system; never called directly by User code.
    c. Validate `payload_len + 4 <= buf_cap`.
    d. Read `payload_len` more bytes: `socket_recv_exact(fd, buf + 4, payload_len, timeout_ms)`.
    e. Set `*out_len = 4 + payload_len`; return `true`.
-5. If `recv_frame` returns false: `Logger::log(WARNING_LO, ...)`, `remove_client(idx)`, return `Result::ERR_IO`.
+5. If `recv_frame` returns false: `LOG_WARN_LO(...)`, `remove_client(idx)`, return `Result::ERR_IO`.
 6. `NEVER_COMPILED_OUT_ASSERT(wire_len >= WIRE_HEADER_SIZE)`.
 7. **`Serializer::deserialize(m_wire_buf, wire_len, env)`** (`Serializer.cpp`):
    a. Reads all 52-byte header fields with big-endian `read_u8/u32/u64` helpers.
@@ -50,11 +50,11 @@ Called internally by the system; never called directly by User code.
    c. Validates `wire_len == WIRE_HEADER_SIZE + env.payload_length`.
    d. `memcpy(env.payload, buf + WIRE_HEADER_SIZE, payload_length)`.
    e. Returns `Result::OK`.
-8. If `deserialize` fails: `Logger::log(WARNING_LO, ...)`, `remove_client(idx)`, return `Result::ERR_INVALID`.
+8. If `deserialize` fails: `LOG_WARN_LO(...)`, `remove_client(idx)`, return `Result::ERR_INVALID`.
 9. **`m_impairment.process_inbound(env, now_us, inbound_delay_buf, &inbound_count)`** (`ImpairmentEngine.cpp`) — applies configured inbound impairments (reorder/partition). With default config, envelope passes straight through.
 10. **`flush_delayed_to_queue(now_us)`** — for each deliverable envelope in the inbound delay buffer: `m_recv_queue.push(env)`.
 11. **`m_recv_queue.push(env)`** — `RingBuffer::push()` with `memory_order_release` on `m_head`. Returns `true` on success, `false` if full.
-12. If `push` returns false: `Logger::log(WARNING_LO, ...)`, return `Result::ERR_FULL`.
+12. If `push` returns false: `LOG_WARN_LO(...)`, return `Result::ERR_FULL`.
 13. Returns `Result::OK`.
 
 ---
@@ -125,7 +125,7 @@ TcpBackend::recv_from_client(client_fd, timeout_ms)   [TcpBackend.cpp]
 ## 10. External Interactions
 
 - **POSIX `::recv()`:** Called via `socket_recv_exact()` on `m_client_fds[idx]`. Inbound direction. May block up to `timeout_ms` per phase.
-- **`stderr`:** `Logger::log()` on error conditions.
+- **`stderr`:** `LOG_*()` on error conditions.
 
 ---
 

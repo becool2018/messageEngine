@@ -37,7 +37,7 @@ Called from `process_outbound()` and `process_inbound()` at the top of each func
    d. If `phase_us < partition_duration_ms * 1000ULL`: return `true` (in partition).
    e. Otherwise: return `false` (in gap).
 3. If `is_partition_active()` returns `true`:
-   - `Logger::log(WARNING_LO, "ImpairmentEngine", "Partition active: dropping outbound message")`.
+   - `LOG_WARN_LO("ImpairmentEngine", "Partition active: dropping outbound message")`.
    - Returns `Result::OK` with `*out_count = 0`. No further processing.
 4. If `false`: continue to loss check and subsequent impairments.
 
@@ -112,7 +112,7 @@ ImpairmentEngine::process_outbound()            [ImpairmentEngine.cpp]
 
 process_outbound(env, now_us, out_buf, &out_count)
   -> is_partition_active(now_us)    <- true
-  -> Logger::log("Partition active: dropping...")
+  -> LOG_INFO("ImpairmentEngine", "partition active: dropping...")
   [*out_count = 0; return OK]
   <- Result::OK  [no ::send() called]
 

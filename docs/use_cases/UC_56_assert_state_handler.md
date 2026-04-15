@@ -47,7 +47,7 @@ class AbortResetHandler : public IResetHandler {
 ## 3. End-to-End Control Flow
 
 **`NEVER_COMPILED_OUT_ASSERT(cond)` when `cond == false`:**
-1. `Logger::log(FATAL, "Assert", "Assertion failed: %s at %s:%d", #cond, __FILE__, __LINE__)`.
+1. `LOG_FATAL("Assert", "Assertion failed: %s at %s:%d", #cond, __FILE__, __LINE__)`.
 2. In debug/test build: `::abort()` — immediate crash, no handler dispatch.
 3. In production build:
    a. `g_fatal_fired = true` (or `assert_state::set_fatal_fired()`).
@@ -69,7 +69,7 @@ class AbortResetHandler : public IResetHandler {
 
 ```
 NEVER_COMPILED_OUT_ASSERT(cond)                    [Assert.hpp macro]
- ├── Logger::log(FATAL, ...)
+ ├── LOG_FATAL(...)
  └── [production path]
       ├── assert_state::set_fatal_fired()
       ├── assert_state::get_reset_handler()
@@ -102,7 +102,7 @@ NEVER_COMPILED_OUT_ASSERT(cond)                    [Assert.hpp macro]
 ## 7. Concurrency / Threading Behavior
 
 - `NEVER_COMPILED_OUT_ASSERT` may fire from any thread.
-- `Logger::log()` and `::abort()` are the only operations after the assert fires; thread-safety is irrelevant once abort is called.
+- `LOG_*()` and `::abort()` are the only operations after the assert fires; thread-safety is irrelevant once abort is called.
 - `set_reset_handler()` must be called before any component starts; no concurrent access expected.
 - No `std::atomic` operations (the fatal flag may be a plain bool set once on the abort path).
 
@@ -126,7 +126,7 @@ NEVER_COMPILED_OUT_ASSERT(cond)                    [Assert.hpp macro]
 ## 10. External Interactions
 
 - **`::abort()`** — POSIX signal `SIGABRT`; terminates the process with a core dump on debug builds.
-- **`stderr`** — FATAL log written via `Logger::log()`.
+- **`stderr`** — FATAL log written via `LOG_*()`.
 
 ---
 
@@ -143,7 +143,7 @@ NEVER_COMPILED_OUT_ASSERT(cond)                    [Assert.hpp macro]
 
 ```
 [Component: NEVER_COMPILED_OUT_ASSERT(m_open) fails]
-  -> Logger::log(FATAL, "Assert", "Assertion failed: m_open at TcpBackend.cpp:42")
+  -> LOG_FATAL("Assert", "Assertion failed: m_open at TcpBackend.cpp:42")
   -> assert_state::set_fatal_fired()
   -> assert_state::get_reset_handler()         <- AbortResetHandler::instance()
   -> AbortResetHandler::on_fatal_assert()
@@ -167,7 +167,7 @@ NEVER_COMPILED_OUT_ASSERT(cond)                    [Assert.hpp macro]
 
 - **No-handler fallback:** If `set_reset_handler()` is not called, the fallback is `::abort()`. This is safe but produces a less informative abort (no soft-reset path).
 - **`g_fatal_fired` use in tests:** Test code can check `assert_state::fatal_fired()` after a test scenario to verify that an expected assert fired. This is used for negative testing.
-- **Async-signal safety:** `Logger::log()` uses `fprintf(stderr, ...)`; `fprintf` is not async-signal-safe. If `NEVER_COMPILED_OUT_ASSERT` fires in a signal handler context, the log call has undefined behavior. This is acceptable given that signal-handler assertions are not a design use case.
+- **Async-signal safety:** `LOG_*()` uses `fprintf(stderr, ...)`; `fprintf` is not async-signal-safe. If `NEVER_COMPILED_OUT_ASSERT` fires in a signal handler context, the log call has undefined behavior. This is acceptable given that signal-handler assertions are not a design use case.
 
 ---
 

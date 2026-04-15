@@ -40,12 +40,12 @@ Called by `drain_readable_clients()` for each slot that has `POLLIN` set. Not ca
 5. **`mbedtls_ssl_read(&m_ssl_contexts[idx], m_recv_buf, sizeof(m_recv_buf))`** — decrypts one TLS record from the client. Retried on `MBEDTLS_ERR_SSL_WANT_READ`. Returns decrypted byte count or negative error.
 6. If `mbedtls_ssl_read()` returns <= 0 (error or EOF): `remove_client(idx)`; return `ERR_IO`.
 7. **`Serializer::deserialize(m_recv_buf, bytes_read, &env)`** — decodes the wire frame.
-8. If `deserialize()` fails: `Logger::log(WARNING_HI, ...)`; return `ERR_IO`.
+8. If `deserialize()` fails: `LOG_WARN_HI(...)`; return `ERR_IO`.
 9. **HELLO interception check:** `if (env.message_type == MessageType::HELLO)`:
    a. Call **`handle_hello_frame(idx, env.source_id)`**:
       - `NEVER_COMPILED_OUT_ASSERT(env.source_id != NODE_ID_INVALID)`.
       - Set `m_client_node_ids[idx] = env.source_id`.
-      - `Logger::log(INFO, "TlsTcpBackend", "Registered client NodeId %u at slot %u", env.source_id, idx)`.
+      - `LOG_INFO("TlsTcpBackend", "Registered client NodeId %u at slot %u", env.source_id, idx)`.
    b. Return **`ERR_AGAIN`** — frame consumed; not pushed to ring buffer.
 10. Non-HELLO path: impairment engine + ring buffer push (TlsTcpBackend normal receive path).
 
@@ -139,7 +139,7 @@ TlsTcpBackend::poll_clients_once()
        [env.message_type == HELLO]
        -> handle_hello_frame(idx, N)
             -> m_client_node_ids[idx] = N
-            -> Logger::log(INFO, "Registered client NodeId N at slot S")
+            -> LOG_INFO("Registered client NodeId N at slot S")
        <- ERR_AGAIN  [frame consumed]
   [drain_readable_clients() discards ERR_AGAIN; loop continues]
 ```

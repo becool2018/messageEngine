@@ -36,7 +36,7 @@ Synchronous in the caller's thread.
 6. Inside `send_via_transport()`:
    a. `NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr)`.
    b. **`timestamp_expired(work.expiry_time_us, now_us)`** is evaluated (`Timestamp.hpp`). Implementation: `return (expiry_time_us != 0U) && (now_us >= expiry_time_us)`.
-   c. **Branch: condition true** — `Logger::log(WARNING_LO, "DeliveryEngine", "Message expired before send; dropping. id=%llu", ...)` is called.
+   c. **Branch: condition true** — `LOG_WARN_LO("DeliveryEngine", "Message expired before send; dropping. id=%llu", ...)` is called.
    d. Returns `Result::ERR_EXPIRED` immediately.
 7. `send_via_transport()` returns `ERR_EXPIRED` to `send_fragments()`, which propagates it to `send()`.
 8. `res != OK` — for RELIABLE_ACK/RETRY: **`rollback_on_transport_failure()`** is called to cancel any reserved bookkeeping slots. For BEST_EFFORT: no slots were allocated; rollback is a no-op. Returns `ERR_EXPIRED`.
@@ -54,7 +54,7 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
  └── send_fragments()                          [DeliveryEngine.cpp]
       └── DeliveryEngine::send_via_transport() [DeliveryEngine.cpp]
            ├── timestamp_expired()             [Timestamp.hpp]  <- returns true; expiry detected
-           └── Logger::log(WARNING_LO, ...)    [Logger.hpp]
+           └── LOG_WARN_LO(...)    [Logger.hpp]
                [returns ERR_EXPIRED immediately; TcpBackend::send_message() NOT called]
  [on ERR_EXPIRED return: rollback_on_transport_failure() cancels any reserved slots]
  [RELIABLE_ACK/RETRY: slot freed; BEST_EFFORT: no-op]
@@ -90,7 +90,7 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
 ## 8. Memory & Ownership Semantics
 
 - `MessageEnvelope work` — 4144 bytes on stack; created but immediately discarded when `ERR_EXPIRED` is returned.
-- Logger uses a 512-byte stack buffer in `Logger::log()` for `snprintf`.
+- Logger uses a 512-byte stack buffer in `LOG_*()` for `snprintf`.
 - No heap allocation. Power of 10 Rule 3 satisfied.
 
 ---
@@ -104,7 +104,7 @@ DeliveryEngine::send()                         [DeliveryEngine.cpp]
 
 ## 10. External Interactions
 
-- **`Logger::log()`** writes to `stderr` via `fprintf`. This is the only external interaction; no socket I/O occurs.
+- **`LOG_*()`** writes to `stderr` via `fprintf`. This is the only external interaction; no socket I/O occurs.
 - No POSIX socket calls, file I/O, or hardware interaction.
 
 ---
@@ -130,7 +130,7 @@ User
        -> send_fragments()
             -> DeliveryEngine::send_via_transport()
                  -> timestamp_expired()           [returns true]
-                 -> Logger::log(WARNING_LO, ...)  [logs drop]
+                 -> LOG_WARN_LO(...)  [logs drop]
                  <- ERR_EXPIRED
             <- ERR_EXPIRED
        -> rollback_on_transport_failure()    [cancels bookkeeping slot; no-op for BEST_EFFORT]

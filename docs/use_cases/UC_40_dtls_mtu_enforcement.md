@@ -31,7 +31,7 @@ Result DtlsUdpBackend::send_message(const MessageEnvelope& envelope) override;
 2. `NEVER_COMPILED_OUT_ASSERT(m_open)`.
 3. **MTU check:** compute `wire_size = WIRE_HEADER_SIZE + envelope.payload_length`.
 4. If `wire_size > DTLS_MAX_DATAGRAM_BYTES`:
-   a. `Logger::log(WARNING_LO, "DtlsUdpBackend", "Message too large: %u > %u", wire_size, DTLS_MAX_DATAGRAM_BYTES)`.
+   a. `LOG_WARN_LO("DtlsUdpBackend", "Message too large: %u > %u", wire_size, DTLS_MAX_DATAGRAM_BYTES)`.
    b. Return `Result::ERR_INVALID`.
 5. (On pass) `Serializer::serialize(envelope, m_wire_buf, sizeof(m_wire_buf), &wire_len)`.
 6. If `tls_enabled`: `mbedtls_ssl_write(&m_ssl, m_wire_buf, wire_len)` — DTLS encrypted send.
@@ -46,7 +46,7 @@ Result DtlsUdpBackend::send_message(const MessageEnvelope& envelope) override;
 ```
 DtlsUdpBackend::send_message(envelope)             [DtlsUdpBackend.cpp]
  ├── [MTU check: WIRE_HEADER_SIZE + payload_length > DTLS_MAX_DATAGRAM_BYTES]
- │    └── Logger::log(WARNING_LO)                  [if oversized; return ERR_INVALID]
+ │    └── LOG_WARN_LO()                  [if oversized; return ERR_INVALID]
  ├── Serializer::serialize()                        [only if size check passes]
  └── mbedtls_ssl_write() / ::send()                [DTLS or plaintext]
 ```
@@ -120,7 +120,7 @@ On the rejection path, no state is modified. The oversized envelope is dropped s
 User -> DtlsUdpBackend::send_message(envelope)
   [wire_size = WIRE_HEADER_SIZE + payload_length]
   [wire_size > DTLS_MAX_DATAGRAM_BYTES?]
-  -> Logger::log(WARNING_LO, "Message too large")
+  -> LOG_WARN_LO("Message too large")
   <- Result::ERR_INVALID
 
 [Pass case: wire_size <= DTLS_MAX_DATAGRAM_BYTES]

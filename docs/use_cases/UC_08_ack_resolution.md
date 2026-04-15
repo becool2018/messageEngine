@@ -42,8 +42,8 @@ Not called directly by the User.
         - `NEVER_COMPILED_OUT_ASSERT(m_slots[i].state == EntryState::ACKED)`.
         - Returns `Result::OK`.  (The slot remains `ACKED`; `ACKED → FREE` happens in the next `sweep_expired()` call via `sweep_one_slot()`.)
    c. If no match: returns `Result::ERR_INVALID`.
-6. If `on_ack()` returns `ERR_INVALID`: `Logger::log(INFO, ...)` ("ACK has no matching ack_tracker slot").
-7. **`m_retry_mgr.on_ack(raw.destination_id, raw.message_id)`** is also called (`RetryManager.cpp`) to cancel any pending retry for the same `(src, message_id)`:
+6. If `on_ack()` returns `ERR_INVALID`: `LOG_INFO(...)` ("ACK has no matching ack_tracker slot").
+7. **`m_retry_manager.on_ack(raw.destination_id, raw.message_id)`** is also called (`RetryManager.cpp`) to cancel any pending retry for the same `(src, message_id)`:
    a. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]`.
    b. If found with `active == true && entry.env.message_id == message_id`: `entry.active = false`.
 8. `receive()` copies `raw` to `out` (the caller's envelope) and returns `Result::OK`. The ACK is delivered to the caller as a control message.
@@ -109,7 +109,7 @@ DeliveryEngine::receive()                            [DeliveryEngine.cpp]
 ## 10. External Interactions
 
 - None — this flow operates entirely in process memory.
-- `Logger::log()` writes to `stderr` on `ERR_INVALID`.
+- `LOG_*()` writes to `stderr` on `ERR_INVALID`.
 
 ---
 

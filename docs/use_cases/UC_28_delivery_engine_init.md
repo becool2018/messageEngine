@@ -40,7 +40,7 @@ Called once at application startup.
    - `m_count = 0`, `m_write_idx = 0`. Buffer contents implicitly stale (will be overwritten on first use).
 8. **`m_ack_tracker.init()`** (`AckTracker.cpp`):
    - For each slot `i` in `0..ACK_TRACKER_CAPACITY-1`: `m_entries[i].state = FREE`.
-9. **`m_retry_mgr.init()`** (`RetryManager.cpp`):
+9. **`m_retry_manager.init()`** (`RetryManager.cpp`):
    - For each slot `i` in `0..ACK_TRACKER_CAPACITY-1`: `m_entries[i].active = false`.
 10. **`m_id_gen.init(local_node_id)`** (`MessageId.cpp`):
     - `m_counter = 0` (or seeded from `local_node_id`).
@@ -88,7 +88,7 @@ DeliveryEngine::init(transport, channel_cfg, local_node_id)  [DeliveryEngine.cpp
 ## 8. Memory & Ownership Semantics
 
 - `m_transport` — non-owning pointer. The caller owns the transport object and must ensure it outlives the `DeliveryEngine`.
-- `m_dedup_filter`, `m_ack_tracker`, `m_retry_mgr`, `m_id_gen` — all value members of `DeliveryEngine`; no heap allocation. Owned and destroyed with the `DeliveryEngine` instance.
+- `m_dedup_filter`, `m_ack_tracker`, `m_retry_manager`, `m_id_gen` — all value members of `DeliveryEngine`; no heap allocation. Owned and destroyed with the `DeliveryEngine` instance.
 - No heap allocation on this path.
 
 ---

@@ -37,7 +37,7 @@ Result DeliveryEngine::send(MessageEnvelope& envelope, uint64_t now_us);
 5. **`reserve_bookkeeping(m_ack_tracker, m_retry_manager, work, m_cfg, now_us)`** is called (static helper, `DeliveryEngine.cpp`). For `RELIABLE_RETRY` this calls both `track()` and `schedule()`:
    a. Calls `m_ack_tracker.track(work, ack_deadline)`. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]` for first `FREE` slot.
       - If no free slot: logs `WARNING_HI`; returns `ERR_FULL` immediately.
-   b. On `track()` success: calls `m_retry_mgr.schedule(work, now_us, m_cfg.retry_backoff_ms, m_cfg.max_retries)`.
+   b. On `track()` success: calls `m_retry_manager.schedule(work, now_us, m_cfg.retry_backoff_ms, m_cfg.max_retries)`.
       - Inside `schedule()`: `NEVER_COMPILED_OUT_ASSERT(backoff_ms > 0)` and `NEVER_COMPILED_OUT_ASSERT(max_retries > 0)`. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]` for first slot where `!active`.
       - If found: `entry.env = work` (full `MessageEnvelope` copy), `entry.next_retry_us = now_us`, `entry.expiry_us = env.expiry_time_us`, `entry.retry_count = 0`, `entry.max_retries = max_retries`, `entry.backoff_ms = backoff_ms`, `entry.active = true`. Returns `Result::OK`.
       - If not found: logs `WARNING_HI`; calls `m_ack_tracker.cancel(work.source_id, work.message_id)` to free the already-reserved AckTracker slot; returns `ERR_FULL`.

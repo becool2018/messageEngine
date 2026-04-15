@@ -42,7 +42,7 @@ Called internally by `TcpBackend::send_message()`, `UdpBackend::send_message()`,
    c. Otherwise: return `false` (forward).
 5. If `check_loss()` returns true:
    - `++m_stats.loss_drops`.
-   - `Logger::log(WARNING_LO, "ImpairmentEngine", "message dropped (loss probability)")`.
+   - `LOG_WARN_LO("ImpairmentEngine", "message dropped (loss probability)")`.
    - Returns `Result::ERR_IO`. The envelope is NOT placed in the delay buffer.
 6. If not lost: compute `release_us` (latency + jitter), call `queue_to_delay_buf(in_env, release_us)`. Apply duplication (UC_14) if configured. Returns `Result::OK`.
 7. Back in backend `send_message()`: `process_outbound()` returned `ERR_IO`, so the backend skips `collect_deliverable()` (or calls it and gets 0 due entries). No socket write occurs for the dropped message.
@@ -108,7 +108,7 @@ TcpBackend::send_message()                            [TcpBackend.cpp]
 ## 10. External Interactions
 
 - None — this flow operates entirely in process memory.
-- `Logger::log()` writes to `stderr` when loss occurs.
+- `LOG_*()` writes to `stderr` when loss occurs.
 
 ---
 
