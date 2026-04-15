@@ -125,105 +125,36 @@ The following questions were open during initial design and are now resolved:
   tests/ entry) for the exact enumerated list of permitted relaxations and non-negotiable rules.
 
 2. Layered architecture
-We conceptually split the network system into four layers:
-
-2.1 Message layer (application-facing)
-- Defines a common message envelope and delivery semantics.
-- Provides serialization/deserialization and reliability helpers.
-- Exposes a transport-agnostic API to the rest of the system.
-
-2.2 Transport abstraction layer
-- Presents a consistent interface for sending/receiving message envelopes.
-- Hides TCP/UDP differences behind a single API.
-- Knows about priorities, reliability modes, and channels, but not application semantics.
-
-2.3 Impairment engine
-- Sits logically between transport abstraction and underlying I/O.
-- Applies configured impairments (latency, jitter, loss, duplication, reordering, partitions).
-- Must be usable with both real sockets and the local simulation harness.
-
-2.4 Platform/network backend
-- Encapsulates raw socket operations (TCP, UDP) and any TLS/DTLS.
-- Handles connection management, framing, basic error mapping, and OS specifics.
-- No application policy: only transport mechanics.
+Four layers: Message (app-facing) → Transport abstraction → Impairment engine → Platform/network backend.
+Full layer descriptions, directory rules, and architecture diagram: docs/ARCHITECTURE.md.
 
 3. Message envelope and semantics
+Full prose specification and rationale: docs/PROTOCOL.md.
 
 3.1 Message envelope
 Every logical application message must be carried inside a standard envelope with at least:
-- [REQ-3.1] message_type: enumerated type or similar.
-- [REQ-3.1] message_id: unique per sender or globally; sufficient for dedupe.
-- [REQ-3.1] timestamp: creation or enqueue time.
-- [REQ-3.1] source_id, destination_id: node/endpoint identifiers.
-- [REQ-3.1] priority: used for channel prioritization.
-- [REQ-3.1] reliability_class: e.g., best_effort, reliable_ack, reliable_retry.
-- [REQ-3.1] expiry_time: wall-clock or relative; used to drop stale messages.
-- [REQ-3.1] payload: opaque, serialized bytes.
+- [REQ-3.1] message_type, message_id, timestamp, source_id, destination_id, priority, reliability_class, expiry_time, payload.
 
 3.2 Messaging utilities
-The message layer must provide helpers for:
 - [REQ-3.2.1] Message ID generation and comparison.
 - [REQ-3.2.2] Timestamps and expiry checking.
-- [REQ-3.2.3] Serialization/deserialization:
-  - Deterministic, endian-safe; wire format carries an explicit protocol version byte and frame magic (see REQ-3.2.8).
-- [REQ-3.2.4] ACK handling:
-  - Generating ACK/NAK messages where needed.
-  - Tracking outstanding messages awaiting ACK.
-- [REQ-3.2.5] Retry logic:
-  - Configurable retry count and backoff.
-  - Clear distinction between "in progress", "failed", and "expired".
-- [REQ-3.2.6] Duplicate suppression:
-  - Recognize and drop duplicates based on (source_id, message_id) pairs.
-- [REQ-3.2.7] Expiry handling:
-  - Drop or deprioritize expired messages before delivery.
-- [REQ-3.2.8] Wire format version enforcement:
-  - Every serialized frame must carry a protocol version byte (byte 3 of the
-    wire header) and a 2-byte frame magic number (wire bytes 40–41).
-  - Constants are defined in src/core/ProtocolVersion.hpp (PROTO_VERSION, PROTO_MAGIC).
-  - Deserializer must reject frames whose version byte does not equal PROTO_VERSION.
-  - Deserializer must reject frames whose magic word does not equal PROTO_MAGIC.
-  - Bump PROTO_VERSION on any change to the wire field layout; PROTO_MAGIC is fixed.
-- [REQ-3.2.9] Stale reassembly slot reclamation:
-  - The reassembly buffer must not hold slots indefinitely. Slots open longer
-    than `recv_timeout_ms` without completing must be reclaimed by a periodic
-    sweep to prevent resource exhaustion from peers that send partial fragment sets.
-- [REQ-3.2.10] Wire-supplied length field overflow guard:
-  - Wire-supplied length fields (frame_len in tcp_recv_frame(), total_payload_length in
-    fragment reassembly) must be validated against a compile-time ceiling before any
-    arithmetic involving those values is performed. The ceiling is defined as
-    WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES. Violation must return ERR_INVALID and log
-    WARNING_HI (C-3, C-4 from SEC_REPORT.txt; CERT INT30-C; HAZ-019).
-- [REQ-3.2.11] Constant-time equality for security-sensitive identifiers:
-  - All security-sensitive (source_id, message_id) equality comparisons in AckTracker,
-    DuplicateFilter, and OrderingBuffer must use a constant-time comparator that does not
-    short-circuit on the first differing byte or field. The loop in
-    DuplicateFilter::is_duplicate() must not early-exit on match (C-1). DTLS cookie
-    comparisons must also be verified constant-time (C-2). Mitigation per HAZ-018
-    (CWE-208 timing oracle).
+- [REQ-3.2.3] Serialization/deserialization — deterministic, endian-safe; wire format carries version byte (byte 3) and frame magic (bytes 40–41); see REQ-3.2.8.
+- [REQ-3.2.4] ACK handling — generate ACK/NAK; track outstanding messages awaiting ACK.
+- [REQ-3.2.5] Retry logic — configurable count and backoff; PENDING / FAILED / EXPIRED states.
+- [REQ-3.2.6] Duplicate suppression — recognize and drop on (source_id, message_id) pair.
+- [REQ-3.2.7] Expiry handling — drop or deprioritize expired messages before delivery.
+- [REQ-3.2.8] Wire format version enforcement — version byte must equal PROTO_VERSION; magic word must equal PROTO_MAGIC (both in src/core/ProtocolVersion.hpp). Reject mismatches. Bump PROTO_VERSION on any wire field layout change; PROTO_MAGIC is fixed.
+- [REQ-3.2.9] Stale reassembly slot reclamation — sweep slots open longer than recv_timeout_ms to prevent resource exhaustion.
+- [REQ-3.2.10] Wire-supplied length overflow guard — validate frame_len and total_payload_length against WIRE_HEADER_SIZE + MSG_MAX_PAYLOAD_BYTES before arithmetic; return ERR_INVALID + WARNING_HI on violation (HAZ-019, CERT INT30-C).
+- [REQ-3.2.11] Constant-time equality — source_id/message_id comparisons in AckTracker, DuplicateFilter, OrderingBuffer must not short-circuit; DTLS cookie compare must be constant-time (HAZ-018, CWE-208).
 
 3.3 Delivery semantics
-The system must support multiple delivery semantics, including:
-- [REQ-3.3.1] Best effort:
-  - No retry, no ACK; may be dropped without notification.
-- [REQ-3.3.2] Reliable with ACK:
-  - Single send, expect ACK; treat missing ACK as failure (no automatic retry).
-- [REQ-3.3.3] Reliable with retry and dedupe:
-  - Retry until ACK or expiry, deduplicating on the receiver.
-- [REQ-3.3.4] Expiring messages:
-  - Do not deliver messages after expiry_time has passed.
-- [REQ-3.3.5] Ordered vs unordered:
-  - Support channels where ordering must be preserved.
-  - Support channels where ordering does not matter and may be relaxed for performance.
-- [REQ-3.3.6] Peer reconnect — ordering state reset:
-  - When a peer reconnects (detected via a HELLO frame on an already-known channel),
-    the per-peer sequence tracking state in the ordering gate must be reset so that
-    messages from the new connection session are not stalled or discarded because
-    `next_expected_seq` retains the value from the prior session.
-  - All held out-of-order messages belonging to the reconnecting peer must be freed.
-  - The staged `m_held_pending` buffer in DeliveryEngine must be discarded if it
-    belongs to the reconnecting peer.
-  - Implemented by: `OrderingBuffer::reset_peer()`, `DeliveryEngine::reset_peer_ordering()`,
-    `DeliveryEngine::drain_hello_reconnects()`, and `TransportInterface::pop_hello_peer()`.
+- [REQ-3.3.1] Best effort — no retry, no ACK; may be dropped silently.
+- [REQ-3.3.2] Reliable with ACK — single send; missing ACK = failure; no auto-retry.
+- [REQ-3.3.3] Reliable with retry and dedupe — retry until ACK or expiry; deduplicate on receiver.
+- [REQ-3.3.4] Expiring messages — do not deliver after expiry_time.
+- [REQ-3.3.5] Ordered vs unordered — support both; ordering may be relaxed on unordered channels.
+- [REQ-3.3.6] Peer reconnect ordering reset — on HELLO from known peer: reset per-peer sequence state, free held out-of-order messages, discard m_held_pending if it belongs to reconnecting peer. Implemented by: OrderingBuffer::reset_peer(), DeliveryEngine::reset_peer_ordering(), DeliveryEngine::drain_hello_reconnects(), TransportInterface::pop_hello_peer().
 
 4. Transport abstraction API
 
@@ -249,186 +180,72 @@ The transport abstraction must offer (conceptually) functions like:
   - Which impairments apply to which channels.
 
 5. Impairment engine requirements
+Full prose specification and rationale: docs/IMPAIRMENT.md.
 
 5.1 Impairment types
-The impairment engine must be able to apply, per channel or globally:
-- [REQ-5.1.1] Fixed latency (e.g., always add 3 seconds).
+The impairment engine must apply, per channel or globally:
+- [REQ-5.1.1] Fixed latency.
 - [REQ-5.1.2] Random jitter around a configured mean/variance.
 - [REQ-5.1.3] Packet loss with configurable probability.
 - [REQ-5.1.4] Packet duplication with configurable probability.
-- [REQ-5.1.5] Packet reordering:
-  - Buffer messages and release them out of order according to policy.
-- [REQ-5.1.6] Partitions / intermittent outages:
-  - Drop or delay all traffic for specified intervals to simulate link loss.
+- [REQ-5.1.5] Packet reordering — buffer messages and release out of order.
+- [REQ-5.1.6] Partitions / intermittent outages — drop or delay all traffic for configured intervals.
 
 5.2 Configuration and control
-- Impairments must be configurable through:
-  - [REQ-5.2.1] A structured configuration object or file (not ad-hoc globals).
-- It must be possible to:
-  - [REQ-5.2.2] Enable/disable each impairment independently.
-  - [REQ-5.2.3] Configure parameters per channel or per peer where sensible.
-- Provide:
-  - [REQ-5.2.4] A deterministic mode controlled by a seedable PRNG.
-    In production builds the seed must be derived from a cryptographically unpredictable
-    source (e.g., getrandom(), /dev/urandom, or a hardware RNG). A fixed literal or
-    time-only seed is prohibited in production. The seed source must be documented in
-    deployment configuration. Rationale: a known seed combined with a known message
-    sequence allows prediction of all impairment decisions (see SECURITY_ASSUMPTIONS.md §7).
-  - [REQ-5.2.5] A way to snapshot or log impairment decisions for debugging tests.
-  - [REQ-5.2.6] Entropy source failure must be fatal in production builds:
-    In production builds (ALLOW_WEAK_PRNG_SEED undefined), if both getrandom() and
-    /dev/urandom fail, the PRNG seed path MUST log FATAL and trigger the reset handler
-    rather than continuing with a weak seed. This applies to both ImpairmentEngine and
-    DeliveryEngine (H-6 from SEC_REPORT.txt; HAZ-022; CWE-338).
+- [REQ-5.2.1] Structured configuration object or file; no ad-hoc globals.
+- [REQ-5.2.2] Enable/disable each impairment independently.
+- [REQ-5.2.3] Configure parameters per channel or per peer where sensible.
+- [REQ-5.2.4] Deterministic PRNG seed — production seed must come from cryptographically unpredictable source (getrandom() / /dev/urandom / hardware RNG); fixed or time-only seeds prohibited in production (HAZ-022, CWE-338; see SECURITY_ASSUMPTIONS.md §7).
+- [REQ-5.2.5] Snapshot/log impairment decisions for debugging tests.
+- [REQ-5.2.6] Entropy source failure is fatal in production — if getrandom() and /dev/urandom both fail, log FATAL and trigger reset handler; never continue with a weak seed (ALLOW_WEAK_PRNG_SEED must be undefined in production; HAZ-022, CWE-338).
 
 5.3 Determinism and testability
-- Design the impairment engine so:
-  - [REQ-5.3.1] Given the same seed and inputs, the sequence of impairments is reproducible.
-  - [REQ-5.3.2] It can run against the local simulation harness without real sockets.
-- Keep APIs simple and composable to allow injection/mocking in tests.
+- [REQ-5.3.1] Same seed + same inputs → same impairment sequence (reproducible).
+- [REQ-5.3.2] Runs against LocalSimHarness without real sockets.
 
 6. Platform/network backend requirements
+Full prose specification and rationale: docs/TRANSPORT.md.
 
 6.1 TCP (connection-oriented) backend
-- Connection management:
-  - [REQ-6.1.1] Perform standard 3-way handshake to establish connections.
-  - [REQ-6.1.2] Implement configurable connection timeouts and retry logic.
-  - [REQ-6.1.3] Support graceful disconnect (FIN/ACK) and handle abrupt disconnects (RST, failures).
-- Reliability:
-  - Use TCP's guaranteed, in-order delivery, but still detect/handle application-level failures.
-  - [REQ-6.1.4] Implement application-level flow control as needed (e.g., queue limits).
-- Data framing:
-  - Implement explicit message framing over the TCP byte stream:
-    - [REQ-6.1.5] Typically length-prefixed or header-with-length framing.
-  - [REQ-6.1.6] Correctly handle partial reads and writes; do not assume one send == one receive.
-- Concurrency:
-  - [REQ-6.1.7] Support multiple simultaneous connections.
-  - Use a well-defined model (thread-per-connection, thread pool, or event loop) consistent with the global rules.
-  - [REQ-6.1.8] Client-side HELLO registration:
-    When a TCP or TLS client establishes a connection it must send a HELLO frame
-    (MessageType::HELLO = 4, source_id = local NodeId, payload_length = 0) before
-    transmitting any DATA frame. The HELLO identifies the client to the server so
-    the server can build a NodeId → socket-slot routing table.
-  - [REQ-6.1.9] Server-side unicast routing:
-    The TCP and TLS server must maintain a NodeId → socket-slot table populated from
-    received HELLO frames. For outbound frames with destination_id != NODE_ID_INVALID,
-    the server routes to the single slot whose registered NodeId matches destination_id.
-    If no matching slot exists the send must fail with ERR_INVALID and log WARNING_HI.
-    For broadcast frames (destination_id == NODE_ID_INVALID = 0) the existing fan-out
-    to all connected clients is retained unchanged.
-  - [REQ-6.1.10] TransportInterface::register_local_id():
-    TransportInterface exposes a non-pure virtual method
-    `virtual Result register_local_id(NodeId id)` with a default body returning OK.
-    TCP/TLS backends (client mode) override this to send the HELLO frame on-wire.
-    TCP/TLS backends (server mode) override this to store the local NodeId for
-    reference. UDP and DTLS-UDP backends override this to store the local NodeId
-    and send a HELLO datagram to the configured peer (UDP always; DTLS client mode
-    only — server has no connected peer at registration time). LocalSimHarness
-    inherits the default no-op.
-    DeliveryEngine::init() calls register_local_id(local_id) immediately after
-    transport->init() returns OK; any failure is logged at WARNING_HI.
-  - [REQ-6.1.11] TCP/TLS source address validation:
-    Before passing any deserialized envelope to DeliveryEngine::receive(), the TCP and
-    TLS backends must verify that the wire-level source address (socket slot) is consistent
-    with the source_id field in the envelope. A mismatch must result in silent discard
-    and a WARNING_HI log entry; the mismatched envelope must never reach the DeliveryEngine.
-    Rationale: prevents source_id spoofing attacks that could corrupt ordering state,
-    trigger spurious ACKs, or exhaust dedup window slots (see SECURITY_ASSUMPTIONS.md §4).
-  - [REQ-6.1.12] HELLO timeout — slow-connect slot eviction:
-    The TCP and TLS servers MUST track a per-slot accept timestamp for every connected
-    client. Any client slot that has not sent a HELLO frame within hello_timeout_ms
-    (default: recv_timeout_ms) of acceptance MUST be evicted and its socket closed, with a
-    WARNING_HI log entry. This prevents slot-exhaustion DoS via slow-connect (H-5 from
-    SEC_REPORT.txt; HAZ-023; CWE-400).
+- [REQ-6.1.1] Standard 3-way handshake.
+- [REQ-6.1.2] Configurable connection timeouts and retry logic.
+- [REQ-6.1.3] Graceful disconnect (FIN/ACK); handle RST and abrupt disconnect.
+- [REQ-6.1.4] Application-level flow control (queue limits).
+- [REQ-6.1.5] Explicit length-prefixed framing over the TCP byte stream.
+- [REQ-6.1.6] Correct partial read/write handling; one send != one receive.
+- [REQ-6.1.7] Multiple simultaneous connections.
+- [REQ-6.1.8] Client-side HELLO registration — TCP/TLS client must send HELLO frame (MessageType::HELLO=4, source_id=local NodeId, payload_length=0) before any DATA frame. Server builds NodeId->socket-slot routing table from received HELLOs.
+- [REQ-6.1.9] Server-side unicast routing — maintain NodeId->slot table; route to matching slot for destination_id != NODE_ID_INVALID; ERR_INVALID + WARNING_HI if no slot found; fan-out to all for destination_id == 0 (broadcast).
+- [REQ-6.1.10] TransportInterface::register_local_id(NodeId) — non-pure virtual, default returns OK. TCP/TLS client: send HELLO on-wire. TCP/TLS server: store local NodeId. UDP/DTLS: store NodeId and send HELLO datagram. DeliveryEngine::init() calls this after transport->init() returns OK; failure logged at WARNING_HI.
+- [REQ-6.1.11] TCP/TLS source address validation — verify socket slot matches source_id in envelope before passing to DeliveryEngine; discard + WARNING_HI on mismatch (prevents source_id spoofing; see SECURITY_ASSUMPTIONS.md §4).
+- [REQ-6.1.12] HELLO timeout — per-slot accept timestamp; evict + close + WARNING_HI any slot that has not sent HELLO within hello_timeout_ms (default: recv_timeout_ms) (HAZ-023, CWE-400).
 
 6.2 UDP (connectionless) backend
-- Reliability:
-  - [REQ-6.2.1] No inherent reliability; implement optional ACK/NAK + retry where required.
-  - Handle packet loss gracefully.
-- Ordering:
-  - [REQ-6.2.2] Use sequence numbers when ordering is needed.
-  - Detect and handle duplicates and out-of-order packets.
-- Message size:
-  - [REQ-6.2.3] Respect UDP size limits.
-  - If needed, implement fragmentation/reassembly at the message layer.
-- Spoofing and validation:
-  - [REQ-6.2.4] Validate source address and basic sanity of incoming datagrams.
-    The UDP and DTLS backends must verify that the wire-level source address of each
-    received datagram is consistent with the source_id field in the deserialized envelope
-    before passing it to DeliveryEngine::receive(). A mismatch must result in silent
-    discard and a WARNING_HI log entry. This is the UDP equivalent of REQ-6.1.11.
-  - [REQ-6.2.5] UdpBackend must reject wildcard peer_ip:
-    UdpBackend init() MUST reject a wildcard peer_ip ("0.0.0.0", "::", or empty string)
-    with ERR_INVALID and log FATAL. Plaintext UDP requires a specific peer address for
-    source binding to be effective (H-7 from SEC_REPORT.txt; HAZ-024; CWE-290).
+- [REQ-6.2.1] No inherent reliability; optional ACK/NAK + retry; handle loss gracefully.
+- [REQ-6.2.2] Sequence numbers for ordering; detect and handle duplicates and reordering.
+- [REQ-6.2.3] Respect UDP size limits; fragmentation/reassembly at message layer if needed.
+- [REQ-6.2.4] Source address validation — verify datagram source matches source_id in envelope; discard + WARNING_HI on mismatch (UDP equivalent of REQ-6.1.11).
+- [REQ-6.2.5] Reject wildcard peer_ip — init() must reject "0.0.0.0", "::", or empty string with ERR_INVALID + FATAL (HAZ-024, CWE-290).
 
 6.3 Common socket requirements (TCP and UDP)
-- Addressing:
-  - [REQ-6.3.1] Bind to configurable IP/port pairs.
-  - Support IPv4, and optionally IPv6.
-  - Use appropriate socket options (e.g., SO_REUSEADDR) to avoid common startup issues.
-- Error handling:
-  - Explicitly handle all error codes (connection refused, reset, timeouts, etc.).
-  - [REQ-6.3.2] Classify errors into recoverable vs fatal, mapping to WARNING_LO / WARNING_HI / FATAL as appropriate.
-- Timeouts and liveness:
-  - [REQ-6.3.3] Implement read/write timeouts to avoid indefinite blocking.
-  - Provide heartbeat/keepalive mechanisms for long-lived connections where appropriate.
-- Security:
-  - [REQ-6.3.4] Provide a clear extension point for TLS (TCP) and DTLS (UDP) usage.
-  - Design interfaces so that secure vs insecure transports can be swapped without changing higher layers.
-- Buffering and scalability:
-  - [REQ-6.3.5] Do not assume unbounded buffers; make buffer sizes explicit and configurable.
-  - Choose concurrency models that can scale to expected connection/message volumes.
-- TLS/DTLS configuration validation:
-  - [REQ-6.3.6] CA certificate required when verify_peer=true:
-    When verify_peer=true, a non-empty ca_file is mandatory. init() MUST return ERR_IO
-    and log FATAL if verify_peer=true and ca_file is empty. A trust anchor is required
-    for certificate verification to be meaningful (H-1 from SEC_REPORT.txt; HAZ-020;
-    CWE-295).
-  - [REQ-6.3.7] CRL enforcement when require_crl=true:
-    When require_crl=true (TlsConfig field), init() MUST return ERR_INVALID and log
-    FATAL if verify_peer=true and crl_file is empty. Default: require_crl=false for
-    backward compatibility (H-2 from SEC_REPORT.txt; CWE-295).
-  - [REQ-6.3.8] Forward secrecy enforcement when tls_require_forward_secrecy=true:
-    When tls_require_forward_secrecy=true (TlsConfig field), the TLS backend MUST reject
-    any TLS 1.2 session resumption handshake after negotiation by zeroizing the session
-    and returning ERR_IO. Default: false for backward compatibility (H-4 from
-    SEC_REPORT.txt; CWE-295).
-  - [REQ-6.3.9] Hostname/verification mismatch must be rejected:
-    When verify_peer=false and peer_hostname is non-empty, init() MUST return ERR_INVALID
-    and log WARNING_HI. An operator who configures a hostname but disables peer
-    verification is in an unsafe state that cannot be reached silently (H-8 from
-    SEC_REPORT.txt; HAZ-025; CWE-297).
-  - [REQ-6.3.10] TlsSessionStore concurrent-access mutex:
-    TlsSessionStore internal state (the mbedtls_ssl_session struct) MUST be protected by
-    a POSIX mutex against concurrent access from zeroize() and try_save/try_load calls.
-    The std::atomic session_valid flag alone is insufficient (H-3 from SEC_REPORT.txt;
-    HAZ-021; CWE-362).
+- [REQ-6.3.1] Bind to configurable IP/port; IPv4 required, IPv6 optional; use SO_REUSEADDR.
+- [REQ-6.3.2] Classify errors as recoverable vs fatal; map to WARNING_LO / WARNING_HI / FATAL.
+- [REQ-6.3.3] Read/write timeouts; heartbeat/keepalive for long-lived connections.
+- [REQ-6.3.4] Clear extension point for TLS (TCP) and DTLS (UDP); swappable without changing higher layers.
+- [REQ-6.3.5] Explicit, configurable buffer sizes; no unbounded buffers.
+- [REQ-6.3.6] CA cert required when verify_peer=true — init() returns ERR_IO + FATAL if ca_file is empty (HAZ-020, CWE-295).
+- [REQ-6.3.7] CRL enforcement when require_crl=true — init() returns ERR_INVALID + FATAL if verify_peer=true and crl_file is empty; default require_crl=false.
+- [REQ-6.3.8] Forward secrecy — when tls_require_forward_secrecy=true, reject TLS 1.2 session resumption by zeroizing session and returning ERR_IO; default false.
+- [REQ-6.3.9] Hostname/peer-verify mismatch — init() returns ERR_INVALID + WARNING_HI if verify_peer=false and peer_hostname is non-empty (HAZ-025, CWE-297).
+- [REQ-6.3.10] TlsSessionStore mutex — protect mbedtls_ssl_session struct with POSIX mutex against concurrent zeroize()/try_save/try_load; std::atomic alone is insufficient (HAZ-021, CWE-362).
 
 6.4 DTLS (Datagram TLS over UDP) backend
-- DTLS mode:
-  - [REQ-6.4.1] Use DTLS transport mode (MBEDTLS_SSL_TRANSPORT_DATAGRAM) for record-layer
-    security over UDP; support both DTLS client and server roles.
-- Anti-replay and cookie exchange:
-  - [REQ-6.4.2] Arm DTLS cookie exchange on the server to prevent amplification attacks;
-    bind each cookie to the client's (address, port) transport identity.
-- Retransmission timer:
-  - [REQ-6.4.3] Configure the DTLS retransmission timer (min/max) to match the expected
-    link RTT; use mbedTLS timer callbacks to drive retransmission without busy-waiting.
-- MTU enforcement:
-  - [REQ-6.4.4] Enforce a configurable DTLS record MTU (DTLS_MAX_DATAGRAM_BYTES) to prevent
-    IP fragmentation; reject outbound messages whose serialized size exceeds the MTU.
-- Plaintext fallback:
-  - [REQ-6.4.5] When `tls_enabled == false`, fall through to the plain UDP socket path
-    (no handshake, no certificate loading); allow the same DtlsUdpBackend code to operate
-    in plaintext mode for testing without changing higher layers.
-- [REQ-6.4.6] DTLS peer hostname verification:
-    When `verify_peer == true` and `peer_hostname` is non-empty, the DTLS client
-    must call `mbedtls_ssl_set_hostname()` after `ssl_setup` and before the
-    handshake to bind the expected certificate CN/SAN. Failure to bind constitutes
-    an incomplete certificate validation and must cause
-    `client_connect_and_handshake()` to return ERR_IO. When `peer_hostname` is
-    empty, nullptr is passed (opt-out is explicit).
+- [REQ-6.4.1] DTLS transport mode (MBEDTLS_SSL_TRANSPORT_DATAGRAM); client and server roles.
+- [REQ-6.4.2] DTLS cookie exchange on server — prevent amplification; bind cookie to client (address, port).
+- [REQ-6.4.3] DTLS retransmission timer — configure min/max to match link RTT; mbedTLS timer callbacks; no busy-wait.
+- [REQ-6.4.4] MTU enforcement — reject outbound messages exceeding DTLS_MAX_DATAGRAM_BYTES.
+- [REQ-6.4.5] Plaintext fallback — when tls_enabled==false, use plain UDP socket path; no handshake.
+- [REQ-6.4.6] DTLS peer hostname verification — when verify_peer==true and peer_hostname non-empty, call mbedtls_ssl_set_hostname() before handshake; return ERR_IO on failure; pass nullptr when peer_hostname is empty (explicit opt-out).
 
 7. Logging, metrics, and observability
 
@@ -586,34 +403,12 @@ Do not edit the matrix by hand; regenerate it by running the script.
 12. Formal inspection and peer review process (NPR 7150.2D §3 / NASA-STD-8739.8)
 
 Every non-trivial change to src/ or tests/ requires a completed inspection record in
-docs/DEFECT_LOG.md. Full procedure and moderator checklist: docs/INSPECTION_CHECKLIST.md.
+docs/DEFECT_LOG.md. Full procedure, reviewer roles, entry/exit criteria, and severity
+definitions: docs/INSPECTION_CHECKLIST.md.
 
-12.1 Reviewer roles
-
-  Author     — wrote the code; presents the change; may not moderate their own review.
-  Moderator  — owns the checklist (docs/INSPECTION_CHECKLIST.md); facilitates; signs off;
-               records all defects in docs/DEFECT_LOG.md.
-  Reviewer   — at least one independent reviewer required. For AI-assisted development
-               the human engineer fills this role, reviewing all AI-generated output as
-               if it were written by a junior engineer.
-
-12.2 Entry criteria (all must be true before review begins)
-
-  [ ] make passes with zero warnings and zero errors.
-  [ ] make lint passes with zero clang-tidy violations (CC ≤ 10 enforced).
-  [ ] make check_traceability passes with RESULT: PASS.
-  [ ] make run_tests passes — all tests green.
-  [ ] All new or modified src/ files carry // Implements: REQ-x.x tags.
-  [ ] All new or modified tests/ files carry // Verifies: REQ-x.x tags.
-  [ ] No raw assert() in src/ — NEVER_COMPILED_OUT_ASSERT used throughout.
-  [ ] No dynamic allocation on critical paths after init (Power of 10 Rule 3).
-  [ ] Author has self-reviewed against docs/INSPECTION_CHECKLIST.md before
-      requesting a moderator-led review.
-
-12.3 Exit criteria summary
-All CRITICAL and MAJOR defects dispositioned; checklist complete; make + run_tests +
-check_traceability all pass; moderator signed off in docs/DEFECT_LOG.md.
-Full exit criteria, waiver policy, and severity definitions: docs/INSPECTION_CHECKLIST.md.
+Entry criteria summary: make + make lint + make check_traceability + make run_tests all pass;
+all Implements/Verifies tags present; no raw assert() in src/.
+Exit criteria summary: all CRITICAL and MAJOR defects dispositioned; moderator signed off in docs/DEFECT_LOG.md.
 
 ---
 
