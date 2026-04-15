@@ -44,18 +44,18 @@ A C++ networking library for building and testing systems that must survive unre
 7. [Coverage Analysis](#coverage-analysis)
 8. [Static Analysis](#static-analysis)
 9. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
-10. [Logging](docs/LOGGING.md) — format, architecture, severity levels, extending, testing
-11. [Documentation Maintenance](docs/DOC_MAINTENANCE.md) — what to update and when for every type of code change
-12. [Using the Library](#using-the-library)
-13. [Use Cases](#use-cases)
-14. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
-15. [Safety & Assurance Documents](#safety--assurance-documents)
-16. [Design Patterns](#design-patterns)
-17. [Coding Standards](#coding-standards)
-18. [Claude Skills](#claude-skills)
-19. [Release History](#release-history)
-20. [Code Statistics](#code-statistics)
-21. [Security Check](SNYK.IO.SECURITY_CHECK.md)
+10. [Documentation Maintenance](docs/DOC_MAINTENANCE.md) — what to update and when for every type of code change
+11. [Using the Library](#using-the-library)
+    - [Logging](docs/LOGGING.md) — format, architecture, severity levels, extending, testing
+12. [Use Cases](#use-cases)
+13. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
+14. [Safety & Assurance Documents](#safety--assurance-documents)
+15. [Design Patterns](#design-patterns)
+16. [Coding Standards](#coding-standards)
+17. [Claude Skills](#claude-skills)
+18. [Release History](#release-history)
+19. [Code Statistics](#code-statistics)
+20. [Security Check](SNYK.IO.SECURITY_CHECK.md)
 
 ---
 
@@ -955,6 +955,24 @@ LocalSimHarness node_a;
 ```
 
 All impairment decisions are driven by a seedable xorshift64 PRNG — given the same seed and input sequence, every run produces an identical fault pattern.
+
+---
+
+### Logging
+
+The library ships a lightweight injectable logger. Attach it once at startup:
+
+```cpp
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
+PosixLogClock clock;
+PosixLogSink  sink;
+Logger::init(&clock, &sink, Severity::INFO);   // min_level filters below INFO
+```
+
+Use the `LOG_INFO` / `LOG_WARNING_HI` / `LOG_FATAL` macros (never call `Logger::log()` directly). Full format, severity levels, sink/clock extension points, and thread-safety guarantees: **[`docs/LOGGING.md`](docs/LOGGING.md)**.
 
 ---
 
