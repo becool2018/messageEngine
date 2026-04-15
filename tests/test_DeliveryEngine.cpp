@@ -42,6 +42,10 @@
 #include "core/DeliveryEngine.hpp"
 #include "platform/LocalSimHarness.hpp"
 #include "MockTransportInterface.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test infrastructure: fixed now_us to avoid real-clock coupling
@@ -4239,6 +4243,12 @@ static void test_de_sequence_state_exhaustion()
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     test_send_best_effort();
     test_send_reliable_ack();
     test_send_reliable_retry();

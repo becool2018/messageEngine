@@ -51,6 +51,8 @@
 #include "core/DeliveryEngine.hpp"
 #include "core/Logger.hpp"
 #include "core/Timestamp.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
 #include "platform/TcpBackend.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -138,8 +140,7 @@ static Result send_echo_reply(DeliveryEngine& engine,
     // Send the reply via delivery engine
     Result res = engine.send(reply, now_us);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_LO, "Server",
-                    "Failed to send echo reply: result=%d\n",
+        LOG_WARN_LO("Server", "Failed to send echo reply: result=%d\n",
                     static_cast<int>(res));
     }
 
@@ -166,8 +167,7 @@ static uint16_t parse_server_port(int argc, char* const argv[])
     // SEC-020: reject if strtol set errno (overflow/underflow) or if no digits
     // were consumed (end_ptr == argv[1]) or if trailing junk follows the number.
     if (errno != 0) {
-        Logger::log(Severity::WARNING_LO, "Server",
-                    "SEC-020: strtol failed for port argument (errno=%d)", errno);
+        LOG_WARN_LO("Server", "SEC-020: strtol failed for port argument (errno=%d)", errno);
         return static_cast<uint16_t>(DEFAULT_BIND_PORT);
     }
     const int port_val = (end_ptr != argv[1] && *end_ptr == '\0')
@@ -197,8 +197,7 @@ static void run_server_iteration(DeliveryEngine& engine,
 
     if (result_ok(res) && envelope_is_data(received)) {
         ++messages_received;
-        Logger::log(Severity::INFO, "Server",
-                    "Received msg#%llu from node %u, len %u: ",
+        LOG_INFO("Server", "Received msg#%llu from node %u, len %u: ",
                     static_cast<unsigned long long>(received.message_id),
                     static_cast<unsigned>(received.source_id),
                     received.payload_length);
@@ -212,13 +211,12 @@ static void run_server_iteration(DeliveryEngine& engine,
 
     uint32_t retried = engine.pump_retries(now_us);
     if (retried > 0U) {
-        Logger::log(Severity::INFO, "Server", "Retried %u message(s)\n", retried);
+        LOG_INFO("Server", "Retried %u message(s)\n", retried);
     }
 
     uint32_t ack_timeouts = engine.sweep_ack_timeouts(now_us);
     if (ack_timeouts > 0U) {
-        Logger::log(Severity::WARNING_HI, "Server",
-                    "Detected %u ACK timeout(s)\n", ack_timeouts);
+        LOG_WARN_HI("Server", "Detected %u ACK timeout(s)\n", ack_timeouts);
     }
 }
 
@@ -230,8 +228,13 @@ int main(int argc, char* argv[])
     NEVER_COMPILED_OUT_ASSERT(argv != nullptr);  // Assert: argv must not be null
     NEVER_COMPILED_OUT_ASSERT(argc >= 1);        // Assert: argc must be at least 1
 
+    // Initialize logger with POSIX clock and sink before any LOG_* call.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     uint16_t bind_port = parse_server_port(argc, argv);
-    Logger::log(Severity::INFO, "Server", "Starting TCP server on port %u\n", bind_port);
+    LOG_INFO("Server", "Starting TCP server on port %u\n", bind_port);
 
     // ─────────────────────────────────────────────────────────────────────────
     // Configure transport and channel
@@ -262,18 +265,18 @@ int main(int argc, char* argv[])
     TcpBackend transport;
     Result res = transport.init(cfg);
     if (!result_ok(res)) {
-        Logger::log(Severity::FATAL, "Server", "Failed to init TcpBackend: result=%d\n",
+        LOG_FATAL("Server", "Failed to init TcpBackend: result=%d\n",
                     static_cast<int>(res));
         return 1;
     }
-    Logger::log(Severity::INFO, "Server", "TcpBackend initialized\n");
+    LOG_INFO("Server", "TcpBackend initialized\n");
 
     // ─────────────────────────────────────────────────────────────────────────
     // Initialize delivery engine
     // ─────────────────────────────────────────────────────────────────────────
     DeliveryEngine engine;
     engine.init(&transport, cfg.channels[0], LOCAL_SERVER_NODE_ID);
-    Logger::log(Severity::INFO, "Server", "DeliveryEngine initialized\n");
+    LOG_INFO("Server", "DeliveryEngine initialized\n");
 
     // ─────────────────────────────────────────────────────────────────────────
     // Install signal handler
@@ -285,14 +288,14 @@ int main(int argc, char* argv[])
     // ─────────────────────────────────────────────────────────────────────────
     // Main receive/echo loop (Power of 10 rule 2: fixed bound)
     // ─────────────────────────────────────────────────────────────────────────
-    Logger::log(Severity::INFO, "Server", "Entering main loop. Press Ctrl+C to exit.\n");
+    LOG_INFO("Server", "Entering main loop. Press Ctrl+C to exit.\n");
 
     uint32_t messages_received = 0U;
     uint32_t messages_sent     = 0U;
 
     for (int iter = 0; iter < MAX_LOOP_ITERS; ++iter) {
         if (g_stop_flag != 0) {
-            Logger::log(Severity::INFO, "Server", "Stop flag set; exiting loop\n");
+            LOG_INFO("Server", "Stop flag set; exiting loop\n");
             break;
         }
         run_server_iteration(engine, messages_received, messages_sent);
@@ -302,8 +305,7 @@ int main(int argc, char* argv[])
     // Cleanup
     // ─────────────────────────────────────────────────────────────────────────
     transport.close();
-    Logger::log(Severity::INFO, "Server",
-                "Server stopped. Messages received: %u, sent: %u\n",
+    LOG_INFO("Server", "Server stopped. Messages received: %u, sent: %u\n",
                 messages_received, messages_sent);
     (void)signal(SIGINT, old_handler);
 

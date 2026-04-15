@@ -20,7 +20,7 @@ RELEASE ?= 0
 ifeq ($(RELEASE),1)
 RELEASE_CXXFLAGS := -O2 -D_FORTIFY_SOURCE=2
 else
-RELEASE_CXXFLAGS :=
+RELEASE_CXXFLAGS := -g -O0
 endif
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -84,6 +84,23 @@ LLVM_COV     := $(if $(LLVM_BIN),$(LLVM_BIN)/llvm-cov,llvm-cov)
 # Compiler
 CXX       ?= g++
 
+# Detect compiler family to handle ##__VA_ARGS__ zero-arg extension.
+# Clang: -Wpedantic + -Wno-gnu-zero-variadic-macro-arguments suppresses just
+#   the GNU-extension warning while keeping all other pedantic checks.
+# GCC:   -Wpedantic has no subcategory flag for the zero-arg ##__VA_ARGS__
+#   warning; the only option is to omit -Wpedantic on GCC builds.
+#   -Wno-variadic-macros is kept on GCC to silence the non-pedantic form.
+CXX_IS_CLANG := $(findstring clang,$(shell $(CXX) --version 2>/dev/null))
+ifeq ($(CXX_IS_CLANG),)
+  # GCC path: no -Wpedantic, suppress variadic-macros warning non-pedantically
+  PEDANTIC_FLAG        :=
+  VARIADIC_MACROS_FLAG := -Wno-variadic-macros
+else
+  # Clang path: keep -Wpedantic, suppress just the GNU ##__VA_ARGS__ extension
+  PEDANTIC_FLAG        := -Wpedantic
+  VARIADIC_MACROS_FLAG := -Wno-gnu-zero-variadic-macro-arguments
+endif
+
 ifeq ($(TLS),1)
 # mbedTLS include/lib discovery:
 # 1) Prefer pkg-config when available (Linux distros, some macOS setups)
@@ -116,10 +133,11 @@ endif
 
 # Include path: do NOT hardcode /opt/homebrew/include by default
 CXXFLAGS  := -std=c++17 -fno-exceptions -fno-rtti \
-             -Wall -Wextra -Wpedantic -Werror \
+             -Wall -Wextra $(PEDANTIC_FLAG) -Werror \
              -Wshadow -Wconversion -Wsign-conversion \
              -Wcast-align -Wformat=2 -Wnull-dereference \
              -Wdouble-promotion -Wno-unknown-pragmas \
+             $(VARIADIC_MACROS_FLAG) \
              -fstack-protector-strong -fPIE \
              $(RELEASE_CXXFLAGS) \
              -Isrc $(MBEDTLS_CFLAGS) -g \
@@ -133,6 +151,18 @@ CXXFLAGS  := -std=c++17 -fno-exceptions -fno-rtti \
 ifneq ($(TLS),1)
 # TLS=0: tell all translation units that TLS/DTLS APIs are compiled out.
 CXXFLAGS += -DMESSAGEENGINE_NO_TLS
+# SEC: warn if TLS is disabled in a release build — this is not suitable for
+# production deployments. An operator must explicitly suppress this warning
+# (ALLOW_TLS_DISABLED_RELEASE=1) to confirm the opt-out is intentional.
+ifeq ($(RELEASE),1)
+ifneq ($(ALLOW_TLS_DISABLED_RELEASE),1)
+$(info )
+$(info WARNING: TLS=0 with RELEASE=1 — TLS/DTLS backends are compiled out.)
+$(info          This build is NOT suitable for production use without TLS.)
+$(info          To suppress: make RELEASE=1 TLS=0 ALLOW_TLS_DISABLED_RELEASE=1)
+$(info )
+endif
+endif
 endif
 
 # mbedTLS linking (portable default). Users can override.
@@ -181,6 +211,7 @@ endif
 # Source groups
 # ─────────────────────────────────────────────────────────────────────────────
 CORE_SRC := \
+    src/core/Logger.cpp \
     src/core/Serializer.cpp \
     src/core/MessageId.cpp \
     src/core/Timestamp.cpp \
@@ -195,6 +226,8 @@ CORE_SRC := \
     src/core/OrderingBuffer.cpp
 
 PLATFORM_SRC := \
+    src/platform/PosixLogClock.cpp \
+    src/platform/PosixLogSink.cpp \
     src/platform/PrngEngine.cpp \
     src/platform/ImpairmentEngine.cpp \
     src/platform/ImpairmentConfigLoader.cpp \
@@ -221,8 +254,8 @@ ALL_LIB_SRC := $(CORE_SRC) $(PLATFORM_SRC)
 # Used by: tests, sanitize_tests, run_tests, run_sanitize.
 # ─────────────────────────────────────────────────────────────────────────────
 ifeq ($(TLS),1)
-RUN_TESTS_FOOTER    := === ALL TESTS PASSED (23/23) ===
-RUN_SANITIZE_FOOTER := === SANITIZER TESTS PASSED (23/23) ===
+RUN_TESTS_FOOTER    := === ALL TESTS PASSED (24/24) ===
+RUN_SANITIZE_FOOTER := === SANITIZER TESTS PASSED (24/24) ===
 TLS_TEST_BINS  := build/test_TlsTcpBackend build/test_DtlsUdpBackend
 TLS_SAN_BINS   := build/san/test_TlsTcpBackend build/san/test_DtlsUdpBackend
 TLS_TEST_NAMES := TlsTcpBackend DtlsUdpBackend
@@ -232,8 +265,8 @@ TLS_LINT_EXCL_TEST :=
 # cppcheck: no -i exclusions needed when TLS=1.
 CPPCHECK_TLS_EXCL  :=
 else
-RUN_TESTS_FOOTER    := === ALL TESTS PASSED (21/23 — TLS=0: test_TlsTcpBackend + test_DtlsUdpBackend skipped) ===
-RUN_SANITIZE_FOOTER := === SANITIZER TESTS PASSED (21/23 — TLS=0: test_TlsTcpBackend + test_DtlsUdpBackend skipped) ===
+RUN_TESTS_FOOTER    := === ALL TESTS PASSED (22/24 — TLS=0: test_TlsTcpBackend + test_DtlsUdpBackend skipped) ===
+RUN_SANITIZE_FOOTER := === SANITIZER TESTS PASSED (22/24 — TLS=0: test_TlsTcpBackend + test_DtlsUdpBackend skipped) ===
 TLS_TEST_BINS  :=
 TLS_SAN_BINS   :=
 TLS_TEST_NAMES :=
@@ -399,7 +432,7 @@ help:
 	@echo "  clean               Remove all build artifacts"
 	@echo ""
 	@echo "Test:"
-	@echo "  tests               Build all 23 unit test binaries"
+	@echo "  tests               Build all 24 unit test binaries"
 	@echo "  run_tests           Build and run the full unit test suite"
 	@echo "  stress_tests         Build all stress tests (capacity, e2e, ordering)"
 	@echo "  run_stress_tests     Build and run all stress tests (STRESS_DURATION=60)"
@@ -480,7 +513,8 @@ tests: \
     build/test_ReassemblyBuffer \
     build/test_OrderingBuffer \
     build/test_PrngEngine \
-    build/test_RingBuffer
+    build/test_RingBuffer \
+    build/test_Logger
 
 build/test_%: $(ALL_LIB_OBJS) build/objs/tests/test_%.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
@@ -595,7 +629,8 @@ sanitize_tests: \
     build/san/test_ReassemblyBuffer \
     build/san/test_OrderingBuffer \
     build/san/test_PrngEngine \
-    build/san/test_RingBuffer
+    build/san/test_RingBuffer \
+    build/san/test_Logger
 
 run_sanitize: sanitize_tests
 	@echo "=== Sanitizer tests: ASan + UBSan ($(if $(SAN_RUN_ENV),$(SAN_RUN_ENV),no LSan suppression needed)) ==="
@@ -622,6 +657,7 @@ run_sanitize: sanitize_tests
 	@$(SAN_RUN_ENV) build/san/test_OrderingBuffer
 	@$(SAN_RUN_ENV) build/san/test_PrngEngine
 	@$(SAN_RUN_ENV) build/san/test_RingBuffer
+	@$(SAN_RUN_ENV) build/san/test_Logger
 	@echo "$(RUN_SANITIZE_FOOTER)"
 
 build/san/test_%: $(SAN_LIB_OBJS) $(SAN_OBJ_DIR)/tests/test_%.o
@@ -814,7 +850,7 @@ COV_CXXFLAGS  := $(filter-out -Werror,$(CXXFLAGS)) \
                  -fprofile-instr-generate -fcoverage-mapping -O0
 COV_LDFLAGS   := -fprofile-instr-generate $(LDFLAGS)
 COV_LIB_OBJS  := $(patsubst src/%.cpp,$(COV_OBJ_DIR)/%.o,$(ALL_LIB_SRC))
-TEST_NAMES_BASE := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader TcpBackend UdpBackend SocketUtils AssertState MessageId Timestamp RequestReplyEngine Fragmentation ReassemblyBuffer OrderingBuffer RingBuffer PrngEngine
+TEST_NAMES_BASE := MessageEnvelope Serializer DuplicateFilter ImpairmentEngine LocalSim AckTracker RetryManager DeliveryEngine ImpairmentConfigLoader TcpBackend UdpBackend SocketUtils AssertState MessageId Timestamp RequestReplyEngine Fragmentation ReassemblyBuffer OrderingBuffer RingBuffer PrngEngine Logger
 TEST_NAMES      := $(TEST_NAMES_BASE) $(TLS_TEST_NAMES)
 
 # TLS-conditional profraw and object-flag fragments for llvm-profdata / llvm-cov.
@@ -870,6 +906,7 @@ coverage: $(COV_TESTS)
 	@LLVM_PROFILE_FILE="build/cov/OrderingBuffer.profraw" build/cov_test_OrderingBuffer >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/RingBuffer.profraw"  build/cov_test_RingBuffer    >/dev/null 2>&1
 	@LLVM_PROFILE_FILE="build/cov/PrngEngine.profraw"  build/cov_test_PrngEngine    >/dev/null 2>&1
+	@LLVM_PROFILE_FILE="build/cov/Logger.profraw"      build/cov_test_Logger        >/dev/null 2>&1
 	@$(LLVM_PROFDATA) merge -sparse \
 	    build/cov/MessageEnvelope.profraw \
 	    build/cov/Serializer.profraw \
@@ -893,6 +930,7 @@ coverage: $(COV_TESTS)
 	    build/cov/OrderingBuffer.profraw \
 	    build/cov/RingBuffer.profraw \
 	    build/cov/PrngEngine.profraw \
+	    build/cov/Logger.profraw \
 	    -o build/cov/merged.profdata
 	@echo "=== Coverage Report (src/ only) ==="
 	@$(LLVM_COV) report \
@@ -919,6 +957,7 @@ coverage: $(COV_TESTS)
 	    -object build/cov_test_OrderingBuffer \
 	    -object build/cov_test_RingBuffer \
 	    -object build/cov_test_PrngEngine \
+	    -object build/cov_test_Logger \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "Policy (CLAUDE.md §12): SC functions require >= branch coverage."
@@ -990,6 +1029,7 @@ coverage_report: coverage
 	    -object build/cov_test_OrderingBuffer \
 	    -object build/cov_test_RingBuffer \
 	    -object build/cov_test_PrngEngine \
+	    -object build/cov_test_Logger \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "--- Per-function detail ---"
@@ -1018,6 +1058,7 @@ coverage_report: coverage
 	    -object build/cov_test_OrderingBuffer \
 	    -object build/cov_test_RingBuffer \
 	    -object build/cov_test_PrngEngine \
+	    -object build/cov_test_Logger \
 	    $(CORE_SRC) $(PLATFORM_SRC)
 	@echo ""
 	@echo "--- Policy compliance (CLAUDE.md §14) ---"
@@ -1222,4 +1263,5 @@ run_tests: tests
 	@echo "=== test_OrderingBuffer ==="; build/test_OrderingBuffer
 	@echo "=== test_PrngEngine ==="; build/test_PrngEngine
 	@echo "=== test_RingBuffer ==="; build/test_RingBuffer
+	@echo "=== test_Logger ==="; build/test_Logger
 	@echo "$(RUN_TESTS_FOOTER)"

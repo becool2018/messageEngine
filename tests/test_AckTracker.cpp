@@ -35,6 +35,10 @@
 #include "core/Types.hpp"
 #include "core/MessageEnvelope.hpp"
 #include "core/AckTracker.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: build a minimal valid test envelope
@@ -669,6 +673,12 @@ static void test_sweep_expired_backward_timestamp()
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     test_init();
     test_track_ok();
     test_track_full();

@@ -1635,3 +1635,86 @@ Implements the three remaining SEC_REPORT.txt security items:
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-04-12. No defects found during inspection. All entry and exit criteria satisfied. `make lint`, `make run_tests`, and `make check_traceability` all PASS. REQ-6.1.12 / REQ-5.2.6 / REQ-6.2.5 (H-5/H-6/H-7) fully implemented with M1+M2+M4+M5 verification. HELLO timeout verified by real-socket tests in both TcpBackend and TlsTcpBackend. All SEC_REPORT.txt security items now resolved. Inspection INSP-028 closed PASS.
+
+---
+
+### INSP-029 — Logger infrastructure: injectable clock/sink, _WALL variants, Class B M4+M5 verification (REQ-7.1.1, REQ-7.1.2, REQ-7.1.3, REQ-7.1.4, REQ-7.2.1)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-15 |
+| Author      | Claude Sonnet 4.6 (AI-assisted) |
+| Moderator   | Don Jessup |
+| Reviewer    | Don Jessup |
+| Branch      | feat/optional-tls-build-2026-04 |
+| Scope       | src/core/ILogSink.hpp, src/core/ILogClock.hpp, src/core/Logger.hpp, src/core/Logger.cpp, src/platform/PosixLogSink.hpp, src/platform/PosixLogSink.cpp, src/platform/PosixLogClock.hpp, src/platform/PosixLogClock.cpp; tests/test_Logger.cpp, tests/FakeLogClock.hpp, tests/RingLogSink.hpp, tests/FaultPosixLogSink.hpp, tests/FaultPosixLogClock.hpp; docs/COVERAGE_CEILINGS.md, docs/STACK_ANALYSIS.md; Makefile |
+
+#### Summary of change
+
+Refactors Logger from an inline header-only facility into a full injectable-clock/sink
+architecture, adding wall-clock `_WALL` macro variants and achieving Class B (M1+M2+M4+M5)
+verification on all new files.
+
+**New production files:**
+- `src/core/ILogSink.hpp` — pure-virtual write interface; no branches; trivially M4-compliant.
+- `src/core/ILogClock.hpp` — pure-virtual clock/TID interface; no branches; trivially M4-compliant.
+- `src/core/Logger.cpp` — `Logger::init()`, `Logger::log()`, `Logger::log_wall()`,
+  `Logger::severity_tag()`; injectable `ILogClock*` + `ILogSink*`; 5 `NEVER_COMPILED_OUT_ASSERT`
+  guards per logging function. Branch coverage: 70.31% (45/64 reachable; 19 permanently-missed
+  per d-i + d-iii ceiling — see COVERAGE_CEILINGS.md §Logger.cpp).
+- `src/platform/PosixLogSink.hpp/.cpp` — NVI seam (`do_write` virtual); `instance()` singleton.
+  Branch coverage: 75.00% (3/4; 1 missed = d-iii static-init guard in `instance()`).
+- `src/platform/PosixLogClock.hpp/.cpp` — NVI seam (`do_clock_gettime` virtual); `instance()` singleton.
+  Branch coverage: 100.00% (4/4).
+
+**New test doubles:**
+- `tests/FakeLogClock.hpp` — settable wall/monotonic/tid returns; exercises all clock paths.
+- `tests/RingLogSink.hpp` — fixed-capacity ring capture for output verification.
+- `tests/FaultPosixLogSink.hpp` — `PosixLogSink` subclass overriding `do_write()` to inject
+  `write(2)` failures (M5 seam for PosixLogSink).
+- `tests/FaultPosixLogClock.hpp` — `PosixLogClock` subclass overriding `do_clock_gettime()` to
+  inject `clock_gettime` failures (M5 seam for PosixLogClock).
+
+**Test file:** `tests/test_Logger.cpp` — 24 tests (T-1 through T-6 + `_WALL` variants).
+Header carries `// Verification: M1 + M2 + M4 + M5 (fault injection via ILogClock, ILogSink)`.
+
+**Makefile:** `Logger` added to `TEST_NAMES_BASE` and to all profraw run/merge/object lists in
+the `coverage`, `coverage_show`, and `coverage_report` targets (was absent — caused Logger tests
+to be excluded from coverage accounting).
+
+**docs/COVERAGE_CEILINGS.md:** Three TBD rows replaced with measured values (Logger.cpp ≥70%,
+PosixLogClock.cpp ≥100%, PosixLogSink.cpp ≥75%). Ceiling arguments documented for all
+permanently-missed branches.
+
+**M4 compliance note for ILogSink.hpp and ILogClock.hpp:**
+Both files are pure-virtual interface declarations with no function bodies, no conditional
+branches, and no executable statements beyond the virtual destructor `= default`. LLVM
+source-based coverage reports 0 branches in each file. M4 (branch coverage) is trivially
+satisfied: there are no reachable branches to cover. This is confirmed by `make coverage` —
+neither file appears in the per-file branch table because the coverage tool finds nothing to
+instrument. This note closes the Class B documentation gap identified during post-implementation
+review (2026-04-15).
+
+#### Entry criteria
+
+| Criterion | Status |
+|-----------|--------|
+| `make` passes with zero warnings and zero errors | PASS |
+| `make lint` passes with zero clang-tidy violations | PASS |
+| `make run_tests` all tests green (24/24 Logger + all prior) | PASS |
+| `make check_traceability` RESULT: PASS | PASS |
+| All new/modified `src/` files carry `// Implements:` tags | PASS |
+| All new/modified `tests/` files carry `// Verifies:` tags | PASS |
+| No raw `assert()` in `src/` — `NEVER_COMPILED_OUT_ASSERT` used throughout | PASS |
+| No dynamic allocation on critical paths after init (Power of 10 Rule 3) | PASS |
+
+#### Defects found
+
+| ID | File : function | Description | Severity | Status | Disposition |
+|----|----------------|-------------|----------|--------|-------------|
+| D-029-1 | Makefile : coverage target | `Logger` absent from `TEST_NAMES_BASE` and all profraw run/merge/object lists — Logger tests excluded from coverage accounting; reported thresholds understated | MAJOR | FIXED | Added `Logger` to all six required locations in Makefile; re-ran `make coverage` to confirm correct thresholds (Logger.cpp 70.31%, PosixLogClock.cpp 100%, PosixLogSink.cpp 75%). |
+| D-029-2 | docs/DEFECT_LOG.md, docs/COVERAGE_CEILINGS.md | M4 compliance of `ILogSink.hpp` and `ILogClock.hpp` not documented — pure-virtual interfaces have trivially 0 branches but this was not confirmed in the inspection record | MINOR | FIXED | Added explicit M4 compliance note in INSP-029 summary (this entry). COVERAGE_CEILINGS.md ceiling sections reference both files by name confirming zero-branch status. |
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-15. Two defects found and fixed during inspection (D-029-1 MAJOR, D-029-2 MINOR). All entry and exit criteria satisfied after fixes. `make lint`, `make run_tests` (24/24 Logger tests + all prior), and `make check_traceability` all PASS. `make coverage` confirms: Logger.cpp 70.31% (45/64 reachable branches; 19 permanently-missed per d-i + d-iii ceiling), PosixLogClock.cpp 100%, PosixLogSink.cpp 75%. REQ-7.1.1 through REQ-7.2.1 fully implemented with M1+M2+M4+M5 verification. ILogSink.hpp and ILogClock.hpp M4 compliance confirmed (0 branches — trivially satisfied). Inspection INSP-029 closed PASS.

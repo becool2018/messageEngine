@@ -41,6 +41,10 @@
 #include "core/Types.hpp"
 #include "core/MessageEnvelope.hpp"
 #include "core/OrderingBuffer.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: build an ordered DATA envelope with given sequence_num
@@ -888,6 +892,12 @@ static bool test_reset_peer_unknown_src()
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     int failed = 0;
 
     if (!test_ordering_in_sequence()) {

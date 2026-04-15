@@ -72,6 +72,10 @@
 #include "platform/IPosixSyscalls.hpp"
 #include "platform/PosixSyscallsImpl.hpp"
 #include "TestPortAllocator.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Loopback address and base port
@@ -1889,6 +1893,12 @@ static void test_send_all_timeout_ms_clamped()
 
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     printf("=== test_SocketUtils ===\n");
 
     test_create_tcp();

@@ -14,15 +14,42 @@
 
 /**
  * @file Logger.hpp
- * @brief Minimal, dependency-free logging facility.
+ * @brief Logger facility with injectable clock and sink interfaces.
  *
- * Writes to stderr with a severity prefix.  No heap allocation, no
- * function pointers, no STL.  Inline so it can be used from any layer.
+ * Provides structured log output with monotonic timestamps, wall-clock
+ * variants, PID, TID, severity, module, file, and line metadata. All POSIX
+ * calls are confined to src/platform (ILogClock, ILogSink implementations).
+ * Logger.hpp includes no POSIX headers.
+ *
+ * Usage — preferred: use the LOG_* macros which inject file/line automatically.
+ *
+ *   LOG_INFO("MyModule",   "connected peer=%u slot=%u", peer_id, slot);
+ *   LOG_WARN_HI("AckTracker", "ack timeout mid=0x%08x retry=%u", msg.id, n);
+ *   LOG_FATAL("Transport", "unrecoverable error");
+ *   LOG_INFO_WALL("TcpBackend", "session established peer=%u", id);
+ *
+ * Message-context convention (keeps output grep-friendly):
+ *   Embed message-specific fields using short key=value pairs in the format
+ *   string. Examples:
+ *     LOG_INFO("DeliveryEngine", "send ok mid=0x%08x peer=%u chan=%u", ...);
+ *     LOG_WARN_HI("AckTracker",  "ack timeout mid=0x%08x retry=%u", ...);
+ *     LOG_INFO("TcpBackend",     "connected peer=%u slot=%u", ...);
+ *   Cross-component correlation: grep 'mid=0x000012ab' traces a single message
+ *   through the full send→impair→receive pipeline across all modules.
+ *
+ * Standard log format (LOG_INFO, LOG_WARN_*, LOG_FATAL):
+ *   [mono_sec.mono_us][pid][severity][tid][module][file:line] message
+ *
+ * Wall variant format (LOG_INFO_WALL, LOG_WARN_*_WALL, LOG_FATAL_WALL):
+ *   [wall_sec.wall_us][mono_sec.mono_us][pid][severity][tid][module][file:line] message
  *
  * Rules applied:
- *   - Power of 10 rule 8: no macros for control flow.
+ *   - Power of 10 rule 8: macros expand to a single function call, no control flow.
+ *     ##__VA_ARGS__ extension documented below.
+ *   - Power of 10 Rule 9: virtual dispatch via ILogSink/ILogClock vtables —
+ *     the approved mechanism. No explicit function pointers.
  *   - F-Prime style: no exceptions, no STL.
- *   - MISRA Dir 4.9: prefer inline functions over macros.
+ *   - Layering: no POSIX headers included; all POSIX calls in src/platform.
  *
  * Implements: REQ-7.1.1, REQ-7.1.2, REQ-7.1.3, REQ-7.1.4
  *
@@ -35,68 +62,142 @@
 #ifndef CORE_LOGGER_HPP
 #define CORE_LOGGER_HPP
 
-#include <cstdio>
 #include <cstdarg>
 #include "Types.hpp"
+#include "ILogClock.hpp"
+#include "ILogSink.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Maximum log-line length (fixed buffer; no dynamic allocation)
+// Buffer size constants (fixed stack allocation; no dynamic allocation).
+// 512U matches the old LOG_LINE_MAX — no net stack increase from prior code.
+// Any change requires a STACK_ANALYSIS.md update per CLAUDE.md §15.
 // ─────────────────────────────────────────────────────────────────────────────
-static const int LOG_LINE_MAX = 512;
 
 class Logger {
 public:
-    /// Write a formatted log line to stderr.
+    // ─────────────────────────────────────────────────────────────────────
+    // Buffer size constants (static constexpr; shared with Logger.cpp via
+    // the class definition — no linker ODR risk).
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Total stack-allocated format buffer: header + caller message body.
+    /// 512U matches the existing LOG_LINE_MAX — no net stack increase.
+    static constexpr uint32_t LOG_FORMAT_BUF_SIZE = 512U;
+
+    /// Standard header reservation (mono ts + pid + severity + tid + module +
+    /// file:line + delimiters). Measured worst case ~100 bytes; 120U provides
+    /// headroom for long module/file names.
+    static constexpr uint32_t LOG_HEADER_MAX_SIZE = 120U;
+
+    /// Wall-variant header adds one wall-clock field (~20 bytes worst case).
+    static constexpr uint32_t LOG_HEADER_WALL_MAX_SIZE = 140U;
+
+    /// Minimum space guaranteed for the caller's message body (standard).
+    static constexpr uint32_t LOG_MSG_MAX_SIZE = LOG_FORMAT_BUF_SIZE - LOG_HEADER_MAX_SIZE;
+
+    /// Minimum space guaranteed for the caller's message body (wall variant).
+    static constexpr uint32_t LOG_MSG_WALL_MAX_SIZE = LOG_FORMAT_BUF_SIZE - LOG_HEADER_WALL_MAX_SIZE;
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Initialization
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Initialize the logger. Must be called once before any log() or log_wall()
+    /// call. Stores clock, sink, and min_level; captures getpid() into s_pid.
+    /// Returns ERR_INVALID if clock or sink is nullptr.
+    ///
+    /// SECURITY: clock and sink must be trusted, application-controlled
+    /// components. Logger performs no integrity verification of the supplied
+    /// implementations. A malicious or compromised sink could exfiltrate all
+    /// log output; a malicious clock could corrupt timestamps. Never accept
+    /// clock or sink pointers from untrusted input (network data, plugins,
+    /// or dynamically loaded modules without integrity verification).
+    static Result init(Severity min_level, ILogClock* clock, ILogSink* sink);
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Logging functions (called via LOG_* macros; not directly in src/)
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Emit a structured log line with monotonic timestamp.
+    /// Format: [mono_sec.mono_us][pid][sev][tid][module][file:line] message
     ///
     /// __attribute__((format)) is a GCC/Clang extension used here as a
-    /// documented, minimal deviation: it is a pure type-safety annotation
-    /// (no control flow, no allocation), it tells the compiler that `fmt`
-    /// is a printf-style format string so -Wformat-nonliteral is suppressed
-    /// at the vsnprintf call site, and it enables compile-time format/argument
-    /// checking at every call site.  This is more compliant, not less.
+    /// documented, minimal deviation: it enables compile-time format/argument
+    /// checking at every call site and suppresses -Wformat-nonliteral at the
+    /// vsnprintf call site. More compliant, not less.
     // NOLINTNEXTLINE(readability-non-const-parameter)  -- va_list requires non-const
-    static void log(Severity sev, const char* module, const char* fmt, ...)
-        __attribute__((format(printf, 3, 4)))
-    {
-        const char* tag = severity_tag(sev);
-        char buf[LOG_LINE_MAX];
+    static void log(Severity sev,
+                    const char* file,
+                    int line,
+                    const char* module,
+                    const char* fmt, ...)
+        __attribute__((format(printf, 5, 6)));
 
-        // Power of 10: bounds-checked write, return value checked
-        int hdr = snprintf(buf, static_cast<size_t>(LOG_LINE_MAX),
-                           "[%s][%s] ", tag, module);
-        // F-1 / CERT INT31-C: snprintf returns the would-be length on truncation,
-        // not the actual written length. Guard both the error case (< 0) and the
-        // truncation case (>= LOG_LINE_MAX). Without the truncation guard, hdr is
-        // used as a pointer offset (buf + hdr → past end-of-buffer) and as the
-        // subtrahend in static_cast<size_t>(LOG_LINE_MAX - hdr), which wraps to a
-        // huge size_t, eliminating all bounds protection from the vsnprintf call.
-        if (hdr < 0 || hdr >= LOG_LINE_MAX) { return; }
-
-        va_list args;
-        va_start(args, fmt);
-        // Power of 10: bounded vsnprintf
-        int body = vsnprintf(buf + hdr,
-                             static_cast<size_t>(LOG_LINE_MAX - hdr),
-                             fmt, args);
-        va_end(args);
-        if (body < 0) { return; }
-
-        (void)fprintf(stderr, "%s\n", buf);
-    }
+    /// Emit a structured log line with wall clock + monotonic timestamp.
+    /// Format: [wall_sec.wall_us][mono_sec.mono_us][pid][sev][tid][module][file:line] message
+    // NOLINTNEXTLINE(readability-non-const-parameter)  -- va_list requires non-const
+    static void log_wall(Severity sev,
+                         const char* file,
+                         int line,
+                         const char* module,
+                         const char* fmt, ...)
+        __attribute__((format(printf, 5, 6)));
 
 private:
     Logger() {}  // not instantiable
 
-    static const char* severity_tag(Severity sev)
-    {
-        switch (sev) {
-            case Severity::INFO:       return "INFO    ";
-            case Severity::WARNING_LO: return "WARN_LO ";
-            case Severity::WARNING_HI: return "WARN_HI ";
-            case Severity::FATAL:      return "FATAL   ";
-            default:                   return "UNKNOWN ";
-        }
-    }
+    static const char* severity_tag(Severity sev);
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LOG_FILE — compile-time basename stripping.
+//
+// Strips the directory prefix from __FILE__ at compile time via pointer
+// arithmetic on the string literal. Zero runtime cost. Reduces .rodata size
+// on constrained (bare-metal) targets.
+// __builtin_strrchr is evaluated at compile time for string literals by GCC/Clang.
+//
+// MISRA C++:2023 Rule 19.3.4 deviation: __builtin_strrchr is a GCC/Clang
+// built-in used for compile-time string processing — no ISO C++17 mechanism
+// achieves the same zero-runtime-cost result. This project targets GCC/Clang
+// on POSIX only; portability to non-GCC toolchains is not required. Reviewed
+// and accepted per deviation policy.
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LOG_FILE \
+    (__builtin_strrchr(__FILE__, '/') \
+        ? __builtin_strrchr(__FILE__, '/') + 1 \
+        : __FILE__)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LOG_* macros — metadata-injecting wrappers for Logger::log / Logger::log_wall.
+//
+// MISRA C++:2023 Rule 19.3.4 deviation: ##__VA_ARGS__ is a GCC/Clang extension
+// used solely to suppress the trailing comma when no variadic arguments are
+// supplied. No ISO C++17 standard mechanism achieves the same effect without
+// adding a dummy argument or a second overload macro. This project targets
+// GCC/Clang on POSIX only; portability to non-GCC toolchains is not required.
+// Reviewed and accepted by project moderator per deviation policy.
+//
+// Standard macros — monotonic timestamp only in header.
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LOG_INFO(mod, fmt, ...)         Logger::log(Severity::INFO,       LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LOG_WARN_LO(mod, fmt, ...)      Logger::log(Severity::WARNING_LO, LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LOG_WARN_HI(mod, fmt, ...)      Logger::log(Severity::WARNING_HI, LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LOG_FATAL(mod, fmt, ...)        Logger::log(Severity::FATAL,      LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+
+// Wall-clock variants — wall timestamp prepended before monotonic.
+// Use when absolute time correlation with external systems is needed
+// (e.g., connection establishment, partition events, fatal errors).
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LOG_INFO_WALL(mod, fmt, ...)    Logger::log_wall(Severity::INFO,       LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LOG_WARN_LO_WALL(mod, fmt, ...) Logger::log_wall(Severity::WARNING_LO, LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LOG_WARN_HI_WALL(mod, fmt, ...) Logger::log_wall(Severity::WARNING_HI, LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
+#define LOG_FATAL_WALL(mod, fmt, ...)   Logger::log_wall(Severity::FATAL,      LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
 
 #endif // CORE_LOGGER_HPP

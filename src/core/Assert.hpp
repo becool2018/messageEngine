@@ -68,7 +68,8 @@
 #define NEVER_COMPILED_OUT_ASSERT(cond)                                           \
     do {                                                                           \
         if (!(cond)) { /* NOLINT(readability-simplify-boolean-expr) */            \
-            Logger::log(Severity::FATAL, "Assert",                                \
+            Logger::log(Severity::FATAL, __FILE__, static_cast<int>(__LINE__),    \
+                        "Assert",                                                  \
                         "Assertion failed: (%s) at %s:%d",                        \
                         #cond, __FILE__, static_cast<int>(__LINE__));             \
             IResetHandler* h_ = assert_state::get_reset_handler();                \
@@ -100,7 +101,8 @@
 #define NEVER_COMPILED_OUT_ASSERT(cond)                                           \
     do {                                                                           \
         if (!(cond)) { /* NOLINT(readability-simplify-boolean-expr) */            \
-            Logger::log(Severity::FATAL, "Assert",                                \
+            Logger::log(Severity::FATAL, __FILE__, static_cast<int>(__LINE__),    \
+                        "Assert",                                                  \
                         "Assertion failed: (%s) at %s:%d",                        \
                         #cond, __FILE__, static_cast<int>(__LINE__));             \
             ::abort();                                                             \

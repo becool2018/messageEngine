@@ -77,6 +77,10 @@
 #endif
 #include <mbedtls/psa_util.h>
 #include <psa/crypto.h>
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Embedded PEM test credentials (self-signed EC P-256, 10-year validity)
@@ -6614,6 +6618,12 @@ static void test_l1_hello_timeout_evicts_slot_plaintext()
 
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     init_pem_paths();
     write_pem_files();
 

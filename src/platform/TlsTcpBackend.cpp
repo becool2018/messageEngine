@@ -105,7 +105,7 @@ static void log_mbedtls_err(const char* tag, const char* func, int ret)
     char err_buf[128];
     (void)memset(err_buf, 0, sizeof(err_buf));
     mbedtls_strerror(ret, err_buf, sizeof(err_buf) - 1U);
-    Logger::log(Severity::WARNING_HI, tag, "%s failed: -0x%04X (%s)",
+    Logger::log(Severity::WARNING_HI, __FILE__, __LINE__, tag, "%s failed: -0x%04X (%s)",
                 func, static_cast<unsigned int>(-ret), err_buf);
 }
 
@@ -122,12 +122,12 @@ static bool tls_path_is_regular_file(const char* path, const char* tag)
 
     struct stat st;
     if (lstat(path, &st) != 0) {
-        Logger::log(Severity::WARNING_HI, tag,
+        Logger::log(Severity::WARNING_HI, __FILE__, __LINE__, tag,
                     "tls_path_is_regular_file: lstat('%s') failed: %d", path, errno);
         return false;
     }
     if (!S_ISREG(st.st_mode)) {
-        Logger::log(Severity::WARNING_HI, tag,
+        Logger::log(Severity::WARNING_HI, __FILE__, __LINE__, tag,
                     "tls_path_is_regular_file: '%s' is not a regular file (mode=0%o)",
                     path, static_cast<unsigned>(st.st_mode));
         return false;
@@ -319,8 +319,7 @@ Result TlsTcpBackend::load_crl_if_configured(const TlsConfig& tls_cfg)
         // revocation checking is disabled. This may be intentional (e.g., OCSP
         // is used instead) but is logged at WARNING_HI so deployments that
         // require CRL checking can detect misconfiguration (REQ-6.3.4, §SECURITY §3).
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "verify_peer=true but crl_file is empty — CRL revocation "
+        LOG_WARN_HI("TlsTcpBackend", "verify_peer=true but crl_file is empty — CRL revocation "
                     "checking disabled (SEC-003, REQ-6.3.4)");
         return Result::OK;
     }
@@ -335,8 +334,7 @@ Result TlsTcpBackend::load_crl_if_configured(const TlsConfig& tls_cfg)
         return Result::ERR_IO;
     }
     m_crl_loaded = true;
-    Logger::log(Severity::INFO, "TlsTcpBackend",
-                "CRL loaded: %s (REQ-6.3.4)", tls_cfg.crl_file);
+    LOG_INFO("TlsTcpBackend", "CRL loaded: %s (REQ-6.3.4)", tls_cfg.crl_file);
 
     NEVER_COMPILED_OUT_ASSERT(m_crl_loaded);
     return Result::OK;
@@ -471,8 +469,7 @@ Result TlsTcpBackend::setup_tls_config(const TlsConfig& tls_cfg)
     // Power of 10 Rule 3 deviation — init-phase heap allocation inside PSA.
     psa_status_t psa_ret = m_tls_ops->crypto_init();
     if (psa_ret != PSA_SUCCESS) {
-        Logger::log(Severity::FATAL, "TlsTcpBackend",
-                    "psa_crypto_init failed: %d", static_cast<int>(psa_ret));
+        LOG_FATAL("TlsTcpBackend", "psa_crypto_init failed: %d", static_cast<int>(psa_ret));
         return Result::ERR_IO;
     }
 
@@ -518,8 +515,7 @@ Result TlsTcpBackend::setup_tls_config(const TlsConfig& tls_cfg)
     }
 #endif /* MBEDTLS_SSL_SESSION_TICKETS */
 
-    Logger::log(Severity::INFO, "TlsTcpBackend",
-                "TLS config ready: role=%s verify_peer=%d cert=%s",
+    LOG_INFO("TlsTcpBackend", "TLS config ready: role=%s verify_peer=%d cert=%s",
                 (tls_cfg.role == TlsRole::SERVER) ? "SERVER" : "CLIENT",
                 static_cast<int>(tls_cfg.verify_peer),
                 tls_cfg.cert_file);
@@ -578,8 +574,7 @@ Result TlsTcpBackend::setup_session_tickets(uint32_t lifetime_s)
         mbedtls_ssl_ticket_write,
         mbedtls_ssl_ticket_parse,
         &m_ticket_ctx);
-    Logger::log(Severity::INFO, "TlsTcpBackend",
-                "Session ticket resumption enabled (lifetime=%u s)", lifetime_s);
+    LOG_INFO("TlsTcpBackend", "Session ticket resumption enabled (lifetime=%u s)", lifetime_s);
 
     NEVER_COMPILED_OUT_ASSERT(ticket_ret == 0);
     return Result::OK;
@@ -612,8 +607,7 @@ Result TlsTcpBackend::bind_and_listen(const char* ip, uint16_t port)
     }
 
     m_open = true;
-    Logger::log(Severity::INFO, "TlsTcpBackend",
-                "Server listening on %s:%s (TLS=%s)", ip, port_str,
+    LOG_INFO("TlsTcpBackend", "Server listening on %s:%s (TLS=%s)", ip, port_str,
                 m_tls_enabled ? "ON" : "OFF");
 
     NEVER_COMPILED_OUT_ASSERT(m_listen_net.fd >= 0);
@@ -682,14 +676,12 @@ bool TlsTcpBackend::log_fs_warning_if_tls12(const char* ver)
     if (ver == nullptr) {
         // Defensive: should not occur after a successful handshake, but guard
         // against future mbedTLS API changes (F-3).
-        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                    "Unknown TLS version string (nullptr); forward-secrecy "
+        LOG_WARN_LO("TlsTcpBackend", "Unknown TLS version string (nullptr); forward-secrecy "
                     "advisory may be suppressed "
                     "(SECURITY_ASSUMPTIONS.md §13)");
     } else if (strncmp(ver, "TLSv1.2", 7U) == 0) {
         // cstring already included via <cstring> in this TU.
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "Session saved under TLS 1.2: resumed sessions do not "
+        LOG_WARN_HI("TlsTcpBackend", "Session saved under TLS 1.2: resumed sessions do not "
                     "have forward secrecy — server ticket key compromise "
                     "exposes past traffic (RFC 5077, "
                     "SECURITY_ASSUMPTIONS.md §13)");
@@ -726,11 +718,9 @@ void TlsTcpBackend::try_save_client_session()
     const int ret = m_session_store_ptr->try_save(&m_ssl[0U], *m_tls_ops);
     if (ret != 0) {
         log_mbedtls_err("TlsTcpBackend", "ssl_get_session", ret);
-        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                    "Session save failed; resumption not attempted on next connect");
+        LOG_WARN_LO("TlsTcpBackend", "Session save failed; resumption not attempted on next connect");
     } else {
-        Logger::log(Severity::INFO, "TlsTcpBackend",
-                    "TLS session saved for resumption on next connect");
+        LOG_INFO("TlsTcpBackend", "TLS session saved for resumption on next connect");
 
         // One-time forward-secrecy advisory: extracted to log_fs_warning_if_tls12()
         // to keep this function's CC ≤ 10 (SECURITY_ASSUMPTIONS.md §13).
@@ -761,11 +751,9 @@ void TlsTcpBackend::try_load_client_session()
     // handles this gracefully (returns false without calling ssl_set_session).
     const bool loaded = m_session_store_ptr->try_load(&m_ssl[0U], *m_tls_ops);
     if (!loaded) {
-        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                    "Session load skipped or failed; performing full handshake");
+        LOG_WARN_LO("TlsTcpBackend", "Session load skipped or failed; performing full handshake");
     } else {
-        Logger::log(Severity::INFO, "TlsTcpBackend",
-                    "Attempting TLS session resumption");
+        LOG_INFO("TlsTcpBackend", "Attempting TLS session resumption");
     }
 }
 
@@ -784,8 +772,7 @@ static void log_stale_ticket_warning(bool had_session, int hs_ret)
     NEVER_COMPILED_OUT_ASSERT(hs_ret != MBEDTLS_ERR_SSL_WANT_READ &&
                                hs_ret != MBEDTLS_ERR_SSL_WANT_WRITE);
     if (had_session) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "TLS handshake failed with session ticket loaded — "
+        LOG_WARN_HI("TlsTcpBackend", "TLS handshake failed with session ticket loaded — "
                     "possible stale/rejected ticket (server key rotation?); "
                     "call store.zeroize() before next init() if this recurs "
                     "(SECURITY_ASSUMPTIONS.md §13, REQ-7.1.3)");
@@ -871,8 +858,7 @@ Result TlsTcpBackend::tls_connect_handshake()
         return Result::ERR_IO;
     }
 
-    Logger::log(Severity::INFO, "TlsTcpBackend",
-                "TLS handshake complete (client): cipher=%s",
+    LOG_INFO("TlsTcpBackend", "TLS handshake complete (client): cipher=%s",
                 mbedtls_ssl_get_ciphersuite(&m_ssl[0U]));
 
     // REQ-6.3.8 / HAZ-020: if tls_require_forward_secrecy=true, reject TLS 1.2 resumptions.
@@ -926,8 +912,7 @@ Result TlsTcpBackend::connect_to_server()
     m_open                    = true;
     ++m_connections_opened;  // REQ-7.2.4: successful client connect
 
-    Logger::log(Severity::INFO, "TlsTcpBackend",
-                "Connected to %s:%s (TLS=%s)",
+    LOG_INFO("TlsTcpBackend", "Connected to %s:%s (TLS=%s)",
                 m_cfg.peer_ip, port_str, m_tls_enabled ? "ON" : "OFF");
 
     NEVER_COMPILED_OUT_ASSERT(m_client_net[0U].fd >= 0);
@@ -983,12 +968,10 @@ Result TlsTcpBackend::do_tls_server_handshake(uint32_t slot)
     ret = m_tls_ops->net_set_nonblock(&m_client_net[slot]);
     if (ret != 0) {
         // Non-fatal: Fix B-2a poll guard prevents stall (defence-in-depth).
-        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                    "set_nonblock after handshake failed: %d", ret);
+        LOG_WARN_LO("TlsTcpBackend", "set_nonblock after handshake failed: %d", ret);
     }
 
-    Logger::log(Severity::INFO, "TlsTcpBackend",
-                "TLS handshake complete (server slot %u): cipher=%s",
+    LOG_INFO("TlsTcpBackend", "TLS handshake complete (server slot %u): cipher=%s",
                 slot, mbedtls_ssl_get_ciphersuite(&m_ssl[slot]));
     return Result::OK;
 }
@@ -1010,7 +993,7 @@ Result TlsTcpBackend::accept_and_handshake()
     }
     if (slot >= MAX_TCP_CONNECTIONS) {
         // No free slot — should not happen since m_client_count < MAX_TCP_CONNECTIONS
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend", "accept: no free slot");
+        LOG_WARN_HI("TlsTcpBackend", "accept: no free slot");
         return Result::OK;
     }
 
@@ -1034,8 +1017,7 @@ Result TlsTcpBackend::accept_and_handshake()
     m_client_accept_ts[slot]      = timestamp_now_us(); // REQ-6.1.12: record accept time
     ++m_client_count;
     ++m_connections_opened;  // REQ-7.2.4: successful server accept
-    Logger::log(Severity::INFO, "TlsTcpBackend",
-                "Accepted client slot=%u (TLS=%s), total=%u",
+    LOG_INFO("TlsTcpBackend", "Accepted client slot=%u (TLS=%s), total=%u",
                 slot, m_tls_enabled ? "ON" : "OFF", m_client_count);
 
     NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);
@@ -1051,8 +1033,7 @@ void TlsTcpBackend::remove_client(uint32_t idx)
     NEVER_COMPILED_OUT_ASSERT(idx < MAX_TCP_CONNECTIONS);
     NEVER_COMPILED_OUT_ASSERT(m_client_count > 0U);
 
-    Logger::log(Severity::INFO, "TlsTcpBackend",
-                "removing client slot %u node_id=%u",
+    LOG_INFO("TlsTcpBackend", "removing client slot %u node_id=%u",
                 static_cast<unsigned>(idx),
                 static_cast<unsigned>(m_client_node_ids[idx]));
 
@@ -1107,8 +1088,7 @@ void TlsTcpBackend::sweep_hello_timeouts()
         if (m_client_hello_received[i]) { continue; }
         if (m_client_accept_ts[i] == 0ULL) { continue; }
         if ((now_us - m_client_accept_ts[i]) > timeout_us) {
-            Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                        "HELLO timeout: evicting slot %u; "
+            LOG_WARN_HI("TlsTcpBackend", "HELLO timeout: evicting slot %u; "
                         "no HELLO within %u ms (REQ-6.1.12 / HAZ-023)",
                         i, m_cfg.channels[0U].recv_timeout_ms);
             remove_client(i);
@@ -1156,8 +1136,7 @@ Result TlsTcpBackend::send_hello_frame()
                                          static_cast<uint32_t>(sizeof(m_wire_buf)),
                                          wire_len);
     if (!result_ok(ser_r)) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "send_hello_frame: serialize failed %u",
+        LOG_WARN_HI("TlsTcpBackend", "send_hello_frame: serialize failed %u",
                     static_cast<uint8_t>(ser_r));
         return ser_r;
     }
@@ -1169,12 +1148,10 @@ Result TlsTcpBackend::send_hello_frame()
     // as ISocketOps::send_frame and SocketUtils::tcp_send_frame).
     bool sent_ok = tls_send_frame(0U, m_wire_buf, wire_len, timeout_ms);
     if (!sent_ok) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "send_hello_frame: tls_send_frame failed");
+        LOG_WARN_HI("TlsTcpBackend", "send_hello_frame: tls_send_frame failed");
         return Result::ERR_IO;
     }
-    Logger::log(Severity::INFO, "TlsTcpBackend",
-                "HELLO sent: local_id=%u", m_local_node_id);
+    LOG_INFO("TlsTcpBackend", "HELLO sent: local_id=%u", m_local_node_id);
     return Result::OK;
 }
 
@@ -1194,8 +1171,7 @@ void TlsTcpBackend::handle_hello_frame(uint32_t idx, NodeId src_id)
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         if ((i != idx) && m_client_slot_active[i] &&
             (m_client_node_ids[i] == src_id)) {
-            Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                        "SEC-012: duplicate NodeId=%u on existing slot %u;"
+            LOG_WARN_HI("TlsTcpBackend", "SEC-012: duplicate NodeId=%u on existing slot %u;"
                         " evicting new slot %u",
                         static_cast<unsigned>(src_id),
                         static_cast<unsigned>(i),
@@ -1206,8 +1182,7 @@ void TlsTcpBackend::handle_hello_frame(uint32_t idx, NodeId src_id)
     }
 
     m_client_node_ids[idx] = src_id;
-    Logger::log(Severity::INFO, "TlsTcpBackend",
-                "HELLO from client slot %u node_id=%u", idx, src_id);
+    LOG_INFO("TlsTcpBackend", "HELLO from client slot %u node_id=%u", idx, src_id);
 
     // REQ-3.3.6: enqueue src_id so DeliveryEngine can reset stale ordering
     // state for this peer on reconnect.
@@ -1259,8 +1234,7 @@ bool TlsTcpBackend::validate_source_id(uint32_t slot, NodeId claimed_id) const
         return true;
     }
     if (claimed_id != registered) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "source_id mismatch: slot=%u claimed=%u registered=%u; dropping (REQ-6.1.11)",
+        LOG_WARN_HI("TlsTcpBackend", "source_id mismatch: slot=%u claimed=%u registered=%u; dropping (REQ-6.1.11)",
                     static_cast<unsigned>(slot),
                     static_cast<unsigned>(claimed_id),
                     static_cast<unsigned>(registered));
@@ -1308,8 +1282,7 @@ bool TlsTcpBackend::send_to_slot(uint32_t slot, const uint8_t* buf, uint32_t len
     bool ok = tls_send_frame(slot, buf, len, timeout_ms);
     bool failed = !ok;
     if (failed) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "send_to_slot %u failed", slot);
+        LOG_WARN_HI("TlsTcpBackend", "send_to_slot %u failed", slot);
     }
     return failed;
 }
@@ -1342,8 +1315,7 @@ bool TlsTcpBackend::tls_write_all(uint32_t idx, const uint8_t* buf, uint32_t len
     }
 
     if (sent != len) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "tls_write_all: short write %u/%u", sent, len);
+        LOG_WARN_HI("TlsTcpBackend", "tls_write_all: short write %u/%u", sent, len);
         return false;
     }
 
@@ -1408,8 +1380,7 @@ bool TlsTcpBackend::tls_read_payload(uint32_t idx, uint8_t* buf,
                                              MBEDTLS_NET_POLL_READ,
                                              timeout_ms);
             if (poll_r <= 0) {
-                Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                            "tls_read_payload: timeout waiting for data");
+                LOG_WARN_LO("TlsTcpBackend", "tls_read_payload: timeout waiting for data");
                 return false;
             }
         } else {
@@ -1419,8 +1390,7 @@ bool TlsTcpBackend::tls_read_payload(uint32_t idx, uint8_t* buf,
     }
 
     if (received != payload_len) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "tls_recv_frame: short read %u/%u", received, payload_len);
+        LOG_WARN_HI("TlsTcpBackend", "tls_recv_frame: short read %u/%u", received, payload_len);
         return false;
     }
 
@@ -1456,8 +1426,7 @@ bool TlsTcpBackend::read_tls_header(uint32_t idx, uint8_t* hdr,
                                              MBEDTLS_NET_POLL_READ,
                                              timeout_ms);
             if (poll_r <= 0) {
-                Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                            "tls_recv_frame: timeout on header read");
+                LOG_WARN_LO("TlsTcpBackend", "tls_recv_frame: timeout on header read");
                 return false;
             }
         } else {
@@ -1466,8 +1435,7 @@ bool TlsTcpBackend::read_tls_header(uint32_t idx, uint8_t* hdr,
         }
     }
     if (hdr_received != 4U) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "tls_recv_frame: short header read %u/4", hdr_received);
+        LOG_WARN_HI("TlsTcpBackend", "tls_recv_frame: short header read %u/4", hdr_received);
         return false;
     }
     return true;
@@ -1499,8 +1467,7 @@ bool TlsTcpBackend::tls_recv_frame(uint32_t idx,
                          |  static_cast<uint32_t>(hdr[3U]);
 
     if (payload_len == 0U || payload_len > buf_cap) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "tls_recv_frame: invalid length %u (cap=%u)",
+        LOG_WARN_HI("TlsTcpBackend", "tls_recv_frame: invalid length %u (cap=%u)",
                     payload_len, buf_cap);
         return false;
     }
@@ -1529,8 +1496,7 @@ bool TlsTcpBackend::apply_inbound_impairment(const MessageEnvelope& env, uint64_
 
     // REQ-5.1.6: drop if an inbound partition is currently active.
     if (m_impairment.is_partition_active(now_us)) {
-        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                    "inbound envelope dropped (partition active)");
+        LOG_WARN_LO("TlsTcpBackend", "inbound envelope dropped (partition active)");
         return false;
     }
 
@@ -1543,8 +1509,7 @@ bool TlsTcpBackend::apply_inbound_impairment(const MessageEnvelope& env, uint64_
                                                inbound_count);
     if (!result_ok(res)) {
         // ERR_FULL from process_inbound (logic error): treat as drop.
-        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                    "process_inbound returned error; dropping envelope");
+        LOG_WARN_LO("TlsTcpBackend", "process_inbound returned error; dropping envelope");
         return false;
     }
 
@@ -1556,8 +1521,7 @@ bool TlsTcpBackend::apply_inbound_impairment(const MessageEnvelope& env, uint64_
     // inbound_count == 1: push the released envelope into the receive queue.
     res = m_recv_queue.push(inbound_out);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "recv queue full; dropping inbound envelope");
+        LOG_WARN_HI("TlsTcpBackend", "recv queue full; dropping inbound envelope");
     }
 
     NEVER_COMPILED_OUT_ASSERT(inbound_count == 1U);  // Post-condition
@@ -1582,8 +1546,7 @@ Result TlsTcpBackend::classify_inbound_frame(uint32_t idx,
     if (env.message_type == MessageType::HELLO) {
         if (m_is_server) {
             if (m_client_hello_received[idx]) {
-                Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                            "SEC-013: duplicate HELLO from slot %u: evicting (REQ-6.1.8)",
+                LOG_WARN_HI("TlsTcpBackend", "SEC-013: duplicate HELLO from slot %u: evicting (REQ-6.1.8)",
                             static_cast<unsigned>(idx));
                 // SEC-013: evict the misbehaving slot — a replayed HELLO could
                 // trigger NodeId re-assignment and confuse the routing table.
@@ -1601,8 +1564,7 @@ Result TlsTcpBackend::classify_inbound_frame(uint32_t idx,
     // Backward-compatibility bypass removed — a client that skips HELLO could
     // otherwise inject arbitrary source_id values via validate_source_id().
     if (m_is_server && !m_client_hello_received[idx]) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "data frame from slot %u before HELLO; dropping (REQ-6.1.11)",
+        LOG_WARN_HI("TlsTcpBackend", "data frame from slot %u before HELLO; dropping (REQ-6.1.11)",
                     static_cast<unsigned>(idx));
         return Result::ERR_INVALID;
     }
@@ -1622,8 +1584,7 @@ Result TlsTcpBackend::recv_from_client(uint32_t idx, uint32_t timeout_ms)
     uint32_t out_len = 0U;
     if (!tls_recv_frame(idx, m_wire_buf, SOCKET_RECV_BUF_BYTES,
                         timeout_ms, &out_len)) {
-        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                    "recv_frame failed on client %u; closing", idx);
+        LOG_WARN_LO("TlsTcpBackend", "recv_frame failed on client %u; closing", idx);
         remove_client(idx);
         return Result::ERR_IO;
     }
@@ -1631,8 +1592,7 @@ Result TlsTcpBackend::recv_from_client(uint32_t idx, uint32_t timeout_ms)
     MessageEnvelope env;
     Result res = Serializer::deserialize(m_wire_buf, out_len, env);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                    "Deserialize failed on client %u: %u",
+        LOG_WARN_LO("TlsTcpBackend", "Deserialize failed on client %u: %u",
                     idx, static_cast<uint8_t>(res));
         return res;
     }
@@ -1659,8 +1619,7 @@ Result TlsTcpBackend::recv_from_client(uint32_t idx, uint32_t timeout_ms)
     if (!m_is_server && (m_client_node_ids[0U] == NODE_ID_INVALID) &&
         (env.source_id != NODE_ID_INVALID)) {
         m_client_node_ids[0U] = env.source_id;
-        Logger::log(Severity::INFO, "TlsTcpBackend",
-                    "SEC-011: server NodeId locked in as %u (REQ-6.1.11)",
+        LOG_INFO("TlsTcpBackend", "SEC-011: server NodeId locked in as %u (REQ-6.1.11)",
                     static_cast<unsigned>(env.source_id));
     }
 
@@ -1693,8 +1652,7 @@ bool TlsTcpBackend::send_to_all_clients(const uint8_t* buf, uint32_t len)
     for (uint32_t i = 0U; i < MAX_TCP_CONNECTIONS; ++i) {
         if (!m_client_slot_active[i]) { continue; }
         if (!tls_send_frame(i, buf, len, timeout_ms)) {
-            Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                        "Send frame failed on client %u", i);
+            LOG_WARN_LO("TlsTcpBackend", "Send frame failed on client %u", i);
             any_failed = true;
         }
     }
@@ -1716,8 +1674,7 @@ Result TlsTcpBackend::unicast_serialized(NodeId dst, const uint8_t* buf, uint32_
         // Broadcast fallback removed: unicast-addressed data must never be sent to
         // all peers; doing so leaks confidential application data to unintended
         // recipients in multi-tenant server deployments.
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "unicast_serialized: no slot for dst=%u; dropping (REQ-6.1.9)", dst);
+        LOG_WARN_HI("TlsTcpBackend", "unicast_serialized: no slot for dst=%u; dropping (REQ-6.1.9)", dst);
         return Result::ERR_INVALID;
     }
     bool failed = send_to_slot(slot, buf, len);
@@ -1738,8 +1695,7 @@ Result TlsTcpBackend::route_one_delayed(const MessageEnvelope& env, bool is_curr
                                          static_cast<uint32_t>(sizeof(m_wire_buf)),
                                          delayed_len);
     if (!result_ok(ser_r)) {
-        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                    "flush_delayed: serialize failed");
+        LOG_WARN_LO("TlsTcpBackend", "flush_delayed: serialize failed");
         // Non-current failures are swallowed; only propagate for the current msg.
         if (!is_current) { return Result::OK; }
         return Result::ERR_IO;
@@ -1756,8 +1712,7 @@ Result TlsTcpBackend::route_one_delayed(const MessageEnvelope& env, bool is_curr
     }
 
     if (!result_ok(send_r) && !is_current) {
-        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                    "flush_delayed: send failed for non-current msg");
+        LOG_WARN_LO("TlsTcpBackend", "flush_delayed: send failed for non-current msg");
         return Result::OK;
     }
     return send_r;
@@ -1906,16 +1861,14 @@ Result TlsTcpBackend::validate_tls_init_config(const TlsConfig& tls_cfg)
 
     // REQ-6.3.6 (H-1): ca_file must be non-empty when verify_peer=true.
     if (tls_cfg.verify_peer && (tls_cfg.ca_file[0] == '\0')) {
-        Logger::log(Severity::FATAL, "TlsTcpBackend",
-                    "REQ-6.3.6/HAZ-020: verify_peer=true but ca_file is empty — "
+        LOG_FATAL("TlsTcpBackend", "REQ-6.3.6/HAZ-020: verify_peer=true but ca_file is empty — "
                     "no trust anchor; init rejected (H-1, CWE-295)");
         return Result::ERR_IO;
     }
 
     // REQ-6.3.7 (H-2): crl_file must be non-empty when require_crl=true and verify_peer=true.
     if (tls_cfg.require_crl && tls_cfg.verify_peer && (tls_cfg.crl_file[0] == '\0')) {
-        Logger::log(Severity::FATAL, "TlsTcpBackend",
-                    "REQ-6.3.7/HAZ-020: require_crl=true but crl_file is empty — "
+        LOG_FATAL("TlsTcpBackend", "REQ-6.3.7/HAZ-020: require_crl=true but crl_file is empty — "
                     "CRL revocation check disabled; init rejected (H-2, CWE-295)");
         return Result::ERR_INVALID;
     }
@@ -1924,8 +1877,7 @@ Result TlsTcpBackend::validate_tls_init_config(const TlsConfig& tls_cfg)
     // operator configuration — the hostname would be passed to SNI but the cert would
     // not be verified, creating a false sense of security (CWE-297).
     if ((!tls_cfg.verify_peer) && (tls_cfg.peer_hostname[0] != '\0')) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "REQ-6.3.9/HAZ-025: verify_peer=false but peer_hostname is non-empty — "
+        LOG_WARN_HI("TlsTcpBackend", "REQ-6.3.9/HAZ-025: verify_peer=false but peer_hostname is non-empty — "
                     "unsafe configuration; init rejected (H-8, CWE-297)");
         return Result::ERR_INVALID;
     }
@@ -1935,8 +1887,7 @@ Result TlsTcpBackend::validate_tls_init_config(const TlsConfig& tls_cfg)
     // verification entirely (CWE-297).
     if ((tls_cfg.role == TlsRole::CLIENT) &&
         tls_cfg.verify_peer && (tls_cfg.peer_hostname[0] == '\0')) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "SEC-021: verify_peer=true but peer_hostname is empty on CLIENT — "
+        LOG_WARN_HI("TlsTcpBackend", "SEC-021: verify_peer=true but peer_hostname is empty on CLIENT — "
                     "refusing to allow handshake without CN/SAN check (REQ-6.4.6 analogue)");
         return Result::ERR_INVALID;
     }
@@ -1981,8 +1932,7 @@ Result TlsTcpBackend::check_forward_secrecy(const char* ver,
         return Result::OK;  // TLS 1.3+ — forward secrecy holds for resumed sessions
     }
 
-    Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                "REQ-6.3.8/HAZ-020: TLS 1.2 session resumption rejected "
+    LOG_WARN_HI("TlsTcpBackend", "REQ-6.3.8/HAZ-020: TLS 1.2 session resumption rejected "
                 "(tls_require_forward_secrecy=true); zeroizing session "
                 "(H-4, CWE-295, RFC 5077)");
     return Result::ERR_IO;
@@ -2029,8 +1979,7 @@ Result TlsTcpBackend::init(const TransportConfig& config)
 
     // S5: validate config before any channels[] access (REQ-6.1.1, ChannelConfig.hpp).
     if (!transport_config_valid(config)) {
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "init: num_channels=%u exceeds MAX_CHANNELS; rejecting config",
+        LOG_WARN_HI("TlsTcpBackend", "init: num_channels=%u exceeds MAX_CHANNELS; rejecting config",
                     config.num_channels);
         return Result::ERR_INVALID;
     }
@@ -2096,7 +2045,7 @@ Result TlsTcpBackend::send_message(const MessageEnvelope& envelope)
     Result res = Serializer::serialize(envelope, m_wire_buf,
                                        SOCKET_RECV_BUF_BYTES, wire_len);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_LO, "TlsTcpBackend", "Serialize failed");
+        LOG_WARN_LO("TlsTcpBackend", "Serialize failed");
         return res;
     }
 
@@ -2114,8 +2063,7 @@ Result TlsTcpBackend::send_message(const MessageEnvelope& envelope)
     }
 
     if (m_client_count == 0U) {
-        Logger::log(Severity::WARNING_LO, "TlsTcpBackend",
-                    "No clients; discarding message");
+        LOG_WARN_LO("TlsTcpBackend", "No clients; discarding message");
         return Result::OK;
     }
 
@@ -2192,8 +2140,7 @@ static bool log_live_session_material_warning(const TlsSessionStore* store_ptr)
         // after transport close is a system-wide risk (any post-close memory
         // read, core dump, or swap file may expose it — CWE-316).  System-wide
         // but recoverable = WARNING_HI per CLAUDE.md §4 taxonomy.
-        Logger::log(Severity::WARNING_HI, "TlsTcpBackend",
-                    "TLS session master-secret material remains live in "
+        LOG_WARN_HI("TlsTcpBackend", "TLS session master-secret material remains live in "
                     "TlsSessionStore after close() (CWE-316, HAZ-017); "
                     "call store.zeroize() immediately if reconnect is not "
                     "planned (SECURITY_ASSUMPTIONS.md §13, CLAUDE.md §7c)");
@@ -2273,8 +2220,7 @@ void TlsTcpBackend::close()
     NEVER_COMPILED_OUT_ASSERT(!session_warned || m_tls_enabled);
     // reset so FS advisory fires once per lifecycle, not just once per process.
     m_fs_warning_logged = false;
-    Logger::log(Severity::INFO, "TlsTcpBackend",
-                "Transport closed (TLS=%s)", m_tls_enabled ? "ON" : "OFF");
+    LOG_INFO("TlsTcpBackend", "Transport closed (TLS=%s)", m_tls_enabled ? "ON" : "OFF");
     // Power of 10 Rule 5: assert 2 — post-condition: transport is closed and
     // all client slots are reset.
     NEVER_COMPILED_OUT_ASSERT(!m_open);

@@ -68,8 +68,7 @@ static Result check_routing(const MessageEnvelope& env,
     NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);                // pre-condition
 
     if (timestamp_expired(env.expiry_time_us, now_us)) {
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "Dropping expired message_id=%llu from src=%u",
+        LOG_WARN_LO("DeliveryEngine", "Dropping expired message_id=%llu from src=%u",
                     (unsigned long long)env.message_id, env.source_id);
         return Result::ERR_EXPIRED;
     }
@@ -77,8 +76,7 @@ static Result check_routing(const MessageEnvelope& env,
     // Safety-critical (SC): HAZ-001 — drop messages not addressed to this node.
     // destination_id == NODE_ID_INVALID (0) is the broadcast sentinel; always accept.
     if (!envelope_addressed_to(env, local_id)) {
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "Dropping misrouted message_id=%llu: dst=%u local=%u",
+        LOG_WARN_LO("DeliveryEngine", "Dropping misrouted message_id=%llu: dst=%u local=%u",
                     (unsigned long long)env.message_id,
                     env.destination_id, local_id);
         return Result::ERR_INVALID;
@@ -105,8 +103,7 @@ static void send_data_ack(TransportInterface&    transport,
     envelope_make_ack(ack_env, data_env, local_id, now_us);
     Result res = transport.send_message(ack_env);
     if (res != Result::OK) {
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "Failed to send ACK for message_id=%llu: result=%d",
+        LOG_WARN_LO("DeliveryEngine", "Failed to send ACK for message_id=%llu: result=%d",
                     (unsigned long long)data_env.message_id,
                     static_cast<int>(res));
     }
@@ -134,8 +131,7 @@ static void process_ack(AckTracker&          ack_tracker,
     Result dst_res = ack_tracker.get_tracked_destination(
                          env.destination_id, env.message_id, expected_ack_sender);
     if (dst_res == Result::OK && expected_ack_sender != env.source_id) {
-        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                    "FORGE-ACK: msg_id=%llu expected ack from node=%u got node=%u; discarding",
+        LOG_WARN_HI("DeliveryEngine", "FORGE-ACK: msg_id=%llu expected ack from node=%u got node=%u; discarding",
                     (unsigned long long)env.message_id,
                     static_cast<unsigned>(expected_ack_sender),
                     static_cast<unsigned>(env.source_id));
@@ -146,28 +142,23 @@ static void process_ack(AckTracker&          ack_tracker,
     // originally created with source_id = local node in send().
     Result ack_res = ack_tracker.on_ack(env.destination_id, env.message_id);
     if (ack_res == Result::ERR_INVALID) {
-        Logger::log(Severity::INFO, "DeliveryEngine",
-                    "ACK has no matching ack_tracker slot for message_id=%llu",
+        LOG_INFO("DeliveryEngine", "ACK has no matching ack_tracker slot for message_id=%llu",
                     (unsigned long long)env.message_id);
     } else if (ack_res != Result::OK) {
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "Unexpected ack_tracker result=%d for message_id=%llu",
+        LOG_WARN_LO("DeliveryEngine", "Unexpected ack_tracker result=%d for message_id=%llu",
                     static_cast<int>(ack_res), (unsigned long long)env.message_id);
     }
 
     Result retry_res = retry_manager.on_ack(env.destination_id, env.message_id);
     if (retry_res == Result::ERR_INVALID) {
-        Logger::log(Severity::INFO, "DeliveryEngine",
-                    "ACK has no matching retry slot for message_id=%llu",
+        LOG_INFO("DeliveryEngine", "ACK has no matching retry slot for message_id=%llu",
                     (unsigned long long)env.message_id);
     } else if (retry_res != Result::OK) {
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "Unexpected retry_manager result=%d for message_id=%llu",
+        LOG_WARN_LO("DeliveryEngine", "Unexpected retry_manager result=%d for message_id=%llu",
                     static_cast<int>(retry_res), (unsigned long long)env.message_id);
     }
 
-    Logger::log(Severity::INFO, "DeliveryEngine",
-                "Received ACK for message_id=%llu from src=%u",
+    LOG_INFO("DeliveryEngine", "Received ACK for message_id=%llu from src=%u",
                 (unsigned long long)env.message_id, env.source_id);
 }
 
@@ -215,8 +206,7 @@ static bool get_seed_entropy(uint64_t& out)
         }
     }
     if (urandom_ok) {
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "getrandom() failed; used /dev/urandom fallback (REQ-5.2.4)");
+        LOG_WARN_LO("DeliveryEngine", "getrandom() failed; used /dev/urandom fallback (REQ-5.2.4)");
         NEVER_COMPILED_OUT_ASSERT(out != 0ULL || true);  // post-condition: value populated
         return true;
     }
@@ -224,8 +214,7 @@ static bool get_seed_entropy(uint64_t& out)
     // Last resort: mix clock(), getpid(), and a monotonic timestamp.
     // REQ-5.2.4: multiple sources reduce (but do not eliminate) predictability.
     // Logged at WARNING_HI because this path is not cryptographically secure.
-    Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                "getrandom() and /dev/urandom both failed; "
+    LOG_WARN_HI("DeliveryEngine", "getrandom() and /dev/urandom both failed; "
                 "using clock/pid/timestamp fallback -- not cryptographically secure "
                 "(REQ-5.2.4)");
     // CERT INT31-C: getpid() returns pid_t (signed); double-cast through uint32_t
@@ -281,8 +270,7 @@ void DeliveryEngine::init(TransportInterface* transport,
     const bool strong_entropy = get_seed_entropy(entropy);
 #if !defined(ALLOW_WEAK_PRNG_SEED)
     if (!strong_entropy) {
-        Logger::log(Severity::FATAL, "DeliveryEngine",
-                    "OS entropy sources exhausted; cannot seed PRNG securely "
+        LOG_FATAL("DeliveryEngine", "OS entropy sources exhausted; cannot seed PRNG securely "
                     "(REQ-5.2.6). Build with -DALLOW_WEAK_PRNG_SEED to override "
                     "in non-production environments.");
         NEVER_COMPILED_OUT_ASSERT(false);  // Assert: unreachable in production (REQ-5.2.6)
@@ -353,8 +341,7 @@ void DeliveryEngine::init(TransportInterface* transport,
     // the on-connect HELLO registration frame.
     Result reg_res = m_transport->register_local_id(local_id);
     if (!result_ok(reg_res)) {
-        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                    "register_local_id failed: %u", static_cast<uint8_t>(reg_res));
+        LOG_WARN_HI("DeliveryEngine", "register_local_id failed: %u", static_cast<uint8_t>(reg_res));
         // Non-fatal: transport is open; routing may be degraded for TCP/TLS unicast.
     }
 
@@ -362,8 +349,7 @@ void DeliveryEngine::init(TransportInterface* transport,
     NEVER_COMPILED_OUT_ASSERT(m_initialized);  // Assert: engine marked initialized
     NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr);  // Assert: transport is valid
 
-    Logger::log(Severity::INFO, "DeliveryEngine",
-                "Initialized channel=%u, local_id=%u",
+    LOG_INFO("DeliveryEngine", "Initialized channel=%u, local_id=%u",
                 cfg.channel_id, local_id);
 }
 
@@ -444,8 +430,7 @@ void DeliveryEngine::account_ordering_expiry_drops(const MessageEnvelope* freed,
 
     // Power of 10 Rule 2: bounded loop (count <= ORDERING_HOLD_COUNT).
     for (uint32_t i = 0U; i < count; ++i) {
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "Ordering hold expired: message_id=%llu from src=%u dropped",
+        LOG_WARN_LO("DeliveryEngine", "Ordering hold expired: message_id=%llu from src=%u dropped",
                     (unsigned long long)freed[i].message_id, freed[i].source_id);
         // REQ-7.2.5: emit EXPIRY_DROP event for each freed ordering hold.
         emit_event(DeliveryEventKind::EXPIRY_DROP,
@@ -529,8 +514,7 @@ Result DeliveryEngine::send_via_transport(const MessageEnvelope& env, uint64_t n
     // Safety-critical (SC): HAZ-004 / REQ-3.3.4 — drop expired messages before I/O.
     // expiry_time_us == 0 means never-expires (handled inside timestamp_expired).
     if (timestamp_expired(env.expiry_time_us, now_us)) {
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "Message expired before send; dropping. id=%llu",
+        LOG_WARN_LO("DeliveryEngine", "Message expired before send; dropping. id=%llu",
                     (unsigned long long)env.message_id);
         return Result::ERR_EXPIRED;
     }
@@ -541,8 +525,7 @@ Result DeliveryEngine::send_via_transport(const MessageEnvelope& env, uint64_t n
     Result res = m_transport->send_message(env);
 
     if (res != Result::OK) {
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "Transport send failed for message_id=%llu (result=%u)",
+        LOG_WARN_LO("DeliveryEngine", "Transport send failed for message_id=%llu (result=%u)",
                     (unsigned long long)env.message_id, static_cast<uint8_t>(res));
     }
 
@@ -582,8 +565,7 @@ static Result reserve_bookkeeping(AckTracker&            ack_tracker,
     // Power of 10 rule 7: check return value
     Result track_res = ack_tracker.track(env, ack_deadline);
     if (track_res != Result::OK) {
-        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                    "Failed to track ACK for message_id=%llu (result=%u); "
+        LOG_WARN_HI("DeliveryEngine", "Failed to track ACK for message_id=%llu (result=%u); "
                     "aborting send to preserve at-most-once contract",
                     (unsigned long long)env.message_id, static_cast<uint8_t>(track_res));
         return track_res;
@@ -601,8 +583,7 @@ static Result reserve_bookkeeping(AckTracker&            ack_tracker,
                                               cfg.retry_backoff_ms,
                                               now_us);
     if (sched_res != Result::OK) {
-        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                    "Failed to schedule retry for message_id=%llu (result=%u); "
+        LOG_WARN_HI("DeliveryEngine", "Failed to schedule retry for message_id=%llu (result=%u); "
                     "aborting send to preserve at-most-once contract",
                     (unsigned long long)env.message_id, static_cast<uint8_t>(sched_res));
         // Roll back AckTracker reservation: cancel() frees the slot directly
@@ -611,8 +592,7 @@ static Result reserve_bookkeeping(AckTracker&            ack_tracker,
         // on failure so a stale PENDING slot can be detected and swept later.
         Result cancel_res = ack_tracker.cancel(env.source_id, env.message_id);
         if (cancel_res != Result::OK) {
-            Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                        "cancel() failed during rollback for message_id=%llu (result=%u); "
+            LOG_WARN_HI("DeliveryEngine", "cancel() failed during rollback for message_id=%llu (result=%u); "
                         "stale PENDING slot may persist until sweep",
                         (unsigned long long)env.message_id,
                         static_cast<uint8_t>(cancel_res));
@@ -652,8 +632,7 @@ static void rollback_on_transport_failure(AckTracker&            ack_tracker,
     // (avoids phantom ACK stat).
     Result ack_cancel_res = ack_tracker.cancel(env.source_id, env.message_id);
     if (ack_cancel_res != Result::OK) {
-        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                    "ack_tracker.cancel() failed during rollback for "
+        LOG_WARN_HI("DeliveryEngine", "ack_tracker.cancel() failed during rollback for "
                     "message_id=%llu (result=%u); stale PENDING slot may "
                     "persist until sweep",
                     (unsigned long long)env.message_id,
@@ -664,8 +643,7 @@ static void rollback_on_transport_failure(AckTracker&            ack_tracker,
     if (env.reliability_class == ReliabilityClass::RELIABLE_RETRY) {
         Result retry_cancel_res = retry_manager.cancel(env.source_id, env.message_id);
         if (retry_cancel_res != Result::OK) {
-            Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                        "retry_manager.cancel() failed during rollback for "
+            LOG_WARN_HI("DeliveryEngine", "retry_manager.cancel() failed during rollback for "
                         "message_id=%llu (result=%u); stale retry slot may "
                         "persist until sweep",
                         (unsigned long long)env.message_id,
@@ -725,8 +703,7 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
     // SEC-007: reject non-monotonic timestamps to prevent time-inversion exploits
     // (e.g. retry suppression via backward time, expiry bypass via stale timestamps).
     if ((m_last_now_us > 0ULL) && (now_us < m_last_now_us)) {
-        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                    "send: non-monotonic now_us=%llu < last=%llu — rejecting (SEC-007)",
+        LOG_WARN_HI("DeliveryEngine", "send: non-monotonic now_us=%llu < last=%llu — rejecting (SEC-007)",
                     (unsigned long long)now_us, (unsigned long long)m_last_now_us);
         return Result::ERR_INVALID;
     }
@@ -795,8 +772,7 @@ Result DeliveryEngine::send(MessageEnvelope& env, uint64_t now_us)
     NEVER_COMPILED_OUT_ASSERT(env.source_id == m_local_id);  // Assert: source set correctly
     NEVER_COMPILED_OUT_ASSERT(env.message_id != 0ULL);       // Assert: message_id assigned
 
-    Logger::log(Severity::INFO, "DeliveryEngine",
-                "Sent message_id=%llu, reliability=%u",
+    LOG_INFO("DeliveryEngine", "Sent message_id=%llu, reliability=%u",
                 (unsigned long long)env.message_id,
                 static_cast<uint8_t>(env.reliability_class));
 
@@ -849,8 +825,7 @@ Result DeliveryEngine::handle_data_dedup(const MessageEnvelope& env, uint64_t no
 
     // Duplicate detected: suppress delivery
     ++m_stats.msgs_dropped_duplicate;  // REQ-7.2.3: count duplicate drop
-    Logger::log(Severity::INFO, "DeliveryEngine",
-                "Suppressed duplicate message_id=%llu from src=%u",
+    LOG_INFO("DeliveryEngine", "Suppressed duplicate message_id=%llu from src=%u",
                 (unsigned long long)env.message_id, env.source_id);
     // Re-ACK the duplicate: the original ACK may have been lost in transit,
     // causing the sender to keep retrying. Sending ACK again stops unnecessary
@@ -880,8 +855,7 @@ void DeliveryEngine::reset_peer_ordering(NodeId src)
     // been reset would violate ordering correctness for the new connection.
     if (m_held_pending_valid && (m_held_pending.source_id == src)) {
         m_held_pending_valid = false;
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "reset_peer_ordering: discarded staged held_pending for src=%u (REQ-3.3.6)",
+        LOG_WARN_LO("DeliveryEngine", "reset_peer_ordering: discarded staged held_pending for src=%u (REQ-3.3.6)",
                     static_cast<unsigned>(src));
     }
 
@@ -926,8 +900,7 @@ Result DeliveryEngine::receive(MessageEnvelope& env,
 
     // SEC-007: reject non-monotonic timestamps (same rationale as send()).
     if ((m_last_now_us > 0ULL) && (now_us < m_last_now_us)) {
-        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                    "receive: non-monotonic now_us=%llu < last=%llu — rejecting (SEC-007)",
+        LOG_WARN_HI("DeliveryEngine", "receive: non-monotonic now_us=%llu < last=%llu — rejecting (SEC-007)",
                     (unsigned long long)now_us, (unsigned long long)m_last_now_us);
         return Result::ERR_INVALID;
     }
@@ -1046,8 +1019,7 @@ Result DeliveryEngine::handle_data_path(MessageEnvelope& env, uint64_t now_us)
         }
     }
 
-    Logger::log(Severity::INFO, "DeliveryEngine",
-                "Received data message_id=%llu from src=%u, length=%u",
+    LOG_INFO("DeliveryEngine", "Received data message_id=%llu from src=%u, length=%u",
                 (unsigned long long)env.message_id, env.source_id,
                 env.payload_length);
 
@@ -1078,8 +1050,7 @@ uint32_t DeliveryEngine::pump_retries(uint64_t now_us)
 
     // SEC-007: reject non-monotonic timestamps (same rationale as send()).
     if ((m_last_now_us > 0ULL) && (now_us < m_last_now_us)) {
-        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                    "pump_retries: non-monotonic now_us=%llu < last=%llu — skipping (SEC-007)",
+        LOG_WARN_HI("DeliveryEngine", "pump_retries: non-monotonic now_us=%llu < last=%llu — skipping (SEC-007)",
                     (unsigned long long)now_us, (unsigned long long)m_last_now_us);
         return 0U;
     }
@@ -1102,13 +1073,11 @@ uint32_t DeliveryEngine::pump_retries(uint64_t now_us)
         // send_fragments() re-fragments on retry as needed (REQ-3.2.3)
         Result send_res = send_fragments(m_retry_buf[i], now_us);
         if (send_res != Result::OK) {
-            Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                        "Retry send failed for message_id=%llu (result=%u)",
+            LOG_WARN_LO("DeliveryEngine", "Retry send failed for message_id=%llu (result=%u)",
                         (unsigned long long)m_retry_buf[i].message_id,
                         static_cast<uint8_t>(send_res));
         } else {
-            Logger::log(Severity::INFO, "DeliveryEngine",
-                        "Retried message_id=%llu",
+            LOG_INFO("DeliveryEngine", "Retried message_id=%llu",
                         (unsigned long long)m_retry_buf[i].message_id);
             // REQ-7.2.5: emit RETRY_FIRED event for successful retry transmission
             emit_event(DeliveryEventKind::RETRY_FIRED,
@@ -1135,8 +1104,7 @@ uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
 
     // SEC-007: reject non-monotonic timestamps (same rationale as send()).
     if ((m_last_now_us > 0ULL) && (now_us < m_last_now_us)) {
-        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                    "sweep_ack_timeouts: non-monotonic now_us=%llu < last=%llu — skipping (SEC-007)",
+        LOG_WARN_HI("DeliveryEngine", "sweep_ack_timeouts: non-monotonic now_us=%llu < last=%llu — skipping (SEC-007)",
                     (unsigned long long)now_us, (unsigned long long)m_last_now_us);
         return 0U;
     }
@@ -1157,8 +1125,7 @@ uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
         const uint64_t stale_us = static_cast<uint64_t>(m_cfg.recv_timeout_ms) * 1000ULL;
         const uint32_t stale_freed = m_reassembly.sweep_stale(now_us, stale_us);
         if (stale_freed > 0U) {
-            Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                        "sweep_stale freed %u stale reassembly slot(s)", stale_freed);
+            LOG_WARN_LO("DeliveryEngine", "sweep_stale freed %u stale reassembly slot(s)", stale_freed);
         }
     }
 
@@ -1182,8 +1149,7 @@ uint32_t DeliveryEngine::sweep_ack_timeouts(uint64_t now_us)
     // Log each timeout as WARNING_HI (system-wide but recoverable)
     // Power of 10 rule 2: bounded loop
     for (uint32_t i = 0U; i < collected; ++i) {
-        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                    "ACK timeout for message_id=%llu sent to node=%u",
+        LOG_WARN_HI("DeliveryEngine", "ACK timeout for message_id=%llu sent to node=%u",
                     (unsigned long long)m_timeout_buf[i].message_id,
                     m_timeout_buf[i].destination_id);
         // REQ-7.2.5: emit ACK_TIMEOUT event
@@ -1272,8 +1238,7 @@ void DeliveryEngine::record_send_failure(const MessageEnvelope& env, Result res)
                    env.message_id, env.destination_id, env.timestamp_us, res);
     }
 
-    Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                "Failed to send message_id=%llu: %u",
+    LOG_WARN_LO("DeliveryEngine", "Failed to send message_id=%llu: %u",
                 (unsigned long long)env.message_id, static_cast<uint8_t>(res));
 }
 
@@ -1337,8 +1302,7 @@ uint32_t DeliveryEngine::next_seq_for(NodeId dst)
     }
 
     // All slots in use: log and return 0 (caller treats as UNORDERED)
-    Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                "Sequence state full; cannot assign sequence for dst=%u", dst);
+    LOG_WARN_HI("DeliveryEngine", "Sequence state full; cannot assign sequence for dst=%u", dst);
     return 0U;
 }
 
@@ -1362,8 +1326,7 @@ Result DeliveryEngine::send_fragments(const MessageEnvelope& env, uint64_t now_u
     // Fragment and send each wire frame
     uint32_t frag_count = fragment_message(env, m_frag_buf, FRAG_MAX_COUNT);
     if (frag_count == 0U) {
-        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                    "fragment_message failed for message_id=%llu",
+        LOG_WARN_HI("DeliveryEngine", "fragment_message failed for message_id=%llu",
                     (unsigned long long)env.message_id);
         return Result::ERR_INVALID;
     }
@@ -1384,8 +1347,7 @@ Result DeliveryEngine::send_fragments(const MessageEnvelope& env, uint64_t now_u
     for (uint32_t i = 0U; i < frag_count; ++i) {
         Result res = send_via_transport(m_frag_buf[i], now_us);
         if (res != Result::OK) {
-            Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                        "Fragment %u/%u send failed for message_id=%llu (result=%u)",
+            LOG_WARN_HI("DeliveryEngine", "Fragment %u/%u send failed for message_id=%llu (result=%u)",
                         i + 1U, frag_count,
                         (unsigned long long)env.message_id,
                         static_cast<uint8_t>(res));
@@ -1423,8 +1385,7 @@ Result DeliveryEngine::handle_fragment_ingest(const MessageEnvelope& wire_env,
     }
 
     if (res != Result::OK) {
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "Reassembly failed for message_id=%llu (result=%u)",
+        LOG_WARN_LO("DeliveryEngine", "Reassembly failed for message_id=%llu (result=%u)",
                     (unsigned long long)wire_env.message_id,
                     static_cast<uint8_t>(res));
     }
@@ -1463,8 +1424,7 @@ Result DeliveryEngine::handle_ordering_gate(const MessageEnvelope& logical,
 
     Result res = m_ordering.ingest(logical, out, now_us);
     if (res == Result::ERR_FULL) {
-        Logger::log(Severity::WARNING_HI, "DeliveryEngine",
-                    "Ordering hold buffer full for src=%u", logical.source_id);
+        LOG_WARN_HI("DeliveryEngine", "Ordering hold buffer full for src=%u", logical.source_id);
     }
 
     NEVER_COMPILED_OUT_ASSERT(res == Result::OK ||
@@ -1494,8 +1454,7 @@ Result DeliveryEngine::deliver_held_pending(MessageEnvelope& env, uint64_t now_u
     // REQ-3.2.7 / Issue 2 fix: re-check expiry on the held message.
     // A message can be valid when first held but expire during a sequence gap.
     if (timestamp_expired(env.expiry_time_us, now_us)) {
-        Logger::log(Severity::WARNING_LO, "DeliveryEngine",
-                    "Held ordered message_id=%llu from src=%u expired; dropping",
+        LOG_WARN_LO("DeliveryEngine", "Held ordered message_id=%llu from src=%u expired; dropping",
                     (unsigned long long)env.message_id, env.source_id);
         ++m_stats.msgs_dropped_expired;  // REQ-7.2.3
         emit_event(DeliveryEventKind::EXPIRY_DROP,
@@ -1526,8 +1485,7 @@ Result DeliveryEngine::deliver_held_pending(MessageEnvelope& env, uint64_t now_u
         }
     }
 
-    Logger::log(Severity::INFO, "DeliveryEngine",
-                "Delivered held message_id=%llu from src=%u (ordering backlog drain)",
+    LOG_INFO("DeliveryEngine", "Delivered held message_id=%llu from src=%u (ordering backlog drain)",
                 (unsigned long long)env.message_id, env.source_id);
 
     // Generate and send ACK (held messages were not ACK'd when originally held).

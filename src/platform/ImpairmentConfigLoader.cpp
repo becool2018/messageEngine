@@ -97,13 +97,11 @@ static bool parse_prob(const char* val, double* out)
     if (std::isnan(v) || std::isinf(v)) { return false; }
     // Clamp to [0.0, 1.0] (Power of 10: explicit bounds check)
     if (v < 0.0) {
-        Logger::log(Severity::WARNING_LO, "ConfigLoader",
-                    "Probability %.6f < 0.0; clamped to 0.0", v);
+        LOG_WARN_LO("ConfigLoader", "Probability %.6f < 0.0; clamped to 0.0", v);
         v = 0.0;
     }
     if (v > 1.0) {
-        Logger::log(Severity::WARNING_LO, "ConfigLoader",
-                    "Probability %.6f > 1.0; clamped to 1.0", v);
+        LOG_WARN_LO("ConfigLoader", "Probability %.6f > 1.0; clamped to 1.0", v);
         v = 1.0;
     }
     *out = v;
@@ -140,8 +138,7 @@ static void apply_reorder_window(const char* val, ImpairmentConfig& cfg)
     uint32_t w = static_cast<uint32_t>(v);
     // Clamp to IMPAIR_DELAY_BUF_SIZE (Power of 10: bounded buffer)
     if (w > IMPAIR_DELAY_BUF_SIZE) {
-        Logger::log(Severity::WARNING_LO, "ConfigLoader",
-                    "reorder_window_size %u exceeds IMPAIR_DELAY_BUF_SIZE %u; clamping",
+        LOG_WARN_LO("ConfigLoader", "reorder_window_size %u exceeds IMPAIR_DELAY_BUF_SIZE %u; clamping",
                     w, IMPAIR_DELAY_BUF_SIZE);
         w = IMPAIR_DELAY_BUF_SIZE;
     }
@@ -228,8 +225,7 @@ static void apply_kv(const char* key, const char* val, ImpairmentConfig& cfg)
     if (!handled) { handled = apply_kv_loss_reorder(key, val, cfg); }
     if (!handled) { handled = apply_kv_partition_seed(key, val, cfg); }
     if (!handled) {
-        Logger::log(Severity::WARNING_LO, "ConfigLoader",
-                    "Unknown config key ignored: %.40s", key);
+        LOG_WARN_LO("ConfigLoader", "Unknown config key ignored: %.40s", key);
     }
 }
 
@@ -267,8 +263,7 @@ static void parse_config_line(const char* line, ImpairmentConfig& cfg)
 
     int n = sscanf(p, "%63[^ \t=]%*[ \t=]%63s", key, val);
     if (n != 2) {
-        Logger::log(Severity::WARNING_LO, "ConfigLoader",
-                    "Skipping malformed config line: %.60s", p);
+        LOG_WARN_LO("ConfigLoader", "Skipping malformed config line: %.60s", p);
         return;
     }
 
@@ -298,12 +293,11 @@ Result impairment_config_load(const char* path, ImpairmentConfig& cfg)
     // before return.  Power of 10 Rule 3 is satisfied (init-phase only).
     FILE* fp = fopen(path, "r"); // NOLINT(cppcoreguidelines-owning-memory)
     if (fp == nullptr) {
-        Logger::log(Severity::WARNING_LO, "ConfigLoader",
-                    "Cannot open impairment config file: %s", path);
+        LOG_WARN_LO("ConfigLoader", "Cannot open impairment config file: %s", path);
         return Result::ERR_IO;
     }
 
-    Logger::log(Severity::INFO, "ConfigLoader", "Loading impairment config: %s", path);
+    LOG_INFO("ConfigLoader", "Loading impairment config: %s", path);
 
     // Power of 10 Rule 2: bounded loop — at most MAX_CONFIG_LINES iterations.
     // Power of 10 Rule 3: fixed stack buffer for each line.
@@ -324,24 +318,21 @@ Result impairment_config_load(const char* path, ImpairmentConfig& cfg)
     }
 
     if (!eof_reached) {
-        Logger::log(Severity::WARNING_LO, "ConfigLoader",
-                    "Config file has more than %u lines; remaining lines ignored",
+        LOG_WARN_LO("ConfigLoader", "Config file has more than %u lines; remaining lines ignored",
                     MAX_CONFIG_LINES);
     }
 
     // Power of 10 Rule 7: check fclose() return value.
     int close_res = fclose(fp); // NOLINT(cppcoreguidelines-owning-memory)
     if (close_res != 0) {
-        Logger::log(Severity::WARNING_LO, "ConfigLoader",
-                    "fclose() returned non-zero for: %s", path);
+        LOG_WARN_LO("ConfigLoader", "fclose() returned non-zero for: %s", path);
     }
 
     // Postconditions: probability values must be in [0.0, 1.0] after clamping.
     NEVER_COMPILED_OUT_ASSERT(cfg.loss_probability >= 0.0 && cfg.loss_probability <= 1.0);
     NEVER_COMPILED_OUT_ASSERT(cfg.duplication_probability >= 0.0 && cfg.duplication_probability <= 1.0);
 
-    Logger::log(Severity::INFO, "ConfigLoader",
-                "Impairment config loaded: enabled=%d latency=%u loss=%.3f seed=%llu",
+    LOG_INFO("ConfigLoader", "Impairment config loaded: enabled=%d latency=%u loss=%.3f seed=%llu",
                 static_cast<int>(cfg.enabled),
                 cfg.fixed_latency_ms,
                 cfg.loss_probability,

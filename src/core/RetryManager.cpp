@@ -69,8 +69,7 @@ void RetryManager::init()
     // Power of 10 Rule 7: m_count access is safe because m_initialized only becomes
     // true inside this function, so the value is always valid here.
     if (m_initialized && (m_count > 0U)) {
-        Logger::log(Severity::WARNING_HI, "RetryManager",
-                    "re-init with %u active retry slot(s); entries discarded", m_count);
+        LOG_WARN_HI("RetryManager", "re-init with %u active retry slot(s); entries discarded", m_count);
     }
     NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count bounded
 
@@ -129,8 +128,7 @@ Result RetryManager::schedule(const MessageEnvelope& env,
             NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count bounded
             NEVER_COMPILED_OUT_ASSERT(m_slots[i].active);  // Assert: slot marked active
 
-            Logger::log(Severity::INFO, "RetryManager",
-                        "Scheduled message_id=%llu for retry (max_retries=%u, backoff_ms=%u)",
+            LOG_INFO("RetryManager", "Scheduled message_id=%llu for retry (max_retries=%u, backoff_ms=%u)",
                         (unsigned long long)env.message_id, max_retries, backoff_ms);
 
             return Result::OK;
@@ -140,8 +138,7 @@ Result RetryManager::schedule(const MessageEnvelope& env,
     // No free slots
     NEVER_COMPILED_OUT_ASSERT(m_count == ACK_TRACKER_CAPACITY);  // Assert: all slots full
 
-    Logger::log(Severity::WARNING_LO, "RetryManager",
-                "Retry table full; cannot schedule message_id=%llu",
+    LOG_WARN_LO("RetryManager", "Retry table full; cannot schedule message_id=%llu",
                 (unsigned long long)env.message_id);
 
     return Result::ERR_FULL;
@@ -170,8 +167,7 @@ Result RetryManager::on_ack(NodeId src, uint64_t msg_id)
             // Power of 10 rule 5: post-condition assertion
             NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count decremented
 
-            Logger::log(Severity::INFO, "RetryManager",
-                        "Cancelled retry for message_id=%llu from node=%u",
+            LOG_INFO("RetryManager", "Cancelled retry for message_id=%llu from node=%u",
                         (unsigned long long)msg_id, src);
 
             return Result::OK;
@@ -179,8 +175,7 @@ Result RetryManager::on_ack(NodeId src, uint64_t msg_id)
     }
 
     // Entry not found
-    Logger::log(Severity::WARNING_LO, "RetryManager",
-                "No retry entry found for message_id=%llu from node=%u",
+    LOG_WARN_LO("RetryManager", "No retry entry found for message_id=%llu from node=%u",
                 (unsigned long long)msg_id, src);
 
     return Result::ERR_INVALID;
@@ -212,8 +207,7 @@ Result RetryManager::cancel(NodeId src, uint64_t msg_id)
             // Power of 10 rule 5: post-condition assertion
             NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count decremented
 
-            Logger::log(Severity::INFO, "RetryManager",
-                        "Cancelled (rollback) retry for message_id=%llu from node=%u",
+            LOG_INFO("RetryManager", "Cancelled (rollback) retry for message_id=%llu from node=%u",
                         (unsigned long long)msg_id, src);
 
             return Result::OK;
@@ -221,8 +215,7 @@ Result RetryManager::cancel(NodeId src, uint64_t msg_id)
     }
 
     // Entry not found — this is expected when no slot was reserved for this message
-    Logger::log(Severity::WARNING_LO, "RetryManager",
-                "No retry entry found to cancel for message_id=%llu from node=%u",
+    LOG_WARN_LO("RetryManager", "No retry entry found to cancel for message_id=%llu from node=%u",
                 (unsigned long long)msg_id, src);
 
     return Result::ERR_INVALID;
@@ -249,8 +242,7 @@ void RetryManager::reap_terminated_slots(uint64_t now_us)
             NEVER_COMPILED_OUT_ASSERT(m_count > 0U);  // CERT INT30-C: guard against uint32_t underflow
             --m_count;
             ++m_stats.slots_expired;  // REQ-7.2.3: record expiry event
-            Logger::log(Severity::WARNING_LO, "RetryManager",
-                        "Expired retry entry for message_id=%llu",
+            LOG_WARN_LO("RetryManager", "Expired retry entry for message_id=%llu",
                         (unsigned long long)m_slots[i].env.message_id);
             continue;
         }
@@ -259,8 +251,7 @@ void RetryManager::reap_terminated_slots(uint64_t now_us)
             NEVER_COMPILED_OUT_ASSERT(m_count > 0U);  // CERT INT30-C: guard against uint32_t underflow
             --m_count;
             ++m_stats.slots_exhausted;  // REQ-7.2.3: record exhaustion event
-            Logger::log(Severity::WARNING_HI, "RetryManager",
-                        "Exhausted retries for message_id=%llu (count=%u, max=%u)",
+            LOG_WARN_HI("RetryManager", "Exhausted retries for message_id=%llu (count=%u, max=%u)",
                         (unsigned long long)m_slots[i].env.message_id,
                         m_slots[i].retry_count, m_slots[i].max_retries);
         }
@@ -285,8 +276,7 @@ uint32_t RetryManager::collect_due(uint64_t         now_us,
     // a clock glitch degrades gracefully rather than triggering abort/reset.
     NEVER_COMPILED_OUT_ASSERT(now_us != 0ULL);  // Assert: zero timestamp is always invalid
     if (now_us < m_last_collect_us) {
-        Logger::log(Severity::WARNING_HI, "RetryManager",
-                    "collect_due: non-monotonic timestamp (now=%llu < last=%llu); clamping",
+        LOG_WARN_HI("RetryManager", "collect_due: non-monotonic timestamp (now=%llu < last=%llu); clamping",
                     static_cast<unsigned long long>(now_us),
                     static_cast<unsigned long long>(m_last_collect_us));
         now_us = m_last_collect_us;
@@ -324,8 +314,7 @@ uint32_t RetryManager::collect_due(uint64_t         now_us,
             uint64_t backoff_us = static_cast<uint64_t>(m_slots[i].backoff_ms) * 1000ULL;
             m_slots[i].next_retry_us = now_us + backoff_us;
 
-            Logger::log(Severity::INFO, "RetryManager",
-                        "Due for retry: message_id=%llu, attempt=%u, next_backoff_ms=%u",
+            LOG_INFO("RetryManager", "Due for retry: message_id=%llu, attempt=%u, next_backoff_ms=%u",
                         (unsigned long long)m_slots[i].env.message_id,
                         m_slots[i].retry_count, m_slots[i].backoff_ms);
         }

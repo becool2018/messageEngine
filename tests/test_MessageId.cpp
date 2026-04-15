@@ -30,6 +30,10 @@
 #include <cassert>
 
 #include "core/MessageId.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 1: init with valid seed — first next() returns the seed value
@@ -167,6 +171,12 @@ static bool test_reinit_resets_sequence()
 
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     struct TestCase {
         const char* name;
         bool (*fn)();

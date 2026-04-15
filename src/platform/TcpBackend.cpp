@@ -104,23 +104,23 @@ Result TcpBackend::bind_and_listen(const char* ip, uint16_t port)
 
     m_listen_fd = m_sock_ops->create_tcp(socket_is_ipv6(ip));
     if (m_listen_fd < 0) {
-        Logger::log(Severity::FATAL, "TcpBackend", "socket_create_tcp failed in server mode");
+        LOG_FATAL("TcpBackend", "socket_create_tcp failed in server mode");
         return Result::ERR_IO;
     }
     if (!m_sock_ops->set_reuseaddr(m_listen_fd)) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend", "socket_set_reuseaddr failed");
+        LOG_WARN_HI("TcpBackend", "socket_set_reuseaddr failed");
         m_sock_ops->do_close(m_listen_fd);
         m_listen_fd = -1;
         return Result::ERR_IO;
     }
     if (!m_sock_ops->do_bind(m_listen_fd, ip, port)) {
-        Logger::log(Severity::FATAL, "TcpBackend", "socket_bind failed on port %u", port);
+        LOG_FATAL("TcpBackend", "socket_bind failed on port %u", port);
         m_sock_ops->do_close(m_listen_fd);
         m_listen_fd = -1;
         return Result::ERR_IO;
     }
     if (!m_sock_ops->do_listen(m_listen_fd, static_cast<int>(MAX_TCP_CONNECTIONS))) {
-        Logger::log(Severity::FATAL, "TcpBackend", "socket_listen failed");
+        LOG_FATAL("TcpBackend", "socket_listen failed");
         m_sock_ops->do_close(m_listen_fd);
         m_listen_fd = -1;
         return Result::ERR_IO;
@@ -129,14 +129,13 @@ Result TcpBackend::bind_and_listen(const char* ip, uint16_t port)
     // when no pending connection exists, allowing receive_message() to honour
     // its timeout. Power of 10 Rule 2 deviation: infrastructure poll loop.
     if (!m_sock_ops->set_nonblocking(m_listen_fd)) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                    "socket_set_nonblocking failed on listen fd");
+        LOG_WARN_HI("TcpBackend", "socket_set_nonblocking failed on listen fd");
         m_sock_ops->do_close(m_listen_fd);
         m_listen_fd = -1;
         return Result::ERR_IO;
     }
     m_open = true;
-    Logger::log(Severity::INFO, "TcpBackend", "Server listening on %s:%u", ip, port);
+    LOG_INFO("TcpBackend", "Server listening on %s:%u", ip, port);
     NEVER_COMPILED_OUT_ASSERT(m_listen_fd >= 0);       // Power of 10: post-condition
     return Result::OK;
 }
@@ -148,8 +147,7 @@ Result TcpBackend::init(const TransportConfig& config)
 
     // S5: validate config before any channels[] access (REQ-6.1.1, ChannelConfig.hpp).
     if (!transport_config_valid(config)) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                    "init: num_channels=%u exceeds MAX_CHANNELS; rejecting config",
+        LOG_WARN_HI("TcpBackend", "init: num_channels=%u exceeds MAX_CHANNELS; rejecting config",
                     config.num_channels);
         return Result::ERR_INVALID;
     }
@@ -201,22 +199,19 @@ Result TcpBackend::connect_to_server()
 
     int fd = m_sock_ops->create_tcp(socket_is_ipv6(m_cfg.peer_ip));
     if (fd < 0) {
-        Logger::log(Severity::FATAL, "TcpBackend",
-                   "socket_create_tcp failed in client mode");
+        LOG_FATAL("TcpBackend", "socket_create_tcp failed in client mode");
         return Result::ERR_IO;
     }
 
     if (!m_sock_ops->set_reuseaddr(fd)) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                   "socket_set_reuseaddr failed");
+        LOG_WARN_HI("TcpBackend", "socket_set_reuseaddr failed");
         m_sock_ops->do_close(fd);
         return Result::ERR_IO;
     }
 
     if (!m_sock_ops->connect_with_timeout(fd, m_cfg.peer_ip, m_cfg.peer_port,
                                           m_cfg.connect_timeout_ms)) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                   "Connection to %s:%u failed", m_cfg.peer_ip, m_cfg.peer_port);
+        LOG_WARN_HI("TcpBackend", "Connection to %s:%u failed", m_cfg.peer_ip, m_cfg.peer_port);
         m_sock_ops->do_close(fd);
         return Result::ERR_IO;
     }
@@ -226,8 +221,7 @@ Result TcpBackend::connect_to_server()
     m_open           = true;
     ++m_connections_opened;  // REQ-7.2.4: successful client connect
 
-    Logger::log(Severity::INFO, "TcpBackend",
-               "Connected to %s:%u", m_cfg.peer_ip, m_cfg.peer_port);
+    LOG_INFO("TcpBackend", "Connected to %s:%u", m_cfg.peer_ip, m_cfg.peer_port);
 
     NEVER_COMPILED_OUT_ASSERT(m_client_fds[0U] >= 0);  // Post-condition
     NEVER_COMPILED_OUT_ASSERT(m_client_count == 1U);  // Post-condition
@@ -262,8 +256,7 @@ Result TcpBackend::accept_clients()
     ++m_client_count;
     ++m_connections_opened;  // REQ-7.2.4: successful server accept
 
-    Logger::log(Severity::INFO, "TcpBackend",
-               "Accepted client %u, total clients: %u", m_client_count - 1U, m_client_count);
+    LOG_INFO("TcpBackend", "Accepted client %u, total clients: %u", m_client_count - 1U, m_client_count);
 
     NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);  // Post-condition
     return Result::OK;
@@ -322,8 +315,7 @@ bool TcpBackend::apply_inbound_impairment(const MessageEnvelope& env, uint64_t n
 
     // REQ-5.1.6: drop if an inbound partition is currently active.
     if (m_impairment.is_partition_active(now_us)) {
-        Logger::log(Severity::WARNING_LO, "TcpBackend",
-                    "inbound envelope dropped (partition active)");
+        LOG_WARN_LO("TcpBackend", "inbound envelope dropped (partition active)");
         return false;
     }
 
@@ -336,8 +328,7 @@ bool TcpBackend::apply_inbound_impairment(const MessageEnvelope& env, uint64_t n
                                                inbound_count);
     if (!result_ok(res)) {
         // ERR_FULL from process_inbound (logic error): treat as drop.
-        Logger::log(Severity::WARNING_LO, "TcpBackend",
-                    "process_inbound returned error; dropping envelope");
+        LOG_WARN_LO("TcpBackend", "process_inbound returned error; dropping envelope");
         return false;
     }
 
@@ -349,8 +340,7 @@ bool TcpBackend::apply_inbound_impairment(const MessageEnvelope& env, uint64_t n
     // inbound_count == 1: push the released envelope into the receive queue.
     res = m_recv_queue.push(inbound_out);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                    "recv queue full; dropping inbound envelope");
+        LOG_WARN_HI("TcpBackend", "recv queue full; dropping inbound envelope");
     }
 
     NEVER_COMPILED_OUT_ASSERT(inbound_count == 1U);  // Post-condition
@@ -368,7 +358,7 @@ Result TcpBackend::recv_from_client(int client_fd, uint32_t timeout_ms)
 
     uint32_t out_len = 0U;
     if (!m_sock_ops->recv_frame(client_fd, m_wire_buf, SOCKET_RECV_BUF_BYTES, timeout_ms, &out_len)) {
-        Logger::log(Severity::WARNING_LO, "TcpBackend", "recv_frame failed; closing connection");
+        LOG_WARN_LO("TcpBackend", "recv_frame failed; closing connection");
         remove_client_fd(client_fd);
         return Result::ERR_IO;
     }
@@ -377,8 +367,7 @@ Result TcpBackend::recv_from_client(int client_fd, uint32_t timeout_ms)
     MessageEnvelope env;
     Result res = Serializer::deserialize(m_wire_buf, out_len, env);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_LO, "TcpBackend",
-                   "Deserialize failed: %u", static_cast<uint8_t>(res));
+        LOG_WARN_LO("TcpBackend", "Deserialize failed: %u", static_cast<uint8_t>(res));
         return res;
     }
 
@@ -399,8 +388,7 @@ Result TcpBackend::recv_from_client(int client_fd, uint32_t timeout_ms)
     // NODE_ID_INVALID by design (server never sends HELLO back) and the slot would
     // always appear unregistered, causing all client-mode receives to be dropped.
     if (m_is_server && is_unregistered_slot(client_fd)) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                    "data frame from unregistered slot fd=%d: dropping (REQ-6.1.11)",
+        LOG_WARN_HI("TcpBackend", "data frame from unregistered slot fd=%d: dropping (REQ-6.1.11)",
                     client_fd);
         return Result::ERR_INVALID;
     }
@@ -420,8 +408,7 @@ Result TcpBackend::recv_from_client(int client_fd, uint32_t timeout_ms)
     if (!m_is_server && (m_client_node_ids[0U] == NODE_ID_INVALID) &&
         (env.source_id != NODE_ID_INVALID)) {
         m_client_node_ids[0U] = env.source_id;
-        Logger::log(Severity::INFO, "TcpBackend",
-                    "SEC-025: server NodeId locked in as %u (REQ-6.1.11)",
+        LOG_INFO("TcpBackend", "SEC-025: server NodeId locked in as %u (REQ-6.1.11)",
                     static_cast<unsigned int>(env.source_id));
     }
 
@@ -452,8 +439,7 @@ bool TcpBackend::send_to_all_clients(const uint8_t* buf, uint32_t len)
         }
         if (!m_sock_ops->send_frame(m_client_fds[i], buf, len,
                                     m_cfg.channels[0U].send_timeout_ms)) {
-            Logger::log(Severity::WARNING_LO, "TcpBackend",
-                       "Send frame failed on client %u", i);
+            LOG_WARN_LO("TcpBackend", "Send frame failed on client %u", i);
             any_failed = true;
         }
     }
@@ -483,8 +469,7 @@ Result TcpBackend::send_one_delayed(const MessageEnvelope& env, bool& failed)
                                          static_cast<uint32_t>(sizeof(m_wire_buf)),
                                          wire_len);
     if (!result_ok(ser_r)) {
-        Logger::log(Severity::WARNING_LO, "TcpBackend",
-                    "send_one_delayed: serialize failed");
+        LOG_WARN_LO("TcpBackend", "send_one_delayed: serialize failed");
         failed = true;
         return Result::OK;  // caller uses failed flag; ERR_IO not distinguishable here
     }
@@ -498,8 +483,7 @@ Result TcpBackend::send_one_delayed(const MessageEnvelope& env, bool& failed)
 
     uint32_t slot = find_client_slot(env.destination_id);
     if (slot >= MAX_TCP_CONNECTIONS) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                    "send_one_delayed: no slot for dst=%u", env.destination_id);
+        LOG_WARN_HI("TcpBackend", "send_one_delayed: no slot for dst=%u", env.destination_id);
         return Result::ERR_INVALID;
     }
     failed = send_to_slot(slot, m_wire_buf, wire_len);
@@ -535,8 +519,7 @@ void TcpBackend::apply_send_result(Result route_r, bool failed,
         return;
     }
     if (failed) {
-        Logger::log(Severity::WARNING_LO, "TcpBackend",
-                    "flush_delayed: send failed for non-current msg");
+        LOG_WARN_LO("TcpBackend", "flush_delayed: send failed for non-current msg");
     }
 }
 
@@ -686,7 +669,7 @@ Result TcpBackend::send_message(const MessageEnvelope& envelope)
     Result res = Serializer::serialize(envelope, m_wire_buf,
                                        SOCKET_RECV_BUF_BYTES, wire_len);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_LO, "TcpBackend", "Serialize failed");
+        LOG_WARN_LO("TcpBackend", "Serialize failed");
         return res;
     }
 
@@ -705,8 +688,7 @@ Result TcpBackend::send_message(const MessageEnvelope& envelope)
 
     // Discard if no clients are connected
     if (m_client_count == 0U) {
-        Logger::log(Severity::WARNING_LO, "TcpBackend",
-                   "No clients connected; discarding message");
+        LOG_WARN_LO("TcpBackend", "No clients connected; discarding message");
         return Result::OK;
     }
 
@@ -791,7 +773,7 @@ void TcpBackend::close()
     m_connections_closed += closed_count;
     m_client_count = 0U;
     m_open         = false;
-    Logger::log(Severity::INFO, "TcpBackend", "Transport closed");
+    LOG_INFO("TcpBackend", "Transport closed");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -858,8 +840,7 @@ Result TcpBackend::send_hello_frame()
                                          static_cast<uint32_t>(sizeof(m_wire_buf)),
                                          wire_len);
     if (!result_ok(ser_r)) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                    "send_hello_frame: serialize failed %u",
+        LOG_WARN_HI("TcpBackend", "send_hello_frame: serialize failed %u",
                     static_cast<uint8_t>(ser_r));
         return ser_r;
     }
@@ -869,8 +850,7 @@ Result TcpBackend::send_hello_frame()
     // established or was closed, this would pass -1 to send_frame, causing silent
     // failure or UB in the underlying send() system call.
     if (m_client_fds[0U] < 0) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                    "send_hello_frame: no active connection (fd=%d); aborting HELLO",
+        LOG_WARN_HI("TcpBackend", "send_hello_frame: no active connection (fd=%d); aborting HELLO",
                     m_client_fds[0U]);
         return Result::ERR_IO;
     }
@@ -879,12 +859,10 @@ Result TcpBackend::send_hello_frame()
     bool sent_ok = m_sock_ops->send_frame(m_client_fds[0U], m_wire_buf, wire_len,
                                           m_cfg.channels[0U].send_timeout_ms);
     if (!sent_ok) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                    "send_hello_frame: send_frame failed");
+        LOG_WARN_HI("TcpBackend", "send_hello_frame: send_frame failed");
         return Result::ERR_IO;
     }
-    Logger::log(Severity::INFO, "TcpBackend",
-                "HELLO sent: local_id=%u", m_local_node_id);
+    LOG_INFO("TcpBackend", "HELLO sent: local_id=%u", m_local_node_id);
     return Result::OK;
 }
 
@@ -902,8 +880,7 @@ void TcpBackend::close_and_evict_slot(int client_fd)
     NEVER_COMPILED_OUT_ASSERT(client_fd >= 0);                         // Pre-condition: valid fd
     NEVER_COMPILED_OUT_ASSERT(m_client_count <= MAX_TCP_CONNECTIONS);  // Invariant: count in range
 
-    Logger::log(Severity::WARNING_HI, "TcpBackend",
-                "close_and_evict_slot: closing rejected fd=%d", client_fd);
+    LOG_WARN_HI("TcpBackend", "close_and_evict_slot: closing rejected fd=%d", client_fd);
     remove_client_fd(client_fd);
 
     // Post-condition: count is still in range after compaction.
@@ -940,8 +917,7 @@ void TcpBackend::sweep_hello_timeouts()
         if (!m_client_hello_received[i] &&
             (m_client_accept_ts[i] != 0ULL) &&
             ((now_us - m_client_accept_ts[i]) > timeout_us)) {
-            Logger::log(Severity::WARNING_HI, "TcpBackend",
-                        "HELLO timeout: evicting fd=%d (slot %u); "
+            LOG_WARN_HI("TcpBackend", "HELLO timeout: evicting fd=%d (slot %u); "
                         "no HELLO within %u ms (REQ-6.1.12 / HAZ-023)",
                         m_client_fds[i], i,
                         m_cfg.channels[0U].recv_timeout_ms);
@@ -971,8 +947,7 @@ void TcpBackend::handle_hello_frame(int client_fd, NodeId src_id)
     // Power of 10 rule 2: fixed loop bound (m_client_count ≤ MAX_TCP_CONNECTIONS)
     for (uint32_t j = 0U; j < m_client_count; ++j) {
         if ((m_client_node_ids[j] == src_id) && (m_client_fds[j] != client_fd)) {
-            Logger::log(Severity::WARNING_HI, "TcpBackend",
-                        "HELLO rejected: node_id=%u already registered on slot %u (HAZ-009); evicting",
+            LOG_WARN_HI("TcpBackend", "HELLO rejected: node_id=%u already registered on slot %u (HAZ-009); evicting",
                         static_cast<unsigned>(src_id), j);
             close_and_evict_slot(client_fd);
             return;  // Slot indices invalidated by compaction; must not continue.
@@ -983,8 +958,7 @@ void TcpBackend::handle_hello_frame(int client_fd, NodeId src_id)
     for (uint32_t i = 0U; i < m_client_count; ++i) {
         if (m_client_fds[i] == client_fd) {
             m_client_node_ids[i] = src_id;
-            Logger::log(Severity::INFO, "TcpBackend",
-                        "HELLO from client slot %u node_id=%u", i, src_id);
+            LOG_INFO("TcpBackend", "HELLO from client slot %u node_id=%u", i, src_id);
 
             // REQ-3.3.6: enqueue src_id so DeliveryEngine can reset stale ordering
             // state for this peer.  A reconnecting peer starts with seq=1; without
@@ -999,8 +973,7 @@ void TcpBackend::handle_hello_frame(int client_fd, NodeId src_id)
             return;
         }
     }
-    Logger::log(Severity::WARNING_LO, "TcpBackend",
-                "handle_hello_frame: fd not found");
+    LOG_WARN_LO("TcpBackend", "handle_hello_frame: fd not found");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1076,8 +1049,7 @@ Result TcpBackend::process_hello_frame(int client_fd, NodeId src_id)
 
     if (slot_idx >= MAX_TCP_CONNECTIONS) {
         // fd not found — should never happen if called from recv_from_client
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                    "process_hello_frame: fd=%d not in slot table", client_fd);
+        LOG_WARN_HI("TcpBackend", "process_hello_frame: fd=%d not in slot table", client_fd);
         return Result::ERR_AGAIN;  // consume frame; nothing else we can do
     }
 
@@ -1085,8 +1057,7 @@ Result TcpBackend::process_hello_frame(int client_fd, NodeId src_id)
     // G-3: close and evict to prevent resource hold and retry flooding.
     // close_and_evict_slot() compacts the slot arrays; return immediately after.
     if (m_client_hello_received[slot_idx]) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                    "duplicate HELLO from slot %u fd=%d node_id=%u: evicting (REQ-6.1.8)",
+        LOG_WARN_HI("TcpBackend", "duplicate HELLO from slot %u fd=%d node_id=%u: evicting (REQ-6.1.8)",
                     static_cast<unsigned>(slot_idx), client_fd,
                     static_cast<unsigned>(src_id));
         close_and_evict_slot(client_fd);
@@ -1131,8 +1102,7 @@ bool TcpBackend::validate_source_id(int client_fd, NodeId claimed_id) const
     // during normal operation; allow as a defensive fallback.
     if (!found) {
         if (m_is_server) {
-            Logger::log(Severity::WARNING_HI, "TcpBackend",
-                        "validate_source_id: fd=%d not in slot table; dropping",
+            LOG_WARN_HI("TcpBackend", "validate_source_id: fd=%d not in slot table; dropping",
                         client_fd);
             return false;
         }
@@ -1148,8 +1118,7 @@ bool TcpBackend::validate_source_id(int client_fd, NodeId claimed_id) const
     }
 
     if (claimed_id != registered) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                    "source_id mismatch: claimed=%u registered=%u; dropping (REQ-6.1.11)",
+        LOG_WARN_HI("TcpBackend", "source_id mismatch: claimed=%u registered=%u; dropping (REQ-6.1.11)",
                     static_cast<unsigned>(claimed_id),
                     static_cast<unsigned>(registered));
         NEVER_COMPILED_OUT_ASSERT(claimed_id != registered);  // post: mismatch detected
@@ -1190,8 +1159,7 @@ bool TcpBackend::send_to_slot(uint32_t slot, const uint8_t* buf, uint32_t len)
     bool ok = m_sock_ops->send_frame(m_client_fds[slot], buf, len,
                                      m_cfg.channels[0U].send_timeout_ms);
     if (!ok) {
-        Logger::log(Severity::WARNING_HI, "TcpBackend",
-                    "send_to_slot %u failed", slot);
+        LOG_WARN_HI("TcpBackend", "send_to_slot %u failed", slot);
     }
     // send_frame returns true on success; invert for "failed" convention
     return !ok;

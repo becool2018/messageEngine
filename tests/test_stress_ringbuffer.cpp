@@ -97,6 +97,10 @@
 #include "core/Types.hpp"
 #include "core/MessageEnvelope.hpp"
 #include "core/RingBuffer.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Compile-time constants
@@ -454,6 +458,12 @@ static uint32_t test_ringbuffer_backpressure_storm(time_t deadline)
 
 int main(int argc, char* argv[])
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     const time_t duration_secs = parse_duration_secs(argc, argv);
     assert(duration_secs > 0);
 

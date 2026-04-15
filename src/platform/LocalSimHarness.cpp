@@ -78,8 +78,7 @@ Result LocalSimHarness::init(const TransportConfig& config)
     m_impairment.init(imp_cfg);
 
     m_open = true;
-    Logger::log(Severity::INFO, "LocalSimHarness",
-               "Local simulation harness initialized (node %u)",
+    LOG_INFO("LocalSimHarness", "Local simulation harness initialized (node %u)",
                config.local_node_id);
 
     NEVER_COMPILED_OUT_ASSERT(m_open);  // Post-condition
@@ -110,7 +109,7 @@ void LocalSimHarness::link(LocalSimHarness* peer)
 
     m_peer = peer;
     ++m_connections_opened;  // REQ-7.2.4: link counts as connection established
-    Logger::log(Severity::INFO, "LocalSimHarness", "Harness linked to peer");
+    LOG_INFO("LocalSimHarness", "Harness linked to peer");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -130,8 +129,7 @@ Result LocalSimHarness::inject(const MessageEnvelope& envelope)
 
     Result res = m_recv_queue.push(envelope);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_HI, "LocalSimHarness",
-                   "Receive queue full; dropping message");
+        LOG_WARN_HI("LocalSimHarness", "Receive queue full; dropping message");
     }
 
     NEVER_COMPILED_OUT_ASSERT(res == Result::OK || res == Result::ERR_FULL);  // Post-condition
@@ -165,8 +163,7 @@ Result LocalSimHarness::deliver_from_peer(const MessageEnvelope& env, uint64_t n
     // REQ-5.1.6: Check inbound partition (intermittent outage) on the receiver side.
     // If a partition is active on this harness, silently drop the arriving envelope.
     if (m_impairment.is_partition_active(now_us)) {
-        Logger::log(Severity::WARNING_LO, "LocalSimHarness",
-                    "deliver_from_peer: inbound partition active; dropping message");
+        LOG_WARN_LO("LocalSimHarness", "deliver_from_peer: inbound partition active; dropping message");
         return Result::ERR_IO;  // Dropped by partition
     }
 
@@ -178,8 +175,7 @@ Result LocalSimHarness::deliver_from_peer(const MessageEnvelope& env, uint64_t n
     Result res = m_impairment.process_inbound(env, now_us,
                                               &inbound_out, 1U, inbound_count);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_HI, "LocalSimHarness",
-                    "deliver_from_peer: process_inbound failed; dropping message");
+        LOG_WARN_HI("LocalSimHarness", "deliver_from_peer: process_inbound failed; dropping message");
         return Result::ERR_IO;
     }
 
@@ -196,8 +192,7 @@ Result LocalSimHarness::deliver_from_peer(const MessageEnvelope& env, uint64_t n
     // Push the (possibly reordered) envelope into the receive queue.
     Result push_res = m_recv_queue.push(inbound_out);
     if (!result_ok(push_res)) {
-        Logger::log(Severity::WARNING_HI, "LocalSimHarness",
-                    "deliver_from_peer: recv queue full; dropping inbound message");
+        LOG_WARN_HI("LocalSimHarness", "deliver_from_peer: recv queue full; dropping inbound message");
         return Result::ERR_FULL;  // Queue full — report to caller
     }
 
@@ -253,14 +248,12 @@ Result LocalSimHarness::flush_outbound_batch(const MessageEnvelope& envelope,
         if (deliver_res == Result::ERR_IO || deliver_res == Result::ERR_FULL) {
             if (is_current) {
                 // Attribute delivery failure to the caller for the current envelope.
-                Logger::log(Severity::WARNING_LO, "LocalSimHarness",
-                            "flush_outbound_batch: current envelope not delivered "
+                LOG_WARN_LO("LocalSimHarness", "flush_outbound_batch: current envelope not delivered "
                             "(inbound impairment on peer); result=%d",
                             static_cast<int>(deliver_res));
                 current_result = deliver_res;
             } else {
-                Logger::log(Severity::WARNING_HI, "LocalSimHarness",
-                            "flush_outbound_batch: delayed envelope at index %u "
+                LOG_WARN_HI("LocalSimHarness", "flush_outbound_batch: delayed envelope at index %u "
                             "not delivered (result=%d)", i,
                             static_cast<int>(deliver_res));
             }
@@ -373,7 +366,7 @@ void LocalSimHarness::close()
     }
     m_peer = nullptr;
     m_open = false;
-    Logger::log(Severity::INFO, "LocalSimHarness", "Transport closed");
+    LOG_INFO("LocalSimHarness", "Transport closed");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

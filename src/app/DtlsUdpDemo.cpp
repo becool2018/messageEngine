@@ -50,6 +50,8 @@
 #include "core/DeliveryEngine.hpp"
 #include "core/Logger.hpp"
 #include "core/Timestamp.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
 #include "platform/DtlsUdpBackend.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -231,8 +233,7 @@ static void send_echo_reply(DeliveryEngine& engine,
     (void)memcpy(reply.payload, received.payload, reply.payload_length);
     const Result res = engine.send(reply, now_us);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_LO, "DtlsUdpDemo",
-                    "Echo send failed: %d\n", static_cast<int>(res));
+        LOG_WARN_LO("DtlsUdpDemo", "Echo send failed: %d\n", static_cast<int>(res));
     }
 }
 
@@ -291,8 +292,7 @@ static int run_server(uint16_t port)
 {
     NEVER_COMPILED_OUT_ASSERT(port > 0U);  // Assert: valid port
 
-    Logger::log(Severity::INFO, "DtlsUdpDemo",
-                "Server starting on UDP port %u (DTLS)\n",
+    LOG_INFO("DtlsUdpDemo", "Server starting on UDP port %u (DTLS)\n",
                 static_cast<unsigned>(port));
 
     TransportConfig cfg;
@@ -301,8 +301,7 @@ static int run_server(uint16_t port)
     DtlsUdpBackend transport;
     const Result res = transport.init(cfg);
     if (!result_ok(res)) {
-        Logger::log(Severity::FATAL, "DtlsUdpDemo",
-                    "Server transport init failed: %d\n", static_cast<int>(res));
+        LOG_FATAL("DtlsUdpDemo", "Server transport init failed: %d\n", static_cast<int>(res));
         return 1;
     }
 
@@ -313,8 +312,7 @@ static int run_server(uint16_t port)
     void (*old_handler)(int) = signal(SIGINT, sig_handler);
     NEVER_COMPILED_OUT_ASSERT(old_handler != SIG_ERR);  // Assert: signal() succeeded
 
-    Logger::log(Severity::INFO, "DtlsUdpDemo",
-                "Server ready. Press Ctrl+C to stop.\n");
+    LOG_INFO("DtlsUdpDemo", "Server ready. Press Ctrl+C to stop.\n");
 
     uint32_t received = 0U;
 
@@ -324,8 +322,7 @@ static int run_server(uint16_t port)
     }
 
     transport.close();
-    Logger::log(Severity::INFO, "DtlsUdpDemo",
-                "Server stopped. Messages received: %u\n", received);
+    LOG_INFO("DtlsUdpDemo", "Server stopped. Messages received: %u\n", received);
     (void)signal(SIGINT, old_handler);
     return 0;
 }
@@ -337,8 +334,7 @@ static int run_client(uint16_t port)
 {
     NEVER_COMPILED_OUT_ASSERT(port > 0U);  // Assert: valid port
 
-    Logger::log(Severity::INFO, "DtlsUdpDemo",
-                "Client connecting to 127.0.0.1:%u (DTLS)\n",
+    LOG_INFO("DtlsUdpDemo", "Client connecting to 127.0.0.1:%u (DTLS)\n",
                 static_cast<unsigned>(port));
 
     // Wait for server to be ready and DTLS cookie exchange to complete
@@ -350,8 +346,7 @@ static int run_client(uint16_t port)
     DtlsUdpBackend transport;
     Result res = transport.init(cfg);
     if (!result_ok(res)) {
-        Logger::log(Severity::FATAL, "DtlsUdpDemo",
-                    "Client transport init failed: %d\n", static_cast<int>(res));
+        LOG_FATAL("DtlsUdpDemo", "Client transport init failed: %d\n", static_cast<int>(res));
         return 1;
     }
 
@@ -386,8 +381,7 @@ static int run_client(uint16_t port)
             ++sent;
             (void)printf("[Client] sent: %s\n", text);
         } else {
-            Logger::log(Severity::WARNING_HI, "DtlsUdpDemo",
-                        "Send failed: %d\n", static_cast<int>(res));
+            LOG_WARN_HI("DtlsUdpDemo", "Send failed: %d\n", static_cast<int>(res));
         }
 
         if (wait_for_echo(engine)) {
@@ -426,6 +420,11 @@ int main(int argc, char* argv[])
 {
     NEVER_COMPILED_OUT_ASSERT(argc >= 1);        // Assert: valid argc
     NEVER_COMPILED_OUT_ASSERT(argv != nullptr);  // Assert: valid argv
+
+    // Initialize logger with POSIX clock and sink before any LOG_* call.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
 
     // Register POSIX abort handler for NEVER_COMPILED_OUT_ASSERT
     assert_state::set_reset_handler(AbortResetHandler::instance());
