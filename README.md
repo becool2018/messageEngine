@@ -401,8 +401,12 @@ messageEngine/
 │       ├── TlsTcpDemo.cpp                  # TLS client/server demo
 │       └── DtlsUdpDemo.cpp                 # DTLS client/server demo
 ├── tests/                # Unit tests (one binary per module)
+│   ├── FakeLogClock.hpp            # Deterministic ILogClock stub (fixed mono_us / wall_us)
+│   ├── FaultPosixLogClock.hpp      # ILogClock stub that can inject clock failures
+│   ├── FaultPosixLogSink.hpp       # ILogSink stub that can inject write failures
 │   ├── MockSocketOps.hpp           # Injectable ISocketOps stub for all four transport backend M5 tests
 │   ├── MockTransportInterface.hpp  # Injectable TransportInterface stub for DeliveryEngine M5 tests
+│   ├── RingLogSink.hpp             # Fixed-capacity ring-buffer log sink for asserting log output in tests
 │   ├── TestPortAllocator.hpp       # Port allocation helper for concurrent backend tests
 │   ├── test_MessageEnvelope.cpp
 │   ├── test_MessageId.cpp
@@ -428,7 +432,12 @@ messageEngine/
 │   ├── test_Logger.cpp
 │   ├── test_PrngEngine.cpp
 │   ├── test_RingBuffer.cpp
-│   └── test_stress_capacity.cpp    # Stress suite (run via make run_stress_tests)
+│   ├── test_stress_capacity.cpp    # Capacity-limit stress tests (slot exhaustion, ring overflow)
+│   ├── test_stress_e2e.cpp         # End-to-end throughput and reliability stress tests
+│   ├── test_stress_ordering.cpp    # Ordering gate stress tests (reorder, hold, release)
+│   ├── test_stress_reconnect.cpp   # Reconnect / ordering-reset stress tests
+│   ├── test_stress_ringbuffer.cpp  # RingBuffer concurrent-access stress tests
+│   └── test_stress_tcp_fanin.cpp   # TCP fan-in stress tests (many clients → one server)
 ├── docs/                 # Requirements, design, and analysis documents
 ├── Makefile
 ├── .cppcheck-suppress
@@ -557,18 +566,25 @@ build/test_RingBuffer
 
 ## Stress Tests
 
-Stress tests exercise **capacity-exhaustion and slot-recycling** paths with thousands of
-consecutive fill/drain cycles.  They target a different failure class than unit tests —
-slot leaks, index-arithmetic wrap errors, and counter drift that only manifest under
-sustained load.
+Six stress test binaries cover capacity-exhaustion, sustained throughput, ordering under
+reorder, reconnect recovery, RingBuffer concurrent access, and TCP fan-in.  They target a
+different failure class than unit tests — slot leaks, index-arithmetic wrap errors, and
+counter drift that only manifest under sustained load.
 
 ```bash
-# Build only
+# Build the four main stress binaries (capacity, e2e, ordering, reconnect)
 make stress_tests
 
-# Build and run
+# Build and run the three standard stress suites (capacity, e2e, ordering; ~60 s each)
 make run_stress_tests
+
+# Run the additional suites individually
+make run_stress_reconnect   # peer reconnect / ordering-reset under load
+make run_stress_ringbuffer  # RingBuffer concurrent-access storm
+make run_stress_tcp_fanin   # TCP multi-client fan-in (many clients → one server)
 ```
+
+**`test_stress_capacity` sub-tests** (each a function inside the capacity binary):
 
 | Test | Cycles | What it catches |
 |---|---|---|
@@ -1174,9 +1190,6 @@ This project ships a set of reusable Claude Code skills in `.claude/skills/`. Sk
 | Skill | Invocation | Description |
 |---|---|---|
 | **read-standards** | `/read-standards` | Reads and internalizes both `CLAUDE.md` and `.claude/CLAUDE.md` in full, then confirms understanding of Power of 10, MISRA C++:2023, layering rules, safety annotations, and traceability policy. Run this at the start of any session that involves writing or reviewing C/C++ code. |
-| **generate_use_case_list** | `/generate_use_case_list` | Reads the live source code in `src/` (headers, implementations, and app entry points) and all test files in `tests/` to regenerate `docs/use_cases/HIGH_LEVEL_USE_CASES.md` from scratch. Automatically picks up new files and ignores deleted ones. Classifies each capability as a user-facing HL group, an Application Workflow pattern, or a System Internal sub-function using a concrete decision algorithm anchored to what `src/app/` code actually calls. |
-| **generate_use_cases** | `/generate_use_cases` | Reads `HIGH_LEVEL_USE_CASES.md` and all source files, then regenerates every individual `UC_*.md` document in `docs/use_cases/` using the 15-section flow-of-control format defined in `docs/use_cases/use_case_format.txt`. Overwrites existing UC files; creates new ones for any UC number that has no matching file. |
-| **find_missing_use_cases** | `/find_missing_use_cases` | Compares the live source code against existing `UC_*.md` files and `HIGH_LEVEL_USE_CASES.md` to identify undocumented capabilities. Writes a new `UC_*.md` for each gap (using the same 15-section format) and inserts the new entries into `HIGH_LEVEL_USE_CASES.md`. Never modifies existing UC files. |
 | **validate-safety-doc** | `/validate-safety-doc <DOC>` or `/validate-safety-doc all` | Validates one or all Safety & Assurance documents in `docs/` against the live source code. Checks that all claims, constants, function names, state machines, HAZ IDs, REQ IDs, and structural references are still accurate. Pass a document name (e.g., `/validate-safety-doc HAZARD_ANALYSIS`) to validate one document, or pass `all` to validate all nine in parallel. Reports findings by severity (CRITICAL / STALE / MISSING / MINOR) and offers to apply fixes. See below for how `all` mode works. |
 
 #### How `/validate-safety-doc all` works
@@ -1216,12 +1229,6 @@ All nine documents are validated simultaneously using three dependency-ordered w
 └── skills/
     ├── read-standards/
     │   └── SKILL.md
-    ├── generate_use_case_list/
-    │   └── SKILL.md
-    ├── generate_use_cases/
-    │   └── SKILL.md
-    ├── find_missing_use_cases/
-    │   └── SKILL.md
     └── validate-safety-doc/
         └── SKILL.md
 ```
@@ -1257,11 +1264,11 @@ All nine documents are validated simultaneously using three dependency-ordered w
 
 | Category | Lines |
 |---|---|
-| `src/` (production + headers) | 21,763 |
-| `tests/` | 34,046 |
-| **Total** | **55,809** |
+| `src/` (production + headers) | 23,009 |
+| `tests/` | 37,993 |
+| **Total** | **61,002** |
 
-75 source files across 3 layers; 23 test suites + 1 stress suite + 3 shared mock/helper headers (27 test files).
+83 source files across 3 layers; 24 unit test suites + 6 stress test suites + 7 shared mock/helper headers (37 test files).
 
 ---
 
