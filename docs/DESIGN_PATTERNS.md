@@ -286,7 +286,7 @@ Test files (e.g. `tests/test_TlsTcpBackend.cpp`, `tests/test_DtlsUdpBackend.cpp`
 | `AckTracker` | `src/core/AckTracker.hpp` | `Entry m_slots[ACK_TRACKER_CAPACITY]` | `ACK_TRACKER_CAPACITY = 32` |
 | `RetryManager` | `src/core/RetryManager.hpp` | `RetryEntry m_slots[ACK_TRACKER_CAPACITY]` | `ACK_TRACKER_CAPACITY = 32` |
 | `ReassemblyBuffer` | `src/core/ReassemblyBuffer.hpp` | `ReassemblySlot m_slots[REASSEMBLY_SLOT_COUNT]` | `REASSEMBLY_SLOT_COUNT` |
-| `ImpairmentEngine` | `src/platform/ImpairmentEngine.hpp` | `DelayEntry m_delay_buf[IMPAIR_DELAY_BUF_SIZE]` | `IMPAIR_DELAY_BUF_SIZE = 64` |
+| `ImpairmentEngine` | `src/platform/ImpairmentEngine.hpp` | `DelayEntry m_delay_buf[IMPAIR_DELAY_BUF_SIZE]` | `IMPAIR_DELAY_BUF_SIZE = 32` |
 | `TcpBackend` | `src/platform/TcpBackend.hpp` | `int m_client_fds[MAX_TCP_CONNECTIONS]` | `MAX_TCP_CONNECTIONS = 8` |
 | `TlsTcpBackend` | `src/platform/TlsTcpBackend.hpp` | `mbedtls_ssl_context m_ssl[MAX_TCP_CONNECTIONS]` | `MAX_TCP_CONNECTIONS = 8` |
 

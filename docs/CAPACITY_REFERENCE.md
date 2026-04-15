@@ -249,7 +249,7 @@ Each slot is a struct of ~16 bytes plus a `SOCKET_RECV_BUF_BYTES` (8 192-byte) b
 |---|---|
 | **Artifact** | `docs/STACK_ANALYSIS.md` |
 | **Constant** | N/A — derived from call chain analysis |
-| **Current worst case** | ~764 bytes / 10 frames (Chain 5: DTLS outbound send) |
+| **Current worst case** | ~764 bytes / 9 frames (Chain 5: DTLS outbound send, non-flush path); 11 frames / ~130 KB (Chain 3: retry pump, flush path) |
 
 ### What it is
 
