@@ -45,6 +45,7 @@ A C++ networking library for building and testing systems that must survive unre
 8. [Static Analysis](#static-analysis)
 9. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
 10. [Logging](docs/LOGGING.md) — format, architecture, severity levels, extending, testing
+11. [Documentation Maintenance](docs/DOC_MAINTENANCE.md) — what to update and when for every type of code change
 11. [Using the Library](#using-the-library)
 11. [Use Cases](#use-cases)
 12. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)

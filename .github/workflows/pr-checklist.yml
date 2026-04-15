@@ -1,0 +1,54 @@
+name: PR Documentation Checklist
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    types: [ opened, edited, synchronize, reopened ]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  checklist:
+    name: Verify documentation checklist
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check documentation section is present and complete
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          echo "=== PR Documentation Checklist ==="
+          FAIL=0
+
+          # 1. Section must be present.
+          if ! echo "$PR_BODY" | grep -iq "Documentation updated"; then
+            echo "FAIL: PR description is missing the 'Documentation updated' section."
+            echo "      Use the PR template (.github/PULL_REQUEST_TEMPLATE.md)."
+            FAIL=1
+          else
+            echo "OK:   Documentation updated section found."
+          fi
+
+          # 2. No unchecked item may remain — it must be checked or replaced with N/A.
+          # An unchecked item: line matching "- [ ] <anything>"
+          UNCHECKED=$(echo "$PR_BODY" | grep -E '^\s*- \[ \]' || true)
+          if [ -n "$UNCHECKED" ]; then
+            echo ""
+            echo "FAIL: One or more checklist items are unchecked:"
+            echo "$UNCHECKED"
+            echo ""
+            echo "      Either check the item (task done) or replace the checkbox"
+            echo "      with:  - N/A — <one-line reason>"
+            FAIL=1
+          else
+            echo "OK:   No unchecked items."
+          fi
+
+          echo ""
+          if [ "$FAIL" -eq 1 ]; then
+            echo "RESULT: FAIL — update the PR description and re-push or edit the PR body."
+            exit 1
+          fi
+          echo "RESULT: PASS"

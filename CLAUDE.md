@@ -83,6 +83,20 @@ Before every git commit, run `make lint` and `make run_tests`. Both must pass wi
 before the commit is created. If either fails, fix the issue first — do not commit broken or
 lint-failing code. These checks are also entry criteria for the formal inspection process (§12).
 
+Before creating or updating a pull request:
+1. Run `make pr-audit` (or `bash docs/pr_audit.sh`).
+   The script inspects the diff against main, determines which documentation items are
+   triggered, verifies each triggered item, and prints a filled-in "Documentation updated"
+   block ready to paste directly into the PR description.
+2. For any item the audit marks FAIL: complete the required documentation update, then
+   re-run `make pr-audit` until all REQUIRED items show PASS or N/A.
+3. Paste the printed block into the PR description.  Items the audit cannot verify
+   automatically (stress tests, coverage run) are printed as unchecked — confirm them
+   manually and tick the box before opening the PR.
+The CI workflow pr-checklist.yml blocks merge if any item remains unchecked without N/A.
+CI already enforces lint, tests, and traceability — the PR template covers only the
+documentation items that require human judgment.
+
 Branch coverage report (`make coverage`) is required **before any merge to main** for SC
 function verification; it is a pre-merge review gate, not a CI automation gate. CI
 automatically verifies M1 (lint), M2 (static analysis), and M4 dynamic test paths (via
