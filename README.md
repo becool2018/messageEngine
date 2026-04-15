@@ -23,7 +23,7 @@ A C++ networking library for building and testing systems that must survive unre
 | Retry manager | 32 pending slots |
 | Inbound ring | 64 messages per backend |
 | Concurrent clients (TCP/TLS) | 8 (configurable via `MAX_TCP_CONNECTIONS` in `Types.hpp`) |
-| Worst-case stack depth | ~259 KB / 12 frames (DTLS flush path); non-flush: ~764 bytes / 10 frames |
+| Worst-case stack depth | ~130 KB / 11 frames (flush path, Chain 3); non-flush: ~764 bytes / 9 frames |
 
 **Written to:** JPL Power of 10 · MISRA C++:2023 · F-Prime style subset · NASA Class C (voluntary Class B test rigor). No exceptions, no templates, no RTTI. STL is excluded from production code with one deliberate exception: `std::atomic<T>` for integral types is permitted and used for shared state — it has no dynamic allocation, maps directly to hardware primitives, and is what MISRA C++:2023 endorses for lock-free concurrency. All other STL containers, algorithms, and headers are absent from `src/`.
 
@@ -70,7 +70,7 @@ If you are new to this codebase, the fastest path to understanding it is:
 ```
 README.md                     ← you are here; read the Architecture and Directory Structure sections
 docs/DEMO_WALKTHROUGH.md      ← line-by-line walkthrough of a real client/server exchange
-docs/use_cases/HIGH_LEVEL_USE_CASES.md  ← all 76 capabilities in one index (HL-1 through HL-35)
+docs/use_cases/HIGH_LEVEL_USE_CASES.md  ← all 78 capabilities in one index (HL-1 through HL-37)
 ```
 
 **Step 2 — Build and run (5 minutes)**
