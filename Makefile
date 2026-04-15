@@ -406,7 +406,7 @@ libdir     ?= $(prefix)/lib
         tests stress_tests run_stress_tests run_tests server client \
         run_stress_reconnect run_stress_ringbuffer run_stress_tcp_fanin \
         tls_demo dtls_demo demos \
-        check_traceability \
+        check_traceability pr-audit \
         lint cppcheck cppcheck-misra pclint scan_build static_analysis \
         coverage coverage_show coverage_report \
         sanitize_tests run_sanitize \
@@ -461,6 +461,8 @@ help:
 	@echo "Verification:"
 	@echo "  check_traceability  Verify REQ-ID Implements/Verifies tags"
 	@echo "  check_version       Verify Version.hpp matches current git tag"
+	@echo "  pr-audit            Pre-PR doc audit: detect triggered items and print PR template block"
+	@echo "                      Usage: make pr-audit [BASE=<branch>]  (default: main)"
 	@echo ""
 	@echo "Options:"
 	@echo "  RELEASE=1           Enable -O2 -D_FORTIFY_SOURCE=2 (production build)"
@@ -729,6 +731,15 @@ check_version:
 
 check_traceability:
 	@bash docs/check_traceability.sh
+
+# Pre-PR documentation audit — run before opening any PR targeting main.
+# Detects which documentation checklist items (docs/DOC_MAINTENANCE.md §2) are
+# triggered by the current branch and verifies whether each has been satisfied.
+# Prints a filled-in "Documentation updated" block ready to paste into the PR.
+# Usage:  make pr-audit [BASE=<branch>]   (default base: main)
+#   BASE=<branch>  — compare against this branch instead of main
+pr-audit:
+	@bash docs/pr_audit.sh $(if $(BASE),$(BASE),main)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Static analysis targets (CLAUDE.md §9.1)

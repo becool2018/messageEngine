@@ -84,9 +84,15 @@ before the commit is created. If either fails, fix the issue first — do not co
 lint-failing code. These checks are also entry criteria for the formal inspection process (§12).
 
 Before creating or updating a pull request:
-1. Consult docs/DOC_MAINTENANCE.md §2 — find the change type, work through its document list.
-2. Fill in the PR template's "Documentation updated" section: check each item that applies,
-   replace inapplicable items with "- N/A — <reason>".
+1. Run `make pr-audit` (or `bash docs/pr_audit.sh`).
+   The script inspects the diff against main, determines which documentation items are
+   triggered, verifies each triggered item, and prints a filled-in "Documentation updated"
+   block ready to paste directly into the PR description.
+2. For any item the audit marks FAIL: complete the required documentation update, then
+   re-run `make pr-audit` until all REQUIRED items show PASS or N/A.
+3. Paste the printed block into the PR description.  Items the audit cannot verify
+   automatically (stress tests, coverage run) are printed as unchecked — confirm them
+   manually and tick the box before opening the PR.
 The CI workflow pr-checklist.yml blocks merge if any item remains unchecked without N/A.
 CI already enforces lint, tests, and traceability — the PR template covers only the
 documentation items that require human judgment.

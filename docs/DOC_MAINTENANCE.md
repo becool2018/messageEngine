@@ -257,7 +257,11 @@ must be true before review begins) are listed in CLAUDE.md §12.2.
 
 ## 7. Quick reference — pre-merge checklist
 
-Copy this block into the PR description when ready for review:
+Run `make pr-audit` (or `bash docs/pr_audit.sh`) to auto-detect which items are triggered
+and get a filled-in block to paste into the PR description.  The script exits 0 when all
+required items are satisfied; exit non-zero when items remain open.
+
+For manual reference, the full checklist is:
 
 ```
 ## Pre-merge documentation checklist
