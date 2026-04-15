@@ -52,12 +52,10 @@ A C++ networking library for building and testing systems that must survive unre
 15. [Safety & Assurance Documents](#safety--assurance-documents)
 16. [Design Patterns](#design-patterns)
 17. [Coding Standards](#coding-standards)
-18. [Standards Sources and Conflicts](#standards-sources-and-conflicts)
-19. [Project Standards Files](#project-standards-files)
-20. [Claude Skills](#claude-skills)
-21. [Release History](#release-history)
-22. [Code Statistics](#code-statistics)
-23. [Security Check](SNYK.IO.SECURITY_CHECK.md)
+18. [Claude Skills](#claude-skills)
+19. [Release History](#release-history)
+20. [Code Statistics](#code-statistics)
+21. [Security Check](SNYK.IO.SECURITY_CHECK.md)
 
 ---
 
@@ -1011,73 +1009,28 @@ Patterns in use: Strategy, Adapter/Bridge, Facade, State Machine, Observer/Event
 
 ## Coding Standards
 
-All production code (`src/`) is written to the following standards. Where a rule cannot be followed, a deviation is recorded at the point of use with a justification comment; significant deviations are also catalogued in `.claude/CLAUDE.md`. No rule is silently broken.
+All production code (`src/`) targets the following standards. Deviations are recorded at the point of use; significant ones are catalogued in `.claude/CLAUDE.md`. MISRA C++:2023 is proprietary (purchase required); NASA standards are public. Neither imposes a software license on compliant code.
 
-**Standards targeting note:** This project targets these standards as a development discipline. MISRA C++:2023 is a proprietary document (purchase required; not redistributed here). NASA standards are public. Neither imposes a software license on compliant code; see the [License](#license) section at the bottom of this file.
-
-**Software classification:** NASA-STD-8719.13C / NASA-STD-8739.8A **Class C** (infrastructure / networking library). **Verification discipline voluntarily targets Class B**: all safety-critical functions require branch coverage (M4), mandatory peer inspection (M1), and static analysis (M2); MC/DC coverage (M5) is the goal for the five highest-hazard functions. See `docs/HAZARD_ANALYSIS.md` and `docs/MCDC_ANALYSIS.md`.
+**Class C** (infrastructure library) with verification discipline voluntarily targeting **Class B**. See [`docs/STANDARDS_AND_CONFLICTS.md §7`](docs/STANDARDS_AND_CONFLICTS.md) for the full classification rationale and Class B gap analysis.
 
 | Standard / Property | How this project targets it |
 |---|---|
-| **JPL Power of 10** | No goto, no recursion; fixed loop bounds; no dynamic allocation after init; cyclomatic complexity ≤ 10 per function (enforced by `make lint`); ≥ 2 assertions per function; minimal variable scope; all return values checked; minimal preprocessor use; ≤ 1 pointer indirection; zero compiler warnings |
+| **JPL Power of 10** | No goto, no recursion; fixed loop bounds; no dynamic allocation after init; cyclomatic complexity ≤ 10 (enforced by `make lint`); ≥ 2 assertions per function; all return values checked; zero compiler warnings |
 | **MISRA C++:2023** | Required rules enforced; advisory rules followed; all deviations documented in-code and in `.claude/CLAUDE.md` |
-| **F-Prime subset** | ISO C++17; `-fno-exceptions`; `-fno-rtti`; no templates; no explicit function pointers (vtable-backed virtual dispatch is a documented exception); no STL except `std::atomic` (see below) |
+| **F-Prime subset** | ISO C++17; `-fno-exceptions`; `-fno-rtti`; no templates; no explicit function pointers; no STL except `std::atomic` |
 | **Error handling** | All errors returned via `Result` enum (`OK`, `ERR_TIMEOUT`, `ERR_FULL`, `ERR_IO`, …); no exceptions |
-| **Assertions** | `NEVER_COMPILED_OUT_ASSERT(cond)` — always compiled in; in debug/test builds calls `abort()`; in production logs FATAL and triggers a controlled reset |
-| **Layering** | App → Core → Platform → OS; no upward dependencies; no cyclic dependencies |
+| **Assertions** | `NEVER_COMPILED_OUT_ASSERT(cond)` — always compiled in; debug builds abort; production logs FATAL and triggers a controlled reset |
+| **Layering** | App → Core → Platform → OS; no upward or cyclic dependencies |
 
-**`std::atomic` exceptions to the no-STL rule** (see `.claude/CLAUDE.md §3`):
-
-| File | Exception | Justification |
-|---|---|---|
-| `src/core/RingBuffer.hpp` | `std::atomic<uint32_t>` | Lock-free head/tail indices; no dynamic allocation; maps directly to a hardware primitive |
-| `src/core/AssertState.hpp/cpp` | `std::atomic<bool>` | `g_fatal_fired` flag must be visible across threads without a mutex |
-| `src/core/Assert.hpp` | `std::memory_order_*` | Required by `std::atomic` store in the assert macro |
-
-### Work Required to Achieve Formal Class B Classification
-
-The project voluntarily meets Class B verification rigor (M1 + M2 + M4 + M5 for all SC functions) but is formally classified **Class C**. Formal reclassification to Class B requires completing the following items. The full gap list is in [`TODO_FOR_CLASS_B_CERT.txt`](TODO_FOR_CLASS_B_CERT.txt).
-
-#### Already achieved (no further work needed)
-
-| Item | Evidence |
-|---|---|
-| M1 — Code review / inspection | [`docs/DEFECT_LOG.md`](docs/DEFECT_LOG.md) INSP-001 (2026-03-31) |
-| M2 — Static analysis (compiler + clang-tidy + cppcheck) | `make lint`; zero unresolved findings |
-| M4 — Branch coverage of all SC functions | `make coverage`; 100% of reachable branches; ceilings documented in `CLAUDE.md §14` |
-| M5 — Fault injection for all SC dependency-failure paths | Injectable interfaces (`IMbedtlsOps`, `ISocketOps`); `MockSocketOps` and `DtlsMockOps` test doubles; fault-injection tests across all four transport backends covering bind, connect, send, receive, and TLS/DTLS credential-path failures |
-| MC/DC analysis (M6 goal, five highest-hazard SC functions) | [`docs/MCDC_ANALYSIS.md`](docs/MCDC_ANALYSIS.md) — all decisions demonstrated |
-
-#### Remaining work (external tools or personnel required)
-
-| # | Item | What is needed | Blocker |
-|---|---|---|---|
-| 6 | **TLA+ model checking** | Formally verify the three SC state machines (`AckTracker`, `RetryManager`, `ImpairmentEngine`) against all invariants in [`docs/STATE_MACHINES.md`](docs/STATE_MACHINES.md) using TLA+ or SPIN | TLA+ toolchain + team member with TLA+ authoring experience |
-| 7 | **Frama-C WP bounds proof** | Prove absence of buffer overflow in `Serializer::serialize()` and `Serializer::deserialize()` using the Frama-C WP plugin with ACSL annotations | Frama-C installation + ACSL annotation authoring |
-| 8 | **PC-lint Plus MISRA C++:2023 report** | Run PC-lint Plus with the MISRA C++:2023 ruleset over all of `src/` to produce a formal compliance report (`make pclint` is a documented TODO stub) | PC-lint Plus commercial licence ([gimpel.com](https://gimpel.com)) |
-| 9 | **Independent V&V** | A second qualified engineer (not the author) must complete a structured inspection of all SC functions per [`docs/INSPECTION_CHECKLIST.md`](docs/INSPECTION_CHECKLIST.md) and record findings in [`docs/DEFECT_LOG.md`](docs/DEFECT_LOG.md) (INSP-002 onward) | Second qualified reviewer |
-
-Items 6 and 7 are also required for Class A reclassification; Item 9 is required at both Class B and Class A (NPR 7150.2D §3.11). Item 8 closes the Tier 3 static analysis gap (see [`docs/STATIC_ANALYSIS_TOOLCHAIN.md`](docs/STATIC_ANALYSIS_TOOLCHAIN.md)).
-
----
-
-## Standards Sources and Conflicts
-
-[`docs/STANDARDS_AND_CONFLICTS.md`](docs/STANDARDS_AND_CONFLICTS.md) lists every external standard, guideline, and rule set referenced in the project's coding standards files — where each one comes from, whether it is free or proprietary, and a plain-English summary of what it is and what obligations it imposes on this codebase. It also documents all known contradictions and tensions between the combined standard set, with resolution status for each.
-
----
-
-## Project Standards Files
-
-Two CLAUDE.md files govern all code in this repository and divide responsibility cleanly:
+**Governing files:**
 
 | File | Purpose |
 |---|---|
-| `.claude/CLAUDE.md` | **Global C/C++ coding standard.** Contains all 10 JPL Power of 10 rules, MISRA C++:2023 compliance requirements, F-Prime style subset, architecture/layering rules, security posture, and NASA assurance mindset. Also cross-references `docs/VERIFICATION_POLICY.md` and `CLAUDE.md` §§11/13 for traceability and safety obligations. |
-| `CLAUDE.md` | **Project-specific spec.** Contains everything tied to this repository: numbered application requirements (`[REQ-x.x]`), references to `docs/` artifacts, the per-directory rule compliance table, named static analysis toolchain, `NEVER_COMPILED_OUT_ASSERT` policy, traceability rules, formal inspection process, and safety/coverage/WCET/formal-methods obligations. |
-| `docs/VERIFICATION_POLICY.md` | **Verification policy (VVP-001).** Defines the minimum verification methods (M1–M7) required at each software classification level (Class C / B / A) and the rules governing architectural ceiling arguments, fault injection, and injectable interface requirements. |
+| `.claude/CLAUDE.md` | Global C/C++ coding standard — Power of 10, MISRA C++:2023, F-Prime, architecture, security posture |
+| `CLAUDE.md` | Project-specific spec — REQ IDs, safety artifacts, traceability rules, inspection process, coverage requirements |
+| `docs/VERIFICATION_POLICY.md` | Verification policy (VVP-001) — M1–M7 methods, classification levels, ceiling argument rules |
 
-**How they divide responsibility:** `.claude/CLAUDE.md` is the authoritative coding standard; `CLAUDE.md` is the project-specific spec (requirement IDs, file paths, process rules, safety artifacts). `VERIFICATION_POLICY.md` governs what test evidence is required at each classification level.
+Full standard sources, all known conflicts and resolutions, `std::atomic` exception table, and Class B gap analysis: **[`docs/STANDARDS_AND_CONFLICTS.md`](docs/STANDARDS_AND_CONFLICTS.md)**
 
 ---
 
