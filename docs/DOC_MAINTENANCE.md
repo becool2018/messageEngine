@@ -125,6 +125,7 @@ or any new component classified SC.
 | 1 | `CONTRIBUTING.md` | Update the "Entry criteria" table if any required `make` target was added, removed, or renamed. |
 | 2 | `docs/STATIC_ANALYSIS_TOOLCHAIN.md` | Update tool versions, new flags, or new tier additions. |
 | 3 | `README.md` build section | Update build instructions if user-facing commands changed. |
+| 4a | `docs/TESTING_AND_ANALYSIS.md` | Update make targets, test binary list, or coverage table if any test or analysis command changed. |
 | 4 | `CLAUDE.md §1c` | Update CI/commit rules if the required pre-commit gate changed. |
 
 ---
@@ -239,6 +240,7 @@ must be true before review begins) are listed in CLAUDE.md §12.2.
 | `docs/LOGGING.md` | Manual — updated per logger change | Logger maintainer |
 | `docs/Design.md` | Manual — updated per architectural change | Chief architect |
 | `docs/STATIC_ANALYSIS_TOOLCHAIN.md` | Manual — updated per tool adoption | Build engineer |
+| `docs/TESTING_AND_ANALYSIS.md` | Manual — updated when make targets, test binaries, or coverage ceilings change | Build engineer |
 | `docs/STANDARDS_AND_CONFLICTS.md` | Manual — updated per standards adoption | Project maintainer |
 | `CLAUDE.md` | Manual — primary requirements source | Project maintainer |
 | `README.md` | Manual — updated per feature/capacity change | Project maintainer |
