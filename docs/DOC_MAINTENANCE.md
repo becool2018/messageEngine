@@ -234,6 +234,7 @@ must be true before review begins) are listed in CLAUDE.md §12.2.
 | `docs/STACK_ANALYSIS.md` | Manual — updated per stack/chain change | Performance analyst |
 | `docs/CAPACITY_REFERENCE.md` | Manual — updated per Types.hpp change | Types.hpp maintainer |
 | `docs/SECURITY_ASSUMPTIONS.md` | Manual — updated per API contract change | Core/platform architect |
+| `docs/SAFETY_ASSURANCE.md` | Manual — updated when HAZ ID range, stack values, or document set changes | Safety engineer |
 | `docs/INSPECTION_CHECKLIST.md` | Template — updated only when criteria change | Project maintainer |
 | `docs/LOGGING.md` | Manual — updated per logger change | Logger maintainer |
 | `docs/Design.md` | Manual — updated per architectural change | Chief architect |
