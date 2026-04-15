@@ -43,7 +43,7 @@ Called internally by `send_message()`. Not called directly by the User.
    - Compare `m_client_node_ids[idx]` with `N`.
    - None match: return `MAX_TCP_CONNECTIONS`.
 6. `find_client_slot()` returns `MAX_TCP_CONNECTIONS` (not found).
-7. **`Logger::log(WARNING_HI, "TcpBackend", "unicast to unregistered NodeId %u; drop", N)`**.
+7. **`LOG_WARN_HI("TcpBackend", "unicast to unregistered NodeId %u; drop", N)`**.
 8. Set `final_result = ERR_INVALID`.
 9. Continue processing remaining deliverable frames (if any).
 10. `flush_delayed_to_clients()` / `send_message()` returns `ERR_INVALID` to `DeliveryEngine::send()`.
@@ -61,7 +61,7 @@ TcpBackend::send_message(env)                        [TcpBackend.cpp]
  └── flush_delayed_to_clients(buf, len, dst_id=N)
       └── find_client_slot(N)                        [scan m_client_node_ids[]]
            <- MAX_TCP_CONNECTIONS  [not found]
-      -> Logger::log(WARNING_HI, "unicast to unregistered NodeId N; drop")
+      -> LOG_WARN_HI("unicast to unregistered NodeId N; drop")
       -> final_result = ERR_INVALID
   <- ERR_INVALID
 
@@ -75,7 +75,7 @@ DeliveryEngine::send()
 ## 5. Key Components Involved
 
 - **`find_client_slot(destination_id)`** — Linear scan of `m_client_node_ids[]`; returns `MAX_TCP_CONNECTIONS` when no match found.
-- **`Logger::log(WARNING_HI, ...)`** — WARNING_HI used because an unregistered unicast destination is a system-wide routing anomaly, not a recoverable per-connection error.
+- **`LOG_WARN_HI(...)`** — WARNING_HI used because an unregistered unicast destination is a system-wide routing anomaly, not a recoverable per-connection error.
 - **`DeliveryEventRing`** — Records `MISROUTE_DROP` for observability; application polls via `poll_event()` (UC_61).
 
 ---
@@ -139,7 +139,7 @@ DeliveryEngine::send(env)         [env.destination_id = N; no client registered 
                  -> find_client_slot(N)
                       [scan m_client_node_ids[0..m_client_count-1]; no match]
                  <- MAX_TCP_CONNECTIONS
-                 -> Logger::log(WARNING_HI, "unicast to unregistered NodeId N; drop")
+                 -> LOG_WARN_HI("unicast to unregistered NodeId N; drop")
                  -> final_result = ERR_INVALID
        <- ERR_INVALID
   <- ERR_INVALID

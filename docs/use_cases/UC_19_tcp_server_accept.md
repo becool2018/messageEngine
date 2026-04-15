@@ -42,7 +42,7 @@ Called by the User during system initialization.
    c. `m_sock_ops->set_nonblocking(m_listen_fd)` — sets `O_NONBLOCK` flag.
    d. `m_sock_ops->do_bind(m_listen_fd, ip, port)` — `::bind()`.
    e. `m_sock_ops->do_listen(m_listen_fd, SOMAXCONN)` — `::listen()`.
-   f. `Logger::log(INFO, "TcpBackend", "Server listening on %s:%u", ip, port)`.
+   f. `LOG_INFO("TcpBackend", "Server listening on %s:%u", ip, port)`.
    g. Returns `Result::OK`.
 7. If `bind_and_listen()` fails: log error; close fd; return `Result::ERR_IO`.
 8. `m_is_server = true`, `m_open = true`.
@@ -54,7 +54,7 @@ Called by the User during system initialization.
    a. `m_sock_ops->do_accept(m_listen_fd, &client_addr)` → `::accept()`. If no pending connection: returns `EAGAIN`/`EWOULDBLOCK`; returns `false`.
    b. If connection: new fd stored at `m_client_fds[m_client_count]`.
    c. `m_client_count++`.
-   d. `Logger::log(INFO, "TcpBackend", "Client connected: %s", addr_str)`.
+   d. `LOG_INFO("TcpBackend", "Client connected: %s", addr_str)`.
 
 ---
 
@@ -70,7 +70,7 @@ TcpBackend::init(config)                      [TcpBackend.cpp]
       ├── ISocketOps::set_nonblocking()
       ├── ISocketOps::do_bind()                [::bind()]
       ├── ISocketOps::do_listen()              [::listen()]
-      └── Logger::log(INFO, ...)
+      └── LOG_INFO(...)
 
 TcpBackend::poll_clients_once() [called from receive_message()]
  └── TcpBackend::accept_and_handshake()
@@ -153,7 +153,7 @@ User
             -> ISocketOps::set_nonblocking() [O_NONBLOCK]
             -> ISocketOps::do_bind()         [::bind()]
             -> ISocketOps::do_listen()       [::listen()]
-            -> Logger::log(INFO, "listening")
+            -> LOG_INFO("listening")
        <- Result::OK [m_open=true]
   <- Result::OK
 
@@ -162,7 +162,7 @@ User -> TcpBackend::receive_message() -> poll_clients_once()
   -> accept_and_handshake()
        -> ISocketOps::do_accept()   [::accept()]  <- new fd
        [m_client_fds[m_client_count] = new_fd; m_client_count++]
-       -> Logger::log(INFO, "Client connected")
+       -> LOG_INFO("Client connected")
 ```
 
 ---

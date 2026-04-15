@@ -52,7 +52,7 @@ public:
     /// Must be called once during system initialization before any other method.
     void init();
 
-    // Safety-critical (SC): HAZ-003, HAZ-019 — reassembly is on the receive path;
+    // Safety-critical (SC): HAZ-003, HAZ-006, HAZ-019 — reassembly is on the receive path;
     // a corrupt fragment could allow duplicate delivery, slot exhaustion, or integer
     // overflow via wire-supplied total_payload_length (REQ-3.2.10).
     /// Ingest one wire fragment.

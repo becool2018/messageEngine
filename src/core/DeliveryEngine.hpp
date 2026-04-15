@@ -76,6 +76,7 @@ public:
      * @param[in] cfg         Channel configuration (priority, reliability, timeouts).
      * @param[in] local_id    Local node ID for identifying ourselves as the sender.
      */
+    // Safety-critical (SC): HAZ-022
     void init(TransportInterface* transport, const ChannelConfig& cfg, NodeId local_id);
 
     // Safety-critical (SC): HAZ-001, HAZ-002, HAZ-006 — verified to M5

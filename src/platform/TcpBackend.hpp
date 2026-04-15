@@ -64,6 +64,7 @@ public:
     ~TcpBackend() override;
 
     // TransportInterface implementation
+    // Safety-critical (SC): HAZ-023
     Result init(const TransportConfig& config) override;
     // Safety-critical (SC): HAZ-005, HAZ-006 — verified to M5
     Result send_message(const MessageEnvelope& envelope) override;
@@ -140,6 +141,7 @@ private:
     /// @param[in] client_fd File descriptor of connected client.
     /// @param[in] timeout_ms Receive timeout in milliseconds.
     /// @return OK on frame received and queued, ERR_IO on connection loss.
+    // Safety-critical (SC): HAZ-009, HAZ-023
     Result recv_from_client(int client_fd, uint32_t timeout_ms);
 
     /// Send serialized data to all currently connected clients.

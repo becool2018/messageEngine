@@ -64,11 +64,11 @@
  *
  * Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.12,
  *             REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6,
- *             REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11,
+ *             REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-3.3.6,
  *             REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9,
  *             REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.1.12, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-6.3.10, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.1.12, REQ-3.3.6, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-6.3.10, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #ifndef PLATFORM_TLS_TCP_BACKEND_HPP
 #define PLATFORM_TLS_TCP_BACKEND_HPP
@@ -120,6 +120,7 @@ public:
     ~TlsTcpBackend() override;
 
     // ── TransportInterface implementation ────────────────────────────────────
+    // Safety-critical (SC): HAZ-020, HAZ-025
     Result init(const TransportConfig& config) override;
     // Safety-critical (SC): HAZ-005, HAZ-006 — verified to M5
     Result send_message(const MessageEnvelope& envelope) override;
@@ -363,6 +364,7 @@ private:
     bool read_tls_header(uint32_t idx, uint8_t* hdr, uint32_t timeout_ms);
 
     /// Receive and deserialize one frame from client at index @p idx.
+    // Safety-critical (SC): HAZ-009, HAZ-023
     Result recv_from_client(uint32_t idx, uint32_t timeout_ms);
 
     /// Serialize + send @p buf/@p len to all connected clients.

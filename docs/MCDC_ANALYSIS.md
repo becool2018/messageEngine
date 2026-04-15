@@ -46,9 +46,9 @@ consistent with the ceiling policy established in CLAUDE.md §14.
 ## 1. `DeliveryEngine::send()` — HAZ-001, HAZ-002, HAZ-006
 
 **Files:** `src/core/DeliveryEngine.cpp`
-- `reserve_bookkeeping()` (static helper): lines 543–603
-- `handle_send_fragments_failure()` (static helper): lines 669–690
-- `DeliveryEngine::send()`: lines 695–783
+- `reserve_bookkeeping()` (static helper): lines 547–605
+- `handle_send_fragments_failure()` (static helper): lines 668–690
+- `DeliveryEngine::send()`: lines 694–783
 
 The logical send path spans both functions. `reserve_bookkeeping()` is a CC-reduction helper called exclusively from `send()` before any I/O; its decisions are analysed here as part of `send()`'s MC/DC argument. `handle_send_fragments_failure()` is called only on the failure path of `send_fragments()`.
 
@@ -56,16 +56,16 @@ The logical send path spans both functions. `reserve_bookkeeping()` is a CC-redu
 
 | ID | Function | Source line | Decision expression | Conditions | MC/DC pair — True outcome | MC/DC pair — False outcome | Test(s) |
 |----|----------|-------------|--------------------|-----------|--------------------------|-----------------------------|---------|
-| S-D1 | `send()` | L700 | `!m_initialized` | A = `m_initialized` | *Architecturally unreachable* — `NEVER_COMPILED_OUT_ASSERT` fires first | `test_send_best_effort` (A=T → branch skipped) | See ceiling note |
-| S-D2 | `send()` | L706 | `(m_last_now_us > 0ULL) && (now_us < m_last_now_us)` | A = `m_last_now_us > 0ULL`; B = `now_us < m_last_now_us` | A=T, B=T (backward timestamp) → ERR_INVALID | A=F (first call, last==0) or B=F (monotonic ts) → continue | T: `test_mcdc_send_backward_timestamp` (A=T,B=T); F(A): `test_send_best_effort` (first call, A=F); F(B): `test_send_best_effort` (monotonic ts, B=F) |
-| S-D3 | `reserve_bookkeeping()` | L553–554 | `rel != RELIABLE_ACK && rel != RELIABLE_RETRY` | A = `rel != RELIABLE_ACK`; B = `rel != RELIABLE_RETRY` | A=T, B=T (BEST_EFFORT) → skip bookkeeping; return OK | A=F (RELIABLE_ACK) or B=F (RELIABLE_RETRY) → proceed to track() | T: `test_send_best_effort`; F(A): `test_send_reliable_ack`; F(B): `test_send_reliable_retry` |
-| S-D4 | `reserve_bookkeeping()` | L563 | `track_res != Result::OK` | A = `track_res != OK` | A=T: AckTracker full → log WARNING_HI; return ERR_FULL | A=F: tracked OK → continue | T: `test_send_ack_tracker_full`; F: `test_send_reliable_ack` |
-| S-D5 | `reserve_bookkeeping()` | L572 | `rel != RELIABLE_RETRY` | A = `rel != RELIABLE_RETRY` | A=T (RELIABLE_ACK) → skip schedule; return OK | A=F (RELIABLE_RETRY) → proceed to schedule() | T: `test_send_reliable_ack`; F: `test_send_reliable_retry` |
-| S-D6 | `reserve_bookkeeping()` | L582 | `sched_res != Result::OK` | A = `sched_res != OK` | A=T: RetryManager full → log WARNING_HI; cancel AckTracker slot; return ERR_FULL | A=F: scheduled OK → return OK | T: `test_send_retry_manager_full`; F: `test_send_reliable_retry` |
-| S-D7 | `send()` | L744 | `book_res != Result::OK` | A = `book_res != OK` | A=T: return error without any wire I/O | A=F: proceed to send_fragments() | T: `test_send_ack_tracker_full`; F: `test_send_best_effort` |
-| S-D8 | `send()` | L753 | `res != Result::OK` | A = `res != OK` | A=T: delegate to `handle_send_fragments_failure()` — see S-D9/S-D10; return error | A=F: increment msgs_sent; return OK | T: `test_mock_send_transport_err_io`, `test_mock_fragmented_partial_send_keeps_bookkeeping`; F: `test_send_best_effort` |
-| S-D9 | `handle_send_fragments_failure()` | L677 | `res == Result::ERR_IO_PARTIAL` | A = `res == ERR_IO_PARTIAL` | A=T: preserve bookkeeping slots (≥1 fragment already on wire); return ERR_IO | A=F: proceed to reliability-class rollback check (S-D10) | T: `test_mock_fragmented_partial_send_keeps_bookkeeping`; F: `test_mock_send_transport_err_io` |
-| S-D10 | `handle_send_fragments_failure()` | L684–685 | `rel == RELIABLE_ACK \|\| rel == RELIABLE_RETRY` | A = `rel == RELIABLE_ACK`; B = `rel == RELIABLE_RETRY` | A=T or B=T → call rollback_on_transport_failure() (cancel slots) | A=F, B=F (BEST_EFFORT) → skip rollback | T(A): `test_mock_reliable_ack_send_err_rolls_back_ack_tracker`; T(B): `test_mock_reliable_retry_send_err_rolls_back_both_slots`; F: `test_mock_send_transport_err_io` |
+| S-D1 | `send()` | L699 | `!m_initialized` | A = `m_initialized` | *Architecturally unreachable* — `NEVER_COMPILED_OUT_ASSERT` fires first | `test_send_best_effort` (A=T → branch skipped) | See ceiling note |
+| S-D2 | `send()` | L705 | `(m_last_now_us > 0ULL) && (now_us < m_last_now_us)` | A = `m_last_now_us > 0ULL`; B = `now_us < m_last_now_us` | A=T, B=T (backward timestamp) → ERR_INVALID | A=F (first call, last==0) or B=F (monotonic ts) → continue | T: `test_mcdc_send_backward_timestamp` (A=T,B=T); F(A): `test_send_best_effort` (first call, A=F); F(B): `test_send_best_effort` (monotonic ts, B=F) |
+| S-D3 | `reserve_bookkeeping()` | L557–558 | `rel != RELIABLE_ACK && rel != RELIABLE_RETRY` | A = `rel != RELIABLE_ACK`; B = `rel != RELIABLE_RETRY` | A=T, B=T (BEST_EFFORT) → skip bookkeeping; return OK | A=F (RELIABLE_ACK) or B=F (RELIABLE_RETRY) → proceed to track() | T: `test_send_best_effort`; F(A): `test_send_reliable_ack`; F(B): `test_send_reliable_retry` |
+| S-D4 | `reserve_bookkeeping()` | L567 | `track_res != Result::OK` | A = `track_res != OK` | A=T: AckTracker full → log WARNING_HI; return ERR_FULL | A=F: tracked OK → continue | T: `test_send_ack_tracker_full`; F: `test_send_reliable_ack` |
+| S-D5 | `reserve_bookkeeping()` | L575 | `rel != RELIABLE_RETRY` | A = `rel != RELIABLE_RETRY` | A=T (RELIABLE_ACK) → skip schedule; return OK | A=F (RELIABLE_RETRY) → proceed to schedule() | T: `test_send_reliable_ack`; F: `test_send_reliable_retry` |
+| S-D6 | `reserve_bookkeeping()` | L585 | `sched_res != Result::OK` | A = `sched_res != OK` | A=T: RetryManager full → log WARNING_HI; cancel AckTracker slot; return ERR_FULL | A=F: scheduled OK → return OK | T: `test_send_retry_manager_full`; F: `test_send_reliable_retry` |
+| S-D7 | `send()` | L742 | `book_res != Result::OK` | A = `book_res != OK` | A=T: return error without any wire I/O | A=F: proceed to send_fragments() | T: `test_send_ack_tracker_full`; F: `test_send_best_effort` |
+| S-D8 | `send()` | L751 | `res != Result::OK` | A = `res != OK` | A=T: delegate to `handle_send_fragments_failure()` — see S-D9/S-D10; return error | A=F: increment msgs_sent; return OK | T: `test_mock_send_transport_err_io`, `test_mock_fragmented_partial_send_keeps_bookkeeping`; F: `test_send_best_effort` |
+| S-D9 | `handle_send_fragments_failure()` | L676 | `res == Result::ERR_IO_PARTIAL` | A = `res == ERR_IO_PARTIAL` | A=T: preserve bookkeeping slots (≥1 fragment already on wire); return ERR_IO | A=F: proceed to reliability-class rollback check (S-D10) | T: `test_mock_fragmented_partial_send_keeps_bookkeeping`; F: `test_mock_send_transport_err_io` |
+| S-D10 | `handle_send_fragments_failure()` | L683 | `rel == RELIABLE_ACK \|\| rel == RELIABLE_RETRY` | A = `rel == RELIABLE_ACK`; B = `rel == RELIABLE_RETRY` | A=T or B=T → call rollback_on_transport_failure() (cancel slots) | A=F, B=F (BEST_EFFORT) → skip rollback | T(A): `test_mock_reliable_ack_send_err_rolls_back_ack_tracker`; T(B): `test_mock_reliable_retry_send_err_rolls_back_both_slots`; F: `test_mock_send_transport_err_io` |
 
 ### MC/DC independence demonstration — S-D2 (compound `&&`)
 
@@ -112,9 +112,9 @@ Note: S-D10 is only reached when S-D9 is False (res != ERR_IO_PARTIAL).
 ## 2. `DeliveryEngine::receive()` — HAZ-001, HAZ-003, HAZ-004, HAZ-005
 
 **File:** `src/core/DeliveryEngine.cpp`
-- `DeliveryEngine::receive()`: lines 895–979
-- `handle_control_message()` (NSC helper): lines 790–805
-- `handle_data_dedup()` (SC: HAZ-003 helper): lines 813–843
+- `DeliveryEngine::receive()`: lines 890–973
+- `handle_control_message()` (NSC helper): lines 787–803
+- `handle_data_dedup()` (SC: HAZ-003 helper): lines 810–838
 
 Decisions in helper functions are analysed here as part of `receive()`'s MC/DC argument.
 
@@ -122,14 +122,15 @@ Decisions in helper functions are analysed here as part of `receive()`'s MC/DC a
 
 | ID | Function | Source line | Decision expression | Conditions | MC/DC pair — True outcome | MC/DC pair — False outcome | Test(s) |
 |----|----------|-------------|--------------------|-----------|--------------------------|-----------------------------|---------|
-| R-D1 | `receive()` | L902 | `!m_initialized` | A = `m_initialized` | *Architecturally unreachable* — `NEVER_COMPILED_OUT_ASSERT` fires first | `test_receive_data_best_effort` (A=T) | See ceiling note |
-| R-D2 | `receive()` | L907 | `(m_last_now_us > 0ULL) && (now_us < m_last_now_us)` | A = `m_last_now_us > 0ULL`; B = `now_us < m_last_now_us` | A=T, B=T (backward timestamp) → ERR_INVALID | A=F or B=F → continue | T: `test_mcdc_receive_backward_timestamp`; F(A): `test_receive_data_best_effort` (first call); F(B): `test_receive_data_best_effort` (monotonic) |
-| R-D3 | `receive()` | L938 | `res != Result::OK` | A = `res != OK` | A=T: receive timeout → return | A=F: message received → continue | T: `test_receive_timeout`; F: `test_receive_data_best_effort` |
-| R-D4 | `receive()` | L964 | `routing_res != Result::OK` | A = routing/expiry check failed | A=T → return routing error (expiry or misroute) | A=F → continue | T: `test_receive_expired`; F: `test_receive_data_best_effort` |
-| R-D5 | `receive()` | L971 | `envelope_is_control(env)` | A = is control type | A=T → handle control | A=F → handle data | T: `test_receive_ack_cancels_retry`; F: `test_receive_data_best_effort` |
-| R-D6 | `handle_control_message()` | L795 | `env.message_type == ACK` | A = `type == ACK` | A=T → process ACK (on_ack, retry cancel) | A=F → pass through (NAK/HEARTBEAT) | T: `test_receive_ack_cancels_retry`; F: `test_receive_nak_control`, `test_receive_heartbeat_control` |
-| R-D7 | `handle_data_dedup()` | L818 | `rel != RELIABLE_RETRY` | A = `rel != RELIABLE_RETRY` | A=T → skip dedup; return OK | A=F → apply dedup | T: `test_receive_data_best_effort`; F: `test_receive_duplicate` |
-| R-D8 | `handle_data_dedup()` | L824 | `dedup_res != ERR_DUPLICATE` | A = not duplicate | A=T → deliver | A=F → return ERR_DUPLICATE | T: `test_receive_duplicate` (first receive of that id); F: `test_receive_duplicate` (second receive of same id) |
+| R-D1 | `receive()` | L897 | `!m_initialized` | A = `m_initialized` | *Architecturally unreachable* — `NEVER_COMPILED_OUT_ASSERT` fires first | `test_receive_data_best_effort` (A=T) | See ceiling note |
+| R-D2 | `receive()` | L902 | `(m_last_now_us > 0ULL) && (now_us < m_last_now_us)` | A = `m_last_now_us > 0ULL`; B = `now_us < m_last_now_us` | A=T, B=T (backward timestamp) → ERR_INVALID | A=F or B=F → continue | T: `test_mcdc_receive_backward_timestamp`; F(A): `test_receive_data_best_effort` (first call); F(B): `test_receive_data_best_effort` (monotonic) |
+| R-D3 | `receive()` | L932 | `res != Result::OK` | A = `res != OK` | A=T: receive timeout → return | A=F: message received → continue | T: `test_receive_timeout`; F: `test_receive_data_best_effort` |
+| R-D3b | `receive()` | L946 | `frag_res != Result::OK` | A = fragment incomplete or error | A=T: ERR_AGAIN (still collecting fragments) or ERR_FULL/ERR_INVALID (fragment-level error) → return frag_res | A=F: assembly complete → continue with fully-assembled `logical_env` | T: `test_de_fragmented_send_receive` (ERR_AGAIN path), `test_de_reassembly_per_source_cap_drops_fragment` (ERR_FULL path); F: `test_receive_data_best_effort` (unfragmented) |
+| R-D4 | `receive()` | L958 | `routing_res != Result::OK` | A = routing/expiry check failed | A=T → return routing error (expiry or misroute) | A=F → continue | T: `test_receive_expired`; F: `test_receive_data_best_effort` |
+| R-D5 | `receive()` | L965 | `envelope_is_control(env)` | A = is control type | A=T → handle control | A=F → handle data | T: `test_receive_ack_cancels_retry`; F: `test_receive_data_best_effort` |
+| R-D6 | `handle_control_message()` | L792 | `env.message_type == ACK` | A = `type == ACK` | A=T → process ACK (on_ack, retry cancel) | A=F → pass through (NAK/HEARTBEAT) | T: `test_receive_ack_cancels_retry`; F: `test_receive_nak_control`, `test_receive_heartbeat_control` |
+| R-D7 | `handle_data_dedup()` | L815 | `rel != RELIABLE_RETRY` | A = `rel != RELIABLE_RETRY` | A=T → skip dedup; return OK | A=F → apply dedup | T: `test_receive_data_best_effort`; F: `test_receive_duplicate` |
+| R-D8 | `handle_data_dedup()` | L821 | `dedup_res != ERR_DUPLICATE` | A = not duplicate | A=T → deliver | A=F → return ERR_DUPLICATE | T: `test_receive_duplicate` (first receive of that id); F: `test_receive_duplicate` (second receive of same id) |
 
 ### MC/DC independence demonstration — R-D2 (compound `&&`)
 
@@ -144,30 +145,41 @@ Decisions in helper functions are analysed here as part of `receive()`'s MC/DC a
 
 **MC/DC status: DEMONSTRATED** — all conditions independent, all outcomes exercised.
 
-**MC/DC status for R-D3 through R-D8:** DEMONSTRATED — all single-condition decisions covered T and F; no additional compound decisions.
+**MC/DC status for R-D3 through R-D8:** DEMONSTRATED — all single-condition decisions covered T and F; no additional compound decisions. R-D3b is a single-condition decision (A = `frag_res != Result::OK`): True outcome exercised by `test_de_fragmented_send_receive` (ERR_AGAIN) and `test_de_reassembly_per_source_cap_drops_fragment` (ERR_FULL); False outcome exercised by all single-frame receive tests.
 
 ---
 
 ## 3. `DuplicateFilter::check_and_record()` — HAZ-003
 
-**File:** `src/core/DuplicateFilter.cpp` lines 160–178
-Note: `check_and_record()` delegates to `is_duplicate()` (L65–82) and `record()` (L119–154).
+**File:** `src/core/DuplicateFilter.cpp` lines 170–183
+Note: `check_and_record()` delegates to `is_duplicate()` (L66–90) and `record()` (L130–156).
 All three are analysed here as they form the single logical operation.
 
 ### Decision table
 
 | ID | Source line | Decision expression | Conditions | MC/DC pair — True outcome | MC/DC pair — False outcome | Test(s) |
 |----|-------------|--------------------|-----------|--------------------------|-----------------------------|---------|
-| DF-D1 | L167 | `is_duplicate(src, msg_id)` | A = found in window | A=T → return ERR_DUPLICATE | A=F → call record(), return OK | T: `test_basic_dedup`; F: `test_not_seen` |
-| DF-D2 | L73 | `m_window[i].valid && m_window[i].src == src && m_window[i].msg_id == msg_id` | A = `valid`; B = `src == src`; C = `msg_id == msg_id` | All A=T,B=T,C=T → match | See compound table below | See below |
-| DF-D3 | L131 | `m_count >= DEDUP_WINDOW_SIZE` | A = window full | A=T → call `find_evict_idx()` (evict oldest entry) | A=F → use ring-buffer write pointer `m_next` | T: `test_window_wraparound`; F: any test before window fills |
+| DF-D1 | L177 | `is_duplicate(src, msg_id)` | A = found in window | A=T → return ERR_DUPLICATE | A=F → call record(), return OK | T: `test_basic_dedup`; F: `test_not_seen` |
+| DF-D2 | L82 | `m_window[i].valid && ct_id_pair_equal(m_window[i].src, src, m_window[i].msg_id, msg_id)` | A = `valid`; B+C = `ct_id_pair_equal()` (combined constant-time check for src and msg_id — see note) | All conditions true → `found = true` | See compound table below | See below |
+| DF-D3 | L141 | `m_count >= DEDUP_WINDOW_SIZE` | A = window full | A=T → call `find_evict_idx()` (evict oldest entry) | A=F → use ring-buffer write pointer `m_next` | T: `test_window_wraparound`; F: any test before window fills |
 
-### MC/DC independence demonstration — DF-D2 (compound `A && B && C`)
+### MC/DC independence demonstration — DF-D2 (compound `A && (B+C)`)
 
-`A && B && C` where:
+**Note on constant-time implementation (REQ-3.2.11 / HAZ-018):** The original expression
+`m_window[i].src == src && m_window[i].msg_id == msg_id` used two separate short-circuit
+comparisons, which constitutes a timing oracle (CWE-208). The implementation was changed
+to use `ct_id_pair_equal(m_window[i].src, src, m_window[i].msg_id, msg_id)` — a single
+constant-time comparator that checks both fields atomically without short-circuiting. For
+MC/DC purposes, B (`src` matches) and C (`msg_id` matches) are the two conditions inside
+`ct_id_pair_equal()`; they cannot be independently controlled at the call site because
+the function does not short-circuit. The MC/DC argument is therefore structural: the four
+test cases below demonstrate that each of A, B, and C independently affects the outcome,
+even though B and C are evaluated unconditionally within the constant-time function.
+
+`A && ct_id_pair_equal(B, C)` where:
 - A = `m_window[i].valid`
-- B = `m_window[i].src == src`
-- C = `m_window[i].msg_id == msg_id`
+- B = `m_window[i].src == src` (evaluated inside `ct_id_pair_equal()`, always)
+- C = `m_window[i].msg_id == msg_id` (evaluated inside `ct_id_pair_equal()`, always)
 
 | Pair | Test case | Scenario | A | B | C | Outcome | Demonstrates |
 |------|-----------|----------|---|---|---|---------|--------------|
@@ -177,6 +189,8 @@ All three are analysed here as they form the single logical operation.
 | C-pair-F | `test_different_id` | Record (src=1,id=100); search (src=1,id=200) → `valid=T`, `src=1`, `id≠200` | T | T | F | F (no match) | C independently causes False when A=T, B=T |
 
 **MC/DC status: DEMONSTRATED** — all three conditions independently affect outcome.
+The constant-time implementation satisfies REQ-3.2.11 without weakening the MC/DC argument:
+each condition still independently determines whether the overall expression is true or false.
 
 ---
 
@@ -238,14 +252,14 @@ guard by the existing test suite; no compound conditions require independence pa
 
 | Function | Decisions | Conditions | Compound decisions | MC/DC status | New tests required |
 |---|---|---|---|---|---|
-| `DeliveryEngine::send` | 9 (1 unreachable) | 13 | 3 (`A&&B` at L706; `A&&B` at L553–554; `A\|\|B` at L684–685) | **DEMONSTRATED** | 0 |
-| `DeliveryEngine::receive` | 8 (1 unreachable) | 9 | 1 (`A&&B` at L907) | **DEMONSTRATED** | 0 |
+| `DeliveryEngine::send` | 9 (1 unreachable) | 13 | 3 (`A&&B` at L705; `A&&B` at L557–558; `A\|\|B` at L683) | **DEMONSTRATED** | 0 |
+| `DeliveryEngine::receive` | 9 (1 unreachable) | 10 | 1 (`A&&B` at L902) | **DEMONSTRATED** | 0 |
 | `DuplicateFilter::check_and_record` | 3 | 5 | 1 (`A&&B&&C` at L73) | **DEMONSTRATED** | 0 |
 | `Serializer::serialize` | 3 | 3 | 0 | **DEMONSTRATED** | 0 |
 | `Serializer::deserialize` | 10 | 10 | 0 | **DEMONSTRATED** | 0 |
-| **Total** | **33 (2 unreachable)** | **40** | **5** | **ALL DEMONSTRATED** | **0** |
+| **Total** | **34 (2 unreachable)** | **41** | **5** | **ALL DEMONSTRATED** | **0** |
 
-All MC/DC requirements are satisfied by the existing test suite. The two architecturally-unreachable True-outcome branches of `!m_initialized` in `send()` and `receive()` are excluded from the demonstration on the same basis as the ceiling branches documented in CLAUDE.md §14.
+All MC/DC requirements are satisfied by the existing test suite. The two architecturally-unreachable True-outcome branches of `!m_initialized` in `send()` and `receive()` are excluded from the demonstration on the same basis as the ceiling branches documented in CLAUDE.md §14. R-D3b (fragment reassembly gate) was added in the 2026-04-15 revision; its single-condition MC/DC argument is satisfied by the existing fragment reassembly tests.
 
 ---
 

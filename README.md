@@ -23,7 +23,7 @@ A C++ networking library for building and testing systems that must survive unre
 | Retry manager | 32 pending slots |
 | Inbound ring | 64 messages per backend |
 | Concurrent clients (TCP/TLS) | 8 (configurable via `MAX_TCP_CONNECTIONS` in `Types.hpp`) |
-| Worst-case stack depth | ~259 KB / 12 frames (DTLS flush path); non-flush: ~764 bytes / 10 frames |
+| Worst-case stack depth | ~130 KB / 11 frames (flush path, Chain 3); non-flush: ~764 bytes / 9 frames |
 
 **Written to:** JPL Power of 10 · MISRA C++:2023 · F-Prime style subset · NASA Class C (voluntary Class B test rigor). No exceptions, no templates, no RTTI. STL is excluded from production code with one deliberate exception: `std::atomic<T>` for integral types is permitted and used for shared state — it has no dynamic allocation, maps directly to hardware primitives, and is what MISRA C++:2023 endorses for lock-free concurrency. All other STL containers, algorithms, and headers are absent from `src/`.
 
@@ -40,24 +40,20 @@ A C++ networking library for building and testing systems that must survive unre
 3. [Architecture](#architecture)
 4. [Directory Structure](#directory-structure)
 5. [Building](#building)
-6. [Running the Tests](#running-the-tests)
-7. [Coverage Analysis](#coverage-analysis)
-8. [Static Analysis](#static-analysis)
-9. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
-10. [Logging](docs/LOGGING.md) — format, architecture, severity levels, extending, testing
-11. [Documentation Maintenance](docs/DOC_MAINTENANCE.md) — what to update and when for every type of code change
-11. [Using the Library](#using-the-library)
-11. [Use Cases](#use-cases)
-12. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
-13. [Safety & Assurance Documents](#safety--assurance-documents)
-14. [Design Patterns](#design-patterns)
-15. [Coding Standards](#coding-standards)
-16. [Standards Sources and Conflicts](#standards-sources-and-conflicts)
-17. [Project Standards Files](#project-standards-files)
-18. [Claude Skills](#claude-skills)
-19. [Release History](#release-history)
-20. [Code Statistics](#code-statistics)
-21. [Security Check](SNYK.IO.SECURITY_CHECK.md)
+6. [Testing and Analysis](#testing-and-analysis) — unit tests, stress tests, coverage, static analysis
+7. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
+8. [Documentation Maintenance](docs/DOC_MAINTENANCE.md) — what to update and when for every type of code change
+9. [Using the Library](#using-the-library)
+    - [Logging](docs/LOGGING.md) — format, architecture, severity levels, extending, testing
+10. [Use Cases](#use-cases)
+11. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
+12. [Safety & Assurance Documents](#safety--assurance-documents)
+13. [Design Patterns](#design-patterns)
+14. [Coding Standards](#coding-standards)
+15. [Claude Skills](#claude-skills)
+16. [Release History](#release-history)
+17. [Code Statistics](#code-statistics)
+18. [Security Check](SNYK.IO.SECURITY_CHECK.md)
 
 ---
 
@@ -70,7 +66,7 @@ If you are new to this codebase, the fastest path to understanding it is:
 ```
 README.md                     ← you are here; read the Architecture and Directory Structure sections
 docs/DEMO_WALKTHROUGH.md      ← line-by-line walkthrough of a real client/server exchange
-docs/use_cases/HIGH_LEVEL_USE_CASES.md  ← all 76 capabilities in one index (HL-1 through HL-35)
+docs/use_cases/HIGH_LEVEL_USE_CASES.md  ← all 78 capabilities in one index (HL-1 through HL-37)
 ```
 
 **Step 2 — Build and run (5 minutes)**
@@ -401,8 +397,12 @@ messageEngine/
 │       ├── TlsTcpDemo.cpp                  # TLS client/server demo
 │       └── DtlsUdpDemo.cpp                 # DTLS client/server demo
 ├── tests/                # Unit tests (one binary per module)
+│   ├── FakeLogClock.hpp            # Deterministic ILogClock stub (fixed mono_us / wall_us)
+│   ├── FaultPosixLogClock.hpp      # ILogClock stub that can inject clock failures
+│   ├── FaultPosixLogSink.hpp       # ILogSink stub that can inject write failures
 │   ├── MockSocketOps.hpp           # Injectable ISocketOps stub for all four transport backend M5 tests
 │   ├── MockTransportInterface.hpp  # Injectable TransportInterface stub for DeliveryEngine M5 tests
+│   ├── RingLogSink.hpp             # Fixed-capacity ring-buffer log sink for asserting log output in tests
 │   ├── TestPortAllocator.hpp       # Port allocation helper for concurrent backend tests
 │   ├── test_MessageEnvelope.cpp
 │   ├── test_MessageId.cpp
@@ -425,9 +425,15 @@ messageEngine/
 │   ├── test_UdpBackend.cpp
 │   ├── test_TlsTcpBackend.cpp
 │   ├── test_DtlsUdpBackend.cpp
+│   ├── test_Logger.cpp
 │   ├── test_PrngEngine.cpp
 │   ├── test_RingBuffer.cpp
-│   └── test_stress_capacity.cpp    # Stress suite (run via make run_stress_tests)
+│   ├── test_stress_capacity.cpp    # Capacity-limit stress tests (slot exhaustion, ring overflow)
+│   ├── test_stress_e2e.cpp         # End-to-end throughput and reliability stress tests
+│   ├── test_stress_ordering.cpp    # Ordering gate stress tests (reorder, hold, release)
+│   ├── test_stress_reconnect.cpp   # Reconnect / ordering-reset stress tests
+│   ├── test_stress_ringbuffer.cpp  # RingBuffer concurrent-access stress tests
+│   └── test_stress_tcp_fanin.cpp   # TCP fan-in stress tests (many clients → one server)
 ├── docs/                 # Requirements, design, and analysis documents
 ├── Makefile
 ├── .cppcheck-suppress
@@ -485,7 +491,7 @@ If mbedTLS is not available in your environment, or you only need TCP/UDP withou
 # Linux:  sudo apt install build-essential clang clang-tidy clang-tools cppcheck llvm
 
 make all TLS=0           # server, client, all non-TLS tests
-make run_tests TLS=0     # runs 21 tests; TlsTcpBackend and DtlsUdpBackend skipped
+make run_tests TLS=0     # runs 22 tests; TlsTcpBackend and DtlsUdpBackend skipped
 make lint TLS=0          # lints only non-TLS source files
 make cppcheck TLS=0      # checks only non-TLS source files
 ```
@@ -514,153 +520,18 @@ The Makefile enforces the zero-warnings policy: `-Wall -Wextra -Wpedantic -Wshad
 
 ---
 
-## Running the Tests
+## Testing and Analysis
 
-```bash
-# Build and run all test suites
-make run_tests
-```
-
-Expected output: every test prints `PASS: <test_name>` and the suite ends with `=== ALL TESTS PASSED ===`.
-
-Individual test binaries can also be run directly:
-
-```bash
-build/test_MessageEnvelope
-build/test_MessageId
-build/test_Timestamp
-build/test_Serializer
-build/test_DuplicateFilter
-build/test_AckTracker
-build/test_RetryManager
-build/test_Fragmentation
-build/test_ReassemblyBuffer
-build/test_OrderingBuffer
-build/test_RequestReplyEngine
-build/test_DeliveryEngine
-build/test_ImpairmentEngine
-build/test_ImpairmentConfigLoader
-build/test_LocalSim
-build/test_AssertState
-build/test_SocketUtils
-build/test_TcpBackend
-build/test_UdpBackend
-build/test_TlsTcpBackend
-build/test_DtlsUdpBackend
-build/test_PrngEngine
-build/test_RingBuffer
-```
-
----
-
-## Stress Tests
-
-Stress tests exercise **capacity-exhaustion and slot-recycling** paths with thousands of
-consecutive fill/drain cycles.  They target a different failure class than unit tests —
-slot leaks, index-arithmetic wrap errors, and counter drift that only manifest under
-sustained load.
-
-```bash
-# Build only
-make stress_tests
-
-# Build and run
-make run_stress_tests
-```
-
-| Test | Cycles | What it catches |
+| What | Command | Detail |
 |---|---|---|
-| `test_ack_tracker_fill_drain_cycles` | 10 000 × 32 slots | Slot leak on `sweep_expired`; off-by-one at slot 33 |
-| `test_ack_tracker_partial_ack_then_sweep` | 1 000 × 32 slots | Double-free if ACKed slot is re-swept; ghost entries after partial drain |
-| `test_retry_manager_fill_ack_drain_cycles` | 5 000 × 32 slots | Slot not freed after `on_ack`; stale inactive entries blocking `schedule` |
-| `test_retry_manager_max_retry_exhaustion` | 1 000 × 32 slots × 5 retries | Slot not freed at exhaustion; retry count exceeding `MAX_RETRY_COUNT`; backoff overflow |
-| `test_ring_buffer_sustained_push_pop` | 64 000 single + 1 000 fill/drain | Index-wrap arithmetic across `uint32_t` boundary; FIFO ordering; `ERR_FULL`/`ERR_EMPTY` boundaries |
-| `test_dedup_filter_window_wraparound` | 100 window lengths × 128 entries | Eviction pointer wrap; false positives after eviction; false negatives within current window |
+| Unit tests (24 suites) | `make run_tests` | All tests must print `=== ALL TESTS PASSED ===` |
+| Stress tests | `make run_stress_tests` | Capacity, e2e, ordering; ~60 s each |
+| Branch coverage | `make coverage` | LLVM source-based; per-file summary |
+| Full coverage report | `make coverage_report` | Per-function breakdown + policy table |
+| All static analysis | `make static_analysis` | Clang-Tidy, Cppcheck, Clang SA |
+| Lint only | `make lint` | Required before every commit |
 
-**When to run stress tests** (per `CLAUDE.md §1c`): not required on every commit. Run when
-any capacity constant in `src/core/Types.hpp` changes, or when the loop-bound or
-slot-management logic in `AckTracker`, `RetryManager`, `RingBuffer`, or `DuplicateFilter`
-is modified.
-
-**CI:** Stress tests run automatically via `.github/workflows/stress.yml` on a nightly
-schedule (2 AM UTC), on any push or PR to `main` that touches a capacity-relevant file,
-and on manual dispatch from the GitHub Actions tab.
-
----
-
-## Coverage Analysis
-
-Uses LLVM source-based coverage (`clang++ -fprofile-instr-generate -fcoverage-mapping`).
-
-```bash
-# Build instrumented binaries, run all tests, print per-file summary
-make coverage
-
-# Full report: per-file summary + per-function breakdown + policy compliance table
-make coverage_report
-
-# Annotated line-level output with branch hit counts (requires make coverage first)
-make coverage_show
-```
-
-Policy floor: 100% of all reachable branches for SC files (CLAUDE.md §14). Per-file ceilings below 100% are documented in `docs/COVERAGE_CEILINGS.md`; every missed branch is individually justified.
-
-> **Methodology note:** LLVM source-based coverage counts each branch outcome (True and False) as a separate entry. All thresholds reflect LLVM output. Numbers are kept current in `docs/COVERAGE_CEILINGS.md` (single source of truth); the table below is a snapshot. All files are at their architectural maxima — see `docs/COVERAGE_CEILINGS.md` for per-file justifications.
-
-| File | Branch % | SC? | Status |
-|---|---|---|---|
-| `core/Serializer.cpp` | 73.76% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `core/DuplicateFilter.cpp` | 73.13% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `core/AckTracker.cpp` | 76.97% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `core/RetryManager.cpp` | 77.07% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `core/DeliveryEngine.cpp` | ~76.2% | SC | Ceiling — assert `[[noreturn]]` branches + init-guard paths |
-| `core/OrderingBuffer.cpp` | 79.33% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `core/Fragmentation.cpp` | 78.12% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `core/RequestReplyEngine.cpp` | 78.10% | SC | Ceiling — assert `[[noreturn]]` branches + payload-guard dead code |
-| `core/AssertState.cpp` | 50.00% | NSC-infra | Ceiling — abort() False branch untestable |
-| `platform/ImpairmentEngine.cpp` | 74.22% | SC | Ceiling — assert + unreachable branches |
-| `platform/ImpairmentConfigLoader.cpp` | 83.91% | SC | Ceiling — assert + unreachable branches |
-| `platform/TcpBackend.cpp` | 75.96% | SC | Ceiling — assert `[[noreturn]]` branches + hard POSIX error paths |
-| `platform/UdpBackend.cpp` | 74.23% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `platform/TlsTcpBackend.cpp` | 78.51% | SC | Ceiling — assert + hard mbedTLS/POSIX error paths |
-| `platform/TlsSessionStore.cpp` | 66.67% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `platform/DtlsUdpBackend.cpp` | 77.21% | SC | Ceiling — assert + mbedTLS/POSIX error paths |
-| `platform/LocalSimHarness.cpp` | 70.49% | SC | Ceiling — assert + structurally-unreachable branches |
-| `platform/MbedtlsOpsImpl.cpp` | 69.33% | SC | Ceiling — assert `[[noreturn]]` branches |
-| `platform/SocketUtils.cpp` | 75.82% | NSC | Ceiling — POSIX errors unreachable on loopback |
-| `platform/PosixSyscallsImpl.cpp` | 70.37% | NSC | Line coverage sufficient |
-| `platform/SocketOpsImpl.cpp` | 66.67% | NSC | Line coverage sufficient |
-
-Ceiling files are at the maximum achievable coverage: `NEVER_COMPILED_OUT_ASSERT` generates permanently-missed branch outcomes (the `[[noreturn]]` `abort()` path), and certain POSIX/mbedTLS error paths cannot be triggered in a loopback test environment. All are documented deviations, not defects. Full per-file justifications are in `docs/COVERAGE_CEILINGS.md`.
-
----
-
-## Static Analysis
-
-Three tiers of static analysis are configured in the Makefile (see `docs/STATIC_ANALYSIS_TOOLCHAIN.md`):
-
-| Tier | Tool | Status | Target |
-|---|---|---|---|
-| **1** | Compiler `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion -Werror` | Active — enforced on every build | `make all` |
-| **2a** | Clang-Tidy (strict for `src/`, relaxed for `tests/`) | Active | `make lint` |
-| **2b** | Cppcheck flow/style analysis (CI-safe; no MISRA addon) | Active | `make cppcheck` |
-| **2b+** | Cppcheck + MISRA C++:2023 addon (macOS only) | Active locally | `make cppcheck-misra` |
-| **2c** | Clang Static Analyzer — path-sensitive, alpha checkers | Active | `make scan_build` |
-| **3** | PC-lint Plus — formal MISRA C++:2023 compliance report | Pending licence | `make pclint` |
-
-```bash
-# Run all active Tier 2 tools in sequence (CI target)
-make static_analysis
-
-# Individual targets
-make lint
-make cppcheck
-make cppcheck-misra   # macOS only — Ubuntu cppcheck 2.13 does not support --addon=misra
-make scan_build
-make pclint           # Tier 3 — requires PC-lint Plus licence and pclint/ config directory
-```
-
-Documented suppressions live in `.cppcheck-suppress`; each entry requires a justification comment and a `DEFECT_LOG.md` reference. On Linux, comment lines are stripped from the suppression file before passing to cppcheck (Ubuntu 24.04 cppcheck 2.13 limitation).
+Full details — individual test binaries, stress test sub-tests, per-file coverage ceilings, and all static analysis tiers: **[`docs/TESTING_AND_ANALYSIS.md`](docs/TESTING_AND_ANALYSIS.md)**.
 
 ---
 
@@ -942,6 +813,24 @@ All impairment decisions are driven by a seedable xorshift64 PRNG — given the 
 
 ---
 
+### Logging
+
+The library ships a lightweight injectable logger. Attach it once at startup:
+
+```cpp
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
+PosixLogClock clock;
+PosixLogSink  sink;
+Logger::init(&clock, &sink, Severity::INFO);   // min_level filters below INFO
+```
+
+Use the `LOG_INFO` / `LOG_WARNING_HI` / `LOG_FATAL` macros (never call `Logger::log()` directly). Full format, severity levels, sink/clock extension points, and thread-safety guarantees: **[`docs/LOGGING.md`](docs/LOGGING.md)**.
+
+---
+
 ### Error Handling
 
 All functions return a `Result` enum. Never ignore a return value.
@@ -977,111 +866,9 @@ Each individual `UC_*.md` document follows a 15-section flow-of-control format c
 
 ## Safety & Assurance Documents
 
-NASA-STD-8719.13C / NASA-STD-8739.8A compliance artifacts maintained in [`docs/`](docs/):
+Ten NASA-STD-8719.13C / NASA-STD-8739.8A compliance artifacts are maintained in [`docs/`](docs/), covering hazard analysis (HAZ-001–HAZ-025), FMEA, SC/NSC function classification, formal state machines, requirements traceability, stack and WCET analysis, MC/DC coverage, inspection records, verification policy, and security assumptions.
 
-| Document | Description |
-|---|---|
-| [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md) | Software Safety Hazard Analysis (HAZ-001–HAZ-007), Failure Mode and Effects Analysis (FMEA) for every major component, and Safety-Critical (SC) vs Non-Safety-Critical (NSC) classification for every public function in `src/`. |
-| [STATE_MACHINES.md](docs/STATE_MACHINES.md) | Formal state-transition tables and invariants for the three safety-critical state machines: `AckTracker`, `RetryManager`, and `ImpairmentEngine` (including the partition sub-state). |
-| [TRACEABILITY_MATRIX.md](docs/TRACEABILITY_MATRIX.md) | Bidirectional requirements traceability matrix mapping every `[REQ-x.x]` ID from `CLAUDE.md` to the `src/` file that implements it and the `tests/` file that verifies it. |
-| [STACK_ANALYSIS.md](docs/STACK_ANALYSIS.md) | Worst-case stack depth analysis across six call chains; flush-path worst case is 12 frames / ~259 KB (dominated by `DtlsUdpBackend` dual `delayed[]` arrays); non-flush worst case is 10 frames / ~764 bytes. |
-| [WCET_ANALYSIS.md](docs/WCET_ANALYSIS.md) | Worst-case execution time analysis expressed as closed-form operation counts for every SC function, derived from the compile-time capacity constants in `src/core/Types.hpp`. |
-| [MCDC_ANALYSIS.md](docs/MCDC_ANALYSIS.md) | MC/DC coverage analysis for the five highest-hazard SC functions: `DeliveryEngine::send`, `DeliveryEngine::receive`, `DuplicateFilter::check_and_record`, `Serializer::serialize`, `Serializer::deserialize`. |
-| [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md) | Moderator-led formal inspection checklist (NPR 7150.2D §3 / NASA-STD-8739.8); entry/exit criteria, severity definitions, and waiver policy for all `src/` changes. |
-| [DEFECT_LOG.md](docs/DEFECT_LOG.md) | Cumulative inspection defect record; every defect found during formal review of `src/` changes is logged here with disposition and sign-off. |
-| [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md) | Verification policy (VVP-001); defines the minimum verification methods (M1–M7) required at each software classification level (Class C / B / A), architectural ceiling rules, fault injection requirements, and injectable interface obligations. |
-| [SECURITY_ASSUMPTIONS.md](docs/SECURITY_ASSUMPTIONS.md) | Security assumptions the library relies on but cannot enforce: monotonic time contract (SEC-007), unique message IDs per session, constant peer node IDs, transport-layer source address validation (HELLO-before-data, source_id binding across all four backends), TLS/DTLS peer hostname verification, cryptographic material zeroing, and timing-safe comparisons. Every assumption violation is a contract breach with undefined behavior. |
-
-### Document Dependencies
-
-Each Safety & Assurance document depends on the following inputs. Update the listed dependencies whenever a structural change is made.
-
-#### [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md)
-
-| Field | Value |
-|---|---|
-| **Normative policy** | `CLAUDE.md` §11, §13 (NASA-STD-8719.13C, NASA-STD-8739.8A) |
-| **Source files** | All `src/core/` and `src/platform/` `.hpp` files (SC/NSC classification tables) |
-| **Other docs** | — (primary artifact; others depend on it) |
-
-#### [STATE_MACHINES.md](docs/STATE_MACHINES.md)
-
-| Field | Value |
-|---|---|
-| **Normative policy** | `CLAUDE.md` §15 (NASA-STD-8719.13C §4, NASA-STD-8739.8A §6) |
-| **Source files** | `AckTracker.hpp/cpp`, `RetryManager.hpp/cpp`, `ImpairmentEngine.hpp/cpp`, `Types.hpp` (capacity constants) |
-| **Other docs** | [`HAZARD_ANALYSIS.md`](docs/HAZARD_ANALYSIS.md) §1 (HAZ IDs) |
-
-#### [TRACEABILITY_MATRIX.md](docs/TRACEABILITY_MATRIX.md)
-
-| Field | Value |
-|---|---|
-| **Normative policy** | `CLAUDE.md` §11, `.claude/CLAUDE.md` §10 |
-| **Source files** | All `src/` and `tests/` files (`// Implements:` / `// Verifies:` comments); REQ IDs from `CLAUDE.md` §§3–7 |
-| **Other docs** | — (generated by `docs/check_traceability.sh`) |
-
-#### [STACK_ANALYSIS.md](docs/STACK_ANALYSIS.md)
-
-| Field | Value |
-|---|---|
-| **Normative policy** | `CLAUDE.md` §13 (NASA-STD-8719.13C) |
-| **Source files** | `src/app/` entry points; `DeliveryEngine`, `Serializer`, `AckTracker`, `RetryManager` (core); `TcpBackend`, `DtlsUdpBackend`, `ImpairmentEngine`, `IMbedtlsOps`, `MbedtlsOpsImpl` (platform) |
-| **Other docs** | — |
-
-#### [WCET_ANALYSIS.md](docs/WCET_ANALYSIS.md)
-
-| Field | Value |
-|---|---|
-| **Normative policy** | `CLAUDE.md` §14 (NASA-STD-8719.13C) |
-| **Source files** | `src/core/Types.hpp` (capacity constants); all SC function implementation files |
-| **Other docs** | [`HAZARD_ANALYSIS.md`](docs/HAZARD_ANALYSIS.md) §3 (SC function scope); [`STACK_ANALYSIS.md`](docs/STACK_ANALYSIS.md) (worst-case call chain) |
-
-#### [MCDC_ANALYSIS.md](docs/MCDC_ANALYSIS.md)
-
-| Field | Value |
-|---|---|
-| **Normative policy** | `CLAUDE.md` §14 §2 (DO-178C, NASA-STD-8739.8A) |
-| **Source files** | `DeliveryEngine.cpp`, `DuplicateFilter.cpp`, `Serializer.cpp`, `Assert.hpp`; `tests/test_DeliveryEngine.cpp`, `tests/test_DuplicateFilter.cpp`, `tests/test_Serializer.cpp` |
-| **Other docs** | [`HAZARD_ANALYSIS.md`](docs/HAZARD_ANALYSIS.md) §3 (five highest-hazard SC functions); [`VERIFICATION_POLICY.md`](docs/VERIFICATION_POLICY.md) (architectural ceiling rules); `CLAUDE.md` §14 |
-
-#### [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md)
-
-| Field | Value |
-|---|---|
-| **Normative policy** | `CLAUDE.md` §12 (NPR 7150.2D, NASA-STD-8739.8) |
-| **Source files** | Files under review (varies per inspection) |
-| **Other docs** | `.claude/CLAUDE.md` §§2–5 (Power of 10, MISRA, F-Prime, architecture — Parts C–E); `CLAUDE.md` §§6–7, §11 (error handling, security, traceability — Parts B, F, G); [`DEFECT_LOG.md`](docs/DEFECT_LOG.md) (completed checklists filed there) |
-
-#### [DEFECT_LOG.md](docs/DEFECT_LOG.md)
-
-| Field | Value |
-|---|---|
-| **Normative policy** | `CLAUDE.md` §12.3 (NPR 7150.2D) |
-| **Source files** | Files reviewed in each inspection |
-| **Other docs** | [`INSPECTION_CHECKLIST.md`](docs/INSPECTION_CHECKLIST.md); [`HAZARD_ANALYSIS.md`](docs/HAZARD_ANALYSIS.md) (HAZ IDs); [`VERIFICATION_POLICY.md`](docs/VERIFICATION_POLICY.md) (verification method references) |
-
-#### [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md)
-
-| Field | Value |
-|---|---|
-| **Normative policy** | NPR 7150.2D, NASA-STD-8739.8A, NASA-STD-8719.13C |
-| **Source files** | — (process/policy document) |
-| **Other docs** | [`HAZARD_ANALYSIS.md`](docs/HAZARD_ANALYSIS.md) §3 (SC/NSC definitions); `CLAUDE.md` §14 (coverage requirements) |
-
-#### Dependency Summary
-
-| Document | Depends on |
-|---|---|
-| [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md) | — (primary artifact; no doc dependencies) |
-| [STATE_MACHINES.md](docs/STATE_MACHINES.md) | [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md) |
-| [TRACEABILITY_MATRIX.md](docs/TRACEABILITY_MATRIX.md) | — (generated from source; no doc dependencies) |
-| [STACK_ANALYSIS.md](docs/STACK_ANALYSIS.md) | — |
-| [WCET_ANALYSIS.md](docs/WCET_ANALYSIS.md) | [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md), [STACK_ANALYSIS.md](docs/STACK_ANALYSIS.md) |
-| [MCDC_ANALYSIS.md](docs/MCDC_ANALYSIS.md) | [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md), [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md) |
-| [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md) | [DEFECT_LOG.md](docs/DEFECT_LOG.md) |
-| [DEFECT_LOG.md](docs/DEFECT_LOG.md) | [INSPECTION_CHECKLIST.md](docs/INSPECTION_CHECKLIST.md), [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md), [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md) |
-| [VERIFICATION_POLICY.md](docs/VERIFICATION_POLICY.md) | [HAZARD_ANALYSIS.md](docs/HAZARD_ANALYSIS.md) |
-| [SECURITY_ASSUMPTIONS.md](docs/SECURITY_ASSUMPTIONS.md) | — (primary artifact; no doc dependencies) |
+Full document index, descriptions, and dependency graph: **[`docs/SAFETY_ASSURANCE.md`](docs/SAFETY_ASSURANCE.md)**
 
 ---
 
@@ -1095,73 +882,28 @@ Patterns in use: Strategy, Adapter/Bridge, Facade, State Machine, Observer/Event
 
 ## Coding Standards
 
-All production code (`src/`) is written to the following standards. Where a rule cannot be followed, a deviation is recorded at the point of use with a justification comment; significant deviations are also catalogued in `.claude/CLAUDE.md`. No rule is silently broken.
+All production code (`src/`) targets the following standards. Deviations are recorded at the point of use; significant ones are catalogued in `.claude/CLAUDE.md`. MISRA C++:2023 is proprietary (purchase required); NASA standards are public. Neither imposes a software license on compliant code.
 
-**Standards targeting note:** This project targets these standards as a development discipline. MISRA C++:2023 is a proprietary document (purchase required; not redistributed here). NASA standards are public. Neither imposes a software license on compliant code; see the [License](#license) section at the bottom of this file.
-
-**Software classification:** NASA-STD-8719.13C / NASA-STD-8739.8A **Class C** (infrastructure / networking library). **Verification discipline voluntarily targets Class B**: all safety-critical functions require branch coverage (M4), mandatory peer inspection (M1), and static analysis (M2); MC/DC coverage (M5) is the goal for the five highest-hazard functions. See `docs/HAZARD_ANALYSIS.md` and `docs/MCDC_ANALYSIS.md`.
+**Class C** (infrastructure library) with verification discipline voluntarily targeting **Class B**. See [`docs/STANDARDS_AND_CONFLICTS.md §7`](docs/STANDARDS_AND_CONFLICTS.md) for the full classification rationale and Class B gap analysis.
 
 | Standard / Property | How this project targets it |
 |---|---|
-| **JPL Power of 10** | No goto, no recursion; fixed loop bounds; no dynamic allocation after init; cyclomatic complexity ≤ 10 per function (enforced by `make lint`); ≥ 2 assertions per function; minimal variable scope; all return values checked; minimal preprocessor use; ≤ 1 pointer indirection; zero compiler warnings |
+| **JPL Power of 10** | No goto, no recursion; fixed loop bounds; no dynamic allocation after init; cyclomatic complexity ≤ 10 (enforced by `make lint`); ≥ 2 assertions per function; all return values checked; zero compiler warnings |
 | **MISRA C++:2023** | Required rules enforced; advisory rules followed; all deviations documented in-code and in `.claude/CLAUDE.md` |
-| **F-Prime subset** | ISO C++17; `-fno-exceptions`; `-fno-rtti`; no templates; no explicit function pointers (vtable-backed virtual dispatch is a documented exception); no STL except `std::atomic` (see below) |
+| **F-Prime subset** | ISO C++17; `-fno-exceptions`; `-fno-rtti`; no templates; no explicit function pointers; no STL except `std::atomic` |
 | **Error handling** | All errors returned via `Result` enum (`OK`, `ERR_TIMEOUT`, `ERR_FULL`, `ERR_IO`, …); no exceptions |
-| **Assertions** | `NEVER_COMPILED_OUT_ASSERT(cond)` — always compiled in; in debug/test builds calls `abort()`; in production logs FATAL and triggers a controlled reset |
-| **Layering** | App → Core → Platform → OS; no upward dependencies; no cyclic dependencies |
+| **Assertions** | `NEVER_COMPILED_OUT_ASSERT(cond)` — always compiled in; debug builds abort; production logs FATAL and triggers a controlled reset |
+| **Layering** | App → Core → Platform → OS; no upward or cyclic dependencies |
 
-**`std::atomic` exceptions to the no-STL rule** (see `.claude/CLAUDE.md §3`):
-
-| File | Exception | Justification |
-|---|---|---|
-| `src/core/RingBuffer.hpp` | `std::atomic<uint32_t>` | Lock-free head/tail indices; no dynamic allocation; maps directly to a hardware primitive |
-| `src/core/AssertState.hpp/cpp` | `std::atomic<bool>` | `g_fatal_fired` flag must be visible across threads without a mutex |
-| `src/core/Assert.hpp` | `std::memory_order_*` | Required by `std::atomic` store in the assert macro |
-
-### Work Required to Achieve Formal Class B Classification
-
-The project voluntarily meets Class B verification rigor (M1 + M2 + M4 + M5 for all SC functions) but is formally classified **Class C**. Formal reclassification to Class B requires completing the following items. The full gap list is in [`TODO_FOR_CLASS_B_CERT.txt`](TODO_FOR_CLASS_B_CERT.txt).
-
-#### Already achieved (no further work needed)
-
-| Item | Evidence |
-|---|---|
-| M1 — Code review / inspection | [`docs/DEFECT_LOG.md`](docs/DEFECT_LOG.md) INSP-001 (2026-03-31) |
-| M2 — Static analysis (compiler + clang-tidy + cppcheck) | `make lint`; zero unresolved findings |
-| M4 — Branch coverage of all SC functions | `make coverage`; 100% of reachable branches; ceilings documented in `CLAUDE.md §14` |
-| M5 — Fault injection for all SC dependency-failure paths | Injectable interfaces (`IMbedtlsOps`, `ISocketOps`); `MockSocketOps` and `DtlsMockOps` test doubles; fault-injection tests across all four transport backends covering bind, connect, send, receive, and TLS/DTLS credential-path failures |
-| MC/DC analysis (M6 goal, five highest-hazard SC functions) | [`docs/MCDC_ANALYSIS.md`](docs/MCDC_ANALYSIS.md) — all decisions demonstrated |
-
-#### Remaining work (external tools or personnel required)
-
-| # | Item | What is needed | Blocker |
-|---|---|---|---|
-| 6 | **TLA+ model checking** | Formally verify the three SC state machines (`AckTracker`, `RetryManager`, `ImpairmentEngine`) against all invariants in [`docs/STATE_MACHINES.md`](docs/STATE_MACHINES.md) using TLA+ or SPIN | TLA+ toolchain + team member with TLA+ authoring experience |
-| 7 | **Frama-C WP bounds proof** | Prove absence of buffer overflow in `Serializer::serialize()` and `Serializer::deserialize()` using the Frama-C WP plugin with ACSL annotations | Frama-C installation + ACSL annotation authoring |
-| 8 | **PC-lint Plus MISRA C++:2023 report** | Run PC-lint Plus with the MISRA C++:2023 ruleset over all of `src/` to produce a formal compliance report (`make pclint` is a documented TODO stub) | PC-lint Plus commercial licence ([gimpel.com](https://gimpel.com)) |
-| 9 | **Independent V&V** | A second qualified engineer (not the author) must complete a structured inspection of all SC functions per [`docs/INSPECTION_CHECKLIST.md`](docs/INSPECTION_CHECKLIST.md) and record findings in [`docs/DEFECT_LOG.md`](docs/DEFECT_LOG.md) (INSP-002 onward) | Second qualified reviewer |
-
-Items 6 and 7 are also required for Class A reclassification; Item 9 is required at both Class B and Class A (NPR 7150.2D §3.11). Item 8 closes the Tier 3 static analysis gap (see [`docs/STATIC_ANALYSIS_TOOLCHAIN.md`](docs/STATIC_ANALYSIS_TOOLCHAIN.md)).
-
----
-
-## Standards Sources and Conflicts
-
-[`docs/STANDARDS_AND_CONFLICTS.md`](docs/STANDARDS_AND_CONFLICTS.md) lists every external standard, guideline, and rule set referenced in the project's coding standards files — where each one comes from, whether it is free or proprietary, and a plain-English summary of what it is and what obligations it imposes on this codebase. It also documents all known contradictions and tensions between the combined standard set, with resolution status for each.
-
----
-
-## Project Standards Files
-
-Two CLAUDE.md files govern all code in this repository and divide responsibility cleanly:
+**Governing files:**
 
 | File | Purpose |
 |---|---|
-| `.claude/CLAUDE.md` | **Global C/C++ coding standard.** Contains all 10 JPL Power of 10 rules, MISRA C++:2023 compliance requirements, F-Prime style subset, architecture/layering rules, security posture, and NASA assurance mindset. Also cross-references `docs/VERIFICATION_POLICY.md` and `CLAUDE.md` §§11/13 for traceability and safety obligations. |
-| `CLAUDE.md` | **Project-specific spec.** Contains everything tied to this repository: numbered application requirements (`[REQ-x.x]`), references to `docs/` artifacts, the per-directory rule compliance table, named static analysis toolchain, `NEVER_COMPILED_OUT_ASSERT` policy, traceability rules, formal inspection process, and safety/coverage/WCET/formal-methods obligations. |
-| `docs/VERIFICATION_POLICY.md` | **Verification policy (VVP-001).** Defines the minimum verification methods (M1–M7) required at each software classification level (Class C / B / A) and the rules governing architectural ceiling arguments, fault injection, and injectable interface requirements. |
+| `.claude/CLAUDE.md` | Global C/C++ coding standard — Power of 10, MISRA C++:2023, F-Prime, architecture, security posture |
+| `CLAUDE.md` | Project-specific spec — REQ IDs, safety artifacts, traceability rules, inspection process, coverage requirements |
+| `docs/VERIFICATION_POLICY.md` | Verification policy (VVP-001) — M1–M7 methods, classification levels, ceiling argument rules |
 
-**How they divide responsibility:** `.claude/CLAUDE.md` is the authoritative coding standard; `CLAUDE.md` is the project-specific spec (requirement IDs, file paths, process rules, safety artifacts). `VERIFICATION_POLICY.md` governs what test evidence is required at each classification level.
+Full standard sources, all known conflicts and resolutions, `std::atomic` exception table, and Class B gap analysis: **[`docs/STANDARDS_AND_CONFLICTS.md`](docs/STANDARDS_AND_CONFLICTS.md)**
 
 ---
 
@@ -1172,9 +914,6 @@ This project ships a set of reusable Claude Code skills in `.claude/skills/`. Sk
 | Skill | Invocation | Description |
 |---|---|---|
 | **read-standards** | `/read-standards` | Reads and internalizes both `CLAUDE.md` and `.claude/CLAUDE.md` in full, then confirms understanding of Power of 10, MISRA C++:2023, layering rules, safety annotations, and traceability policy. Run this at the start of any session that involves writing or reviewing C/C++ code. |
-| **generate_use_case_list** | `/generate_use_case_list` | Reads the live source code in `src/` (headers, implementations, and app entry points) and all test files in `tests/` to regenerate `docs/use_cases/HIGH_LEVEL_USE_CASES.md` from scratch. Automatically picks up new files and ignores deleted ones. Classifies each capability as a user-facing HL group, an Application Workflow pattern, or a System Internal sub-function using a concrete decision algorithm anchored to what `src/app/` code actually calls. |
-| **generate_use_cases** | `/generate_use_cases` | Reads `HIGH_LEVEL_USE_CASES.md` and all source files, then regenerates every individual `UC_*.md` document in `docs/use_cases/` using the 15-section flow-of-control format defined in `docs/use_cases/use_case_format.txt`. Overwrites existing UC files; creates new ones for any UC number that has no matching file. |
-| **find_missing_use_cases** | `/find_missing_use_cases` | Compares the live source code against existing `UC_*.md` files and `HIGH_LEVEL_USE_CASES.md` to identify undocumented capabilities. Writes a new `UC_*.md` for each gap (using the same 15-section format) and inserts the new entries into `HIGH_LEVEL_USE_CASES.md`. Never modifies existing UC files. |
 | **validate-safety-doc** | `/validate-safety-doc <DOC>` or `/validate-safety-doc all` | Validates one or all Safety & Assurance documents in `docs/` against the live source code. Checks that all claims, constants, function names, state machines, HAZ IDs, REQ IDs, and structural references are still accurate. Pass a document name (e.g., `/validate-safety-doc HAZARD_ANALYSIS`) to validate one document, or pass `all` to validate all nine in parallel. Reports findings by severity (CRITICAL / STALE / MISSING / MINOR) and offers to apply fixes. See below for how `all` mode works. |
 
 #### How `/validate-safety-doc all` works
@@ -1214,12 +953,6 @@ All nine documents are validated simultaneously using three dependency-ordered w
 └── skills/
     ├── read-standards/
     │   └── SKILL.md
-    ├── generate_use_case_list/
-    │   └── SKILL.md
-    ├── generate_use_cases/
-    │   └── SKILL.md
-    ├── find_missing_use_cases/
-    │   └── SKILL.md
     └── validate-safety-doc/
         └── SKILL.md
 ```
@@ -1255,11 +988,11 @@ All nine documents are validated simultaneously using three dependency-ordered w
 
 | Category | Lines |
 |---|---|
-| `src/` (production + headers) | 21,763 |
-| `tests/` | 34,046 |
-| **Total** | **55,809** |
+| `src/` (production + headers) | 23,009 |
+| `tests/` | 37,993 |
+| **Total** | **61,002** |
 
-75 source files across 3 layers; 23 test suites + 1 stress suite + 3 shared mock/helper headers (27 test files).
+83 source files across 3 layers; 24 unit test suites + 6 stress test suites + 7 shared mock/helper headers (37 test files).
 
 ---
 

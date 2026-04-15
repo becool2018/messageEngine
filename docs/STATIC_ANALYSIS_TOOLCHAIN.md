@@ -14,11 +14,30 @@ Tools are organised into four tiers by when they run and what they enforce.
 
 **Tool:** GCC / Clang compiler warnings
 
-Flags:
+Flags (compiler-family conditional — see note below):
 ```
--Wall -Wextra -Wpedantic -Werror -Wshadow -Wconversion -Wsign-conversion
+-Wall -Wextra -Werror -Wshadow -Wconversion -Wsign-conversion
 -Wcast-align -Wformat=2 -Wnull-dereference -Wdouble-promotion
+-Wno-unknown-pragmas
+-fstack-protector-strong -fPIE
+
+# Clang builds only:
+-Wpedantic -Wno-gnu-zero-variadic-macro-arguments
+
+# GCC builds only (no -Wpedantic — see note):
+-Wno-variadic-macros
 ```
+
+Note — compiler-family detection: The Makefile detects whether `$(CXX)` is
+Clang or GCC at configuration time (via `$(CXX) --version`). On Clang,
+`-Wpedantic` is retained and only the GNU-extension warning for zero-argument
+`##__VA_ARGS__` is suppressed with `-Wno-gnu-zero-variadic-macro-arguments`.
+On GCC, `-Wpedantic` is omitted entirely because GCC has no subcategory flag
+for the zero-argument `##__VA_ARGS__` warning; `-Wno-variadic-macros` is
+applied instead.
+
+`-fstack-protector-strong` and `-fPIE` are compile-time flags (present in
+`CXXFLAGS`) applied to every object file, not only at link time.
 
 Role: First line of defence. Zero-warnings policy (Power of 10 Rule 10) means
 any warning is a build failure. Enforced in `Makefile`.
@@ -40,12 +59,14 @@ Config:
 - `src/.clang-tidy` — strict profile (full rule set)
 - `tests/.clang-tidy` — relaxed profile (STL and dynamic alloc permitted)
 
-Key checks enabled:
+Key checks enabled (representative; see `src/.clang-tidy` for the full list):
 - `readability-function-cognitive-complexity` (threshold: 10, per Rule 4)
 - `cppcoreguidelines-no-malloc` (Rule 3)
-- `fuchsia-restrict-system-includes` (not currently enabled in src/.clang-tidy)
+- `cppcoreguidelines-pro-type-cstyle-cast` (no C-style casts)
 - `misc-no-recursion` (Rule 1)
-- `bugprone-*`, `performance-*`, `portability-*`
+- `readability-const-return-type`, `readability-non-const-parameter` (const correctness)
+- `bugprone-*`, `clang-analyzer-*`, `performance-*`, `portability-*`
+- `fuchsia-restrict-system-includes` — not currently enabled in src/.clang-tidy
 
 Status: **ACTIVE**
 
@@ -54,13 +75,12 @@ Status: **ACTIVE**
 Makefile target: `make cppcheck`
 
 Role: Second-pass analysis; catches patterns Clang-Tidy misses — integer
-overflow, uninitialised variables, out-of-bounds array access, and MISRA
-C++:2023 rules via the bundled `misra.py` addon.
+overflow, uninitialised variables, out-of-bounds array access, and style
+issues. Suppressions for documented false positives are in `.cppcheck-suppress`.
 
-Config: `make cppcheck` (CI-safe target) does **not** pass `--addon=misra`; it runs
-Cppcheck without the MISRA addon for fast CI feedback. Only the separate
-`make cppcheck-misra` target passes `--addon=misra --misra-c++-version=2023` on `src/`.
-Use `.cppcheck-suppress` for documented deviations.
+Config: `make cppcheck` (CI-safe target) does **not** pass `--addon=misra`; it
+runs Cppcheck without the MISRA addon for fast CI feedback. The separate
+`make cppcheck-misra` target passes `--addon=misra` on `src/` (see below).
 
 Status: **ACTIVE**
 
@@ -73,10 +93,13 @@ uninitialized values, and memory leaks. Complementary to Clang-Tidy (which is
 primarily pattern-based) because the Static Analyzer tracks values across calls.
 
 Config: `scan-build` wrapper over the standard build; reports written to
-`build/scan-build-report/`.
+`build/scan-build/`.
 
 Checks: All default Clang Static Analyzer checkers (null dereference, dead store,
-uninitialized values, memory leaks).
+uninitialized values, memory leaks) plus three alpha checkers explicitly enabled:
+- `-enable-checker alpha.core.BoolAssignment`
+- `-enable-checker alpha.core.Conversion`
+- `-enable-checker alpha.unix.cstring.OutOfBounds`
 
 Status: **ACTIVE**
 
@@ -100,13 +123,24 @@ Config (to be created):
 
 Status: **TODO — requires licence purchase**
 
-### Cppcheck with MISRA addon (alternative) — ACTIVE
+### Cppcheck with MISRA addon (alternative) — ACTIVE (macOS only)
+
+Makefile target: `make cppcheck-misra`
 
 Role: Covers a subset of MISRA C++:2023 rules. Acceptable for development-time
 checking but does not produce a full compliance report suitable for formal audit.
 Use as a stand-in until PC-lint Plus is procured.
 
-Status: **ACTIVE** (same Cppcheck install as Tier 2; add `--addon=misra` flag)
+Invocation: `--addon=misra --std=c++17 -I src` (no version qualifier; misra.py
+selects the applicable rule set from its bundled data).
+
+Platform restriction: `make cppcheck-misra` is macOS-only (local use). It is
+**excluded from CI** because cppcheck 2.13 (Ubuntu 24.04 apt package) fails when
+`--addon=misra` is combined with `--suppressions-list`; the CI target uses the
+plain `make cppcheck` instead. Run `make cppcheck-misra` locally on macOS
+(`brew install cppcheck` includes the misra.py addon).
+
+Status: **ACTIVE** (macOS local use only; CI uses `make cppcheck` without addon)
 
 ---
 
@@ -134,7 +168,8 @@ Status: **NOT REQUIRED** — revisit if classification is raised.
 - [x] Install Clang-Tidy; create `src/.clang-tidy` (strict) and `tests/.clang-tidy` (relaxed).
 - [x] Add `make lint` target invoking Clang-Tidy on `src/` and `tests/`.
 - [x] Install Cppcheck; create `.cppcheck-suppress` deviation file.
-- [x] Add `make cppcheck` target invoking Cppcheck + MISRA addon on `src/`.
+- [x] Add `make cppcheck` target invoking Cppcheck (no MISRA addon) on `src/` — CI-safe.
+- [x] Add `make cppcheck-misra` target invoking Cppcheck + MISRA addon on `src/` — macOS local use only.
 - [ ] Procure PC-lint Plus licence; create `pclint/` config directory.
 - [ ] Add `make pclint` target for formal MISRA C++:2023 compliance report.
 - [x] Add `make static_analysis` umbrella target running `lint` + `cppcheck` + `scan_build` in sequence.
@@ -142,3 +177,7 @@ Status: **NOT REQUIRED** — revisit if classification is raised.
       disposition and the specific MISRA rule reference.
 - [ ] Add Clang-Tidy or cppcheck rule to flag any remaining `assert()` in `src/`
       (CLAUDE.md §10 — `NEVER_COMPILED_OUT_ASSERT` required in all production code).
+- [ ] Investigate enabling `fuchsia-restrict-system-includes` in `src/.clang-tidy`
+      once system-header include paths are stabilised.
+- [ ] Generate a `compile_commands.json` (via CMake or Bear) to eliminate
+      `misra-config` false-positive warnings in `make cppcheck-misra`.

@@ -31,7 +31,7 @@ Called from the User's application event loop. Synchronous in the caller's threa
 1. **`DeliveryEngine::pump_retries(now_us)`** — entry.
 2. `NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr)`.
 3. Pre-allocated member buffer `m_retry_buf[MSG_RING_CAPACITY]` (64 slots, zero-initialised in `init()`) is used for due entries. No stack allocation.
-4. **`m_retry_mgr.collect_due(now_us, m_retry_buf, MSG_RING_CAPACITY)`** (`RetryManager.cpp`):
+4. **`m_retry_manager.collect_due(now_us, m_retry_buf, MSG_RING_CAPACITY)`** (`RetryManager.cpp`):
    a. `NEVER_COMPILED_OUT_ASSERT(out_buf != nullptr)` and `NEVER_COMPILED_OUT_ASSERT(buf_cap > 0)`.
    b. Linear scan of `m_entries[0..ACK_TRACKER_CAPACITY-1]`:
       - Skip inactive entries (`active == false`).
@@ -44,7 +44,7 @@ Called from the User's application event loop. Synchronous in the caller's threa
    c. Returns `due_count` directly as `uint32_t`.
 5. Back in `pump_retries()`: for each `m_retry_buf[i]` (`i` in `0..due_count-1`):
    a. **`send_via_transport(due_buf[i], now_us)`** — expiry check, then `m_transport->send_message()`.
-   b. If non-OK: `Logger::log(WARNING_LO, ...)` ("retry send failed"); continue.
+   b. If non-OK: `LOG_WARN_LO(...)` ("retry send failed"); continue.
 6. Returns `due_count` to the User.
 
 ---

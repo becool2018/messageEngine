@@ -37,16 +37,16 @@ Called by `drain_readable_clients()` for each fd that has `POLLIN` set. Not call
 4. **`m_sock_ops->recv_frame(client_fd, m_recv_buf, sizeof(m_recv_buf), timeout_ms)`** — reads the 4-byte length prefix + frame payload. Returns byte count or error.
 5. If `recv_frame()` fails (EOF or error): `remove_client(client_fd)`; return `ERR_IO`.
 6. **`Serializer::deserialize(m_recv_buf, bytes_read, &env)`** — decodes the wire frame into `MessageEnvelope env`. Validates PROTO_VERSION and PROTO_MAGIC.
-7. If `deserialize()` fails: `Logger::log(WARNING_HI, ...)`; return `ERR_IO`.
+7. If `deserialize()` fails: `LOG_WARN_HI(...)`; return `ERR_IO`.
 8. **HELLO interception check:** `if (env.message_type == MessageType::HELLO)`:
    a. Call **`handle_hello_frame(client_fd, env.source_id)`**:
       - `NEVER_COMPILED_OUT_ASSERT(env.source_id != NODE_ID_INVALID)`.
       - Loop over `idx` in `0..m_client_count-1` (bounded by `MAX_TCP_CONNECTIONS`):
         - If `m_client_fds[idx] == client_fd`: found slot.
         - Set `m_client_node_ids[idx] = env.source_id`.
-        - `Logger::log(INFO, "TcpBackend", "Registered client NodeId %u at slot %u", env.source_id, idx)`.
+        - `LOG_INFO("TcpBackend", "Registered client NodeId %u at slot %u", env.source_id, idx)`.
         - Return.
-      - If no slot found: `Logger::log(WARNING_HI, "TcpBackend", "HELLO: no slot for fd %d")`.
+      - If no slot found: `LOG_WARN_HI("TcpBackend", "HELLO: no slot for fd %d")`.
    b. Return **`ERR_AGAIN`** — frame consumed; caller discards this return and continues the poll loop.
 9. Non-HELLO path: impairment engine + ring buffer push (UC_06 / UC_21 normal path).
 
@@ -141,7 +141,7 @@ TcpBackend::poll_clients_once()
        -> handle_hello_frame(client_fd, env.source_id)
             [scan m_client_fds[]; idx found]
             -> m_client_node_ids[idx] = env.source_id
-            -> Logger::log(INFO, "Registered client NodeId N at slot S")
+            -> LOG_INFO("Registered client NodeId N at slot S")
        <- ERR_AGAIN  [frame consumed]
   [drain_readable_clients() discards ERR_AGAIN; loop continues]
 ```

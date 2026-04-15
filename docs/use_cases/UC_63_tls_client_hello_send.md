@@ -42,12 +42,12 @@ Called by `DeliveryEngine::init()` after a successful `transport->init()`. Not c
 7. Client path — **`send_hello_frame()`** is called:
    a. Build `MessageEnvelope hello`: `message_type = MessageType::HELLO`, `source_id = id`, `destination_id = 0`, `payload_length = 0`, `message_id = 0`, `timestamp_us = 0`, `reliability_class = BEST_EFFORT`.
    b. **`Serializer::serialize(hello, m_wire_buf, sizeof(m_wire_buf), &hello_len)`** — encodes the envelope into `m_wire_buf`. Includes PROTO_VERSION and PROTO_MAGIC per REQ-3.2.8.
-   c. If `serialize()` fails: `Logger::log(WARNING_HI, "TlsTcpBackend", "HELLO serialize failed")`. Return `ERR_IO`.
+   c. If `serialize()` fails: `LOG_WARN_HI("TlsTcpBackend", "HELLO serialize failed")`. Return `ERR_IO`.
    d. **`tls_send_frame(0, m_wire_buf, hello_len, m_cfg.send_timeout_ms)`** — sends the frame through the TLS session at slot 0 (the server connection).
       - `mbedtls_ssl_write()` is called in a retry loop until all bytes are written or timeout.
       - Returns true on full success; false on TLS error or timeout.
-   e. If `tls_send_frame()` returns false: `Logger::log(WARNING_HI, "TlsTcpBackend", "HELLO TLS send failed")`. Return `ERR_IO`.
-   f. `Logger::log(INFO, "TlsTcpBackend", "Sent HELLO NodeId %u to server via TLS")`. Return `Result::OK`.
+   e. If `tls_send_frame()` returns false: `LOG_WARN_HI("TlsTcpBackend", "HELLO TLS send failed")`. Return `ERR_IO`.
+   f. `LOG_INFO("TlsTcpBackend", "Sent HELLO NodeId %u to server via TLS")`. Return `Result::OK`.
 8. `register_local_id()` returns `Result::OK` on success, `ERR_IO` on error.
 
 ---
@@ -139,7 +139,7 @@ DeliveryEngine::init()
                  -> mbedtls_ssl_write()     [TLS record layer encrypt + send]
                  <- bytes_written == hello_len
             <- true
-            -> Logger::log(INFO, "Sent HELLO NodeId N to server via TLS")
+            -> LOG_INFO("Sent HELLO NodeId N to server via TLS")
        <- Result::OK
   <- Result::OK
 ```

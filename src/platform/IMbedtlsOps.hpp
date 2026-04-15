@@ -157,6 +157,7 @@ public:
     /// consume the datagram (MSG_PEEK semantics).
     /// Wraps recvfrom(..., MSG_PEEK, ...).
     /// @return Bytes peeked (≥0) on success; -1 on failure.
+    // Safety-critical (SC): HAZ-004, HAZ-005
     virtual ssize_t recvfrom_peek(int             sockfd,
                                   void*           buf,
                                   size_t          len,

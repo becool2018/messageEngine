@@ -1,7 +1,7 @@
-# Standards Sources
+# Coding Standards, Sources, and Conflicts
 
 **Project:** messageEngine
-**Purpose:** Lists every external standard, guideline, or rule set referenced in `CLAUDE.md` and `.claude/CLAUDE.md`, where it comes from, and a plain-English summary of what it is.
+**Purpose:** Lists every external standard referenced in `CLAUDE.md` and `.claude/CLAUDE.md` (where it comes from, what it requires), documents all known conflicts and their resolutions, and records the formal software classification and Class B certification gap analysis.
 
 ---
 
@@ -13,6 +13,7 @@
 4. [Supporting Language Standards](#4-supporting-language-standards)
 5. [Contradictions and Tensions Between Standards](#5-contradictions-and-tensions-between-standards)
 6. [Summary by Source](#6-summary-by-source)
+7. [Formal Classification and Class B Gap Analysis](#7-formal-classification-and-class-b-gap-analysis)
 
 ---
 
@@ -227,7 +228,7 @@
 
 ## 5. Contradictions and Tensions Between Standards
 
-The standards above are largely complementary, but several genuine conflicts exist. Four are formally documented and resolved in the project's `CLAUDE.md` files; three are real but only partially addressed.
+The standards above are largely complementary, but several genuine conflicts exist. Four are formally documented and resolved in the project's `CLAUDE.md` files; five are real but only partially addressed.
 
 ---
 
@@ -284,6 +285,22 @@ The standards above are largely complementary, but several genuine conflicts exi
 
 ---
 
+#### Tension 4 — `ALLOW_WEAK_PRNG_SEED` escape hatch vs. "secure by default"
+**Standards in tension:** `.claude/CLAUDE.md §7` ("secure by default — prefer safe defaults, e.g., encryption enabled") and `CLAUDE.md REQ-5.2.4 / REQ-5.2.6` (production PRNG seeds must come from `getrandom()` or `/dev/urandom`; if both fail the path must log `FATAL` and trigger the reset handler rather than continuing with a weak seed) vs. the testability need for a deterministic, reproducible seed in simulation and CI builds.
+**Where documented:** `CLAUDE.md REQ-5.2.4`, `CLAUDE.md REQ-5.2.6`, and the `ALLOW_WEAK_PRNG_SEED` guard in `ImpairmentEngine` and `DeliveryEngine`.
+**Resolution:** `ALLOW_WEAK_PRNG_SEED` is explicitly prohibited in production builds. It is a compile-time escape hatch valid **only** in test or simulation build configurations (i.e., when the resulting binary has no path to a production deployment). The default build never defines this macro; any CI or release build system that defines it must document the justification. Any production binary that ships with `ALLOW_WEAK_PRNG_SEED` defined is a non-compliance defect.
+**Practical impact:** Low provided build configurations are correctly maintained. The risk is a misconfigured release build silently carrying the macro. The mitigation is a build-system audit step — verify the macro is absent from any production artifact.
+
+---
+
+#### Tension 5 — `TLS=0` optional build flag vs. "encryption enabled" default
+**Standards in tension:** `.claude/CLAUDE.md §7` ("prefer safe defaults, e.g., encryption enabled") vs. the `TLS=0` build flag, which defines `MESSAGEENGINE_NO_TLS` and removes all TLS/DTLS compilation from the library, allowing the engine to run over plaintext TCP and UDP.
+**Where documented:** `CLAUDE.md REQ-6.3.4` (TLS extension point), `CLAUDE.md REQ-6.4.5` (DTLS plaintext fallback), and the `TLS=0` target in the `Makefile`.
+**Resolution:** `TLS=0` is an explicit, documented opt-out — not a default. The default `make` invocation (no `TLS` variable) always builds with TLS enabled (`TLS=1`). The opt-out exists for two legitimate use cases: (1) functional testing in environments where mbedTLS is unavailable or where test speed matters more than security posture, and (2) resource-constrained embedded targets where the TLS stack is genuinely too large. Any deployment of a `TLS=0` binary in a context where network traffic is externally accessible constitutes an insecure configuration that must be documented and approved at the deployment level — it is not sanctioned by this project's default security posture.
+**Practical impact:** Medium. The plaintext build path is useful and tested. The risk is that a developer or integrator takes a `TLS=0` binary and deploys it to a networked environment assuming it is production-ready. Mitigation: the `Makefile` prints a visible warning when `TLS=0` is specified, and any packaging or release artifact built with `TLS=0` must carry an explicit label.
+
+---
+
 ## 6. Summary by Source
 
 | Source | Standards |
@@ -295,6 +312,49 @@ The standards above are largely complementary, but several genuine conflicts exi
 | **ISO / IEC** | ISO C++17 |
 | **GCC / Clang / Linux kernel** | Compiler hardening flags (`-fstack-protector-strong`, `_FORTIFY_SOURCE=2`, `-fPIE`, RELRO) |
 | **AUTOSAR** | C++14 guidelines (superseded; noted for historical context) |
+
+---
+
+---
+
+## 7. Formal Classification and Class B Gap Analysis
+
+**Software classification:** NASA-STD-8719.13C / NASA-STD-8739.8A **Class C** (infrastructure / networking library). The library does not directly command actuators or safety barriers; the embedding application bears Class A/B responsibility if required.
+
+**Verification discipline voluntarily targets Class B:** all safety-critical functions require branch coverage (M4), mandatory peer inspection (M1), and static analysis (M2); fault injection (M5) covers all SC dependency-failure paths; MC/DC coverage (M5/M6) is the goal for the five highest-hazard functions. See `docs/HAZARD_ANALYSIS.md` and `docs/MCDC_ANALYSIS.md`.
+
+**`std::atomic` exceptions to the no-STL rule** (see `.claude/CLAUDE.md §3`):
+
+| File | Exception | Justification |
+|---|---|---|
+| `src/core/RingBuffer.hpp` | `std::atomic<uint32_t>` | Lock-free head/tail indices; no dynamic allocation; maps directly to a hardware primitive |
+| `src/core/AssertState.hpp/cpp` | `std::atomic<bool>` | `g_fatal_fired` flag must be visible across threads without a mutex |
+| `src/core/Assert.hpp` | `std::memory_order_*` | Required by `std::atomic` store in the assert macro |
+
+### Work Required to Achieve Formal Class B Classification
+
+The project voluntarily meets Class B verification rigor but is formally classified **Class C**. Formal reclassification requires completing the following items. The full gap list is in [`TODO_FOR_CLASS_B_CERT.txt`](../TODO_FOR_CLASS_B_CERT.txt).
+
+#### Already achieved (no further work needed)
+
+| Item | Evidence |
+|---|---|
+| M1 — Code review / inspection | [`docs/DEFECT_LOG.md`](DEFECT_LOG.md) INSP-001 (2026-03-31) |
+| M2 — Static analysis (compiler + clang-tidy + cppcheck) | `make lint`; zero unresolved findings |
+| M4 — Branch coverage of all SC functions | `make coverage`; 100% of reachable branches; ceilings documented in `CLAUDE.md §14` |
+| M5 — Fault injection for all SC dependency-failure paths | Injectable interfaces (`IMbedtlsOps`, `ISocketOps`); `MockSocketOps` and `DtlsMockOps` test doubles; fault-injection tests across all four transport backends |
+| MC/DC analysis (five highest-hazard SC functions) | [`docs/MCDC_ANALYSIS.md`](MCDC_ANALYSIS.md) — all decisions demonstrated |
+
+#### Remaining work (external tools or personnel required)
+
+| # | Item | What is needed | Blocker |
+|---|---|---|---|
+| 6 | **TLA+ model checking** | Formally verify the three SC state machines (`AckTracker`, `RetryManager`, `ImpairmentEngine`) against all invariants in [`docs/STATE_MACHINES.md`](STATE_MACHINES.md) | TLA+ toolchain + team member with TLA+ experience |
+| 7 | **Frama-C WP bounds proof** | Prove absence of buffer overflow in `Serializer::serialize()` and `Serializer::deserialize()` using Frama-C WP with ACSL annotations | Frama-C installation + ACSL annotation authoring |
+| 8 | **PC-lint Plus MISRA C++:2023 report** | Run PC-lint Plus over all of `src/` to produce a formal compliance report (`make pclint` is a documented TODO stub) | PC-lint Plus commercial licence ([gimpel.com](https://gimpel.com)) |
+| 9 | **Independent V&V** | A second qualified engineer must complete a structured inspection of all SC functions per [`docs/INSPECTION_CHECKLIST.md`](INSPECTION_CHECKLIST.md) and record findings in [`docs/DEFECT_LOG.md`](DEFECT_LOG.md) (INSP-002 onward) | Second qualified reviewer |
+
+Items 6 and 7 are also required for Class A reclassification; Item 9 is required at both Class B and Class A (NPR 7150.2D §3.11). Item 8 closes the Tier 3 static analysis gap (see [`docs/STATIC_ANALYSIS_TOOLCHAIN.md`](STATIC_ANALYSIS_TOOLCHAIN.md)).
 
 ---
 

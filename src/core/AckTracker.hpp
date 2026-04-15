@@ -55,7 +55,7 @@ public:
     /// @return OK on success; ERR_FULL if ACK_TRACKER_CAPACITY is reached
     Result track(const MessageEnvelope& env, uint64_t deadline_us);
 
-    // Safety-critical (SC): HAZ-002 — verified to M5
+    // Safety-critical (SC): HAZ-002, HAZ-018 — verified to M5
     /// Mark a message as ACKed.
     /// @param src    [in] source (sender) of the message
     /// @param msg_id [in] message ID that was ACKed
@@ -90,7 +90,7 @@ public:
     /// NSC: read-only lookup; no state change.
     Result get_send_timestamp(NodeId src, uint64_t msg_id, uint64_t& out_ts) const;
 
-    // Safety-critical (SC): HAZ-002 — forge-ACK prevention (F-7)
+    // Safety-critical (SC): HAZ-002, HAZ-018 — forge-ACK prevention (F-7)
     /// Look up the destination_id (peer) recorded in a PENDING slot.
     /// Used by DeliveryEngine::process_ack() to verify that an incoming ACK
     /// was sent by the node we actually sent the message to, preventing

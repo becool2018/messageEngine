@@ -41,7 +41,7 @@ Result TcpBackend::init(const TransportConfig& config);
       - `::poll({fd, POLLOUT, 0}, 1, connect_timeout_ms)` — waits for writable (connected).
       - Check `SO_ERROR` via `getsockopt` — if 0: connected.
    d. If connect fails: close fd; return `ERR_IO`.
-   e. `Logger::log(INFO, "TcpBackend", "Connected to %s:%u", peer_ip, peer_port)`.
+   e. `LOG_INFO("TcpBackend", "Connected to %s:%u", peer_ip, peer_port)`.
 7. `m_client_count = 1`.
 8. `m_is_server = false`.
 9. `m_open = true`.
@@ -135,7 +135,7 @@ User
                  -> ::poll(fd, POLLOUT, timeout)     [waits for writable]
                  -> ::getsockopt(SO_ERROR)           [verify 0]
             <- success
-            -> Logger::log(INFO, "Connected to ...")
+            -> LOG_INFO("Connected to ...")
   [m_client_count=1; m_open=true]
   <- Result::OK
 ```

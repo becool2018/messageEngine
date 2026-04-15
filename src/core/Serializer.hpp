@@ -78,7 +78,7 @@ public:
                            uint32_t               buf_len,
                            uint32_t&              out_len);
 
-    // Safety-critical (SC): HAZ-001, HAZ-005 — verified to M5
+    // Safety-critical (SC): HAZ-001, HAZ-005, HAZ-019 — verified to M5
     /// Deserialize a MessageEnvelope from a buffer.
     /// @param buf        [in] source buffer
     /// @param buf_len    [in] available bytes in buf

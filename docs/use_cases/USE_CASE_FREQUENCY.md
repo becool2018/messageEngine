@@ -1,6 +1,6 @@
 # Use Case Frequency Classification
 
-This document classifies all 76 use cases by how often they execute during
+This document classifies all 78 use cases by how often they execute during
 normal application operation. Use this as a guide for performance analysis,
 code review prioritisation, and deciding where to focus profiling effort.
 
@@ -99,9 +99,10 @@ testing and configuration. Correctness matters; performance is not the concern.
 | UC_43 | envelope_init(): zero-initialise a MessageEnvelope | Once per envelope before field assignment |
 | UC_44 | envelope_is_data() / envelope_is_control() / envelope_valid() | Per envelope classification call |
 | UC_45 | Receive happy path (also in hottest path — listed here for completeness) | — |
-| UC_46 | Logger::log() called directly by user application code | On application-defined log events |
+| UC_46 | LOG_*() macros → Logger::log() → ILogClock/ILogSink injectable pipeline | On application-defined log events |
 | UC_48 | timestamp_now_us(): read CLOCK_MONOTONIC in microseconds | Every send, receive, pump, and sweep call |
 | UC_49 | timestamp_deadline_us(): compute absolute expiry deadline | Every time an expiry or ACK timeout is configured |
+| UC_77 | Logger::init() — inject ILogClock and ILogSink, set min_level | Once at application startup, before any logging |
 
 ---
 
@@ -120,6 +121,7 @@ frequency is determined entirely by whichever higher-level UC invokes them.
 | UC_58 | IMbedtlsOps / MbedtlsOpsImpl — injectable mbedTLS adapter | Inherits from UC_38 / UC_39 (DTLS) |
 | UC_75 | TlsSessionStore save/load — try_save/try_load_client_session() | Once per TLS connection init (load) and once after each handshake (save) |
 | UC_76 | IPosixSyscalls / PosixSyscallsImpl — injectable POSIX syscall adapter | Inherits from all SocketUtils-based TCP/UDP send/receive UCs |
+| UC_78 | TLS=0 optional build (MESSAGEENGINE_NO_TLS) — excludes TLS/DTLS translation units | Build-time only — no runtime frequency |
 
 ---
 

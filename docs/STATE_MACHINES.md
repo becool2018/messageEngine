@@ -38,7 +38,7 @@ equivalent) for all state machines documented here.
 | `PENDING` | `sweep_expired()` | `now_us < deadline_us` | `PENDING` | No action |
 | `PENDING` | `cancel(src, msg_id)` | src and msg_id match slot | `FREE` | Decrement m_count; no stat bump; used for send-failure rollback only |
 | `PENDING` | `cancel(src, msg_id)` | src or msg_id does not match | `PENDING` | Returns `ERR_INVALID`; slot unchanged |
-| `ACKED` | `sweep_expired()` | — | `FREE` | Decrement m_count |
+| `ACKED` | `sweep_expired()` | — | `FREE` | Decrement m_count (guarded: only if m_count > 0U — INT30-C unsigned underflow guard) |
 
 ### Invariants
 
@@ -99,8 +99,9 @@ logical states are:
 | `WAITING` | `collect_due(now, buf)` | `next_retry_us > now_us` | `WAITING` | No action |
 | `WAITING` | `collect_due(now, buf)` | `now_us ≥ expiry_us` | `INACTIVE` | Decrement m_count; log `WARNING_LO` (expired) |
 | `WAITING` | `collect_due(now, buf)` | `retry_count ≥ max_retries` | `INACTIVE` | Decrement m_count; log `WARNING_HI` (exhausted) |
-| `WAITING` | `on_ack(src, msg_id)` | src and msg_id match | `INACTIVE` | Decrement m_count; log INFO |
+| `WAITING` | `on_ack(src, msg_id)` | src and msg_id match | `INACTIVE` | Decrement m_count; increment acks_received; log INFO |
 | `WAITING` | `on_ack(src, msg_id)` | src or msg_id does not match | `WAITING` | Returns `ERR_INVALID`; log `WARNING_LO`; no state change. |
+| `WAITING` | `cancel(src, msg_id)` | src and msg_id match slot | `INACTIVE` | Deactivate slot; decrement m_count; do NOT increment acks_received; log INFO. Returns `ERR_INVALID` if no match. |
 | `DUE` | `collect_due(now, buf)` | buf has space | `WAITING` | Copy to buf; increment retry_count; advance backoff; set next_retry_us |
 | `DUE` | `collect_due(now, buf)` | buf full | `DUE` | Not collected this sweep; will retry on next call. Note: slot's `next_retry_us` is not advanced when buffer is full; the slot will be collected on the next `collect_due()` call that has buffer capacity. |
 
@@ -116,6 +117,10 @@ logical states are:
 > **Defect fixed (DEF-003-1):** The source_id mismatch described for AckTracker §1 applied equally to RetryManager. `DeliveryEngine::receive()` now passes `env.destination_id` (local node ID) to `RetryManager::on_ack()`, which correctly matches the stored `slot.env.source_id` (also the local node ID set at `schedule()` time). ACK receipt now cancels retry slots via `on_ack()` in both AckTracker and RetryManager as intended.
 
 > **G-1 monotonic behavior change (commit d7584dd):** Prior to G-1, a backward timestamp triggered `NEVER_COMPILED_OUT_ASSERT(now_us >= m_last_collect_us)` and aborted the process. G-1 replaced this with a defensive clamp + WARNING_HI. See SECURITY_ASSUMPTIONS.md §1.
+
+> **`cancel()` rollback path:** `cancel()` is used on the transport send-failure rollback path. It deactivates a WAITING slot without recording it as an ACK receipt, preserving the accuracy of the `acks_received` statistic.
+
+> **Security note (REQ-3.2.11):** `RetryManager::on_ack()` uses plain `==` equality for the (source_id, message_id) slot lookup, not the constant-time `ct_id_pair_equal()` used by `AckTracker::on_ack()`. This divergence is intentional: the RetryManager lookup is protected by the upstream `AckTracker` which performs the constant-time check before an ACK reaches the retry path. A direct timing attack on `RetryManager::on_ack()` requires an adversary who can already forge ACKs past `AckTracker`, which is the higher-value target. This justification is recorded here per REQ-3.2.11.
 
 ---
 
@@ -212,6 +217,7 @@ ready slots, copying envelopes to the caller's buffer.
   `release_us = now_us` (immediate pass-through), preserving the pipeline interface.
   If the delay buffer is full, `process_outbound()` returns `ERR_FULL` even in
   disabled mode.
+- **Partition drops apply symmetrically to inbound and outbound:** When `m_cfg.enabled == true`, both `process_outbound()` and `process_inbound()` check `is_partition_active()` before processing; a partition drops traffic in both directions. When `m_cfg.enabled == false`, the `!m_cfg.enabled` fast-path runs first in both functions, bypassing the partition check entirely.
 
 ---
 

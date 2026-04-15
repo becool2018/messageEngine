@@ -35,7 +35,7 @@ Called directly by application code. No thread is created; the call is synchrono
 2. `NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr)` — verifies transport is wired up.
 3. `NEVER_COMPILED_OUT_ASSERT(envelope_valid(envelope))` — verifies envelope is not INVALID type.
 4. `m_id_gen.next()` is called (`MessageId.cpp`) to assign a unique monotonic `message_id`; the result is written into a local copy of the envelope (stack-allocated `MessageEnvelope work`).
-5. **Branch:** `envelope.reliability_class == BEST_EFFORT` — true, so neither `m_ack_tracker.track()` nor `m_retry_mgr.schedule()` is called. Both ACK and retry branches are entirely skipped.
+5. **Branch:** `envelope.reliability_class == BEST_EFFORT` — true, so neither `m_ack_tracker.track()` nor `m_retry_manager.schedule()` is called. Both ACK and retry branches are entirely skipped.
 6. **`send_fragments(work, now_us)`** is called (`DeliveryEngine.cpp`), which calls `send_via_transport()` per frame. For BEST_EFFORT with a payload ≤ `FRAG_MAX_PAYLOAD_BYTES`, this is always a single frame.
 7. Inside `send_via_transport`: `NEVER_COMPILED_OUT_ASSERT(m_transport != nullptr)`.
 8. **Branch:** `work.expiry_time_us != 0 && timestamp_expired(work.expiry_time_us, now_us)` — if true, log `WARNING_LO` and return `Result::ERR_EXPIRED`. For a freshly built envelope this is false; continue.
@@ -113,7 +113,7 @@ DeliveryEngine::send()                       [DeliveryEngine.cpp]
   - `m_wire_buf[SOCKET_RECV_BUF_BYTES]` — 8192-byte member of `TcpBackend`; used to hold the serialized frame.
   - `delay_buf[IMPAIR_DELAY_BUF_SIZE]` — 32-slot array of `MessageEnvelope` inside `ImpairmentEngine::process_outbound()`.
 - **No heap allocation** on this path (Power of 10 Rule 3 satisfied).
-- `DeliveryEngine` owns `m_id_gen`, `m_ack_tracker`, `m_retry_mgr` as value members; no ownership transfer occurs.
+- `DeliveryEngine` owns `m_id_gen`, `m_ack_tracker`, `m_retry_manager` as value members; no ownership transfer occurs.
 - `m_transport` is a non-owning pointer set by `DeliveryEngine::init()`; the transport object is owned by the caller.
 
 ---
@@ -170,7 +170,7 @@ User
 ## 13. Initialization vs Runtime Flow
 
 **Preconditions (must be true before this flow runs):**
-- `DeliveryEngine::init(&transport, channel_cfg, local_node_id)` has been called, setting `m_transport` and resetting `m_id_gen`, `m_ack_tracker`, `m_retry_mgr`, `m_dedup_filter`.
+- `DeliveryEngine::init(&transport, channel_cfg, local_node_id)` has been called, setting `m_transport` and resetting `m_id_gen`, `m_ack_tracker`, `m_retry_manager`, `m_dedup_filter`.
 - `TcpBackend::init(config)` has been called; `m_open == true`; at least one client is connected (`m_client_count >= 1`) for the send to reach the wire (otherwise `send_to_all_clients` is a no-op).
 
 **Runtime behavior:**

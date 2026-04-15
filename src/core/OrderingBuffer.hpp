@@ -60,7 +60,7 @@ public:
     /// @param local_node  The local node ID (used to identify self in logging).
     void init(NodeId local_node);
 
-    // Safety-critical (SC): HAZ-001 — ordering gate determines delivery sequence.
+    // Safety-critical (SC): HAZ-001, HAZ-006, HAZ-018
     /// Ingest one fully-reassembled logical message.
     ///
     /// @param msg    [in]  Logical envelope (post-reassembly).
@@ -79,6 +79,7 @@ public:
     /// @param out [out] Filled with the next in-sequence message on OK.
     /// @return OK      if a held message matched and is ready for delivery.
     ///         ERR_AGAIN if no held message matches next_expected for this src.
+    // Safety-critical (SC): HAZ-001
     Result try_release_next(NodeId src, MessageEnvelope& out);
 
     // Safety-critical (SC): HAZ-001, HAZ-016 — resets the ordering gate state for a peer.
@@ -108,7 +109,7 @@ public:
     /// @param out_cap  Capacity of out_freed (use ORDERING_HOLD_COUNT or larger).
     /// @return Number of expired hold slots released (written to out_freed[0..n-1]).
     /// Power of 10 Rule 2: bounded loop (≤ ORDERING_HOLD_COUNT iterations).
-    // Safety-critical (SC): HAZ-001 — prevents permanent ordering stall on gap loss.
+    // Safety-critical (SC): HAZ-001, HAZ-014
     uint32_t sweep_expired_holds(uint64_t         now_us,
                                   MessageEnvelope* out_freed,
                                   uint32_t         out_cap);

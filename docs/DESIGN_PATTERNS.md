@@ -246,12 +246,12 @@ The base class provides a no-op default that returns `NODE_ID_INVALID`. Only TCP
 
 Each backend exposes two constructors:
 
-| Backend | Default constructor | Injection constructor |
+| Backend | Default constructor | Injection constructor(s) |
 |---|---|---|
 | `src/platform/TcpBackend.hpp` | `TcpBackend()` — uses `SocketOpsImpl` singleton | `TcpBackend(ISocketOps& ops)` |
-| `src/platform/TlsTcpBackend.hpp` | `TlsTcpBackend()` — uses `SocketOpsImpl` singleton | `TlsTcpBackend(ISocketOps& sock_ops)` |
+| `src/platform/TlsTcpBackend.hpp` | `TlsTcpBackend()` — uses both singletons | `TlsTcpBackend(ISocketOps&)` — socket only; `TlsTcpBackend(ISocketOps&, IMbedtlsOps&)` — full injection |
 | `src/platform/UdpBackend.hpp` | `UdpBackend()` — uses `SocketOpsImpl` singleton | `UdpBackend(ISocketOps& ops)` |
-| `src/platform/DtlsUdpBackend.hpp` | `DtlsUdpBackend()` — uses both singletons | `DtlsUdpBackend(ISocketOps&, IMbedtlsOps&)` |
+| `src/platform/DtlsUdpBackend.hpp` | `DtlsUdpBackend()` — uses both singletons | `DtlsUdpBackend(IMbedtlsOps&)` — TLS only; `DtlsUdpBackend(ISocketOps&, IMbedtlsOps&)` — full injection |
 
 Test files (e.g. `tests/test_TlsTcpBackend.cpp`, `tests/test_DtlsUdpBackend.cpp`) use the injection constructors to inject mock implementations that simulate socket errors, connection failures, and TLS faults.
 
@@ -286,7 +286,7 @@ Test files (e.g. `tests/test_TlsTcpBackend.cpp`, `tests/test_DtlsUdpBackend.cpp`
 | `AckTracker` | `src/core/AckTracker.hpp` | `Entry m_slots[ACK_TRACKER_CAPACITY]` | `ACK_TRACKER_CAPACITY = 32` |
 | `RetryManager` | `src/core/RetryManager.hpp` | `RetryEntry m_slots[ACK_TRACKER_CAPACITY]` | `ACK_TRACKER_CAPACITY = 32` |
 | `ReassemblyBuffer` | `src/core/ReassemblyBuffer.hpp` | `ReassemblySlot m_slots[REASSEMBLY_SLOT_COUNT]` | `REASSEMBLY_SLOT_COUNT` |
-| `ImpairmentEngine` | `src/platform/ImpairmentEngine.hpp` | `DelayEntry m_delay_buf[IMPAIR_DELAY_BUF_SIZE]` | `IMPAIR_DELAY_BUF_SIZE = 64` |
+| `ImpairmentEngine` | `src/platform/ImpairmentEngine.hpp` | `DelayEntry m_delay_buf[IMPAIR_DELAY_BUF_SIZE]` | `IMPAIR_DELAY_BUF_SIZE = 32` |
 | `TcpBackend` | `src/platform/TcpBackend.hpp` | `int m_client_fds[MAX_TCP_CONNECTIONS]` | `MAX_TCP_CONNECTIONS = 8` |
 | `TlsTcpBackend` | `src/platform/TlsTcpBackend.hpp` | `mbedtls_ssl_context m_ssl[MAX_TCP_CONNECTIONS]` | `MAX_TCP_CONNECTIONS = 8` |
 

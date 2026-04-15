@@ -48,7 +48,7 @@ Not called directly by the User; called internally by `DeliveryEngine::receive()
       - (When `m_count == DEDUP_WINDOW_SIZE`: oldest entry at `m_write_idx` is overwritten on next call — sliding window eviction).
    f. Return `Result::OK`.
 7. Back in `receive()`: if `check_and_record()` returned `ERR_DUPLICATE`:
-   - `Logger::log(INFO, "DeliveryEngine", "Suppressed duplicate message_id=...")`.
+   - `LOG_INFO("DeliveryEngine", "Suppressed duplicate message_id=...")`.
    - Returns `Result::ERR_DUPLICATE` to the User.
 8. If returned `Result::OK`: continue with delivery.
 
@@ -110,7 +110,7 @@ DeliveryEngine::receive()                       [DeliveryEngine.cpp]
 ## 10. External Interactions
 
 - None — this flow operates entirely in process memory.
-- `Logger::log()` writes to `stderr` when a duplicate is dropped (called from `DeliveryEngine::receive()`, not from `check_and_record()` itself).
+- `LOG_*()` writes to `stderr` when a duplicate is dropped (called from `DeliveryEngine::receive()`, not from `check_and_record()` itself).
 
 ---
 
@@ -147,7 +147,7 @@ DeliveryEngine::receive()
             [scan finds match at entry k]
             <- true
        <- Result::ERR_DUPLICATE
-  -> Logger::log(INFO, "Suppressed duplicate message_id=...")
+  -> LOG_INFO("Suppressed duplicate message_id=...")
   <- ERR_DUPLICATE
 ```
 
