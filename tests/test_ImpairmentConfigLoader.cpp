@@ -35,6 +35,10 @@
 
 #include "core/Types.hpp"
 #include "platform/ImpairmentConfigLoader.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test fixture helpers — write temporary INI files to /tmp
@@ -753,6 +757,12 @@ static void test_apply_reorder_window_overflow()
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     init_test_path();
     test_file_not_found();
     test_empty_file();

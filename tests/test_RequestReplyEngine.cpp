@@ -43,6 +43,10 @@
 #include "core/DeliveryEngine.hpp"
 #include "core/RequestReplyEngine.hpp"
 #include "platform/LocalSimHarness.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -1824,6 +1828,12 @@ static void test_rre_sweep_not_yet_expired()
 
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     printf("=== test_RequestReplyEngine ===\n");
 
     test_rre_basic_request_response();

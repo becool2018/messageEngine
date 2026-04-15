@@ -72,8 +72,7 @@ static bool fill_addr(const char* ip, uint16_t port,
         a6->sin6_family = AF_INET6;
         a6->sin6_port   = htons(port);
         if (inet_pton(AF_INET6, stripped, &a6->sin6_addr) != 1) {
-            Logger::log(Severity::WARNING_LO, "SocketUtils",
-                       "inet_pton(AF_INET6, '%s') failed", ip);
+            LOG_WARN_LO("SocketUtils", "inet_pton(AF_INET6, '%s') failed", ip);
             return false;
         }
         *addr_len = static_cast<socklen_t>(sizeof(struct sockaddr_in6));
@@ -84,8 +83,7 @@ static bool fill_addr(const char* ip, uint16_t port,
         a4->sin_family = AF_INET;
         a4->sin_port   = htons(port);
         if (inet_pton(AF_INET, ip, &a4->sin_addr) != 1) {
-            Logger::log(Severity::WARNING_LO, "SocketUtils",
-                       "inet_pton(AF_INET, '%s') failed", ip);
+            LOG_WARN_LO("SocketUtils", "inet_pton(AF_INET, '%s') failed", ip);
             return false;
         }
         *addr_len = static_cast<socklen_t>(sizeof(struct sockaddr_in));
@@ -115,11 +113,11 @@ static void log_socket_create_error(const char* proto, const char* family_str, i
                            (err == EACCES) || (err == EPERM);
     Severity sev = is_resource_err ? Severity::WARNING_HI : Severity::WARNING_LO;
     if (is_resource_err) {
-        Logger::log(sev, "SocketUtils",
+        Logger::log(sev, __FILE__, __LINE__, "SocketUtils",
                     "socket(%s, %s) failed (system resource/permission): %d",
                     proto, family_str, err);
     } else {
-        Logger::log(sev, "SocketUtils",
+        Logger::log(sev, __FILE__, __LINE__, "SocketUtils",
                     "socket(%s, %s) failed: %d",
                     proto, family_str, err);
     }
@@ -196,8 +194,7 @@ bool socket_set_nonblocking(int fd, IPosixSyscalls& sys)
     // Get current flags
     int flags = sys.sys_fcntl(fd, F_GETFL, 0);
     if (flags < 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "fcntl(F_GETFL) failed: %d", errno);
+        LOG_WARN_LO("SocketUtils", "fcntl(F_GETFL) failed: %d", errno);
         return false;
     }
 
@@ -205,8 +202,7 @@ bool socket_set_nonblocking(int fd, IPosixSyscalls& sys)
     flags |= O_NONBLOCK;
     int result = sys.sys_fcntl(fd, F_SETFL, flags);
     if (result < 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "fcntl(F_SETFL, O_NONBLOCK) failed: %d", errno);
+        LOG_WARN_LO("SocketUtils", "fcntl(F_SETFL, O_NONBLOCK) failed: %d", errno);
         return false;
     }
 
@@ -228,8 +224,7 @@ bool socket_set_reuseaddr(int fd)
     int result = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
                            &optval, sizeof(optval));
     if (result < 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "setsockopt(SO_REUSEADDR) failed: %d", errno);
+        LOG_WARN_LO("SocketUtils", "setsockopt(SO_REUSEADDR) failed: %d", errno);
         return false;
     }
 
@@ -258,8 +253,7 @@ bool socket_bind(int fd, const char* ip, uint16_t port)
     // sockaddr* is the POSIX-standard socket API polymorphism idiom.
     int result = bind(fd, reinterpret_cast<struct sockaddr*>(&addr), addr_len);
     if (result < 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "bind(%s:%u) failed: %d", ip, port, errno);
+        LOG_WARN_LO("SocketUtils", "bind(%s:%u) failed: %d", ip, port, errno);
         return false;
     }
 
@@ -318,8 +312,7 @@ bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
 
     // Check for EINPROGRESS (expected for non-blocking)
     if (errno != EINPROGRESS) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "connect(%s:%u) failed: %d", ip, port, errno);
+        LOG_WARN_LO("SocketUtils", "connect(%s:%u) failed: %d", ip, port, errno);
         return false;
     }
 
@@ -335,8 +328,7 @@ bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
     const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
     int poll_result = sys.sys_poll(&pfd, 1, static_cast<int>(clamped_ms));
     if (poll_result <= 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "connect(%s:%u) timeout", ip, port);
+        LOG_WARN_LO("SocketUtils", "connect(%s:%u) timeout", ip, port);
         return false;
     }
 
@@ -346,8 +338,7 @@ bool socket_connect_with_timeout(int fd, const char* ip, uint16_t port,
     int getsock_result = getsockopt(fd, SOL_SOCKET, SO_ERROR,
                                    &opt_err, &opt_len);
     if (getsock_result < 0 || opt_err != 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "connect(%s:%u) failed after poll: %d", ip, port, opt_err);
+        LOG_WARN_LO("SocketUtils", "connect(%s:%u) failed after poll: %d", ip, port, opt_err);
         return false;
     }
 
@@ -367,8 +358,7 @@ bool socket_listen(int fd, int backlog)
 
     int result = listen(fd, backlog);
     if (result < 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "listen(backlog=%d) failed: %d", backlog, errno);
+        LOG_WARN_LO("SocketUtils", "listen(backlog=%d) failed: %d", backlog, errno);
         return false;
     }
 
@@ -389,8 +379,7 @@ int socket_accept(int fd)
     // Accept without address information
     int client_fd = accept(fd, nullptr, nullptr);
     if (client_fd < 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "accept() failed: %d", errno);
+        LOG_WARN_LO("SocketUtils", "accept() failed: %d", errno);
         return -1;
     }
 
@@ -412,8 +401,7 @@ void socket_close(int fd)
     // Close the socket; ignore EINTR
     int result = close(fd);
     if (result < 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "close(%d) failed: %d", fd, errno);
+        LOG_WARN_LO("SocketUtils", "close(%d) failed: %d", fd, errno);
         // Still consider it a success; the fd is likely closed
     }
 }
@@ -451,8 +439,7 @@ bool socket_send_all(int fd, const uint8_t* buf, uint32_t len,
         const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
         int poll_result = sys.sys_poll(&pfd, 1, static_cast<int>(clamped_ms));
         if (poll_result <= 0) {
-            Logger::log(Severity::WARNING_HI, "SocketUtils",
-                       "send poll timeout (sent %u of %u bytes)", sent, len);
+            LOG_WARN_HI("SocketUtils", "send poll timeout (sent %u of %u bytes)", sent, len);
             return false;
         }
 
@@ -460,15 +447,13 @@ bool socket_send_all(int fd, const uint8_t* buf, uint32_t len,
         uint32_t remaining = len - sent;
         ssize_t send_result = sys.sys_send(fd, &buf[sent], remaining, 0);
         if (send_result < 0) {
-            Logger::log(Severity::WARNING_HI, "SocketUtils",
-                       "send() failed: %d", errno);
+            LOG_WARN_HI("SocketUtils", "send() failed: %d", errno);
             return false;
         }
         // F-4: send() returning 0 means the peer closed the connection.
         // Without this guard the loop spins indefinitely without advancing `sent`.
         if (send_result == 0) {
-            Logger::log(Severity::WARNING_HI, "SocketUtils",
-                       "send() returned 0 (peer closed); aborting (sent %u of %u)",
+            LOG_WARN_HI("SocketUtils", "send() returned 0 (peer closed); aborting (sent %u of %u)",
                        sent, len);
             return false;
         }
@@ -509,8 +494,7 @@ bool socket_recv_exact(int fd, uint8_t* buf, uint32_t len,
         const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
         int poll_result = poll(&pfd, 1, static_cast<int>(clamped_ms));
         if (poll_result <= 0) {
-            Logger::log(Severity::WARNING_HI, "SocketUtils",
-                       "recv poll timeout (received %u of %u bytes)", received, len);
+            LOG_WARN_HI("SocketUtils", "recv poll timeout (received %u of %u bytes)", received, len);
             return false;
         }
 
@@ -518,15 +502,13 @@ bool socket_recv_exact(int fd, uint8_t* buf, uint32_t len,
         uint32_t remaining = len - received;
         ssize_t recv_result = recv(fd, &buf[received], remaining, 0);
         if (recv_result < 0) {
-            Logger::log(Severity::WARNING_HI, "SocketUtils",
-                       "recv() failed: %d", errno);
+            LOG_WARN_HI("SocketUtils", "recv() failed: %d", errno);
             return false;
         }
 
         // Check for socket closure (recv returns 0)
         if (recv_result == 0) {
-            Logger::log(Severity::WARNING_HI, "SocketUtils",
-                       "recv() returned 0 (socket closed)");
+            LOG_WARN_HI("SocketUtils", "recv() returned 0 (socket closed)");
             return false;
         }
 
@@ -565,16 +547,14 @@ bool tcp_send_frame(int fd, const uint8_t* buf, uint32_t len,
 
     // Send header
     if (!socket_send_all(fd, header, 4U, timeout_ms, sys)) {
-        Logger::log(Severity::WARNING_HI, "SocketUtils",
-                   "tcp_send_frame: failed to send header");
+        LOG_WARN_HI("SocketUtils", "tcp_send_frame: failed to send header");
         return false;
     }
 
     // Send payload
     if (len > 0U) {
         if (!socket_send_all(fd, buf, len, timeout_ms, sys)) {
-            Logger::log(Severity::WARNING_HI, "SocketUtils",
-                       "tcp_send_frame: failed to send payload (%u bytes)", len);
+            LOG_WARN_HI("SocketUtils", "tcp_send_frame: failed to send payload (%u bytes)", len);
             return false;
         }
     }
@@ -599,8 +579,7 @@ bool tcp_recv_frame(int fd, uint8_t* buf, uint32_t buf_cap,
     // Receive 4-byte big-endian length header
     uint8_t header[4U];
     if (!socket_recv_exact(fd, header, 4U, timeout_ms)) {
-        Logger::log(Severity::WARNING_HI, "SocketUtils",
-                   "tcp_recv_frame: failed to receive header");
+        LOG_WARN_HI("SocketUtils", "tcp_recv_frame: failed to receive header");
         return false;
     }
 
@@ -623,8 +602,7 @@ bool tcp_recv_frame(int fd, uint8_t* buf, uint32_t buf_cap,
     // zero-length or truncated frames cannot contain a valid envelope header.
     if (frame_len < Serializer::WIRE_HEADER_SIZE ||
         frame_len > k_max_safe_frame || frame_len > buf_cap) {
-        Logger::log(Severity::WARNING_HI, "SocketUtils",
-                   "tcp_recv_frame: frame_len %u outside valid range [%u, %u]"
+        LOG_WARN_HI("SocketUtils", "tcp_recv_frame: frame_len %u outside valid range [%u, %u]"
                    " (REQ-3.2.10, HAZ-019, CERT INT30-C)",
                    frame_len,
                    static_cast<unsigned>(Serializer::WIRE_HEADER_SIZE),
@@ -636,8 +614,7 @@ bool tcp_recv_frame(int fd, uint8_t* buf, uint32_t buf_cap,
 
     // Receive frame payload (frame_len >= WIRE_HEADER_SIZE > 0 guaranteed above).
     if (!socket_recv_exact(fd, buf, frame_len, timeout_ms)) {
-        Logger::log(Severity::WARNING_HI, "SocketUtils",
-                   "tcp_recv_frame: failed to receive payload (%u bytes)", frame_len);
+        LOG_WARN_HI("SocketUtils", "tcp_recv_frame: failed to receive payload (%u bytes)", frame_len);
         return false;
     }
 
@@ -681,15 +658,13 @@ bool socket_send_to(int fd, const uint8_t* buf, uint32_t len,
                                          reinterpret_cast<struct sockaddr*>(&addr),
                                          addr_len);
     if (send_result < 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "sendto(%s:%u) failed: %d", ip, port, errno);
+        LOG_WARN_LO("SocketUtils", "sendto(%s:%u) failed: %d", ip, port, errno);
         return false;
     }
 
     // Verify all bytes sent (UDP should be atomic, but check anyway)
     if (static_cast<uint32_t>(send_result) != len) {
-        Logger::log(Severity::WARNING_HI, "SocketUtils",
-                   "sendto() sent %ld of %u bytes", send_result, len);
+        LOG_WARN_HI("SocketUtils", "sendto() sent %ld of %u bytes", send_result, len);
         return false;
     }
 
@@ -733,8 +708,7 @@ bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,
     const uint32_t clamped_ms = (timeout_ms > k_poll_max_ms) ? k_poll_max_ms : timeout_ms;
     int poll_result = sys.sys_poll(&pfd, 1, static_cast<int>(clamped_ms));
     if (poll_result <= 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "recvfrom poll timeout");
+        LOG_WARN_LO("SocketUtils", "recvfrom poll timeout");
         return false;
     }
 
@@ -749,14 +723,12 @@ bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,
                                            reinterpret_cast<struct sockaddr*>(&src_addr),
                                            &src_len);
     if (recv_result < 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "recvfrom() failed: %d", errno);
+        LOG_WARN_LO("SocketUtils", "recvfrom() failed: %d", errno);
         return false;
     }
 
     if (recv_result == 0) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "recvfrom() returned 0 bytes");
+        LOG_WARN_LO("SocketUtils", "recvfrom() returned 0 bytes");
         return false;
     }
 
@@ -779,8 +751,7 @@ bool socket_recv_from(int fd, uint8_t* buf, uint32_t buf_cap,
     }
 
     if (ntop_result == nullptr) {
-        Logger::log(Severity::WARNING_LO, "SocketUtils",
-                   "inet_ntop() failed: %d", errno);
+        LOG_WARN_LO("SocketUtils", "inet_ntop() failed: %d", errno);
         return false;
     }
 

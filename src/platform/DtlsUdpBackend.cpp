@@ -89,7 +89,7 @@ static void log_mbedtls_err(const char* tag, const char* func, int ret)
     char err_buf[128];
     (void)memset(err_buf, 0, sizeof(err_buf));
     mbedtls_strerror(ret, err_buf, sizeof(err_buf) - 1U);
-    Logger::log(Severity::WARNING_HI, tag, "%s failed: -0x%04X (%s)",
+    Logger::log(Severity::WARNING_HI, __FILE__, __LINE__, tag, "%s failed: -0x%04X (%s)",
                 func, static_cast<unsigned int>(-ret), err_buf);
 }
 
@@ -113,12 +113,12 @@ static bool tls_path_is_regular_file(const char* path, const char* tag)
     // MISRA C++:2023 Rule 5.2.4 exemption: lstat() is a POSIX API; no application-level
     // pointer cast is performed here.
     if (lstat(path, &st) != 0) {
-        Logger::log(Severity::WARNING_HI, tag,
+        Logger::log(Severity::WARNING_HI, __FILE__, __LINE__, tag,
                     "tls_path_is_regular_file: lstat('%s') failed: %d", path, errno);
         return false;
     }
     if (!S_ISREG(st.st_mode)) {
-        Logger::log(Severity::WARNING_HI, tag,
+        Logger::log(Severity::WARNING_HI, __FILE__, __LINE__, tag,
                     "tls_path_is_regular_file: '%s' is not a regular file (mode=0%o)",
                     path, static_cast<unsigned>(st.st_mode));
         return false;
@@ -331,8 +331,7 @@ Result DtlsUdpBackend::load_crl_if_configured(const TlsConfig& tls_cfg)
         // revocation checking is disabled. This may be intentional (e.g., OCSP
         // is used instead) but is logged at WARNING_HI so deployments that
         // require CRL checking can detect misconfiguration (REQ-6.3.4, SECURITY §3).
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "verify_peer=true but crl_file is empty — CRL revocation "
+        LOG_WARN_HI("DtlsUdpBackend", "verify_peer=true but crl_file is empty — CRL revocation "
                     "checking disabled (SEC-003, REQ-6.3.4)");
     }
 
@@ -394,8 +393,7 @@ Result DtlsUdpBackend::setup_dtls_config(const TlsConfig& tls_cfg)
     // Power of 10 Rule 3 deviation — init-phase heap allocation inside PSA.
     psa_status_t psa_ret = m_ops->crypto_init();
     if (psa_ret != PSA_SUCCESS) {
-        Logger::log(Severity::FATAL, "DtlsUdpBackend",
-                    "psa_crypto_init failed: %d", static_cast<int>(psa_ret));
+        LOG_FATAL("DtlsUdpBackend", "psa_crypto_init failed: %d", static_cast<int>(psa_ret));
         return Result::ERR_IO;
     }
 
@@ -464,8 +462,7 @@ Result DtlsUdpBackend::setup_dtls_config(const TlsConfig& tls_cfg)
                                  MBEDTLS_SSL_MINOR_VERSION_3);
 #endif
 
-    Logger::log(Severity::INFO, "DtlsUdpBackend",
-                "DTLS config ready: role=%s verify_peer=%d cert=%s",
+    LOG_INFO("DtlsUdpBackend", "DTLS config ready: role=%s verify_peer=%d cert=%s",
                 (tls_cfg.role == TlsRole::SERVER) ? "SERVER" : "CLIENT",
                 static_cast<int>(tls_cfg.verify_peer),
                 tls_cfg.cert_file);
@@ -523,8 +520,7 @@ Result DtlsUdpBackend::run_dtls_handshake(const void* peer_addr, uint32_t addr_l
     }
 
     if (!done) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "DTLS handshake did not complete in %u iterations",
+        LOG_WARN_HI("DtlsUdpBackend", "DTLS handshake did not complete in %u iterations",
                     DTLS_HANDSHAKE_MAX_ITER);
         return Result::ERR_IO;
     }
@@ -557,8 +553,7 @@ Result DtlsUdpBackend::server_wait_and_handshake()
     int wait_ms = static_cast<int>(clamped_timeout);
     int pr = poll(&pfd, 1, wait_ms);
     if (pr <= 0) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "server: timeout waiting for first client datagram");
+        LOG_WARN_HI("DtlsUdpBackend", "server: timeout waiting for first client datagram");
         return Result::ERR_TIMEOUT;
     }
 
@@ -574,8 +569,7 @@ Result DtlsUdpBackend::server_wait_and_handshake()
         m_sock_fd, peek_buf, sizeof(peek_buf),
         reinterpret_cast<struct sockaddr*>(&peer_addr), &peer_addr_len);
     if (n < 0) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "server: recvfrom(MSG_PEEK) failed");
+        LOG_WARN_HI("DtlsUdpBackend", "server: recvfrom(MSG_PEEK) failed");
         return Result::ERR_IO;
     }
 
@@ -585,8 +579,7 @@ Result DtlsUdpBackend::server_wait_and_handshake()
     if (m_ops->net_connect(m_sock_fd,
                            reinterpret_cast<const struct sockaddr*>(&peer_addr),
                            peer_addr_len) < 0) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "server: connect() to client failed");
+        LOG_WARN_HI("DtlsUdpBackend", "server: connect() to client failed");
         return Result::ERR_IO;
     }
 
@@ -635,8 +628,7 @@ Result DtlsUdpBackend::server_wait_and_handshake()
 
     m_open = true;
     ++m_connections_opened;  // REQ-7.2.4: DTLS server handshake complete
-    Logger::log(Severity::INFO, "DtlsUdpBackend",
-                "DTLS handshake complete (server): cipher=%s",
+    LOG_INFO("DtlsUdpBackend", "DTLS handshake complete (server): cipher=%s",
                 mbedtls_ssl_get_ciphersuite(&m_ssl));
 
     NEVER_COMPILED_OUT_ASSERT(m_open);
@@ -658,8 +650,7 @@ Result DtlsUdpBackend::client_connect_and_handshake()
     // the same trusted CA can impersonate the server (CWE-297). Reject
     // this configuration at connection time rather than silently degrading.
     if (m_cfg.tls.verify_peer && (m_cfg.tls.peer_hostname[0] == '\0')) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "client_connect_and_handshake: verify_peer=true but "
+        LOG_WARN_HI("DtlsUdpBackend", "client_connect_and_handshake: verify_peer=true but "
                     "peer_hostname is empty — hostname verification would be "
                     "skipped; refusing connection (SEC-001, REQ-6.4.6)");
         return Result::ERR_INVALID;
@@ -673,8 +664,7 @@ Result DtlsUdpBackend::client_connect_and_handshake()
     peer.sin_port   = htons(m_cfg.peer_port);
     // MISRA C++:2023 Rule 5.2.4: inet_pton result stored into in_addr (same type).
     if (m_ops->inet_pton_ipv4(m_cfg.peer_ip, &peer.sin_addr) != 1) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "client: inet_pton failed for %s", m_cfg.peer_ip);
+        LOG_WARN_HI("DtlsUdpBackend", "client: inet_pton failed for %s", m_cfg.peer_ip);
         return Result::ERR_IO;
     }
 
@@ -682,8 +672,7 @@ Result DtlsUdpBackend::client_connect_and_handshake()
     if (m_ops->net_connect(m_sock_fd,
                            reinterpret_cast<const struct sockaddr*>(&peer),
                            static_cast<socklen_t>(sizeof(peer))) < 0) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "client: connect() to %s:%u failed",
+        LOG_WARN_HI("DtlsUdpBackend", "client: connect() to %s:%u failed",
                     m_cfg.peer_ip, m_cfg.peer_port);
         return Result::ERR_IO;
     }
@@ -730,8 +719,7 @@ Result DtlsUdpBackend::client_connect_and_handshake()
 
     m_open = true;
     ++m_connections_opened;  // REQ-7.2.4: DTLS client handshake complete
-    Logger::log(Severity::INFO, "DtlsUdpBackend",
-                "DTLS handshake complete (client): cipher=%s",
+    LOG_INFO("DtlsUdpBackend", "DTLS handshake complete (client): cipher=%s",
                 mbedtls_ssl_get_ciphersuite(&m_ssl));
 
     NEVER_COMPILED_OUT_ASSERT(m_open);
@@ -791,8 +779,7 @@ bool DtlsUdpBackend::validate_source(const char* src_ip, uint16_t src_port)
     if (!ip_match || !port_match) {
         // SEC-005 / SEC-023: REQ-6.2.4 / REQ-6.3.2 — source mismatch is a security
         // event; WARNING_HI matches UdpBackend behaviour and satisfies severity table.
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "Dropped datagram from unexpected source %s:%u (expected %s:%u) "
+        LOG_WARN_HI("DtlsUdpBackend", "Dropped datagram from unexpected source %s:%u (expected %s:%u) "
                     "(SEC-005, SEC-023, REQ-6.2.4)",
                     src_ip, static_cast<unsigned int>(src_port),
                     m_cfg.peer_ip, static_cast<unsigned int>(m_cfg.peer_port));
@@ -837,8 +824,7 @@ bool DtlsUdpBackend::deserialize_and_dispatch(uint32_t out_len)
     MessageEnvelope env;
     Result res = Serializer::deserialize(m_wire_buf, out_len, env);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
-                    "deserialize_and_dispatch: deserialize failed: %u",
+        LOG_WARN_LO("DtlsUdpBackend", "deserialize_and_dispatch: deserialize failed: %u",
                     static_cast<uint8_t>(res));
         return false;
     }
@@ -918,8 +904,7 @@ bool DtlsUdpBackend::process_hello_or_validate(const MessageEnvelope& env,
     if (env.message_type == MessageType::HELLO) {
         if (m_peer_hello_received) {
             // REQ-6.1.8: only one HELLO per connection allowed
-            Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                        "process_hello_or_validate: duplicate HELLO from NodeId=%u; dropping",
+            LOG_WARN_HI("DtlsUdpBackend", "process_hello_or_validate: duplicate HELLO from NodeId=%u; dropping",
                         static_cast<unsigned int>(env.source_id));
             return false;
         }
@@ -929,8 +914,7 @@ bool DtlsUdpBackend::process_hello_or_validate(const MessageEnvelope& env,
         // SEC-027: commit the candidate port now that HELLO is validated.
         // Extracted to commit_pending_src_port() to keep CC ≤ 10.
         commit_pending_src_port();
-        Logger::log(Severity::INFO, "DtlsUdpBackend",
-                    "DTLS: HELLO received, peer NodeId %u registered, port %u locked",
+        LOG_INFO("DtlsUdpBackend", "DTLS: HELLO received, peer NodeId %u registered, port %u locked",
                     static_cast<unsigned int>(m_peer_node_id),
                     static_cast<unsigned int>(m_peer_src_port));
         // SEC-026: server sends a HELLO response so the client can register
@@ -951,8 +935,7 @@ bool DtlsUdpBackend::process_hello_or_validate(const MessageEnvelope& env,
     // otherwise inject arbitrary source_id values for the lifetime of the connection,
     // corrupting ordering state and exhausting the dedup window.
     if (!m_peer_hello_received) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "process_hello_or_validate: data frame before HELLO; "
+        LOG_WARN_HI("DtlsUdpBackend", "process_hello_or_validate: data frame before HELLO; "
                     "dropping (source_id=%u)",
                     static_cast<unsigned int>(env.source_id));
         return false;
@@ -960,8 +943,7 @@ bool DtlsUdpBackend::process_hello_or_validate(const MessageEnvelope& env,
 
     // source_id must match the NodeId registered in the HELLO.
     if (env.source_id != m_peer_node_id) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "process_hello_or_validate: source_id %u != registered %u; "
+        LOG_WARN_HI("DtlsUdpBackend", "process_hello_or_validate: source_id %u != registered %u; "
                     "spoofing attempt — dropping (REQ-6.2.4)",
                     static_cast<unsigned int>(env.source_id),
                     static_cast<unsigned int>(m_peer_node_id));
@@ -1002,8 +984,7 @@ bool DtlsUdpBackend::apply_inbound_impairment(const MessageEnvelope& env)
     NEVER_COMPILED_OUT_ASSERT(inbound_count == 1U);  // Power of 10: exactly one output
     res = m_recv_queue.push(inbound_out[0]);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "apply_inbound_impairment: recv queue full; dropping datagram");
+        LOG_WARN_HI("DtlsUdpBackend", "apply_inbound_impairment: recv queue full; dropping datagram");
         return false;
     }
     return true;
@@ -1043,20 +1024,19 @@ Result DtlsUdpBackend::create_and_bind_udp_socket(const TransportConfig& config)
 
     m_sock_fd = m_sock_ops->create_udp(socket_is_ipv6(config.bind_ip));
     if (m_sock_fd < 0) {
-        Logger::log(Severity::FATAL, "DtlsUdpBackend", "socket_create_udp failed");
+        LOG_FATAL("DtlsUdpBackend", "socket_create_udp failed");
         return Result::ERR_IO;
     }
 
     if (!m_sock_ops->set_reuseaddr(m_sock_fd)) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend", "socket_set_reuseaddr failed");
+        LOG_WARN_HI("DtlsUdpBackend", "socket_set_reuseaddr failed");
         m_sock_ops->do_close(m_sock_fd);
         m_sock_fd = -1;
         return Result::ERR_IO;
     }
 
     if (!m_sock_ops->do_bind(m_sock_fd, config.bind_ip, config.bind_port)) {
-        Logger::log(Severity::FATAL, "DtlsUdpBackend",
-                    "socket_bind failed on port %u", config.bind_port);
+        LOG_FATAL("DtlsUdpBackend", "socket_bind failed on port %u", config.bind_port);
         m_sock_ops->do_close(m_sock_fd);
         m_sock_fd = -1;
         return Result::ERR_IO;
@@ -1092,8 +1072,7 @@ Result DtlsUdpBackend::run_tls_handshake_phase(const TransportConfig& config)
         // Plaintext UDP — no handshake; open immediately (REQ-6.4.5)
         m_open = true;
         ++m_connections_opened;  // REQ-7.2.4: plaintext UDP bind complete
-        Logger::log(Severity::INFO, "DtlsUdpBackend",
-                    "Plaintext UDP %s bound to %s:%u",
+        LOG_INFO("DtlsUdpBackend", "Plaintext UDP %s bound to %s:%u",
                     m_is_server ? "server" : "client",
                     config.bind_ip, config.bind_port);
     }
@@ -1125,16 +1104,14 @@ Result DtlsUdpBackend::validate_dtls_init_config(const TlsConfig& tls_cfg)
 
     // REQ-6.3.6 (H-1): ca_file must be non-empty when verify_peer=true.
     if (tls_cfg.verify_peer && (tls_cfg.ca_file[0] == '\0')) {
-        Logger::log(Severity::FATAL, "DtlsUdpBackend",
-                    "REQ-6.3.6/HAZ-020: verify_peer=true but ca_file is empty — "
+        LOG_FATAL("DtlsUdpBackend", "REQ-6.3.6/HAZ-020: verify_peer=true but ca_file is empty — "
                     "no trust anchor; init rejected (H-1, CWE-295)");
         return Result::ERR_IO;
     }
 
     // REQ-6.3.7 (H-2): crl_file must be non-empty when require_crl=true and verify_peer=true.
     if (tls_cfg.require_crl && tls_cfg.verify_peer && (tls_cfg.crl_file[0] == '\0')) {
-        Logger::log(Severity::FATAL, "DtlsUdpBackend",
-                    "REQ-6.3.7/HAZ-020: require_crl=true but crl_file is empty — "
+        LOG_FATAL("DtlsUdpBackend", "REQ-6.3.7/HAZ-020: require_crl=true but crl_file is empty — "
                     "CRL revocation check disabled; init rejected (H-2, CWE-295)");
         return Result::ERR_INVALID;
     }
@@ -1142,8 +1119,7 @@ Result DtlsUdpBackend::validate_dtls_init_config(const TlsConfig& tls_cfg)
     // REQ-6.3.9 (H-8): verify_peer=false with a non-empty peer_hostname is an unsafe
     // operator configuration — hostname set for SNI but cert validation disabled (CWE-297).
     if ((!tls_cfg.verify_peer) && (tls_cfg.peer_hostname[0] != '\0')) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "REQ-6.3.9/HAZ-025: verify_peer=false but peer_hostname is non-empty — "
+        LOG_WARN_HI("DtlsUdpBackend", "REQ-6.3.9/HAZ-025: verify_peer=false but peer_hostname is non-empty — "
                     "unsafe configuration; init rejected (H-8, CWE-297)");
         return Result::ERR_INVALID;
     }
@@ -1164,8 +1140,7 @@ Result DtlsUdpBackend::init(const TransportConfig& config)
 
     // S5: validate config before any channels[] access (REQ-6.1.1, ChannelConfig.hpp).
     if (!transport_config_valid(config)) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "init: num_channels=%u exceeds MAX_CHANNELS; rejecting config",
+        LOG_WARN_HI("DtlsUdpBackend", "init: num_channels=%u exceeds MAX_CHANNELS; rejecting config",
                     config.num_channels);
         return Result::ERR_INVALID;
     }
@@ -1191,8 +1166,7 @@ Result DtlsUdpBackend::init(const TransportConfig& config)
          ci < sizeof(m_cfg.peer_ip) && m_cfg.peer_ip[ci] != '\0';
          ++ci) {
         if (m_cfg.peer_ip[ci] == ':') {
-            Logger::log(Severity::FATAL, "DtlsUdpBackend",
-                        "IPv6 peer_ip not supported; DtlsUdpBackend is IPv4-only "
+            LOG_FATAL("DtlsUdpBackend", "IPv6 peer_ip not supported; DtlsUdpBackend is IPv4-only "
                         "(F-5, REQ-6.4.1). Use an IPv4 address.");
             return Result::ERR_INVALID;
         }
@@ -1289,20 +1263,17 @@ Result DtlsUdpBackend::send_hello_datagram()
     uint32_t wire_len = 0U;
     Result res = Serializer::serialize(hello, m_wire_buf, SOCKET_RECV_BUF_BYTES, wire_len);
     if (!result_ok(res) || wire_len > DTLS_MAX_DATAGRAM_BYTES) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "send_hello_datagram: serialize failed or MTU exceeded");
+        LOG_WARN_HI("DtlsUdpBackend", "send_hello_datagram: serialize failed or MTU exceeded");
         return Result::ERR_IO;
     }
 
     Result send_res = send_wire_bytes(m_wire_buf, wire_len);
     if (send_res != Result::OK) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "send_hello_datagram: send_wire_bytes failed");
+        LOG_WARN_HI("DtlsUdpBackend", "send_hello_datagram: send_wire_bytes failed");
         return send_res;
     }
 
-    Logger::log(Severity::INFO, "DtlsUdpBackend",
-                "HELLO sent: local_id=%u", static_cast<unsigned int>(m_local_node_id));
+    LOG_INFO("DtlsUdpBackend", "HELLO sent: local_id=%u", static_cast<unsigned int>(m_local_node_id));
     NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);  // post: something was sent
     return Result::OK;
 }
@@ -1330,8 +1301,7 @@ Result DtlsUdpBackend::send_wire_bytes(const uint8_t* buf, uint32_t len)
                                    ? m_peer_src_port : m_cfg.peer_port;
         if (!m_sock_ops->send_to(m_sock_fd, buf, len,
                                  m_cfg.peer_ip, dest_port)) {
-            Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
-                        "send_message: socket_send_to failed to %s:%u",
+            LOG_WARN_LO("DtlsUdpBackend", "send_message: socket_send_to failed to %s:%u",
                         m_cfg.peer_ip, dest_port);
             return Result::ERR_IO;
         }
@@ -1357,8 +1327,7 @@ bool DtlsUdpBackend::send_one_envelope(const MessageEnvelope& env, bool is_curre
     Result send_res = send_wire_bytes(m_wire_buf, dlen);
     if (send_res != Result::OK) {
         if (!is_current) {
-            Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
-                        "send_wire_bytes failed for delayed envelope");
+            LOG_WARN_LO("DtlsUdpBackend", "send_wire_bytes failed for delayed envelope");
         }
         return is_current;  // Send failed: attribute only if current
     }
@@ -1408,15 +1377,13 @@ Result DtlsUdpBackend::send_message(const MessageEnvelope& envelope)
     Result res = Serializer::serialize(envelope, m_wire_buf,
                                        SOCKET_RECV_BUF_BYTES, wire_len);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_LO, "DtlsUdpBackend",
-                    "send_message: serialize failed");
+        LOG_WARN_LO("DtlsUdpBackend", "send_message: serialize failed");
         return res;
     }
 
     // Enforce DTLS MTU to prevent IP fragmentation (REQ-6.4.4)
     if (wire_len > DTLS_MAX_DATAGRAM_BYTES) {
-        Logger::log(Severity::WARNING_HI, "DtlsUdpBackend",
-                    "send_message: serialized len %u exceeds DTLS MTU %u; rejected",
+        LOG_WARN_HI("DtlsUdpBackend", "send_message: serialized len %u exceeds DTLS MTU %u; rejected",
                     wire_len, DTLS_MAX_DATAGRAM_BYTES);
         return Result::ERR_INVALID;
     }
@@ -1513,8 +1480,7 @@ void DtlsUdpBackend::close()
     m_peer_src_port       = 0U;   // SEC-023: clear locked port for new session
 
     m_open = false;
-    Logger::log(Severity::INFO, "DtlsUdpBackend",
-                "Transport closed (DTLS=%s)", m_tls_enabled ? "ON" : "OFF");
+    LOG_INFO("DtlsUdpBackend", "Transport closed (DTLS=%s)", m_tls_enabled ? "ON" : "OFF");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

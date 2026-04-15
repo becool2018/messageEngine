@@ -41,6 +41,10 @@
 #include "core/Types.hpp"
 #include "core/MessageEnvelope.hpp"
 #include "core/Fragmentation.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // Fixed output buffer for all tests (Power of 10 rule 3: no dynamic allocation)
 static MessageEnvelope g_out_frags[FRAG_MAX_COUNT];
@@ -280,6 +284,12 @@ static bool test_frag_zero_payload()
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     int failed = 0;
 
     if (!test_frag_single_fragment()) {

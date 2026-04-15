@@ -198,8 +198,7 @@ Result ReassemblyBuffer::record_fragment(uint32_t idx, const MessageEnvelope& fr
     // G-2: defensive bounds check — replaced NEVER_COMPILED_OUT_ASSERT to avoid
     // abort on a malformed fragment that reaches this path.
     if (byte_offset > MSG_MAX_PAYLOAD_BYTES) {
-        Logger::log(Severity::WARNING_HI, "ReassemblyBuffer",
-                    "record_fragment: byte_offset %u exceeds MSG_MAX_PAYLOAD_BYTES; dropping",
+        LOG_WARN_HI("ReassemblyBuffer", "record_fragment: byte_offset %u exceeds MSG_MAX_PAYLOAD_BYTES; dropping",
                     byte_offset);
         return Result::ERR_INVALID;
     }
@@ -208,8 +207,7 @@ Result ReassemblyBuffer::record_fragment(uint32_t idx, const MessageEnvelope& fr
     if (frag.payload_length > 0U) {
         // G-2: defensive overrun check — replaced assert with return.
         if (frag.payload_length > MSG_MAX_PAYLOAD_BYTES - byte_offset) {
-            Logger::log(Severity::WARNING_HI, "ReassemblyBuffer",
-                        "record_fragment: fragment overruns buffer "
+            LOG_WARN_HI("ReassemblyBuffer", "record_fragment: fragment overruns buffer "
                         "(offset=%u len=%u max=%u); dropping",
                         byte_offset, frag.payload_length, MSG_MAX_PAYLOAD_BYTES);
             return Result::ERR_INVALID;
@@ -220,8 +218,7 @@ Result ReassemblyBuffer::record_fragment(uint32_t idx, const MessageEnvelope& fr
     // F-6: accumulate received byte count for integrity check at assembly.
     // G-2: CERT INT30-C overflow guard — replaced assert with defensive return.
     if (frag.payload_length > MSG_MAX_PAYLOAD_BYTES - m_slots[idx].received_bytes) {
-        Logger::log(Severity::WARNING_HI, "ReassemblyBuffer",
-                    "record_fragment: received_bytes overflow for slot %u; dropping", idx);
+        LOG_WARN_HI("ReassemblyBuffer", "record_fragment: received_bytes overflow for slot %u; dropping", idx);
         return Result::ERR_INVALID;
     }
     m_slots[idx].received_bytes += frag.payload_length;
@@ -263,8 +260,7 @@ Result ReassemblyBuffer::assemble_and_free(uint32_t idx, MessageEnvelope& logica
     // means the sender inflated total_payload_length; discard the slot to avoid
     // handing a logically inconsistent envelope to the DeliveryEngine.
     if (m_slots[idx].received_bytes != static_cast<uint32_t>(m_slots[idx].total_length)) {
-        Logger::log(Severity::WARNING_HI, "ReassemblyBuffer",
-                    "assemble_and_free: received_bytes=%u != total_length=%u; "
+        LOG_WARN_HI("ReassemblyBuffer", "assemble_and_free: received_bytes=%u != total_length=%u; "
                     "discarding (src=%u msg_id=%llu)",
                     m_slots[idx].received_bytes,
                     static_cast<uint32_t>(m_slots[idx].total_length),
@@ -325,8 +321,7 @@ Result ReassemblyBuffer::validate_metadata(const MessageEnvelope& frag) const
     // REQ-3.2.10, HAZ-019, CERT INT30-C: reject wire-supplied total_payload_length
     // that exceeds the compile-time ceiling before any slot arithmetic is performed.
     if (static_cast<uint32_t>(frag.total_payload_length) > MSG_MAX_PAYLOAD_BYTES) {
-        Logger::log(Severity::WARNING_HI, "ReassemblyBuffer",
-                    "validate_metadata: total_payload_length %u > ceiling %u "
+        LOG_WARN_HI("ReassemblyBuffer", "validate_metadata: total_payload_length %u > ceiling %u "
                     "(REQ-3.2.10, HAZ-019, CERT INT30-C)",
                     static_cast<unsigned>(frag.total_payload_length),
                     static_cast<unsigned>(MSG_MAX_PAYLOAD_BYTES));
@@ -354,8 +349,7 @@ Result ReassemblyBuffer::find_or_open_slot(const MessageEnvelope& frag, uint32_t
         // A single peer may hold at most k_reasm_per_src_max (= REASSEMBLY_SLOT_COUNT/2)
         // open slots to prevent reassembly table exhaustion via partial fragment sets.
         if (count_open_slots_for_src(frag.source_id) >= k_reasm_per_src_max) {
-            Logger::log(Severity::WARNING_HI, "ReassemblyBuffer",
-                        "per-source slot cap reached for source=%u; dropping fragment",
+            LOG_WARN_HI("ReassemblyBuffer", "per-source slot cap reached for source=%u; dropping fragment",
                         static_cast<unsigned>(frag.source_id));
             return Result::ERR_FULL;
         }
@@ -486,8 +480,7 @@ uint32_t ReassemblyBuffer::sweep_stale(uint64_t now_us, uint64_t stale_threshold
         if (now_us >= m_slots[i].open_time_us &&
             (now_us - m_slots[i].open_time_us) >= stale_threshold_us) {
             // Log stale slot expiry.
-            Logger::log(Severity::WARNING_LO, "ReassemblyBuffer",
-                        "stale slot freed: src=%u msg_id=%llu age_ms=%llu",
+            LOG_WARN_LO("ReassemblyBuffer", "stale slot freed: src=%u msg_id=%llu age_ms=%llu",
                         static_cast<unsigned>(m_slots[i].source_id),
                         static_cast<unsigned long long>(m_slots[i].message_id),
                         static_cast<unsigned long long>(

@@ -53,6 +53,8 @@
 #include "core/DeliveryEngine.hpp"
 #include "core/Logger.hpp"
 #include "core/Timestamp.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
 #include "platform/TcpBackend.hpp"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -83,7 +85,7 @@ static void sleep_ms(int milliseconds)
     // Power of 10 rule 7: check return value
     int ret = nanosleep(&ts, nullptr);
     if (ret != 0) {
-        Logger::log(Severity::WARNING_LO, "Client", "nanosleep interrupted\n");
+        LOG_WARN_LO("Client", "nanosleep interrupted\n");
     }
 }
 
@@ -106,8 +108,7 @@ static Result send_test_message(DeliveryEngine& engine,
     int payload_len = snprintf(payload_buf, static_cast<size_t>(PAYLOAD_BUILD_MAX),
                                "Hello from client #%d", msg_num);
     if (payload_len < 0 || payload_len >= PAYLOAD_BUILD_MAX) {
-        Logger::log(Severity::WARNING_LO, "Client",
-                    "Payload string construction failed\n");
+        LOG_WARN_LO("Client", "Payload string construction failed\n");
         return Result::ERR_INVALID;
     }
 
@@ -130,8 +131,7 @@ static Result send_test_message(DeliveryEngine& engine,
     // Send via delivery engine
     Result res = engine.send(env, now_us);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_HI, "Client",
-                    "Failed to send message #%d: result=%d\n",
+        LOG_WARN_HI("Client", "Failed to send message #%d: result=%d\n",
                     msg_num, static_cast<int>(res));
     }
 
@@ -158,8 +158,7 @@ static Result wait_for_echo(DeliveryEngine& engine,
 
         if (result_ok(res)) {
             if (envelope_is_data(reply)) {
-                Logger::log(Severity::INFO, "Client",
-                            "Received echo reply: msg_id=%llu, len=%u\n",
+                LOG_INFO("Client", "Received echo reply: msg_id=%llu, len=%u\n",
                             static_cast<unsigned long long>(reply.message_id),
                             reply.payload_length);
                 return Result::OK;
@@ -171,7 +170,7 @@ static Result wait_for_echo(DeliveryEngine& engine,
         (void)engine.sweep_ack_timeouts(now_us);
     }
 
-    Logger::log(Severity::WARNING_HI, "Client", "Timeout waiting for echo reply\n");
+    LOG_WARN_HI("Client", "Timeout waiting for echo reply\n");
     return Result::ERR_TIMEOUT;
 }
 
@@ -209,8 +208,7 @@ static uint16_t parse_peer_port(int argc, char* const argv[])
     // SEC-020: reject if strtol set errno (overflow/underflow) or if no digits
     // were consumed (end_ptr == argv[2]) or if trailing junk follows the number.
     if (errno != 0) {
-        Logger::log(Severity::WARNING_LO, "Client",
-                    "SEC-020: strtol failed for port argument (errno=%d)", errno);
+        LOG_WARN_LO("Client", "SEC-020: strtol failed for port argument (errno=%d)", errno);
         return static_cast<uint16_t>(DEFAULT_PEER_PORT);
     }
     const int port_val = (end_ptr != argv[2] && *end_ptr == '\0')
@@ -235,7 +233,7 @@ static void run_client_iteration(DeliveryEngine& engine, int msg_idx,
     Result res = send_test_message(engine, static_cast<NodeId>(LOCAL_SERVER_NODE_ID), msg_idx, now_us);
     if (result_ok(res)) {
         ++messages_sent;
-        Logger::log(Severity::INFO, "Client", "Sent message #%d\n", msg_idx);
+        LOG_INFO("Client", "Sent message #%d\n", msg_idx);
     }
 
     Result echo_res = wait_for_echo(engine, now_us);
@@ -256,11 +254,16 @@ int main(int argc, char* argv[])
     NEVER_COMPILED_OUT_ASSERT(argv != nullptr);  // Assert: argv must not be null
     NEVER_COMPILED_OUT_ASSERT(argc >= 1);        // Assert: argc must be at least 1
 
+    // Initialize logger with POSIX clock and sink before any LOG_* call.
+    // Failure is non-fatal here: the process can still run but logging will abort.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     const char* peer_ip   = parse_peer_ip(argc, argv);
     uint16_t    peer_port = parse_peer_port(argc, argv);
 
-    Logger::log(Severity::INFO, "Client",
-                "Starting TCP client connecting to %s:%u\n",
+    LOG_INFO("Client", "Starting TCP client connecting to %s:%u\n",
                 peer_ip, peer_port);
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -293,23 +296,23 @@ int main(int argc, char* argv[])
     TcpBackend transport;
     Result res = transport.init(cfg);
     if (!result_ok(res)) {
-        Logger::log(Severity::FATAL, "Client", "Failed to init TcpBackend: result=%d\n",
+        LOG_FATAL("Client", "Failed to init TcpBackend: result=%d\n",
                     static_cast<int>(res));
         return 1;
     }
-    Logger::log(Severity::INFO, "Client", "TcpBackend initialized\n");
+    LOG_INFO("Client", "TcpBackend initialized\n");
 
     // ─────────────────────────────────────────────────────────────────────────
     // Initialize delivery engine
     // ─────────────────────────────────────────────────────────────────────────
     DeliveryEngine engine;
     engine.init(&transport, cfg.channels[0], LOCAL_CLIENT_NODE_ID);
-    Logger::log(Severity::INFO, "Client", "DeliveryEngine initialized\n");
+    LOG_INFO("Client", "DeliveryEngine initialized\n");
 
     // ─────────────────────────────────────────────────────────────────────────
     // Send/receive loop (Power of 10 rule 2: fixed bound NUM_MESSAGES)
     // ─────────────────────────────────────────────────────────────────────────
-    Logger::log(Severity::INFO, "Client", "Sending %d test messages...\n", NUM_MESSAGES);
+    LOG_INFO("Client", "Sending %d test messages...\n", NUM_MESSAGES);
 
     uint32_t messages_sent   = 0U;
     uint32_t echoes_received = 0U;
@@ -326,11 +329,11 @@ int main(int argc, char* argv[])
     uint32_t final_timeouts = engine.sweep_ack_timeouts(final_now_us);
 
     if (final_retried > 0U) {
-        Logger::log(Severity::INFO, "Client", "Final pump: retried %u message(s)\n",
+        LOG_INFO("Client", "Final pump: retried %u message(s)\n",
                     final_retried);
     }
     if (final_timeouts > 0U) {
-        Logger::log(Severity::WARNING_HI, "Client", "Final sweep: %u ACK timeout(s)\n",
+        LOG_WARN_HI("Client", "Final sweep: %u ACK timeout(s)\n",
                     final_timeouts);
     }
 
@@ -338,8 +341,7 @@ int main(int argc, char* argv[])
     // Cleanup and report
     // ─────────────────────────────────────────────────────────────────────────
     transport.close();
-    Logger::log(Severity::INFO, "Client",
-                "Client completed. Sent: %u, Echo replies received: %u\n",
+    LOG_INFO("Client", "Client completed. Sent: %u, Echo replies received: %u\n",
                 messages_sent, echoes_received);
 
     int exit_code = (echoes_received == static_cast<uint32_t>(NUM_MESSAGES)) ? 0 : 1;

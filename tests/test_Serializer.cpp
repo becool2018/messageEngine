@@ -37,6 +37,10 @@
 #include "core/MessageEnvelope.hpp"
 #include "core/Serializer.hpp"
 #include "core/ProtocolVersion.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // Fixed-size wire buffer for all serialization tests
 // (Power of 10 rule 3: no dynamic allocation)
@@ -864,6 +868,12 @@ static bool test_deserialize_rejects_message_type_invalid_sentinel()
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     int failed = 0;
 
     if (!test_serialize_deserialize_basic()) {

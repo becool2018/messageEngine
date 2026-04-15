@@ -110,6 +110,10 @@
 #include "core/MessageEnvelope.hpp"
 #include "platform/TcpBackend.hpp"
 #include "TestPortAllocator.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Compile-time constants
@@ -520,6 +524,12 @@ static uint32_t test_tcp_fanin_storm(time_t deadline)
 
 int main(int argc, char* argv[])
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     // Ignore SIGPIPE process-wide — send() to a closed socket returns EPIPE
     // instead of killing the process.  TcpBackend checks all return values and
     // logs a warning on EPIPE; per-round correctness asserts catch any mismatch.

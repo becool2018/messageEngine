@@ -136,8 +136,7 @@ uint32_t OrderingBuffer::evict_peer_no_holds()
     for (uint32_t i = 0U; i < ORDERING_PEER_COUNT; ++i) {
         if (!m_peers[i].active) { continue; }
         if (count_holds_for_peer(m_peers[i].src) == 0U) {
-            Logger::log(Severity::WARNING_HI, "OrderingBuffer",
-                        "peer table full: evicting peer src=%u (no holds; SECfix-2)",
+            LOG_WARN_HI("OrderingBuffer", "peer table full: evicting peer src=%u (no holds; SECfix-2)",
                         static_cast<unsigned>(m_peers[i].src));
             m_peers[i].active = false;
             return i;
@@ -263,8 +262,7 @@ void OrderingBuffer::advance_next_expected(uint32_t peer_idx)
 
     if (next == 0U) {
         // Wraparound from 0xFFFFFFFF -> 0; reset to 1 to avoid ordering stall.
-        Logger::log(Severity::WARNING_HI, "OrderingBuffer",
-                    "sequence number wraparound for peer slot %u; resetting to 1",
+        LOG_WARN_HI("OrderingBuffer", "sequence number wraparound for peer slot %u; resetting to 1",
                     static_cast<unsigned>(peer_idx));
         next = 1U;
     }
@@ -332,8 +330,7 @@ Result OrderingBuffer::ingest(const MessageEnvelope& msg,
 
     // SECfix-7: enforce per-peer hold cap to prevent single source exhausting all hold slots.
     if (count_holds_for_peer(msg.source_id) >= k_hold_per_peer_max) {
-        Logger::log(Severity::WARNING_HI, "OrderingBuffer",
-                    "per-peer hold cap reached for src=%u; dropping out-of-order msg seq=%u",
+        LOG_WARN_HI("OrderingBuffer", "per-peer hold cap reached for src=%u; dropping out-of-order msg seq=%u",
                     msg.source_id, msg.sequence_num);
         return Result::ERR_FULL;
     }
@@ -346,8 +343,7 @@ Result OrderingBuffer::ingest(const MessageEnvelope& msg,
     envelope_copy(m_hold[hold_idx].env, msg);
     m_hold[hold_idx].active = true;
 
-    Logger::log(Severity::INFO, "OrderingBuffer",
-                "Held out-of-order msg seq=%u (expected=%u) from src=%u",
+    LOG_INFO("OrderingBuffer", "Held out-of-order msg seq=%u (expected=%u) from src=%u",
                 msg.sequence_num, expected, msg.source_id);
 
     NEVER_COMPILED_OUT_ASSERT(m_hold[hold_idx].active);  // Assert: hold slot is active
@@ -414,8 +410,7 @@ void OrderingBuffer::reset_peer(NodeId src)
     // Reset sequence cursor to 1; 0 is the UNORDERED sentinel and is never expected.
     m_peers[peer_idx].next_expected_seq = 1U;
 
-    Logger::log(Severity::WARNING_HI, "OrderingBuffer",
-                "Peer ordering state reset for src=%u (peer reconnect; REQ-3.3.6)",
+    LOG_WARN_HI("OrderingBuffer", "Peer ordering state reset for src=%u (peer reconnect; REQ-3.3.6)",
                 static_cast<unsigned>(src));
 
     NEVER_COMPILED_OUT_ASSERT(m_peers[peer_idx].next_expected_seq == 1U);  // Assert: reset complete
@@ -447,8 +442,7 @@ void OrderingBuffer::advance_sequence(NodeId src, uint32_t up_to_seq)
             if (m_hold[i].active &&
                 m_hold[i].env.source_id == src &&
                 m_hold[i].env.sequence_num < m_peers[peer_idx].next_expected_seq) {
-                Logger::log(Severity::WARNING_LO, "OrderingBuffer",
-                            "Freeing stale held seq=%u from src=%u (cursor advanced to %u)",
+                LOG_WARN_LO("OrderingBuffer", "Freeing stale held seq=%u from src=%u (cursor advanced to %u)",
                             m_hold[i].env.sequence_num, src,
                             m_peers[peer_idx].next_expected_seq);
                 m_hold[i].active = false;
@@ -476,8 +470,7 @@ uint32_t OrderingBuffer::seq_next_guarded(uint32_t seq)
     } else {
         // CERT INT30-C: UINT32_MAX + 1 would wrap to 0 (the UNORDERED sentinel).
         // Reset to 1 instead, consistent with advance_next_expected() policy.
-        Logger::log(Severity::WARNING_HI, "OrderingBuffer",
-                    "sequence_num UINT32_MAX in seq_next_guarded; resetting to 1");
+        LOG_WARN_HI("OrderingBuffer", "sequence_num UINT32_MAX in seq_next_guarded; resetting to 1");
         next = 1U;
     }
 
@@ -507,8 +500,7 @@ uint32_t OrderingBuffer::sweep_expired_holds(uint64_t         now_us,
             continue;
         }
         if (timestamp_expired(m_hold[i].env.expiry_time_us, now_us)) {
-            Logger::log(Severity::WARNING_LO, "OrderingBuffer",
-                        "Held seq=%u from src=%u expired; advancing ordering gate",
+            LOG_WARN_LO("OrderingBuffer", "Held seq=%u from src=%u expired; advancing ordering gate",
                         m_hold[i].env.sequence_num, m_hold[i].env.source_id);
             // Copy freed envelope to caller's buffer before freeing the slot.
             // Power of 10 Rule 7: out_cap check before write (no overflow).

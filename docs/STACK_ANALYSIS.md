@@ -261,6 +261,59 @@ message send path. For non-DTLS (TCP/TLS) backends the single `delayed[]` flush 
 
 ---
 
+## Logger call chain (NSC-infrastructure — added 2026-04-14)
+
+`Logger::log()` and `Logger::log_wall()` are called from every LOG_* macro site across the
+codebase. Because they own a 512-byte stack buffer, their call chain is documented here per
+the update trigger (stack-allocated buffer > 256 bytes).
+
+```
+<any caller>  [varies]
+  └─ Logger::log() [buf[512] + ~50 B locals]
+       ├─ s_clock->now_monotonic_us()  [PosixLogClock::now_monotonic_us(): ~16 B]
+       │    └─ PosixLogClock::do_clock_gettime()  [~16 B]  ← NVI seam, thin POSIX wrapper
+       └─ s_sink->write()  [PosixLogSink::write(): ~16 B]
+            └─ PosixLogSink::do_write()  [~16 B]  ← NVI seam, wraps ::write(2)
+```
+
+**Depth added to any call chain containing a LOG_* macro:** 4 frames (Logger::log +
+`now_monotonic_us` + `do_clock_gettime` + `write` + `do_write` — 5 frames from the call
+site, but the call site itself is already counted in its parent chain).
+
+**Stack allocation:** `Logger::log()` owns `char buf[LOG_FORMAT_BUF_SIZE]` = `buf[512]` plus
+approximately 50 bytes of local variables (timestamp decomposition, snprintf return values,
+computed write_len). Total for the Logger frame: ~562 bytes. The remaining three frames each
+contribute ~16 bytes. Total added by the Logger chain: ~610 bytes.
+
+**Worst-case impact:** The 512-byte buffer in Logger::log() exceeds the 256-byte threshold
+that triggers an update to this document. However, it does **not** displace any existing
+worst-case chain because:
+
+1. **Frame depth:** Adding 4 frames to Chain 3 (the depth worst case at 12 frames) would
+   produce 16 frames — but Chain 3 calls `flush_delayed_to_clients()` which itself calls
+   `Serializer::serialize()` which calls `ImpairmentEngine::process_outbound()`. These
+   inner callers already contain LOG_* macros; the 4-frame Logger chain is already
+   implicitly present in Chain 3's leaf calls. No new worst-case depth is introduced.
+
+2. **Stack size:** The 512-byte Logger buffer is dwarfed by the `MessageEnvelope delayed[32]`
+   (~130 KB) allocation in `flush_delayed_to_clients()` and `flush_delayed_to_wire()`. The
+   Logger frame adds at most ~562 B to the ~130 KB flush-path worst case — less than 0.5%
+   change; the Chain 3 and Chain 5 estimates remain accurate within their stated margin.
+
+3. **Non-flush paths:** On non-flush paths the worst-case stack was stated as "~764 B".
+   A call to `Logger::log()` on such a path adds ~562 B, raising the non-flush estimate
+   to at most ~1,326 B — still well within the platform headroom of ≥ 8 MB (macOS/Linux).
+
+**Updated non-flush worst-case estimate:** ~1,326 B (previously ~764 B; difference is the
+Logger::log() buf[512] + locals). This is below the 256-byte mention threshold only for the
+parent caller, not the Logger frame itself; all platform headroom figures remain valid.
+
+The chain structure is documented here for completeness per the stack-analysis update
+policy. No entry in the Summary table requires revision; the floor and ceiling estimates
+are unchanged.
+
+---
+
 ## Update Trigger
 
 This document must be updated when:

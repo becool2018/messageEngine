@@ -43,6 +43,10 @@
 #include "core/MessageEnvelope.hpp"
 #include "core/ReassemblyBuffer.hpp"
 #include "core/Fragmentation.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: build a fragment envelope
@@ -1146,6 +1150,12 @@ static bool test_sweep_stale_now_before_open_time()
 
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     int failed = 0;
 
     if (!test_reassembly_single_fragment()) {

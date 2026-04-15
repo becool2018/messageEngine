@@ -50,6 +50,10 @@
 #include "core/AssertState.hpp"
 #include "core/IResetHandler.hpp"
 #include "core/AbortResetHandler.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MockResetHandler — records on_fatal_assert invocations without aborting.
@@ -269,6 +273,12 @@ static void test_get_fatal_count_nonzero_after_trigger()
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     // Test 4 must run first — verifies nullptr before any registration.
     test_get_handler_initially_null();
 

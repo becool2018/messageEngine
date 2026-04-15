@@ -11,7 +11,7 @@ A C++ networking library for building and testing systems that must survive unre
 - **Five transport backends** — TCP, UDP, TLS/TCP, DTLS/UDP, and an in-process simulation harness (`LocalSimHarness`) that needs no OS sockets
 - **A fault injection engine** — inject latency, jitter, packet loss, duplication, reordering, and link partitions, all driven by a seedable PRNG for reproducible test runs
 - **Bounded, fixed-allocation design** — no heap allocation on critical paths after init; all capacities are compile-time constants in `src/core/Types.hpp`
-- **Observable by default** — severity-tagged logging, per-engine delivery counters, and an 8-kind event ring (`poll_event` / `drain_events`) for post-hoc analysis without callbacks or heap
+- **Observable by default** — severity-tagged logging ([guide](docs/LOGGING.md)), per-engine delivery counters, and an 8-kind event ring (`poll_event` / `drain_events`) for post-hoc analysis without callbacks or heap
 
 **Quick capacity reference** ([full details →](docs/CAPACITY_REFERENCE.md))**:**
 
@@ -44,7 +44,8 @@ A C++ networking library for building and testing systems that must survive unre
 7. [Coverage Analysis](#coverage-analysis)
 8. [Static Analysis](#static-analysis)
 9. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
-10. [Using the Library](#using-the-library)
+10. [Logging](docs/LOGGING.md) — format, architecture, severity levels, extending, testing
+11. [Using the Library](#using-the-library)
 11. [Use Cases](#use-cases)
 12. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
 13. [Safety & Assurance Documents](#safety--assurance-documents)
@@ -181,7 +182,7 @@ All impairment decisions are driven by a seedable xorshift64 PRNG — identical 
 - **Retry manager** — per-message exponential backoff scheduler; doubles interval each attempt, capped at 60 s; cancelled on ACK
 
 ### 7. Observability
-- Severity-tagged logging (`INFO`, `WARNING_LO`, `WARNING_HI`, `FATAL`) to stderr via a fixed 512-byte stack buffer
+- Severity-tagged logging (`INFO`, `WARNING_LO`, `WARNING_HI`, `FATAL`) to stderr via a fixed 512-byte stack buffer — **[full logging guide →](docs/LOGGING.md)**
 - No heap allocation in the logger
 - **DeliveryEvent ring** — a bounded, overwrite-on-full ring buffer (`DeliveryEventRing`, capacity `DELIVERY_EVENT_RING_CAPACITY`) records 8 event kinds (SEND_OK, SEND_FAIL, ACK_RECEIVED, RETRY_FIRED, ACK_TIMEOUT, DUPLICATE_DROP, EXPIRY_DROP, MISROUTE_DROP). Events are pulled via `DeliveryEngine::poll_event()` — no callbacks, no heap, no virtual dispatch for delivery (REQ-7.2.5).
 - **drain_events()** — bulk observability drain: `DeliveryEngine::drain_events(out_buf, buf_cap)` pulls up to `buf_cap` events in one call (FIFO order); all 8 event kinds emitted from core delivery paths.

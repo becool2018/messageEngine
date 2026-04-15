@@ -64,6 +64,10 @@
 #include "platform/TcpBackend.hpp"
 #include "MockSocketOps.hpp"
 #include "TestPortAllocator.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — build server / client TransportConfig
@@ -3266,6 +3270,12 @@ static void test_tcp_hello_timeout_evicts_slot()
 
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     printf("=== test_TcpBackend ===\n");
 
     test_tcp_config_default();

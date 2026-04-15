@@ -84,8 +84,7 @@ Result UdpBackend::init(const TransportConfig& config)
 
     // S5: validate config before any channels[] access (REQ-6.1.1, ChannelConfig.hpp).
     if (!transport_config_valid(config)) {
-        Logger::log(Severity::WARNING_HI, "UdpBackend",
-                    "init: num_channels=%u exceeds MAX_CHANNELS; rejecting config",
+        LOG_WARN_HI("UdpBackend", "init: num_channels=%u exceeds MAX_CHANNELS; rejecting config",
                     config.num_channels);
         return Result::ERR_INVALID;
     }
@@ -96,8 +95,7 @@ Result UdpBackend::init(const TransportConfig& config)
     if (config.peer_ip[0] == '\0' ||
         strcmp(config.peer_ip, "0.0.0.0") == 0 ||
         strcmp(config.peer_ip, "::") == 0) {
-        Logger::log(Severity::FATAL, "UdpBackend",
-                    "init: peer_ip is wildcard or empty ('%s'); "
+        LOG_FATAL("UdpBackend", "init: peer_ip is wildcard or empty ('%s'); "
                     "plaintext UDP requires a specific peer address (REQ-6.2.5)",
                     config.peer_ip);
         return Result::ERR_INVALID;
@@ -108,14 +106,13 @@ Result UdpBackend::init(const TransportConfig& config)
     // Create UDP socket
     m_fd = m_sock_ops->create_udp(socket_is_ipv6(config.bind_ip));
     if (m_fd < 0) {
-        Logger::log(Severity::FATAL, "UdpBackend", "socket_create_udp failed");
+        LOG_FATAL("UdpBackend", "socket_create_udp failed");
         return Result::ERR_IO;
     }
 
     // Set SO_REUSEADDR
     if (!m_sock_ops->set_reuseaddr(m_fd)) {
-        Logger::log(Severity::WARNING_HI, "UdpBackend",
-                   "socket_set_reuseaddr failed");
+        LOG_WARN_HI("UdpBackend", "socket_set_reuseaddr failed");
         m_sock_ops->do_close(m_fd);
         m_fd = -1;
         return Result::ERR_IO;
@@ -123,8 +120,7 @@ Result UdpBackend::init(const TransportConfig& config)
 
     // Bind to local address
     if (!m_sock_ops->do_bind(m_fd, config.bind_ip, config.bind_port)) {
-        Logger::log(Severity::FATAL, "UdpBackend",
-                   "socket_bind failed on port %u", config.bind_port);
+        LOG_FATAL("UdpBackend", "socket_bind failed on port %u", config.bind_port);
         m_sock_ops->do_close(m_fd);
         m_fd = -1;
         return Result::ERR_IO;
@@ -142,8 +138,7 @@ Result UdpBackend::init(const TransportConfig& config)
 
     m_open = true;
     ++m_connections_opened;  // REQ-7.2.4: successful UDP socket bind counts as connection
-    Logger::log(Severity::INFO, "UdpBackend",
-               "UDP socket bound to %s:%u", config.bind_ip, config.bind_port);
+    LOG_INFO("UdpBackend", "UDP socket bound to %s:%u", config.bind_ip, config.bind_port);
 
     NEVER_COMPILED_OUT_ASSERT(m_fd >= 0);  // Post-condition
     NEVER_COMPILED_OUT_ASSERT(m_open);  // Post-condition
@@ -178,8 +173,7 @@ Result UdpBackend::send_hello_datagram()
     NEVER_COMPILED_OUT_ASSERT(m_fd >= 0);                            // pre: socket open
 
     if (m_cfg.peer_ip[0] == '\0' || m_cfg.peer_port == 0U) {
-        Logger::log(Severity::WARNING_HI, "UdpBackend",
-                    "send_hello_datagram: peer not configured; cannot send HELLO");
+        LOG_WARN_HI("UdpBackend", "send_hello_datagram: peer not configured; cannot send HELLO");
         return Result::ERR_INVALID;
     }
 
@@ -193,21 +187,18 @@ Result UdpBackend::send_hello_datagram()
     uint32_t wire_len = 0U;
     Result res = Serializer::serialize(hello, m_wire_buf, SOCKET_RECV_BUF_BYTES, wire_len);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_HI, "UdpBackend",
-                    "send_hello_datagram: serialize failed");
+        LOG_WARN_HI("UdpBackend", "send_hello_datagram: serialize failed");
         return res;
     }
 
     if (!m_sock_ops->send_to(m_fd, m_wire_buf, wire_len,
                              m_cfg.peer_ip, m_cfg.peer_port)) {
-        Logger::log(Severity::WARNING_HI, "UdpBackend",
-                    "send_hello_datagram: send_to %s:%u failed",
+        LOG_WARN_HI("UdpBackend", "send_hello_datagram: send_to %s:%u failed",
                     m_cfg.peer_ip, static_cast<unsigned int>(m_cfg.peer_port));
         return Result::ERR_IO;
     }
 
-    Logger::log(Severity::INFO, "UdpBackend",
-                "HELLO sent: local_id=%u", static_cast<unsigned int>(m_local_node_id));
+    LOG_INFO("UdpBackend", "HELLO sent: local_id=%u", static_cast<unsigned int>(m_local_node_id));
     NEVER_COMPILED_OUT_ASSERT(wire_len > 0U);  // post: something was sent
     return Result::OK;
 }
@@ -230,8 +221,7 @@ bool UdpBackend::send_one_envelope(const MessageEnvelope& env, bool is_current)
     if (!m_sock_ops->send_to(m_fd, m_wire_buf, dlen,
                              m_cfg.peer_ip, m_cfg.peer_port)) {
         if (!is_current) {
-            Logger::log(Severity::WARNING_LO, "UdpBackend",
-                        "send_to failed for delayed envelope");
+            LOG_WARN_LO("UdpBackend", "send_to failed for delayed envelope");
         }
         return is_current;  // Send failed: attribute to caller only if current
     }
@@ -283,15 +273,14 @@ Result UdpBackend::send_message(const MessageEnvelope& envelope)
     Result res = Serializer::serialize(envelope, m_wire_buf,
                                        SOCKET_RECV_BUF_BYTES, wire_len);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_LO, "UdpBackend", "Serialize failed");
+        LOG_WARN_LO("UdpBackend", "Serialize failed");
         return res;
     }
 
     // F-9: enforce UDP datagram MTU to prevent IP fragmentation (REQ-6.2.3).
     // DtlsUdpBackend enforces this at line 1114; plaintext UdpBackend must match.
     if (wire_len > DTLS_MAX_DATAGRAM_BYTES) {
-        Logger::log(Severity::WARNING_HI, "UdpBackend",
-                    "send_message: serialized len %u exceeds UDP MTU %u; rejected",
+        LOG_WARN_HI("UdpBackend", "send_message: serialized len %u exceeds UDP MTU %u; rejected",
                     wire_len, DTLS_MAX_DATAGRAM_BYTES);
         return Result::ERR_INVALID;
     }
@@ -351,8 +340,7 @@ bool UdpBackend::validate_source(const char* src_ip, uint16_t src_port) const
 
     if (!ip_match || !port_match) {
         // REQ-6.3.2: source spoofing is a security event; classify as WARNING_HI.
-        Logger::log(Severity::WARNING_HI, "UdpBackend",
-                    "Dropped datagram from unexpected source %s:%u (expected %s:%u)",
+        LOG_WARN_HI("UdpBackend", "Dropped datagram from unexpected source %s:%u (expected %s:%u)",
                     src_ip, static_cast<unsigned int>(src_port),
                     m_cfg.peer_ip, static_cast<unsigned int>(m_cfg.peer_port));
         return false;
@@ -386,16 +374,14 @@ bool UdpBackend::process_hello_or_validate(const MessageEnvelope& env,
     if (env.message_type == MessageType::HELLO) {
         if (m_peer_hello_received) {
             // REQ-6.1.8: only one HELLO per connection allowed
-            Logger::log(Severity::WARNING_HI, "UdpBackend",
-                        "process_hello_or_validate: duplicate HELLO from NodeId=%u; dropping",
+            LOG_WARN_HI("UdpBackend", "process_hello_or_validate: duplicate HELLO from NodeId=%u; dropping",
                         static_cast<unsigned int>(env.source_id));
             return false;
         }
         // First HELLO: register the peer NodeId
         m_peer_node_id       = env.source_id;
         m_peer_hello_received = true;
-        Logger::log(Severity::INFO, "UdpBackend",
-                    "UDP: HELLO received, peer NodeId %u registered",
+        LOG_INFO("UdpBackend", "UDP: HELLO received, peer NodeId %u registered",
                     static_cast<unsigned int>(m_peer_node_id));
         consumed = true;  // HELLO consumed; must not reach DeliveryEngine
         return true;
@@ -406,8 +392,7 @@ bool UdpBackend::process_hello_or_validate(const MessageEnvelope& env,
     // arbitrary source_id values, corrupting ordering state and exhausting the
     // dedup window.
     if (!m_peer_hello_received) {
-        Logger::log(Severity::WARNING_HI, "UdpBackend",
-                    "process_hello_or_validate: data frame before HELLO; "
+        LOG_WARN_HI("UdpBackend", "process_hello_or_validate: data frame before HELLO; "
                     "dropping (source_id=%u)",
                     static_cast<unsigned int>(env.source_id));
         return false;
@@ -415,8 +400,7 @@ bool UdpBackend::process_hello_or_validate(const MessageEnvelope& env,
 
     // source_id must match the NodeId registered in the HELLO.
     if (env.source_id != m_peer_node_id) {
-        Logger::log(Severity::WARNING_HI, "UdpBackend",
-                    "process_hello_or_validate: source_id %u != registered %u; "
+        LOG_WARN_HI("UdpBackend", "process_hello_or_validate: source_id %u != registered %u; "
                     "spoofing attempt \xe2\x80\x94 dropping (REQ-6.2.4)",
                     static_cast<unsigned int>(env.source_id),
                     static_cast<unsigned int>(m_peer_node_id));
@@ -452,8 +436,7 @@ bool UdpBackend::recv_one_datagram(uint32_t timeout_ms)
     MessageEnvelope env;
     Result res = Serializer::deserialize(m_wire_buf, out_len, env);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_LO, "UdpBackend",
-                   "Deserialize failed: %u", static_cast<uint8_t>(res));
+        LOG_WARN_LO("UdpBackend", "Deserialize failed: %u", static_cast<uint8_t>(res));
         return false;
     }
 
@@ -485,8 +468,7 @@ bool UdpBackend::recv_one_datagram(uint32_t timeout_ms)
     NEVER_COMPILED_OUT_ASSERT(inbound_count == 1U);  // Power of 10: exactly one output
     res = m_recv_queue.push(inbound_out[0]);
     if (!result_ok(res)) {
-        Logger::log(Severity::WARNING_HI, "UdpBackend",
-                   "Recv queue full; dropping datagram from %s:%u",
+        LOG_WARN_HI("UdpBackend", "Recv queue full; dropping datagram from %s:%u",
                    src_ip, src_port);
         return false;
     }
@@ -519,8 +501,7 @@ void UdpBackend::flush_delayed_to_wire(uint64_t now_us)
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
         const bool send_failed = send_one_envelope(delayed[i], false);
         if (send_failed) {
-            Logger::log(Severity::WARNING_HI, "UdpBackend",
-                        "flush_delayed_to_wire: send_one_envelope failed for slot %u", i);
+            LOG_WARN_HI("UdpBackend", "flush_delayed_to_wire: send_one_envelope failed for slot %u", i);
         }
     }
 }
@@ -584,7 +565,7 @@ void UdpBackend::close()
     m_peer_hello_received = false;
 
     m_open = false;
-    Logger::log(Severity::INFO, "UdpBackend", "Transport closed");
+    LOG_INFO("UdpBackend", "Transport closed");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

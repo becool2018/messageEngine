@@ -88,8 +88,7 @@ static uint64_t gather_os_entropy()
     ssize_t got = getrandom(static_cast<void*>(&entropy), sizeof(entropy), 0U);
     if (got != static_cast<ssize_t>(sizeof(entropy))) {
         // Tier 2: /dev/urandom — available even early-boot when getrandom() blocks.
-        Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
-                    "getrandom() failed (got=%ld); trying /dev/urandom",
+        LOG_WARN_HI("ImpairmentEngine", "getrandom() failed (got=%ld); trying /dev/urandom",
                     static_cast<long>(got));
         int urfd = open("/dev/urandom", O_RDONLY);
         if (urfd >= 0) {
@@ -137,12 +136,10 @@ void ImpairmentEngine::init(const ImpairmentConfig& cfg)
             entropy = (static_cast<uint64_t>(clock()) << 32U)
                       ^ static_cast<uint64_t>(getpid());
             if (entropy == 0ULL) { entropy = 1ULL; }
-            Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
-                        "OS entropy was zero; using clock/pid fallback — "
+            LOG_WARN_HI("ImpairmentEngine", "OS entropy was zero; using clock/pid fallback — "
                         "NOT PRODUCTION SAFE (ALLOW_WEAK_PRNG_SEED defined)");
 #else
-            Logger::log(Severity::FATAL, "ImpairmentEngine",
-                        "OS entropy sources exhausted; cannot seed PRNG securely "
+            LOG_FATAL("ImpairmentEngine", "OS entropy sources exhausted; cannot seed PRNG securely "
                         "(REQ-5.2.4). Build with -DALLOW_WEAK_PRNG_SEED to override "
                         "in non-production environments.");
             NEVER_COMPILED_OUT_ASSERT(false);  // Assert: unreachable in production
@@ -237,8 +234,7 @@ void ImpairmentEngine::apply_duplication(const MessageEnvelope& env,
             Result res = queue_to_delay_buf(env, release_us + 100ULL);
             if (result_ok(res)) {
                 ++m_stats.duplicate_injects;  // REQ-7.2.2: record duplicate injection
-                Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
-                           "message duplicated");
+                LOG_WARN_LO("ImpairmentEngine", "message duplicated");
             }
         }
     }
@@ -270,8 +266,7 @@ uint64_t ImpairmentEngine::compute_jitter_us()
     // can never produce range = hi-lo+1 = 0 via uint32 wrap (PrngEngine line 140).
     uint32_t hi_ms = 0U;
     if (m_cfg.jitter_variance_ms > (UINT32_MAX - m_cfg.jitter_mean_ms)) {
-        Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
-                    "jitter overflow: mean=%u variance=%u; clamping hi to UINT32_MAX-1",
+        LOG_WARN_HI("ImpairmentEngine", "jitter overflow: mean=%u variance=%u; clamping hi to UINT32_MAX-1",
                     m_cfg.jitter_mean_ms, m_cfg.jitter_variance_ms);
         hi_ms = UINT32_MAX - 1U;
     } else {
@@ -302,8 +297,7 @@ uint64_t ImpairmentEngine::compute_release_us(uint64_t now_us,
     static const uint64_t k_release_cap_us = UINT64_MAX / 2ULL;
     uint64_t delay_total_us = 0ULL;
     if (base_delay_us > k_release_cap_us - jitter_us) {
-        Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
-                    "delay overflow: base=%llu jitter=%llu; clamping to cap",
+        LOG_WARN_HI("ImpairmentEngine", "delay overflow: base=%llu jitter=%llu; clamping to cap",
                     static_cast<unsigned long long>(base_delay_us),
                     static_cast<unsigned long long>(jitter_us));
         delay_total_us = k_release_cap_us;
@@ -312,8 +306,7 @@ uint64_t ImpairmentEngine::compute_release_us(uint64_t now_us,
     }
     uint64_t release_us = 0ULL;
     if (now_us > UINT64_MAX - delay_total_us) {
-        Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
-                    "release_us overflow: now=%llu delay=%llu; clamping to UINT64_MAX",
+        LOG_WARN_HI("ImpairmentEngine", "release_us overflow: now=%llu delay=%llu; clamping to UINT64_MAX",
                     static_cast<unsigned long long>(now_us),
                     static_cast<unsigned long long>(delay_total_us));
         release_us = UINT64_MAX;
@@ -341,8 +334,7 @@ void ImpairmentEngine::check_delay_buf_watermark() const
         (IMPAIR_DELAY_BUF_SIZE * 80U) / 100U;
 
     if (m_delay_count > k_delay_warn_threshold) {
-        Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
-                    "delay buffer approaching capacity: %u/%u slots used",
+        LOG_WARN_LO("ImpairmentEngine", "delay buffer approaching capacity: %u/%u slots used",
                     static_cast<unsigned>(m_delay_count),
                     static_cast<unsigned>(IMPAIR_DELAY_BUF_SIZE));
     }
@@ -362,8 +354,7 @@ Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env,
     // If impairments disabled, pass through immediately with zero latency
     if (!m_cfg.enabled) {
         if (m_delay_count >= IMPAIR_DELAY_BUF_SIZE) {
-            Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
-                       "delay buffer full (disabled impairments)");
+            LOG_WARN_HI("ImpairmentEngine", "delay buffer full (disabled impairments)");
             return Result::ERR_FULL;
         }
         Result r_passthrough = queue_to_delay_buf(in_env, now_us);
@@ -377,16 +368,14 @@ Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env,
     if (is_partition_active(now_us)) {
         ++m_stats.partition_drops;  // REQ-7.2.2: partition-specific drop
         ++m_stats.loss_drops;       // REQ-7.2.2: total loss drop (partition counts as loss)
-        Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
-                   "message dropped (partition active)");
+        LOG_WARN_LO("ImpairmentEngine", "message dropped (partition active)");
         return Result::ERR_IO;
     }
 
     // Drop if loss impairment fires
     if (check_loss()) {
         ++m_stats.loss_drops;  // REQ-7.2.2: probabilistic loss drop
-        Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
-                   "message dropped (loss probability)");
+        LOG_WARN_LO("ImpairmentEngine", "message dropped (loss probability)");
         return Result::ERR_IO;
     }
 
@@ -398,8 +387,7 @@ Result ImpairmentEngine::process_outbound(const MessageEnvelope& in_env,
 
     // Queue the message in the delay buffer
     if (m_delay_count >= IMPAIR_DELAY_BUF_SIZE) {
-        Logger::log(Severity::WARNING_HI, "ImpairmentEngine",
-                   "delay buffer full; dropping message");
+        LOG_WARN_HI("ImpairmentEngine", "delay buffer full; dropping message");
         return Result::ERR_FULL;
     }
     Result res = queue_to_delay_buf(in_env, release_us);
@@ -477,8 +465,7 @@ Result ImpairmentEngine::process_inbound(const MessageEnvelope& in_env,
     if (m_cfg.enabled && is_partition_active(now_us)) {
         ++m_stats.partition_drops;  // REQ-7.2.2: partition-specific drop
         ++m_stats.loss_drops;       // REQ-7.2.2: total loss drop (partition counts as loss)
-        Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
-                   "inbound message dropped (partition active)");
+        LOG_WARN_LO("ImpairmentEngine", "inbound message dropped (partition active)");
         NEVER_COMPILED_OUT_ASSERT(out_count == 0U);  // Power of 10: no output on drop
         return Result::ERR_IO;
     }
@@ -576,8 +563,7 @@ bool ImpairmentEngine::is_partition_active(uint64_t now_us)
         m_partition_active = true;
         m_partition_start_us = now_us;
         m_next_partition_event_us = sat_add_us(now_us, m_cfg.partition_duration_ms);  // CERT INT30-C
-        Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
-                   "partition started (duration: %u ms)",
+        LOG_WARN_LO("ImpairmentEngine", "partition started (duration: %u ms)",
                    m_cfg.partition_duration_ms);
         NEVER_COMPILED_OUT_ASSERT(m_partition_active);
         return true;
@@ -587,8 +573,7 @@ bool ImpairmentEngine::is_partition_active(uint64_t now_us)
         // End the partition
         m_partition_active = false;
         m_next_partition_event_us = sat_add_us(now_us, m_cfg.partition_gap_ms);  // CERT INT30-C
-        Logger::log(Severity::WARNING_LO, "ImpairmentEngine",
-                   "partition ended");
+        LOG_WARN_LO("ImpairmentEngine", "partition ended");
         NEVER_COMPILED_OUT_ASSERT(!m_partition_active);
         return false;
     }

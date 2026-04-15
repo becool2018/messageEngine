@@ -57,6 +57,10 @@
 #include "platform/UdpBackend.hpp"
 #include "MockSocketOps.hpp"
 #include "TestPortAllocator.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — build a UDP TransportConfig for loopback
@@ -1241,6 +1245,12 @@ static void test_udp_send_hello_peer_port_zero()
 
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     printf("=== test_UdpBackend ===\n");
 
     test_udp_config();

@@ -49,6 +49,10 @@
 #include "core/RingBuffer.hpp"
 #include "core/MessageEnvelope.hpp"
 #include "core/Types.hpp"
+#include "core/Logger.hpp"
+#include "platform/PosixLogClock.hpp"
+#include "platform/PosixLogSink.hpp"
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: make a minimal data envelope with a recognisable message_id
@@ -402,6 +406,12 @@ static bool test_init_resets()
 
 int main()
 {
+    // Initialize logger before any production code that may call LOG_* macros.
+    // Power of 10: return value checked; failure causes abort via NEVER_COMPILED_OUT_ASSERT.
+    (void)Logger::init(Severity::INFO,
+                       &PosixLogClock::instance(),
+                       &PosixLogSink::instance());
+
     struct TestCase {
         const char* name;
         bool (*fn)();

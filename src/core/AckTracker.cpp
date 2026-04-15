@@ -221,8 +221,7 @@ uint32_t AckTracker::sweep_expired(uint64_t         now_us,
     // triggering an abort/reset in a server process.
     NEVER_COMPILED_OUT_ASSERT(now_us != 0ULL);  // Assert: zero timestamp is always invalid
     if (now_us < m_last_sweep_us) {
-        Logger::log(Severity::WARNING_HI, "AckTracker",
-                    "sweep_expired: non-monotonic timestamp (now=%llu < last=%llu); clamping",
+        LOG_WARN_HI("AckTracker", "sweep_expired: non-monotonic timestamp (now=%llu < last=%llu); clamping",
                     static_cast<unsigned long long>(now_us),
                     static_cast<unsigned long long>(m_last_sweep_us));
         now_us = m_last_sweep_us;

@@ -92,8 +92,7 @@ void RequestReplyEngine::init(DeliveryEngine& engine, NodeId local_node)
     NEVER_COMPILED_OUT_ASSERT(m_initialized);       // post: engine marked ready
     NEVER_COMPILED_OUT_ASSERT(m_engine != nullptr); // post: engine pointer set
 
-    Logger::log(Severity::INFO, "RequestReplyEngine",
-                "Initialized, local_node=%u", local_node);
+    LOG_INFO("RequestReplyEngine", "Initialized, local_node=%u", local_node);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,8 +113,7 @@ uint32_t RequestReplyEngine::build_wire_payload(RRKind         kind,
 
     const uint32_t total = RR_HEADER_SIZE + app_len;
     if (total > out_cap) {
-        Logger::log(Severity::WARNING_LO, "RequestReplyEngine",
-                    "build_wire_payload: payload too large (%u > %u)",
+        LOG_WARN_LO("RequestReplyEngine", "build_wire_payload: payload too large (%u > %u)",
                     total, out_cap);
         return 0U;
     }
@@ -205,8 +203,7 @@ bool RequestReplyEngine::parse_rr_header(const uint8_t* raw_payload,
     // rejected rather than silently accepted. A non-zero pad byte indicates a framing
     // error or a different header version that this implementation does not support.
     if ((hdr_out._pad[0] != 0U) || (hdr_out._pad[1] != 0U) || (hdr_out._pad[2] != 0U)) {
-        Logger::log(Severity::WARNING_LO, "RequestReplyEngine",
-                    "Rejected RR frame: non-zero reserved padding bytes");
+        LOG_WARN_LO("RequestReplyEngine", "Rejected RR frame: non-zero reserved padding bytes");
         return false;
     }
 
@@ -269,8 +266,7 @@ void RequestReplyEngine::handle_inbound_response(uint64_t       correlation_id,
     uint32_t idx = find_pending(correlation_id);
     if (idx >= MAX_PENDING_REQUESTS) {
         // Unknown correlation_id — silently drop (test 5 requirement).
-        Logger::log(Severity::INFO, "RequestReplyEngine",
-                    "Dropped response for unknown correlation_id=%llu",
+        LOG_INFO("RequestReplyEngine", "Dropped response for unknown correlation_id=%llu",
                     (unsigned long long)correlation_id);
         return;
     }
@@ -283,8 +279,7 @@ void RequestReplyEngine::handle_inbound_response(uint64_t       correlation_id,
     uint32_t copy_len = app_len;
     if (copy_len > APP_PAYLOAD_CAP) {
         copy_len = APP_PAYLOAD_CAP;
-        Logger::log(Severity::WARNING_LO, "RequestReplyEngine",
-                    "Response payload truncated to %u bytes",
+        LOG_WARN_LO("RequestReplyEngine", "Response payload truncated to %u bytes",
                     APP_PAYLOAD_CAP);
     }
 
@@ -296,8 +291,7 @@ void RequestReplyEngine::handle_inbound_response(uint64_t       correlation_id,
     m_pending[idx].stash_len   = copy_len;
     m_pending[idx].stash_ready = true;
 
-    Logger::log(Severity::INFO, "RequestReplyEngine",
-                "Stashed response correlation_id=%llu len=%u",
+    LOG_INFO("RequestReplyEngine", "Stashed response correlation_id=%llu len=%u",
                 (unsigned long long)correlation_id, copy_len);
 }
 
@@ -317,8 +311,7 @@ void RequestReplyEngine::handle_inbound_request(NodeId         src,
     // FIFO write: check count before computing the write index.
     // Power of 10 Rule 2: m_stash_head and m_stash_count are bounded by MAX_STASH_SIZE.
     if (m_stash_count >= MAX_STASH_SIZE) {
-        Logger::log(Severity::WARNING_LO, "RequestReplyEngine",
-                    "Request stash full; dropping correlation_id=%llu from src=%u",
+        LOG_WARN_LO("RequestReplyEngine", "Request stash full; dropping correlation_id=%llu from src=%u",
                     (unsigned long long)correlation_id, src);
         return;
     }
@@ -344,8 +337,7 @@ void RequestReplyEngine::handle_inbound_request(NodeId         src,
     m_request_stash[slot].active         = true;
     ++m_stash_count;
 
-    Logger::log(Severity::INFO, "RequestReplyEngine",
-                "Stashed request correlation_id=%llu from src=%u len=%u",
+    LOG_INFO("RequestReplyEngine", "Stashed request correlation_id=%llu from src=%u len=%u",
                 (unsigned long long)correlation_id, src, copy_len);
 }
 
@@ -439,8 +431,7 @@ void RequestReplyEngine::stash_non_rr_data(const MessageEnvelope& env)
     NEVER_COMPILED_OUT_ASSERT(envelope_is_data(env));    // Assert: DATA frames only
 
     if (m_non_rr_count >= MAX_STASH_SIZE) {
-        Logger::log(Severity::WARNING_LO, "RequestReplyEngine",
-                    "Non-RR stash full; dropping message_id=%llu from src=%u",
+        LOG_WARN_LO("RequestReplyEngine", "Non-RR stash full; dropping message_id=%llu from src=%u",
                     (unsigned long long)env.message_id, env.source_id);
         return;
     }
@@ -513,8 +504,7 @@ Result RequestReplyEngine::send_request(NodeId           destination,
     // Guard: pending table must have a free slot BEFORE building the envelope.
     uint32_t slot = find_free_pending();
     if (slot >= MAX_PENDING_REQUESTS) {
-        Logger::log(Severity::WARNING_LO, "RequestReplyEngine",
-                    "send_request: pending table full");
+        LOG_WARN_LO("RequestReplyEngine", "send_request: pending table full");
         return Result::ERR_FULL;
     }
 
@@ -557,8 +547,7 @@ Result RequestReplyEngine::send_request(NodeId           destination,
     // Power of 10 Rule 7: check return value from engine.send().
     Result res = m_engine->send(env, now_us);
     if (res != Result::OK) {
-        Logger::log(Severity::WARNING_LO, "RequestReplyEngine",
-                    "send_request: engine.send failed: result=%u",
+        LOG_WARN_LO("RequestReplyEngine", "send_request: engine.send failed: result=%u",
                     static_cast<uint8_t>(res));
         return res;
     }
@@ -576,8 +565,7 @@ Result RequestReplyEngine::send_request(NodeId           destination,
     NEVER_COMPILED_OUT_ASSERT(m_pending[slot].active);   // post: slot is active
     NEVER_COMPILED_OUT_ASSERT(correlation_id_out != 0U); // post: non-zero cid
 
-    Logger::log(Severity::INFO, "RequestReplyEngine",
-                "Sent request correlation_id=%llu to dst=%u",
+    LOG_INFO("RequestReplyEngine", "Sent request correlation_id=%llu to dst=%u",
                 (unsigned long long)cid, destination);
 
     return Result::OK;
@@ -683,12 +671,10 @@ Result RequestReplyEngine::send_response(NodeId         destination,
     // Power of 10 Rule 7: check return value.
     Result res = m_engine->send(env, now_us);
     if (res != Result::OK) {
-        Logger::log(Severity::WARNING_LO, "RequestReplyEngine",
-                    "send_response: engine.send failed: result=%u",
+        LOG_WARN_LO("RequestReplyEngine", "send_response: engine.send failed: result=%u",
                     static_cast<uint8_t>(res));
     } else {
-        Logger::log(Severity::INFO, "RequestReplyEngine",
-                    "Sent response correlation_id=%llu to dst=%u",
+        LOG_INFO("RequestReplyEngine", "Sent response correlation_id=%llu to dst=%u",
                     (unsigned long long)correlation_id, destination);
     }
 
@@ -719,8 +705,7 @@ Result RequestReplyEngine::receive_response(uint64_t   correlation_id,
     // Look up the pending slot.
     uint32_t idx = find_pending(correlation_id);
     if (idx >= MAX_PENDING_REQUESTS) {
-        Logger::log(Severity::INFO, "RequestReplyEngine",
-                    "receive_response: unknown correlation_id=%llu",
+        LOG_INFO("RequestReplyEngine", "receive_response: unknown correlation_id=%llu",
                     (unsigned long long)correlation_id);
         return Result::ERR_INVALID;
     }
@@ -750,8 +735,7 @@ Result RequestReplyEngine::receive_response(uint64_t   correlation_id,
     NEVER_COMPILED_OUT_ASSERT(!m_pending[idx].active);     // post: slot freed
     NEVER_COMPILED_OUT_ASSERT(idx < MAX_PENDING_REQUESTS); // post: valid index
 
-    Logger::log(Severity::INFO, "RequestReplyEngine",
-                "Received response correlation_id=%llu len=%u",
+    LOG_INFO("RequestReplyEngine", "Received response correlation_id=%llu len=%u",
                 (unsigned long long)correlation_id, copy_len);
 
     return Result::OK;
@@ -779,8 +763,7 @@ uint32_t RequestReplyEngine::sweep_timeouts(uint64_t now_us)
             continue;
         }
         if (now_us >= m_pending[i].expires_us) {
-            Logger::log(Severity::WARNING_LO, "RequestReplyEngine",
-                        "sweep_timeouts: correlation_id=%llu expired",
+            LOG_WARN_LO("RequestReplyEngine", "sweep_timeouts: correlation_id=%llu expired",
                         (unsigned long long)m_pending[i].correlation_id);
             m_pending[i].active      = false;
             m_pending[i].stash_ready = false;
