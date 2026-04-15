@@ -144,6 +144,10 @@ void Logger::log(Severity sev,  // NOLINT(misc-no-recursion)
     va_list args;
     va_start(args, fmt);
     // Power of 10: bounded vsnprintf.
+    // NOLINTNEXTLINE(clang-analyzer-valist.Uninitialized) — false positive:
+    // va_start() is called two lines above. The clang-analyzer loses track of
+    // initialization when it symbolically follows the NEVER_COMPILED_OUT_ASSERT
+    // macro's recursive Logger::log() call path in the outer frame.
     const int body = vsnprintf(buf + hdr,
                                static_cast<size_t>(LOG_FORMAT_BUF_SIZE
                                    - static_cast<uint32_t>(hdr)),
@@ -222,6 +226,8 @@ void Logger::log_wall(Severity sev,  // NOLINT(misc-no-recursion)
 
     va_list args;
     va_start(args, fmt);
+    // NOLINTNEXTLINE(clang-analyzer-valist.Uninitialized) — false positive:
+    // va_start() is called two lines above. Same analyzer confusion as log().
     const int body = vsnprintf(buf + hdr,
                                static_cast<size_t>(LOG_FORMAT_BUF_SIZE
                                    - static_cast<uint32_t>(hdr)),
