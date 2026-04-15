@@ -49,7 +49,7 @@ public:
     /// Must be called once during system initialization.
     void init();
 
-    // Safety-critical (SC): HAZ-003 — verified to M5
+    // Safety-critical (SC): HAZ-003, HAZ-018 — verified to M5
     /// Check if a message (by source_id, message_id) is already in the window.
     /// Returns true if duplicate, false if new.
     bool is_duplicate(NodeId src, uint64_t msg_id) const;
@@ -65,7 +65,7 @@ public:
     /// Returns ERR_DUPLICATE if message is already known, OK otherwise.
     /// On OK, also records the message.
     /// @param now_us  Current time in microseconds (must be > 0); forwarded to record().
-    // Safety-critical (SC): HAZ-003
+    // Safety-critical (SC): HAZ-003, HAZ-018
     Result check_and_record(NodeId src, uint64_t msg_id, uint64_t now_us);
 
 private:

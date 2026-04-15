@@ -115,8 +115,9 @@ public:
     ~DtlsUdpBackend() override;
 
     // ── TransportInterface implementation ────────────────────────────────────
+    // Safety-critical (SC): HAZ-020, HAZ-025
     Result init(const TransportConfig& config) override;
-    // NSC: DTLS/UDP has no per-client registration; no-op per REQ-6.1.10.
+    // Safety-critical (SC): HAZ-005 — sends HELLO datagram to peer in client mode; failure silently prevents server routing (REQ-6.1.10)
     Result register_local_id(NodeId id) override;
     // Safety-critical (SC): HAZ-005, HAZ-006 — verified to M5
     Result send_message(const MessageEnvelope& envelope) override;
@@ -195,6 +196,7 @@ private:
     Result server_wait_and_handshake();
 
     /// Client: connect socket to peer, set up DTLS session, complete handshake.
+    // Safety-critical (SC): HAZ-008, HAZ-020, HAZ-025
     Result client_connect_and_handshake();
 
     /// Run the DTLS handshake loop on m_ssl, handling HELLO_VERIFY_REQUIRED
@@ -291,6 +293,7 @@ private:
     /// register_local_id() in client mode so the server can register this side's
     /// NodeId before any DATA frame arrives (REQ-6.1.8, REQ-6.1.10).
     /// @return OK on success; ERR_IO / ERR_INVALID on failure.
+    // Safety-critical (SC): HAZ-005
     Result send_hello_datagram();
     /// SEC-027: commit m_pending_src_port → m_peer_src_port on first valid HELLO.
     /// No-op in client mode or when no pending port is recorded.

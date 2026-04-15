@@ -65,6 +65,7 @@ public:
     ~UdpBackend() override;
 
     // TransportInterface implementation
+    // Safety-critical (SC): HAZ-024
     Result init(const TransportConfig& config) override;
     // Safety-critical (SC): HAZ-005 — sends HELLO on wire; failure prevents peer from accepting DATA.
     // SC: stores local NodeId and sends HELLO datagram to peer (REQ-6.1.8, REQ-6.1.10).

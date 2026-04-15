@@ -31,7 +31,7 @@
  *             REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10,
  *             REQ-6.3.4, REQ-7.1.1, REQ-5.1.5, REQ-5.1.6
  */
-// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.1.12, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-6.3.10, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
+// Implements: REQ-4.1.1, REQ-4.1.2, REQ-4.1.3, REQ-4.1.4, REQ-6.1.1, REQ-6.1.2, REQ-6.1.3, REQ-6.1.5, REQ-6.1.6, REQ-6.1.7, REQ-6.1.8, REQ-6.1.9, REQ-6.1.10, REQ-6.1.11, REQ-6.1.12, REQ-3.3.6, REQ-6.3.4, REQ-6.3.6, REQ-6.3.7, REQ-6.3.8, REQ-6.3.9, REQ-6.3.10, REQ-7.1.1, REQ-7.2.4, REQ-5.1.5, REQ-5.1.6
 
 #include "platform/TlsTcpBackend.hpp"
 #include "platform/TlsSessionStore.hpp"

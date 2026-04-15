@@ -94,12 +94,12 @@ Before creating or updating a pull request:
    automatically (stress tests, coverage run) are printed as unchecked — confirm them
    manually and tick the box before opening the PR.
 The CI workflow pr-checklist.yml blocks merge if any item remains unchecked without N/A.
-CI already enforces lint, tests, and traceability — the PR template covers only the
+CI already enforces lint and tests — the PR template covers only the
 documentation items that require human judgment.
 
 Branch coverage report (`make coverage`) is required **before any merge to main** for SC
 function verification; it is a pre-merge review gate, not a CI automation gate. CI
-automatically verifies M1 (lint), M2 (static analysis), and M4 dynamic test paths (via
+automatically verifies M2 (lint/static analysis) and M4 dynamic test paths (via
 `run_tests` + `run_sanitize`). The human reviewer must confirm no regression in SC function
 branch coverage before approving a merge. See docs/COVERAGE_CEILINGS.md for per-file thresholds
 and docs/VERIFICATION_POLICY.md §4 for ceiling argument policy.
@@ -663,7 +663,7 @@ Security assumptions and invariants: docs/SECURITY_ASSUMPTIONS.md
 ```xml
 <coverage_requirements>
 1. Mandatory floor — all SC functions (docs/HAZARD_ANALYSIS.md §3):
-   - Branch coverage (true/false for every decision) is the CI-enforced minimum.
+   - Branch coverage (true/false for every decision) is the pre-merge human review gate minimum.
    - Measure with: make coverage  (LLVM source-based coverage via clang++).
    - A branch coverage regression on any SC function is a blocking defect.
 

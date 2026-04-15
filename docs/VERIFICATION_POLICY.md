@@ -247,6 +247,15 @@ signed off in the project inspection record.
 | d | Update SC declarations and test headers | **COMPLETE** — All SC function declarations in TcpBackend.hpp, UdpBackend.hpp, TlsTcpBackend.hpp, DtlsUdpBackend.hpp carry `— verified to M5`. All four backend test files carry `Verification: M1 + M2 + M4 + M5` headers. |
 | e | Update Hazard Analysis and FMEA | **COMPLETE** — HAZARD_ANALYSIS.md §2 and §3 updated through INSP-018 to reflect the injectable interface design; no new hazards were identified during the M5 test suite implementation. |
 
+> **Note:** The "verified to M5" annotation in item (d) applies to the SC functions covered by
+> INSP-019 (scope: send/receive paths as of 2026-04-09). SC functions added in subsequent
+> security hardening PRs — including `TcpBackend::sweep_hello_timeouts`, `UdpBackend::init`,
+> `TlsTcpBackend::recv_from_client`, `DtlsUdpBackend::init`,
+> `DtlsUdpBackend::client_connect_and_handshake`, `DtlsUdpBackend::send_hello_datagram`,
+> `IMbedtlsOps::recvfrom_peek`, and related `init()` functions — do not yet carry the
+> "verified to M5" annotation. These functions require their own M5 verification evidence
+> entries, to be added when those functions are formally inspected.
+
 **Remaining gap before formal Class B reclassification:** Items a–e are complete. The remaining
 obligation (per NPR 7150.2D §3.11) is independent V&V of all SC functions — a process gate
 requiring a human reviewer who was not involved in the implementation. See

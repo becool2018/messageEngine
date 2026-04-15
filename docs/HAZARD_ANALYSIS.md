@@ -267,6 +267,13 @@ SC functions must carry `// Safety-critical (SC): HAZ-NNN` in their `.hpp` decla
 | `record()` | `DuplicateFilter` | SC | HAZ-003 |
 | `check_and_record()` | `DuplicateFilter` | SC | HAZ-003, HAZ-018 |
 
+### `src/core/ConstantTime.hpp`
+
+| Function | Classification | HAZ IDs | Rationale |
+|---|---|---|---|
+| `ct_node_id_equal(NodeId a, NodeId b)` | SC | HAZ-018 | Timing-safe NodeId comparison; prevents timing oracle on security-sensitive routing lookups (CWE-208, REQ-3.2.11) |
+| `ct_id_pair_equal(NodeId sa, MessageId ma, NodeId sb, MessageId mb)` | SC | HAZ-018 | Timing-safe (source_id, message_id) pair comparison; used by AckTracker, DuplicateFilter, OrderingBuffer to prevent ACK-forge timing attacks (CWE-208, REQ-3.2.11) |
+
 ### src/core/RetryManager.hpp
 
 | Function | Class | SC/NSC | HAZ IDs |
@@ -323,6 +330,16 @@ Rationale: Fragment splitting is a wire-format operation; incorrect splitting co
 | `reset_peer_ordering()` | `DeliveryEngine` | SC | HAZ-001, HAZ-016 |
 | `drain_hello_reconnects()` | `DeliveryEngine` | NSC | — |
 | `get_stats()` | `DeliveryEngine` | NSC | — |
+
+### `src/core/DeliveryEventRing.hpp`
+
+| Function | Classification | HAZ IDs | Rationale |
+|---|---|---|---|
+| `init()` | NSC | — | Observability ring initialisation; no effect on message delivery safety |
+| `push(DeliveryEvent)` | NSC | — | Records delivery event to bounded ring; non-blocking, no safety impact |
+| `poll_event(DeliveryEvent&)` | NSC | — | Reads one event from ring; observability only |
+| `drain_events(DeliveryEvent*, uint32_t, uint32_t&)` | NSC | — | Bulk drain of observability ring; no safety impact |
+| `pending_event_count()` | NSC | — | Returns fill level of observability ring; no safety impact |
 
 ### src/core/TransportInterface.hpp
 
@@ -409,7 +426,7 @@ All `SocketUtils` functions are **NSC** — raw POSIX I/O primitives with no mes
 | `find_client_slot()` | `TcpBackend` | NSC | — |
 | `handle_hello_frame()` | `TcpBackend` | NSC | — |
 | `recv_from_client()` | `TcpBackend` | SC | HAZ-009, HAZ-023 |
-| `evict_hello_timeout_slots()` | `TcpBackend` | SC | HAZ-023 |
+| `sweep_hello_timeouts()` | `TcpBackend` | SC | HAZ-023 |
 | `send_to_slot()` | `TcpBackend` | NSC | — |
 | `validate_source_id()` | `TcpBackend` | SC | HAZ-009 |
 | `close()` | `TcpBackend` | NSC | — |
@@ -497,7 +514,7 @@ Note: `LocalSimHarness` implements `TransportInterface` and is used as the trans
 | `validate_source_id()` | `TlsTcpBackend` | SC | HAZ-009 |
 | `classify_inbound_frame()` | `TlsTcpBackend` | SC | HAZ-009 |
 | `tls_connect_handshake()` | `TlsTcpBackend` | SC | HAZ-008, HAZ-020, HAZ-025 |
-| `evict_hello_timeout_slots()` | `TlsTcpBackend` | SC | HAZ-023 |
+| `sweep_hello_timeouts()` | `TlsTcpBackend` | SC | HAZ-023 |
 | `try_save_client_session()` | `TlsTcpBackend` | SC | HAZ-012, HAZ-017 |
 | `try_load_client_session()` | `TlsTcpBackend` | SC | HAZ-017 |
 | `set_session_store()` | `TlsTcpBackend` | NSC | — |
@@ -605,7 +622,7 @@ The following hazards are mitigated exclusively in init-phase initialisation or 
 | HAZ-020 | `TlsTcpBackend::init()`, `DtlsUdpBackend::init()`, `TlsTcpBackend::tls_connect_handshake()`, `DtlsUdpBackend::client_connect_and_handshake()` | Empty CA with `verify_peer=true` makes certificate verification a no-op; fail-fast required per REQ-6.3.6. Reclassified from NSC because `init()` now makes a security enforcement decision. |
 | HAZ-021 | `TlsSessionStore::zeroize()`, `TlsSessionStore::try_save()`, `TlsSessionStore::try_load()` | Concurrent access race on TLS session struct; POSIX mutex required per REQ-6.3.10. `try_save` and `try_load` added as new SC functions. |
 | HAZ-022 | `DeliveryEngine::init()` | Entropy source failure without fail-fast guard enables predictable `MessageIdGen` seeding and ACK forgery (extends HAZ-010); FATAL + reset required per REQ-5.2.6. Reclassified from NSC. |
-| HAZ-023 | `TcpBackend::init()`, `TcpBackend::recv_from_client()`, `TcpBackend::evict_hello_timeout_slots()`, `TlsTcpBackend::init()`, `TlsTcpBackend::recv_from_client()`, `TlsTcpBackend::evict_hello_timeout_slots()` | Slow-connect slot exhaustion DoS; per-slot HELLO timeout required per REQ-6.1.12. `evict_hello_timeout_slots()` is a new SC function in both TCP backends. |
+| HAZ-023 | `TcpBackend::init()`, `TcpBackend::recv_from_client()`, `TcpBackend::sweep_hello_timeouts()`, `TlsTcpBackend::init()`, `TlsTcpBackend::recv_from_client()`, `TlsTcpBackend::sweep_hello_timeouts()` | Slow-connect slot exhaustion DoS; per-slot HELLO timeout required per REQ-6.1.12. `sweep_hello_timeouts()` is a new SC function in both TCP backends. |
 | HAZ-024 | `UdpBackend::init()` | Wildcard `peer_ip` enables NodeId hijack; init must reject wildcard per REQ-6.2.5. Reclassified from NSC. |
 | HAZ-025 | `TlsTcpBackend::init()`, `DtlsUdpBackend::init()`, `TlsTcpBackend::tls_connect_handshake()`, `DtlsUdpBackend::client_connect_and_handshake()` | Silent MitM trap when `verify_peer=false` and `peer_hostname` is non-empty; fail-fast required per REQ-6.3.9. |
 
