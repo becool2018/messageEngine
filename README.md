@@ -37,23 +37,24 @@ A C++ networking library for building and testing systems that must survive unre
 
 1. [Getting Started for New Contributors](#getting-started-for-new-contributors)
 2. [System Overview](#system-overview)
-3. [Architecture](#architecture)
-4. [Directory Structure](#directory-structure)
-5. [Building](#building)
-6. [Testing and Analysis](#testing-and-analysis) — unit tests, stress tests, coverage, static analysis
-7. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
-8. [Documentation Maintenance](docs/DOC_MAINTENANCE.md) — what to update and when for every type of code change
-9. [Using the Library](#using-the-library)
+    - [Use Cases](#use-cases)
+3. [Architecture & Design](#architecture--design)
+    - [Architecture](#architecture)
+    - [Directory Structure](#directory-structure)
+    - [Design Patterns](#design-patterns)
+4. [Building](#building)
+5. [Testing and Analysis](#testing-and-analysis) — unit tests, stress tests, coverage, static analysis
+6. [Running the Demo (Server / Client)](#running-the-demo-server--client) — see also [Demo Walkthrough](docs/DEMO_WALKTHROUGH.md)
+7. [Documentation Maintenance](docs/DOC_MAINTENANCE.md) — what to update and when for every type of code change
+8. [Using the Library](#using-the-library)
     - [Logging](docs/LOGGING.md) — format, architecture, severity levels, extending, testing
-10. [Use Cases](#use-cases)
-11. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
-12. [Design Patterns](#design-patterns)
-13. [Project Standards](#project-standards)
+9. [Where this API could be used; Possible Applications](docs/POSSIBLE_APPLICATIONS.md)
+10. [Project Standards](#project-standards)
     - [Safety & Assurance Documents](#safety--assurance-documents)
-14. [Claude Skills](#claude-skills)
-15. [Release History](#release-history)
-16. [Code Statistics](#code-statistics)
-18. [Security Check](SNYK.IO.SECURITY_CHECK.md)
+11. [Claude Skills](#claude-skills)
+12. [Release History](#release-history)
+13. [Code Statistics](#code-statistics)
+14. [Security Check](SNYK.IO.SECURITY_CHECK.md)
 
 ---
 
@@ -192,9 +193,22 @@ All impairment decisions are driven by a seedable xorshift64 PRNG — identical 
 - `ImpairmentEngine` is fully reproducible given the same seed
 - External dependencies are injectable via `TransportInterface` (pointer passed at `init`)
 
+### Use Cases
+
+The [`docs/use_cases/`](docs/use_cases/) directory contains detailed use case documents that trace every user-facing capability and system-internal sub-function through the live source code.
+
+- **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 76 use cases, grouped by high-level capability (HL-1 through HL-35), Application Workflow patterns, and System Internal sub-functions.
+- **[USE_CASE_FREQUENCY.md](docs/use_cases/USE_CASE_FREQUENCY.md)** — frequency classification of all 76 use cases (hottest path → high → medium → low → system internals); use this to guide performance analysis, profiling focus, and code review prioritisation.
+  - [Hottest path](docs/use_cases/USE_CASE_FREQUENCY.md#hottest-path--called-on-every-message-and-every-event-loop-tick) — 7 use cases on every send / receive / event-loop tick
+  - [High frequency](docs/use_cases/USE_CASE_FREQUENCY.md#high-frequency--called-frequently-during-active-messaging) — per-message use cases when reliability modes or impairments are active
+
+Each individual `UC_*.md` document follows a 15-section flow-of-control format covering: entry points, end-to-end control flow, call tree, branching logic, concurrency behavior, memory ownership, error handling, external interactions, state changes, and known risks.
+
 ---
 
-## Architecture
+## Architecture & Design
+
+### Architecture
 
 Dependencies flow strictly downward. No lower layer may reference a higher one; cyclic dependencies are prohibited.
 
@@ -337,27 +351,26 @@ DeliveryEngine::sweep_ack_timeouts(now_us)
  └  logs WARNING_HI per expired slot
 ```
 
----
 
-## Directory Structure
+### Directory Structure
 
 ```
 messageEngine/
 ├── src/
 │   ├── core/             # Transport-agnostic message layer
-│   │   ├── Types.hpp         # Enums, constants, NodeId
-│   │   ├── MessageEnvelope.hpp
-│   │   ├── TransportInterface.hpp
-│   │   ├── ChannelConfig.hpp
-│   │   ├── TlsConfig.hpp
-│   │   ├── RingBuffer.hpp
-│   │   ├── ImpairmentConfig.hpp
-│   │   ├── Serializer.hpp/cpp
-│   │   ├── MessageId.hpp/cpp
-│   │   ├── Timestamp.hpp/cpp
-│   │   ├── DuplicateFilter.hpp/cpp
-│   │   ├── AckTracker.hpp/cpp
-│   │   ├── RetryManager.hpp/cpp
+│   │   ├── Types.hpp                     # Enums, constants, NodeId
+│   │   ├── MessageEnvelope.hpp           # Standard message envelope (all fields every message carries)
+│   │   ├── TransportInterface.hpp        # Abstract transport API (init/send/receive/close)
+│   │   ├── ChannelConfig.hpp             # Per-channel parameters (priority, reliability, ordering)
+│   │   ├── TlsConfig.hpp                 # TLS/DTLS connection parameters (certs, verify, resumption)
+│   │   ├── RingBuffer.hpp                # 64-slot SPSC lock-free ring buffer
+│   │   ├── ImpairmentConfig.hpp          # Impairment parameter structs (loss, jitter, latency, etc.)
+│   │   ├── Serializer.hpp/cpp            # Serialize/deserialize MessageEnvelope to/from wire bytes
+│   │   ├── MessageId.hpp/cpp             # Monotonically-incrementing 64-bit message ID generator
+│   │   ├── Timestamp.hpp/cpp             # Wall and monotonic clock access; expiry helpers
+│   │   ├── DuplicateFilter.hpp/cpp       # 128-entry sliding window for (source_id, msg_id) dedup
+│   │   ├── AckTracker.hpp/cpp            # 32-slot table tracking pending ACKs with deadlines
+│   │   ├── RetryManager.hpp/cpp          # Exponential backoff retry scheduler
 │   │   ├── Fragmentation.hpp/cpp         # Split large payloads into wire frames
 │   │   ├── ReassemblyBuffer.hpp/cpp      # Reassemble fragment streams
 │   │   ├── OrderingBuffer.hpp/cpp        # Sequence-number in-order delivery gate
@@ -366,34 +379,34 @@ messageEngine/
 │   │   ├── DeliveryEvent.hpp             # DeliveryEventKind enum (8 event types)
 │   │   ├── DeliveryEventRing.hpp         # Fixed-capacity observability event ring
 │   │   ├── DeliveryStats.hpp             # Per-engine send/receive/drop counters
-│   │   ├── DeliveryEngine.hpp/cpp
+│   │   ├── DeliveryEngine.hpp/cpp        # Main application API: reliability, dedup, ordering, retries
 │   │   ├── Version.hpp                   # ME_VERSION_STRING ("2.0.0")
-│   │   ├── Assert.hpp            # NEVER_COMPILED_OUT_ASSERT macro
-│   │   ├── AssertState.hpp/cpp   # Global assert handler registry
-│   │   ├── IResetHandler.hpp     # Abstract fatal-assert handler interface
-│   │   ├── AbortResetHandler.hpp # POSIX abort() implementation
-│   │   └── Logger.hpp
+│   │   ├── Assert.hpp                    # NEVER_COMPILED_OUT_ASSERT macro
+│   │   ├── AssertState.hpp/cpp           # Global assert handler registry
+│   │   ├── IResetHandler.hpp             # Abstract fatal-assert handler interface
+│   │   ├── AbortResetHandler.hpp         # POSIX abort() implementation
+│   │   └── Logger.hpp                    # Severity-tagged logger (INFO/WARNING_LO/WARNING_HI/FATAL)
 │   ├── platform/         # OS and socket adapters
-│   │   ├── PrngEngine.hpp/cpp
-│   │   ├── ImpairmentConfig.hpp
-│   │   ├── ImpairmentEngine.hpp/cpp
+│   │   ├── PrngEngine.hpp/cpp            # xorshift64 PRNG used by ImpairmentEngine
+│   │   ├── ImpairmentConfig.hpp          # Impairment parameter structs (platform-side include)
+│   │   ├── ImpairmentEngine.hpp/cpp      # Applies loss/jitter/latency/duplication/reordering/partition
 │   │   ├── ImpairmentConfigLoader.hpp/cpp  # INI-style file parser
 │   │   ├── ISocketOps.hpp                  # Injectable POSIX socket interface
 │   │   ├── SocketOpsImpl.hpp/cpp           # Production POSIX implementation
 │   │   ├── IMbedtlsOps.hpp                 # Injectable mbedTLS interface
 │   │   ├── MbedtlsOpsImpl.hpp/cpp          # Production mbedTLS implementation
-│   │   ├── SocketUtils.hpp/cpp
-│   │   ├── TcpBackend.hpp/cpp
-│   │   ├── UdpBackend.hpp/cpp
+│   │   ├── SocketUtils.hpp/cpp             # POSIX socket helpers (connect, bind, recv_exact, etc.)
+│   │   ├── TcpBackend.hpp/cpp              # TCP transport (8-client server, 4-byte length framing)
+│   │   ├── UdpBackend.hpp/cpp              # UDP transport (one datagram per message)
 │   │   ├── TlsTcpBackend.hpp/cpp           # TLS over TCP (mbedTLS 4.0 PSA)
 │   │   ├── TlsSessionStore.hpp/cpp         # Caller-owned TLS session persistence (RFC 5077)
 │   │   ├── DtlsUdpBackend.hpp/cpp          # DTLS over UDP (mbedTLS 4.0 PSA)
 │   │   ├── IPosixSyscalls.hpp              # Injectable POSIX syscall interface (fault injection)
 │   │   ├── PosixSyscallsImpl.hpp/cpp       # Production POSIX syscall singleton
-│   │   └── LocalSimHarness.hpp/cpp
+│   │   └── LocalSimHarness.hpp/cpp         # In-process transport for testing; no OS sockets
 │   └── app/              # Demo programs
-│       ├── Server.cpp
-│       ├── Client.cpp
+│       ├── Server.cpp                      # TCP echo server demo
+│       ├── Client.cpp                      # TCP client demo
 │       ├── TlsTcpDemo.cpp                  # TLS client/server demo
 │       └── DtlsUdpDemo.cpp                 # DTLS client/server demo
 ├── tests/                # Unit tests (one binary per module)
@@ -404,30 +417,30 @@ messageEngine/
 │   ├── MockTransportInterface.hpp  # Injectable TransportInterface stub for DeliveryEngine M5 tests
 │   ├── RingLogSink.hpp             # Fixed-capacity ring-buffer log sink for asserting log output in tests
 │   ├── TestPortAllocator.hpp       # Port allocation helper for concurrent backend tests
-│   ├── test_MessageEnvelope.cpp
-│   ├── test_MessageId.cpp
-│   ├── test_Timestamp.cpp
-│   ├── test_Serializer.cpp
-│   ├── test_DuplicateFilter.cpp
-│   ├── test_AckTracker.cpp
-│   ├── test_RetryManager.cpp
-│   ├── test_Fragmentation.cpp
-│   ├── test_ReassemblyBuffer.cpp
-│   ├── test_OrderingBuffer.cpp
-│   ├── test_RequestReplyEngine.cpp
-│   ├── test_DeliveryEngine.cpp
-│   ├── test_ImpairmentEngine.cpp
-│   ├── test_ImpairmentConfigLoader.cpp
-│   ├── test_LocalSim.cpp
-│   ├── test_AssertState.cpp
-│   ├── test_SocketUtils.cpp
-│   ├── test_TcpBackend.cpp
-│   ├── test_UdpBackend.cpp
-│   ├── test_TlsTcpBackend.cpp
-│   ├── test_DtlsUdpBackend.cpp
-│   ├── test_Logger.cpp
-│   ├── test_PrngEngine.cpp
-│   ├── test_RingBuffer.cpp
+│   ├── test_MessageEnvelope.cpp    # MessageEnvelope field validation and round-trip tests
+│   ├── test_MessageId.cpp          # MessageId generation, ordering, and uniqueness tests
+│   ├── test_Timestamp.cpp          # Timestamp creation, expiry, and clock tests
+│   ├── test_Serializer.cpp         # Wire format serialization/deserialization tests
+│   ├── test_DuplicateFilter.cpp    # Sliding-window dedup and overflow eviction tests
+│   ├── test_AckTracker.cpp         # ACK tracking, deadline sweeping, and slot management tests
+│   ├── test_RetryManager.cpp       # Retry scheduling, backoff, and cancellation tests
+│   ├── test_Fragmentation.cpp      # Fragmentation splitting and edge-case tests
+│   ├── test_ReassemblyBuffer.cpp   # Fragment reassembly, timeout, and slot reclaim tests
+│   ├── test_OrderingBuffer.cpp     # Sequence-number ordering gate and hold/release tests
+│   ├── test_RequestReplyEngine.cpp # Request/reply correlation, timeout, and sweep tests
+│   ├── test_DeliveryEngine.cpp     # End-to-end delivery: reliability modes, ACK, retry, dedup
+│   ├── test_ImpairmentEngine.cpp   # Impairment application: loss, jitter, latency, partition
+│   ├── test_ImpairmentConfigLoader.cpp  # INI config parsing and validation tests
+│   ├── test_LocalSim.cpp           # LocalSimHarness in-process send/receive/impairment tests
+│   ├── test_AssertState.cpp        # Assert handler registration and NEVER_COMPILED_OUT_ASSERT tests
+│   ├── test_SocketUtils.cpp        # POSIX socket helper function tests
+│   ├── test_TcpBackend.cpp         # TcpBackend send/receive, framing, and multi-client tests
+│   ├── test_UdpBackend.cpp         # UdpBackend send/receive and HELLO enforcement tests
+│   ├── test_TlsTcpBackend.cpp      # TLS handshake, certificate validation, and session tests
+│   ├── test_DtlsUdpBackend.cpp     # DTLS cookie exchange, MTU enforcement, and session tests
+│   ├── test_Logger.cpp             # Logger severity, format, and sink injection tests
+│   ├── test_PrngEngine.cpp         # PRNG determinism, seed, and distribution tests
+│   ├── test_RingBuffer.cpp         # RingBuffer push/pop, overflow, and concurrent-access tests
 │   ├── test_stress_capacity.cpp    # Capacity-limit stress tests (slot exhaustion, ring overflow)
 │   ├── test_stress_e2e.cpp         # End-to-end throughput and reliability stress tests
 │   ├── test_stress_ordering.cpp    # Ordering gate stress tests (reorder, hold, release)
@@ -435,12 +448,18 @@ messageEngine/
 │   ├── test_stress_ringbuffer.cpp  # RingBuffer concurrent-access stress tests
 │   └── test_stress_tcp_fanin.cpp   # TCP fan-in stress tests (many clients → one server)
 ├── docs/                 # Requirements, design, and analysis documents
-├── Makefile
-├── .cppcheck-suppress
-├── .gitignore
+├── Makefile              # Build, test, lint, coverage, and stress-test targets
+├── .cppcheck-suppress    # Cppcheck false-positive suppressions
+├── .gitignore            # VCS exclusions (build/, coverage output, editor artifacts)
 ├── CLAUDE.md             # Project-specific requirements and standards
 └── .claude/CLAUDE.md     # Global C/C++ coding standards
 ```
+
+### Design Patterns
+
+[`docs/DESIGN_PATTERNS.md`](docs/DESIGN_PATTERNS.md) documents every design pattern used in the codebase — where each pattern appears (file, class, method), and why it was chosen given the project's Power of 10 / MISRA C++:2023 / F-Prime constraints.
+
+Patterns in use: Strategy, Adapter/Bridge, Facade, State Machine, Observer/Event Ring, Chain of Responsibility, Non-Virtual Interface (NVI), Dependency Injection, Singleton (safety variant), Slot Pool, Value Object, Serializer, Ring Buffer (SPSC lock-free), RAII Lifecycle.
 
 ---
 
@@ -848,27 +867,6 @@ All functions return a `Result` enum. Never ignore a return value.
 | `ERR_OVERRUN` | Internal buffer overrun |
 | `ERR_AGAIN` | More data needed — reassembly or ordering in progress; not an error |
 | `ERR_IO_PARTIAL` | Partial fragmented send: ≥1 fragment already on wire; do not cancel AckTracker/RetryManager slots |
-
----
-
-## Use Cases
-
-The [`docs/use_cases/`](docs/use_cases/) directory contains detailed use case documents that trace every user-facing capability and system-internal sub-function through the live source code.
-
-- **[HIGH_LEVEL_USE_CASES.md](docs/use_cases/HIGH_LEVEL_USE_CASES.md)** — index of all 76 use cases, grouped by high-level capability (HL-1 through HL-35), Application Workflow patterns, and System Internal sub-functions.
-- **[USE_CASE_FREQUENCY.md](docs/use_cases/USE_CASE_FREQUENCY.md)** — frequency classification of all 76 use cases (hottest path → high → medium → low → system internals); use this to guide performance analysis, profiling focus, and code review prioritisation.
-  - [Hottest path](docs/use_cases/USE_CASE_FREQUENCY.md#hottest-path--called-on-every-message-and-every-event-loop-tick) — 7 use cases on every send / receive / event-loop tick
-  - [High frequency](docs/use_cases/USE_CASE_FREQUENCY.md#high-frequency--called-frequently-during-active-messaging) — per-message use cases when reliability modes or impairments are active
-
-Each individual `UC_*.md` document follows a 15-section flow-of-control format covering: entry points, end-to-end control flow, call tree, branching logic, concurrency behavior, memory ownership, error handling, external interactions, state changes, and known risks.
-
----
-
-## Design Patterns
-
-[`docs/DESIGN_PATTERNS.md`](docs/DESIGN_PATTERNS.md) documents every design pattern used in the codebase — where each pattern appears (file, class, method), and why it was chosen given the project's Power of 10 / MISRA C++:2023 / F-Prime constraints.
-
-Patterns in use: Strategy, Adapter/Bridge, Facade, State Machine, Observer/Event Ring, Chain of Responsibility, Non-Virtual Interface (NVI), Dependency Injection, Singleton (safety variant), Slot Pool, Value Object, Serializer, Ring Buffer (SPSC lock-free), RAII Lifecycle.
 
 ---
 
