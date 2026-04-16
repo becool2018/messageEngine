@@ -495,7 +495,9 @@ Security assumptions and invariants: docs/SECURITY_ASSUMPTIONS.md
 Analysis artifact and current worst-case call chains: docs/STACK_ANALYSIS.md.
 Current worst case: 11 frames (Chain 3 — retry pump with send_fragments); ~130 KB stack
 dominated by DtlsUdpBackend/TlsTcpBackend delayed[] buffer (flush path). Non-flush
-worst case: ~764 bytes. Platform headroom: >10 000× on macOS/Linux (non-DTLS flush path).
+worst case: ~764 bytes (~1,326 B including Logger frames). Platform headroom: >10 000× on macOS/Linux (non-DTLS flush path).
+Embedded porting note: the ~130 KB flush-path stack is a known limitation; see
+docs/STACK_ANALYSIS.md "Known Limitation" and "Embedded porting guidance" sections.
 
 Update trigger: update docs/STACK_ANALYSIS.md when any function introduces a
 stack-allocated buffer >256 bytes, a new call chain exceeds 10 frames, or a new

@@ -1780,6 +1780,50 @@ Moderator: Don Jessup — 2026-04-15. All four deferred requirements (REQ-7.2.1�
 
 ---
 
+### INSP-031 — Stack flush-buffer investigation: ~130 KB delayed[] in flush helpers (2026-04-15)
+
+**Branch:** `fix/stack-delay-buf-member-2026-04`
+**Change summary:** Investigated moving `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]`
+from stack-local to pre-allocated member in all five transport backends. The member-buffer
+approach is technically correct but not implementable without modifying test infrastructure:
+backends (`TcpBackend`, etc.) are already ~540 KB structs; adding a 132 KB member brings them
+to ~674 KB, which causes SIGSEGV in LLVM coverage builds when tests stack-allocate backend
+objects on macOS ARM64 (lazy stack-page-mapping skips pages not probed by the compiler for
+the oversized frame). A static-local is also unsafe because server/client can call the
+function simultaneously from separate threads. Correct fix requires heap-allocating backends
+in ~60+ test functions across 4 test files — deferred to a follow-on PR (see DEF-031-1).
+
+Outcome: documentation-only update. `docs/STACK_ANALYSIS.md` updated with detailed
+"Known Limitation" section, investigation findings, and embedded porting guidance.
+`CLAUDE.md §15` updated to reference the limitation. No source code changes.
+
+**Defects found:**
+
+| ID | Severity | Description | Status |
+|----|----------|-------------|--------|
+| DEF-031-1 | MAJOR | `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]` in five flush helpers allocates ~130 KB of stack on every call, making the library unsuitable for embedded targets with ≤ 256 KB per-thread stacks | DEFER — fix requires heap-allocating backends in ~60 test functions; tracked as follow-on |
+
+**Acceptance criteria:**
+
+| Criterion | Status |
+|-----------|--------|
+| `docs/STACK_ANALYSIS.md` "Critical Warning" updated with investigation findings and porting guidance | PASS |
+| `CLAUDE.md §15` updated to reference the limitation and porting guidance | PASS |
+| `make lint` PASS | PASS |
+| `make run_tests` 24/24 PASS | PASS |
+| `make check_traceability` PASS | PASS |
+| `make coverage` PASS (all backends — no regression) | PASS |
+
+**Moderator sign-off:**
+
+Moderator: Don Jessup — 2026-04-15. DEF-031-1 deferred: code fix incompatible with
+LLVM coverage builds without also heap-allocating backends in tests. Documentation updated
+with full investigation findings. All acceptance criteria satisfied. `make lint`,
+`make run_tests` (24/24), `make check_traceability`, `make coverage` all PASS.
+Inspection INSP-031 closed PASS (documentation change only; DEF-031-1 deferred).
+
+---
+
 ### INSP-032 — Logger: replace filename with function name in log output (2026-04-15)
 
 | Field       | Value |
