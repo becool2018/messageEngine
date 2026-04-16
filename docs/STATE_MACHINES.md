@@ -38,17 +38,20 @@ equivalent) for all state machines documented here.
 | `PENDING` | `sweep_expired()` | `now_us < deadline_us` | `PENDING` | No action |
 | `PENDING` | `cancel(src, msg_id)` | src and msg_id match slot | `FREE` | Decrement m_count; no stat bump; used for send-failure rollback only |
 | `PENDING` | `cancel(src, msg_id)` | src or msg_id does not match | `PENDING` | Returns `ERR_INVALID`; slot unchanged |
+| `PENDING` | `cancel_peer(dst)` | `slot.env.destination_id == dst` | `FREE` | Decrement m_count; no stat bump; increments cancelled count returned to caller; used for peer reconnect cleanup (HAZ-016, REQ-3.3.6) |
 | `ACKED` | `sweep_expired()` | — | `FREE` | Decrement m_count (guarded: only if m_count > 0U — INT30-C unsigned underflow guard) |
 
 ### Invariants
 
 - `0 ≤ m_count ≤ ACK_TRACKER_CAPACITY` at all times.
 - A slot in `ACKED` state is freed on the very next `sweep_expired()` call.
-- A slot in `PENDING` state is freed by: (a) `sweep_expired()` when the deadline passes — copied to `expired_buf` if space available; or (b) `cancel()` on send-failure rollback — freed directly to `FREE` with no stat bump and no copy to `expired_buf`.
-- `on_ack()` never decrements `m_count` — only `sweep_expired()` and `cancel()` do.
+- A slot in `PENDING` state is freed by: (a) `sweep_expired()` when the deadline passes — copied to `expired_buf` if space available; (b) `cancel()` on send-failure rollback — freed directly to `FREE` with no stat bump and no copy to `expired_buf`; or (c) `cancel_peer(dst)` on peer reconnect — frees all PENDING slots for the reconnecting peer's destination, no stat bump (HAZ-016, REQ-3.3.6).
+- `on_ack()` never decrements `m_count` — only `sweep_expired()`, `cancel()`, and `cancel_peer()` do.
 - `now_us` must be non-zero at entry. A backward `now_us` (now < m_last_sweep_us) triggers WARNING_HI and is **clamped** to `m_last_sweep_us`; processing continues with the clamped value (G-1 behavior, commit d7584dd). This replaces the prior `NEVER_COMPILED_OUT_ASSERT` which would have aborted the process.
 
 > **Note:** `cancel()` is a rollback-only path, callable exclusively from `DeliveryEngine::send()` on transport failure before any wire I/O. It must not be called after a message has been delivered to the wire.
+
+> **Note:** `cancel_peer(dst)` is a peer-reconnect cleanup path, callable from `DeliveryEngine::reset_peer_ordering()` when a HELLO is received from a known peer. It cancels all PENDING slots for `dst` in a single bounded pass over the slot array and returns the count of cancelled entries. Unlike `cancel()`, it operates on destination NodeId (not per-message_id) and may cancel zero or more slots in one call (SC: HAZ-001, HAZ-016).
 
 > **G-1 monotonic behavior change (commit d7584dd):** Prior to G-1, a backward timestamp triggered `NEVER_COMPILED_OUT_ASSERT(now_us >= m_last_sweep_us)` and aborted the process. G-1 replaced this with a defensive clamp + WARNING_HI. The invariant is preserved (slots expire correctly at worst one sweep late). See SECURITY_ASSUMPTIONS.md §1.
 

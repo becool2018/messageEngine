@@ -90,6 +90,7 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 | `AckTracker::on_ack()` | Linear scan for matching PENDING | O(A) = O(32) | |
 | `AckTracker::sweep_expired()` | Full scan of all slots | O(A) = O(32) | Calls sweep_one_slot per slot |
 | `AckTracker::cancel()` | Linear scan for matching slot + mark FREE | O(A) = O(32) | SC: HAZ-002. Cancels tracking for a given message_id; used on reliable-send cancellation or peer disconnect path. |
+| `AckTracker::cancel_peer()` | Full scan of all slots; mark FREE for each slot where destination_id matches | O(A) = O(32) | SC: HAZ-001, HAZ-016. Cancels all PENDING slots for a reconnecting peer's destination NodeId; called from reset_peer_ordering() on HELLO reconnect (INSP-034). |
 
 ### src/core/DuplicateFilter.hpp
 
@@ -106,6 +107,7 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 | `RetryManager::schedule()` | Linear scan for free slot | O(A) = O(32) | Uses ACK_TRACKER_CAPACITY slots |
 | `RetryManager::on_ack()` | Linear scan for matching entry | O(A) = O(32) | |
 | `RetryManager::collect_due()` | Full scan; envelope_copy per due entry | O(A × P) = O(32 × 4096) | **Worst case: 32 due entries each copied.** Two-phase implementation: Phase 1 `reap_terminated_slots()` O(A) marks completed/expired slots FREE; Phase 2 collect O(A×P) copies due entries to caller. Dominant bound O(A×P) is unchanged. |
+| `RetryManager::cancel_peer()` | Full scan of all slots; deactivate each active slot where destination_id matches | O(A) = O(32) | SC: HAZ-016. Cancels all active retry slots for a reconnecting peer's destination NodeId; called from reset_peer_ordering() on HELLO reconnect (INSP-034). |
 
 ### src/core/DeliveryEngine.hpp
 
@@ -119,7 +121,7 @@ Let **R** = `MSG_RING_CAPACITY` = 64,
 | `DeliveryEngine::deliver_held_pending()` | 1 check + 1 queue push | O(1) | SC: HAZ-001, HAZ-004. Private helper; delivers the staged `m_held_pending` buffer to the application queue after ordering gate releases it. |
 | `DeliveryEngine::send_fragments()` | `needs_fragmentation()` check O(1) + `fragment_message()` O(FRAG_MAX_COUNT × P) + per-fragment: serialize O(P) + transport send O(P) | O(FRAG_MAX_COUNT × P) = O(4 × 4096) = O(16,384) | SC (on send/retry path). Called from both `send()` and `pump_retries()`. For non-fragmenting messages (payload ≤ 1024 B) degenerates to O(P) single-fragment path. |
 | `DeliveryEngine::handle_data_dedup()` | delegates to `DuplicateFilter::check_and_record()` | O(D) = O(128) | SC: HAZ-003. Private helper that wraps the dedup call and emits WARNING_HI on duplicate detection. Cost is entirely O(D) from the underlying scan. |
-| `DeliveryEngine::reset_peer_ordering()` | 1 held_pending check (O(1)) + `reset_peer()` (O(N + H)) | O(N + H) = O(16 + 8) = O(24) | N = ORDERING_PEER_COUNT=16 (peer table scan in find_peer); H = ORDERING_HOLD_COUNT=8 (hold slot scan). SC: HAZ-001, HAZ-016. Called per HELLO event from drain_hello_reconnects(). |
+| `DeliveryEngine::reset_peer_ordering()` | 1 held_pending check (O(1)) + `reset_peer()` (O(N + H)) + seq_state reset loop (O(A) with early break) + `m_ack_tracker.cancel_peer()` (O(A)) + `m_retry_manager.cancel_peer()` (O(A)) | O(N + H + A) = O(16 + 8 + 32) = O(56) | N = ORDERING_PEER_COUNT=16 (peer table scan in find_peer); H = ORDERING_HOLD_COUNT=8 (hold slot scan); A = ACK_TRACKER_CAPACITY=32 (cancel_peer loops). INSP-034: added two cancel_peer() O(A) loops. Dominant term O(A)=O(32). SC: HAZ-001, HAZ-016. Called per HELLO event from drain_hello_reconnects(). |
 
 ### src/core/RequestReplyEngine.hpp
 

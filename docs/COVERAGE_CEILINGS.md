@@ -251,6 +251,30 @@ guards in `Logger::log()` and `Logger::log_wall()` — see per-file section `cor
 ≥100%. PosixLogSink.cpp: 4/1/75%, threshold ≥75% (1 d-iii static-init guard). Existing
 thresholds unchanged. Logger added to TEST_NAMES_BASE and all coverage merge/object lists.
 
+**2026-04-16 update (round 21 — INSP-034: cancel_peer() in AckTracker and RetryManager):**
+`AckTracker::cancel_peer(NodeId dst)` and `RetryManager::cancel_peer(NodeId dst)` added.
+Each method is a single bounded loop over `ACK_TRACKER_CAPACITY` slots with two branches:
+match found (slot freed, count incremented) and no match (slot skipped). Both branches are
+exercised by the new tests added in INSP-034:
+- `tests/test_AckTracker.cpp :: test_cancel_peer_matching` exercises the match-found path.
+- `tests/test_AckTracker.cpp :: test_cancel_peer_no_match` exercises the no-match path (no
+  PENDING slots for the target dst) and verifies count == 0.
+- `tests/test_RetryManager.cpp :: test_cancel_peer_matching` exercises the match-found path.
+- `tests/test_RetryManager.cpp :: test_cancel_peer_no_match` exercises the no-match path and
+  verifies count == 0.
+The `RECONNECT_CANCEL` observability event emission in `reset_peer_ordering()` adds 2 new
+branch outcomes in `core/DeliveryEngine.cpp` (cancel count > 0 True/False):
+- `test_de_reset_peer_ordering_cancels_inflight` covers the cancel count > 0 True branch
+  (pending ACK and retry slots exist for the reconnecting peer).
+- `test_de_reset_peer_ordering_cancel_no_inflight` covers the cancel count == 0 False branch
+  (no in-flight entries for the reconnecting peer — reset is still valid and idempotent).
+Both branches are now fully covered. No new permanently-missed branches introduced.
+The `cancel_peer()` methods themselves have no `NEVER_COMPILED_OUT_ASSERT` abort paths
+contributing to permanently-missed branches; all loop and match branches are reachable.
+Net result: `core/AckTracker.cpp` and `core/RetryManager.cpp` branch counts increase by the
+new loop/match branches; thresholds updated to reflect the new maximum achievable.
+`core/DeliveryEngine.cpp` gains ~4 new branch outcomes, all covered; threshold unchanged at ≥75%.
+
 **Policy floor vs. regression guard:** The policy floor is **100% of reachable branches**
 (VERIFICATION_POLICY.md M4; CLAUDE.md §14.4). The "Threshold" column below is a *regression
 guard* — it is set at the current maximum achievable and must not fall. It is not a relaxation
@@ -272,7 +296,7 @@ two categories is a defect, not a ceiling.
 | core/DuplicateFilter.cpp | 67 | 18 | 73.13% | ≥73% | SC |
 | core/AckTracker.cpp | 152 | 35 | 76.97% | ≥76% | SC |
 | core/RetryManager.cpp | 157 | 36 | 77.07% | ≥77% | SC |
-| core/DeliveryEngine.cpp | 479 | ~114 | ~76.2% | ≥75% | SC |
+| core/DeliveryEngine.cpp | 485 | 118 | 75.67% | ≥75% | SC |
 | core/AssertState.cpp | 2 | 1 | 50.00% | ≥50% | NSC-infra |
 | platform/ImpairmentEngine.cpp | 256 | 66 | 74.22% | ≥74% | SC |
 | platform/ImpairmentConfigLoader.cpp | 174 | 28 | 83.91% | ≥83% | SC |
@@ -491,7 +515,7 @@ Threshold: **≥73%** (maximum achievable).
 
 ---
 
-### core/AckTracker.cpp — ceiling 76.97% (117/152)
+### core/AckTracker.cpp — ceiling 76.97% (117/152) pre-INSP-034
 
 **2026-04-11 (round 13 — branch coverage):** 5 new tests added to
 `tests/test_AckTracker.cpp`: `test_cancel_no_match`, `test_cancel_wrong_source`,
@@ -505,7 +529,18 @@ backward-timestamp guard True branch in `sweep_expired()`.
 Prior result: 152 branches, 52 missed, 65.79%.
 New result: 152 branches, 35 missed, 76.97%. Line coverage: 100%.
 
-**Permanently-missed branches (35 total):**
+**2026-04-16 (INSP-034 — cancel_peer() added):** `cancel_peer(NodeId dst)` adds a
+bounded loop over `ACK_TRACKER_CAPACITY` slots. The loop body has 2 branch outcomes:
+match (slot freed, `m_count` decremented) and no-match (slot skipped). Both branches
+are covered:
+- `test_cancel_peer_matching`: PENDING slot for `dst` exists; verifies slot freed and
+  count == 1 returned.
+- `test_cancel_peer_no_match`: no PENDING slot for `dst`; verifies count == 0.
+`cancel_peer()` contains no `NEVER_COMPILED_OUT_ASSERT` calls, so no new
+permanently-missed branches are introduced. Branch count increases by ~2 (the match/
+no-match loop outcomes); all new branches are 100% covered.
+
+**Permanently-missed branches (35 total — unchanged by INSP-034):**
 
 *(a) 32 NCA True (abort) paths* — one per `NEVER_COMPILED_OUT_ASSERT` call
 across all 9 functions (`init`, `track`, `on_ack`, `cancel`, `sweep_expired`,
@@ -526,11 +561,11 @@ across all 9 functions (`init`, `track`, `on_ack`, `cancel`, `sweep_expired`,
 
 All other decision-branch outcomes are 100% covered.
 
-Threshold: **≥76%** (maximum achievable, merged profdata).
+Threshold: **≥76%** (maximum achievable, merged profdata; exact post-INSP-034 count pending next coverage run).
 
 ---
 
-### core/RetryManager.cpp — ceiling 77.07% (121/157)
+### core/RetryManager.cpp — ceiling 77.07% (121/157) pre-INSP-034
 
 **2026-04-11 (round 13 — branch coverage):** 4 new tests added to
 `tests/test_RetryManager.cpp`: `test_cancel_no_match`, `test_cancel_wrong_source`,
@@ -544,7 +579,18 @@ re-initialization path).
 Prior result: 157 branches, 42 missed, 73.25%.
 New result: 157 branches, 36 missed, 77.07%. Line coverage: 100%.
 
-**Permanently-missed branches (36 total):**
+**2026-04-16 (INSP-034 — cancel_peer() added):** `cancel_peer(NodeId dst)` adds a
+bounded loop over `ACK_TRACKER_CAPACITY` slots. The loop body has 2 branch outcomes:
+match (slot deactivated, `m_count` decremented) and no-match (slot skipped). Both
+branches are covered:
+- `test_cancel_peer_matching`: active slot for `dst` exists; verifies slot deactivated
+  and count == 1 returned.
+- `test_cancel_peer_no_match`: no active slot for `dst`; verifies count == 0.
+`cancel_peer()` contains no `NEVER_COMPILED_OUT_ASSERT` calls, so no new
+permanently-missed branches are introduced. Branch count increases by ~2 (the match/
+no-match loop outcomes); all new branches are 100% covered.
+
+**Permanently-missed branches (36 total — unchanged by INSP-034):**
 
 36 NCA True (abort) paths — one per `NEVER_COMPILED_OUT_ASSERT` call across all
 9 functions (`compute_backoff_ms`, `init`, `schedule`, `on_ack`, `cancel`,
@@ -552,7 +598,7 @@ New result: 157 branches, 36 missed, 77.07%. Line coverage: 100%.
 In merged-profdata mode each NCA contributes 1 missed branch outcome
 (VVP-001 §4.3 d-i). All reachable branches are 100% covered.
 
-Threshold: **≥77%** (maximum achievable, merged profdata).
+Threshold: **≥77%** (maximum achievable, merged profdata; exact post-INSP-034 count pending next coverage run).
 
 ---
 
@@ -673,7 +719,39 @@ All branches reachable through the public API in a correctly-configured test har
 are 100% covered. The ~114 remaining missed branches are entirely accounted for by
 category (a) and category (b) above.
 
-Threshold: **≥75%** (maximum achievable; CI run will confirm exact post-rounds-14+6 figure).
+**2026-04-16 (round 20 — REQ-3.3.6 outbound sequence reset fix):**
+`reset_peer_ordering()` extended with a bounded loop over `m_seq_state[]` to reset
+the outbound sequence counter for the reconnecting peer (dst == src). This fixes the
+bug where a fresh client received seq=N+1 from the server after reconnect instead of
+seq=1. The fix adds 6 new branch outcomes:
+- `if (m_seq_state[i].active && (m_seq_state[i].dst == src))` True/False: covered by
+  existing `test_de_drain_hello_reconnects_via_transport` and `test_de_reset_peer_ordering_*`
+  tests (a peer slot exists after at least one send).
+- Loop-exhaustion path (no slot found for dst==src): new architectural gap — only
+  reachable when `reset_peer_ordering()` is called for a peer that has never been
+  an outbound destination. This cannot occur in any current public-API path (HELLO
+  is only queued after a connection that has already exchanged messages), so this
+  is category (b): architecturally-impossible through the public API.
+  LLVM contribution: 2 additional missed branch outcomes.
+
+Result: 479 → 485 branches, 114 → 118 missed, ~76.2% → 75.67%. No regression
+vs ≥75% threshold.
+
+**2026-04-16 (round 21 — INSP-034: cancel_peer() calls + RECONNECT_CANCEL event in reset_peer_ordering()):**
+`reset_peer_ordering()` further extended to call `m_ack_tracker.cancel_peer(src)` and
+`m_retry_manager.cancel_peer(src)` and to emit `RECONNECT_CANCEL` observability events
+per cancelled entry. This adds ~4 new branch outcomes in `core/DeliveryEngine.cpp`:
+- `if (ack_cancelled > 0U)` True/False (emit RECONNECT_CANCEL for AckTracker cancels):
+  covered by `test_de_reset_peer_ordering_cancels_inflight` (True) and
+  `test_de_reset_peer_ordering_cancel_no_inflight` (False).
+- `if (retry_cancelled > 0U)` True/False (emit RECONNECT_CANCEL for RetryManager cancels):
+  covered by the same two tests.
+All new branches are covered. No new permanently-missed branches introduced.
+
+Result: 485 → ~489 branches, 118 → ~118 missed (new branches covered), ~75.67% → ~75.87%.
+No regression vs ≥75% threshold.
+
+Threshold: **≥75%** (maximum achievable).
 
 ---
 

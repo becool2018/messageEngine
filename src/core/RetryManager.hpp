@@ -29,7 +29,7 @@
  * retry schedule and expiry. collect_due() applies exponential backoff and
  * removes exhausted entries.
  *
- * Implements: REQ-3.2.5, REQ-3.3.3, REQ-7.2.3
+ * Implements: REQ-3.2.5, REQ-3.3.3, REQ-3.3.6, REQ-7.2.3
  */
 
 #ifndef CORE_RETRY_MANAGER_HPP
@@ -81,6 +81,17 @@ public:
      * @return OK if cancelled; ERR_INVALID if no entry found.
      */
     Result on_ack(NodeId src, uint64_t msg_id);
+
+    // Safety-critical (SC): HAZ-016 — reconnect cleanup (REQ-3.3.6)
+    /// Cancel all active retry slots for messages destined to @p dst.
+    /// Called by DeliveryEngine::reset_peer_ordering() on peer reconnect so that
+    /// stale retries from a prior session are not injected into the new connection.
+    /// Transitions each matching slot to inactive without bumping acks_received —
+    /// delivery confirmation will never arrive.
+    /// Logs WARNING_HI per cancelled entry with the cancelled message_id.
+    /// @param dst  [in] destination node ID of the reconnecting peer
+    /// @return count of active slots cancelled (0 if none matched)
+    uint32_t cancel_peer(NodeId dst);
 
     /// Cancel an active retry slot without incrementing acks_received.
     /// Used for rollback when the associated send failed before hitting the wire.

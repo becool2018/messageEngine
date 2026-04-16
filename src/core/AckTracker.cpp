@@ -24,7 +24,7 @@
  *   - MISRA C++: no dynamic allocation, no exceptions.
  *   - F-Prime style: simple state machine (FREE/PENDING/ACKED), deterministic behavior.
  *
- * Implements: REQ-3.2.4, REQ-3.3.2, REQ-7.2.3, REQ-3.2.11
+ * Implements: REQ-3.2.4, REQ-3.3.2, REQ-3.3.6, REQ-7.2.3, REQ-3.2.11
  */
 
 #include "AckTracker.hpp"
@@ -126,6 +126,46 @@ Result AckTracker::on_ack(NodeId src, uint64_t msg_id)
     NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);  // Assert: count is still valid
 
     return Result::ERR_INVALID;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AckTracker::cancel_peer() — SC: HAZ-001, HAZ-016
+// Cancels all PENDING slots addressed to dst on peer reconnect (REQ-3.3.6).
+// Transitions each matching slot directly FREE without incrementing acks_received;
+// delivery confirmation for the prior session will never arrive.
+// Logs WARNING_HI per entry (with message_id) so operators can audit cancellations.
+// Power of 10 Rule 5: 2 assertions. CC <= 4.
+// ─────────────────────────────────────────────────────────────────────────────
+
+uint32_t AckTracker::cancel_peer(NodeId dst)
+{
+    // Power of 10 rule 5: pre-condition assertions
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);             // Assert: init() called
+    NEVER_COMPILED_OUT_ASSERT(dst != NODE_ID_INVALID);    // Assert: valid destination
+
+    uint32_t cancelled = 0U;
+
+    // Power of 10 Rule 2: bounded loop (ACK_TRACKER_CAPACITY is a compile-time constant)
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        if ((m_slots[i].state == EntryState::PENDING) &&
+            (m_slots[i].env.destination_id == dst)) {
+            // Release slot to FREE; do NOT increment acks_received — the peer
+            // reconnected, so delivery confirmation will never arrive (REQ-3.3.6).
+            LOG_WARN_HI("AckTracker",
+                        "cancel_peer: cancelled in-flight message_id=%llu to dst=%u due to peer reconnect (REQ-3.3.6)",
+                        static_cast<unsigned long long>(m_slots[i].env.message_id),
+                        static_cast<unsigned>(dst));
+            m_slots[i].state = EntryState::FREE;
+            if (m_count > 0U) { --m_count; }
+            ++cancelled;
+        }
+    }
+
+    // Power of 10 rule 5: post-condition assertions
+    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);    // Assert: count bounded
+    NEVER_COMPILED_OUT_ASSERT(cancelled <= ACK_TRACKER_CAPACITY);  // Assert: result bounded
+
+    return cancelled;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

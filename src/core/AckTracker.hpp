@@ -25,7 +25,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 ptr indirection.
  *   - F-Prime style: simple state machine (FREE/PENDING/ACKED), deterministic behavior.
  *
- * Implements: REQ-3.2.4, REQ-3.3.2, REQ-7.2.3, REQ-3.2.11
+ * Implements: REQ-3.2.4, REQ-3.3.2, REQ-3.3.6, REQ-7.2.3, REQ-3.2.11
  */
 
 #ifndef CORE_ACK_TRACKER_HPP
@@ -61,6 +61,17 @@ public:
     /// @param msg_id [in] message ID that was ACKed
     /// @return OK on success; ERR_INVALID if no matching pending message found
     Result on_ack(NodeId src, uint64_t msg_id);
+
+    // Safety-critical (SC): HAZ-001, HAZ-016 — reconnect cleanup (REQ-3.3.6)
+    /// Cancel all PENDING slots tracking messages sent to @p dst.
+    /// Called by DeliveryEngine::reset_peer_ordering() on peer reconnect so that
+    /// pre-reset envelopes addressed to the reconnecting peer are not retried on the
+    /// new connection.  Transitions each matching slot directly to FREE without
+    /// incrementing acks_received — delivery confirmation will never arrive.
+    /// Logs WARNING_HI per cancelled entry with the cancelled message_id.
+    /// @param dst  [in] destination node ID of the reconnecting peer
+    /// @return count of PENDING slots cancelled (0 if none matched)
+    uint32_t cancel_peer(NodeId dst);
 
     // Safety-critical (SC): HAZ-002
     /// Cancel a PENDING slot without incrementing acks_received.
