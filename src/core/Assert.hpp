@@ -68,7 +68,7 @@
 #define NEVER_COMPILED_OUT_ASSERT(cond)                                           \
     do {                                                                           \
         if (!(cond)) { /* NOLINT(readability-simplify-boolean-expr) */            \
-            Logger::log(Severity::FATAL, __FILE__, static_cast<int>(__LINE__),    \
+            Logger::log(Severity::FATAL, __func__, static_cast<int>(__LINE__),    \
                         "Assert",                                                  \
                         "Assertion failed: (%s) at %s:%d",                        \
                         #cond, __FILE__, static_cast<int>(__LINE__));             \
@@ -101,7 +101,7 @@
 #define NEVER_COMPILED_OUT_ASSERT(cond)                                           \
     do {                                                                           \
         if (!(cond)) { /* NOLINT(readability-simplify-boolean-expr) */            \
-            Logger::log(Severity::FATAL, __FILE__, static_cast<int>(__LINE__),    \
+            Logger::log(Severity::FATAL, __func__, static_cast<int>(__LINE__),    \
                         "Assert",                                                  \
                         "Assertion failed: (%s) at %s:%d",                        \
                         #cond, __FILE__, static_cast<int>(__LINE__));             \

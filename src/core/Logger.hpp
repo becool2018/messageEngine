@@ -38,10 +38,10 @@
  *   through the full send→impair→receive pipeline across all modules.
  *
  * Standard log format (LOG_INFO, LOG_WARN_*, LOG_FATAL):
- *   [mono_sec.mono_us][pid][severity][tid][module][file:line] message
+ *   [mono_sec.mono_us][pid][severity][tid][module][func:line] message
  *
  * Wall variant format (LOG_INFO_WALL, LOG_WARN_*_WALL, LOG_FATAL_WALL):
- *   [wall_sec.wall_us][mono_sec.mono_us][pid][severity][tid][module][file:line] message
+ *   [wall_sec.wall_us][mono_sec.mono_us][pid][severity][tid][module][func:line] message
  *
  * Rules applied:
  *   - Power of 10 rule 8: macros expand to a single function call, no control flow.
@@ -119,7 +119,7 @@ public:
     // ─────────────────────────────────────────────────────────────────────
 
     /// Emit a structured log line with monotonic timestamp.
-    /// Format: [mono_sec.mono_us][pid][sev][tid][module][file:line] message
+    /// Format: [mono_sec.mono_us][pid][sev][tid][module][func:line] message
     ///
     /// __attribute__((format)) is a GCC/Clang extension used here as a
     /// documented, minimal deviation: it enables compile-time format/argument
@@ -127,17 +127,17 @@ public:
     /// vsnprintf call site. More compliant, not less.
     // NOLINTNEXTLINE(readability-non-const-parameter)  -- va_list requires non-const
     static void log(Severity sev,
-                    const char* file,
+                    const char* func,
                     int line,
                     const char* module,
                     const char* fmt, ...)
         __attribute__((format(printf, 5, 6)));
 
     /// Emit a structured log line with wall clock + monotonic timestamp.
-    /// Format: [wall_sec.wall_us][mono_sec.mono_us][pid][sev][tid][module][file:line] message
+    /// Format: [wall_sec.wall_us][mono_sec.mono_us][pid][sev][tid][module][func:line] message
     // NOLINTNEXTLINE(readability-non-const-parameter)  -- va_list requires non-const
     static void log_wall(Severity sev,
-                         const char* file,
+                         const char* func,
                          int line,
                          const char* module,
                          const char* fmt, ...)
@@ -150,26 +150,15 @@ private:
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LOG_FILE — compile-time basename stripping.
-//
-// Strips the directory prefix from __FILE__ at compile time via pointer
-// arithmetic on the string literal. Zero runtime cost. Reduces .rodata size
-// on constrained (bare-metal) targets.
-// __builtin_strrchr is evaluated at compile time for string literals by GCC/Clang.
-//
-// MISRA C++:2023 Rule 19.3.4 deviation: __builtin_strrchr is a GCC/Clang
-// built-in used for compile-time string processing — no ISO C++17 mechanism
-// achieves the same zero-runtime-cost result. This project targets GCC/Clang
-// on POSIX only; portability to non-GCC toolchains is not required. Reviewed
-// and accepted per deviation policy.
-// NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LOG_FILE \
-    (__builtin_strrchr(__FILE__, '/') \
-        ? __builtin_strrchr(__FILE__, '/') + 1 \
-        : __FILE__)
-
-// ─────────────────────────────────────────────────────────────────────────────
 // LOG_* macros — metadata-injecting wrappers for Logger::log / Logger::log_wall.
+//
+// __func__ (ISO C++17 §9.2.3) is a predefined string literal holding the
+// undecorated name of the enclosing function. Zero runtime cost — it is a
+// static const char[] initialized by the compiler. No MISRA deviation needed.
+//
+// The func field is formatted as %.15s in Logger::log/log_wall — truncated to
+// 15 characters at format time with no padding for shorter names. This keeps
+// log lines predictably bounded without any caller-side allocation or copying.
 //
 // MISRA C++:2023 Rule 19.3.4 deviation: ##__VA_ARGS__ is a GCC/Clang extension
 // used solely to suppress the trailing comma when no variadic arguments are
@@ -180,24 +169,24 @@ private:
 //
 // Standard macros — monotonic timestamp only in header.
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LOG_INFO(mod, fmt, ...)         Logger::log(Severity::INFO,       LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+#define LOG_INFO(mod, fmt, ...)         Logger::log(Severity::INFO,       __func__, __LINE__, (mod), (fmt), ##__VA_ARGS__)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LOG_WARN_LO(mod, fmt, ...)      Logger::log(Severity::WARNING_LO, LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+#define LOG_WARN_LO(mod, fmt, ...)      Logger::log(Severity::WARNING_LO, __func__, __LINE__, (mod), (fmt), ##__VA_ARGS__)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LOG_WARN_HI(mod, fmt, ...)      Logger::log(Severity::WARNING_HI, LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+#define LOG_WARN_HI(mod, fmt, ...)      Logger::log(Severity::WARNING_HI, __func__, __LINE__, (mod), (fmt), ##__VA_ARGS__)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LOG_FATAL(mod, fmt, ...)        Logger::log(Severity::FATAL,      LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+#define LOG_FATAL(mod, fmt, ...)        Logger::log(Severity::FATAL,      __func__, __LINE__, (mod), (fmt), ##__VA_ARGS__)
 
 // Wall-clock variants — wall timestamp prepended before monotonic.
 // Use when absolute time correlation with external systems is needed
 // (e.g., connection establishment, partition events, fatal errors).
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LOG_INFO_WALL(mod, fmt, ...)    Logger::log_wall(Severity::INFO,       LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+#define LOG_INFO_WALL(mod, fmt, ...)    Logger::log_wall(Severity::INFO,       __func__, __LINE__, (mod), (fmt), ##__VA_ARGS__)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LOG_WARN_LO_WALL(mod, fmt, ...) Logger::log_wall(Severity::WARNING_LO, LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+#define LOG_WARN_LO_WALL(mod, fmt, ...) Logger::log_wall(Severity::WARNING_LO, __func__, __LINE__, (mod), (fmt), ##__VA_ARGS__)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LOG_WARN_HI_WALL(mod, fmt, ...) Logger::log_wall(Severity::WARNING_HI, LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+#define LOG_WARN_HI_WALL(mod, fmt, ...) Logger::log_wall(Severity::WARNING_HI, __func__, __LINE__, (mod), (fmt), ##__VA_ARGS__)
 // NOLINTNEXTLINE(cppcoreguidelines-macro-usage)
-#define LOG_FATAL_WALL(mod, fmt, ...)   Logger::log_wall(Severity::FATAL,      LOG_FILE, __LINE__, (mod), (fmt), ##__VA_ARGS__)
+#define LOG_FATAL_WALL(mod, fmt, ...)   Logger::log_wall(Severity::FATAL,      __func__, __LINE__, (mod), (fmt), ##__VA_ARGS__)
 
 #endif // CORE_LOGGER_HPP
