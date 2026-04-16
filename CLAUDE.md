@@ -493,9 +493,11 @@ Security assumptions and invariants: docs/SECURITY_ASSUMPTIONS.md
 15. Stack Depth Analysis (NASA-STD-8719.13C)
 
 Analysis artifact and current worst-case call chains: docs/STACK_ANALYSIS.md.
-Current worst case: 11 frames (Chain 3 — retry pump with send_fragments); ~130 KB stack
-dominated by DtlsUdpBackend/TlsTcpBackend delayed[] buffer (flush path). Non-flush
-worst case: ~764 bytes. Platform headroom: >10 000× on macOS/Linux (non-DTLS flush path).
+Current worst case (frame depth): 11 frames (Chain 3 — retry pump with send_fragments); ~592 B.
+Current worst case (stack size): Chain 5 — DTLS outbound send; ~764 B (~1,326 B with Logger frames).
+DEF-031-1 (2026-04-15): delayed[] buffers in all five flush helpers moved to pre-allocated
+member arrays (m_delay_buf); flush-path stack reduced from ~130 KB to ~48 B.
+Platform headroom: >10,000× on macOS/Linux.
 
 Update trigger: update docs/STACK_ANALYSIS.md when any function introduces a
 stack-allocated buffer >256 bytes, a new call chain exceeds 10 frames, or a new

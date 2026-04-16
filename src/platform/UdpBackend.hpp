@@ -86,6 +86,10 @@ private:
     ISocketOps*       m_sock_ops;                         ///< Non-owning; never null after ctor
     int               m_fd;                              ///< UDP socket FD
     uint8_t           m_wire_buf[SOCKET_RECV_BUF_BYTES]; ///< Serialization buffer
+    // Power of 10 Rule 3: pre-allocated impairment flush buffer; avoids 130 KB stack frame in
+    // send_message() and flush_delayed_to_wire(). The two callers are never simultaneously live.
+    // Zero-initialized at declaration.
+    MessageEnvelope   m_delay_buf[IMPAIR_DELAY_BUF_SIZE] = {};  ///< SC: HAZ-005, HAZ-006
     TransportConfig   m_cfg;                             ///< Transport configuration
     ImpairmentEngine  m_impairment;                      ///< Impairment simulator
     RingBuffer        m_recv_queue;                      ///< Inbound message queue

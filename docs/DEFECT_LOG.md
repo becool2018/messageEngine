@@ -1777,3 +1777,37 @@ DEF-004-4 with the following acceptance criteria:
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-04-15. All four deferred requirements (REQ-7.2.1–REQ-7.2.4) now implemented and verified. All five acceptance criteria from INSP-004 satisfied. `make check_traceability` PASS. DEF-004-1 through DEF-004-4 closed FIX. Inspection INSP-030 closed PASS.
+
+### INSP-031 — Stack flush-buffer fix: MessageEnvelope m_delay_buf moved from stack-local to member (2026-04-15)
+
+**Branch:** `fix/stack-delay-buf-member-2026-04`
+**Change summary:** In all five transport backends (`TcpBackend`, `TlsTcpBackend`, `UdpBackend`,
+`DtlsUdpBackend`, `LocalSimHarness`), the stack-local array `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]`
+declared inside `flush_delayed_to_clients()`, `flush_delayed_to_wire()`, and `send_message()` flush
+helpers has been replaced by a pre-allocated private member `MessageEnvelope m_delay_buf[IMPAIR_DELAY_BUF_SIZE] = {}`.
+This reduces the flush-path worst-case stack from ~130 KB to ~48 B.
+
+**Defects found:**
+
+| ID | Severity | Description | Status |
+|----|----------|-------------|--------|
+| DEF-031-1 | MAJOR | `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]` in five flush helpers allocates ~130 KB of stack on every call, making the library unsuitable for embedded targets with ≤ 256 KB per-thread stacks | FIX |
+
+**Acceptance criteria:**
+
+| Criterion | Status |
+|-----------|--------|
+| `m_delay_buf` added as private member in all five backend headers (`= {}` zero-init) | PASS |
+| All seven stack-local `delayed[]` / `delayed_envelopes[]` declarations removed from .cpp files | PASS |
+| All references to local `delayed[i]` / `delayed_envelopes` replaced with `m_delay_buf[i]` / `m_delay_buf` | PASS |
+| `docs/STACK_ANALYSIS.md` Critical Warning section converted to Resolved; Chain 3 updated ~130 KB → ~592 B; Summary table updated | PASS |
+| `CLAUDE.md §15` worst-case figures updated | PASS |
+| `make lint` PASS | PASS |
+| `make run_tests` 24/24 PASS | PASS |
+| `make check_traceability` PASS | PASS |
+
+**Moderator sign-off:**
+
+Moderator: Don Jessup — 2026-04-15. DEF-031-1 fixed across all five backends. Stack-analysis
+document updated; `~130 KB` flush-path allocation eliminated. All acceptance criteria satisfied.
+`make lint`, `make run_tests` (24/24), `make check_traceability` all PASS. Inspection INSP-031 closed PASS.

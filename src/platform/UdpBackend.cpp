@@ -304,12 +304,11 @@ Result UdpBackend::send_message(const MessageEnvelope& envelope)
     // pass-through and the timed-delay cases. Do NOT also call send_to() for
     // `envelope` directly — that causes every message to be sent twice. (HAZ-003)
     // flush_outbound_batch() handles the three-case attribution (see its comment).
-    MessageEnvelope delayed_envelopes[IMPAIR_DELAY_BUF_SIZE];
     uint32_t delayed_count = m_impairment.collect_deliverable(now_us,
-                                                              delayed_envelopes,
+                                                              m_delay_buf,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    if (flush_outbound_batch(envelope, delayed_envelopes, delayed_count)) {
+    if (flush_outbound_batch(envelope, m_delay_buf, delayed_count)) {
         return Result::ERR_IO;
     }
 
@@ -488,8 +487,7 @@ void UdpBackend::flush_delayed_to_wire(uint64_t now_us)
     NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);      // Power of 10: valid timestamp
     NEVER_COMPILED_OUT_ASSERT(m_open);             // Power of 10: transport must be open
 
-    MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];
-    uint32_t count = m_impairment.collect_deliverable(now_us, delayed,
+    uint32_t count = m_impairment.collect_deliverable(now_us, m_delay_buf,
                                                       IMPAIR_DELAY_BUF_SIZE);
 
     // Power of 10 rule 2: fixed loop bound
@@ -499,7 +497,7 @@ void UdpBackend::flush_delayed_to_wire(uint64_t now_us)
     //      failures, but we must not discard the return value (Rule 7).
     for (uint32_t i = 0U; i < count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        const bool send_failed = send_one_envelope(delayed[i], false);
+        const bool send_failed = send_one_envelope(m_delay_buf[i], false);
         if (send_failed) {
             LOG_WARN_HI("UdpBackend", "flush_delayed_to_wire: send_one_envelope failed for slot %u", i);
         }
