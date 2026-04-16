@@ -1003,12 +1003,13 @@ void DtlsUdpBackend::flush_delayed_to_wire(uint64_t now_us)
     NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);
     NEVER_COMPILED_OUT_ASSERT(m_open);
 
-    uint32_t count = m_impairment.collect_deliverable(now_us, m_delay_buf,
+    MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];
+    uint32_t count = m_impairment.collect_deliverable(now_us, delayed,
                                                       IMPAIR_DELAY_BUF_SIZE);
     // Power of 10 Rule 2: fixed loop bound (IMPAIR_DELAY_BUF_SIZE)
     for (uint32_t i = 0U; i < count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        (void)send_one_envelope(m_delay_buf[i], false);
+        (void)send_one_envelope(delayed[i], false);
     }
 }
 
@@ -1405,10 +1406,11 @@ Result DtlsUdpBackend::send_message(const MessageEnvelope& envelope)
     // delay cases. Do NOT also call send_wire_bytes() here; that would send every
     // message twice. (HAZ-003)
     // flush_outbound_batch() handles the three-case attribution (see its comment).
-    uint32_t delayed_count = m_impairment.collect_deliverable(now_us, m_delay_buf,
+    MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];
+    uint32_t delayed_count = m_impairment.collect_deliverable(now_us, delayed,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
-    if (flush_outbound_batch(envelope, m_delay_buf, delayed_count)) {
+    if (flush_outbound_batch(envelope, delayed, delayed_count)) {
         return Result::ERR_IO;
     }
 

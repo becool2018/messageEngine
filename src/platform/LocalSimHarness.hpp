@@ -106,9 +106,6 @@ private:
     // ───────────────────────────────────────────────────────────────────────
     LocalSimHarness*  m_peer;               ///< Linked peer harness (nullptr if unlinked)
     ImpairmentEngine  m_impairment;         ///< Impairment simulator
-    // Power of 10 Rule 3: pre-allocated impairment flush buffer; avoids 130 KB stack frame in
-    // send_message(). Zero-initialized at declaration.
-    MessageEnvelope   m_delay_buf[IMPAIR_DELAY_BUF_SIZE] = {};  ///< SC: HAZ-005, HAZ-006
     RingBuffer        m_recv_queue;         ///< Inbound message queue
     bool              m_open;              ///< Transport open/closed state
     uint32_t          m_connections_opened; ///< REQ-7.2.4: successful link() events

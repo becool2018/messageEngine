@@ -92,9 +92,6 @@ private:
     int                m_client_fds[MAX_TCP_CONNECTIONS];     ///< Connected client FDs
     uint32_t           m_client_count;                        ///< Number of active clients
     uint8_t            m_wire_buf[SOCKET_RECV_BUF_BYTES];     ///< Serialization buffer
-    // Power of 10 Rule 3: pre-allocated impairment flush buffer; avoids 130 KB stack frame in flush_delayed_to_clients().
-    // Zero-initialized at declaration. Never simultaneously live with receive path.
-    MessageEnvelope    m_delay_buf[IMPAIR_DELAY_BUF_SIZE] = {};  ///< SC: HAZ-005, HAZ-006
     TransportConfig    m_cfg;                                 ///< Transport configuration
     ImpairmentEngine   m_impairment;                          ///< Impairment simulator
     RingBuffer         m_recv_queue;                          ///< Inbound message queue

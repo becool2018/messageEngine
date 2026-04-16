@@ -533,7 +533,8 @@ Result TcpBackend::flush_delayed_to_clients(const MessageEnvelope& current_env,
     NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);          // Power of 10: valid timestamp
     NEVER_COMPILED_OUT_ASSERT(m_open);                 // Power of 10: transport must be open
 
-    uint32_t count = m_impairment.collect_deliverable(now_us, m_delay_buf,
+    MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];
+    uint32_t count = m_impairment.collect_deliverable(now_us, delayed,
                                                       IMPAIR_DELAY_BUF_SIZE);
 
     Result final_result = Result::OK;
@@ -541,11 +542,11 @@ Result TcpBackend::flush_delayed_to_clients(const MessageEnvelope& current_env,
     // Power of 10 rule 2: fixed loop bound (IMPAIR_DELAY_BUF_SIZE)
     for (uint32_t i = 0U; i < count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        bool is_current = (m_delay_buf[i].source_id == current_env.source_id) &&
-                          (m_delay_buf[i].message_id == current_env.message_id);
+        bool is_current = (delayed[i].source_id == current_env.source_id) &&
+                          (delayed[i].message_id == current_env.message_id);
 
         bool failed = false;
-        Result route_r = send_one_delayed(m_delay_buf[i], failed);
+        Result route_r = send_one_delayed(delayed[i], failed);
         apply_send_result(route_r, failed, is_current, final_result);
     }
     return final_result;

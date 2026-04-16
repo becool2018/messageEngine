@@ -147,10 +147,6 @@ private:
     // ── Socket and transport state ───────────────────────────────────────────
     int             m_sock_fd;                        ///< POSIX SOCK_DGRAM file descriptor
     uint8_t         m_wire_buf[SOCKET_RECV_BUF_BYTES]; ///< Serialization / receive buffer
-    // Power of 10 Rule 3: pre-allocated impairment flush buffer; avoids 130 KB stack frame in
-    // flush_delayed_to_wire() and send_message(). The two callers are never simultaneously live.
-    // Zero-initialized at declaration.
-    MessageEnvelope m_delay_buf[IMPAIR_DELAY_BUF_SIZE] = {};  ///< SC: HAZ-005, HAZ-006
     TransportConfig m_cfg;                            ///< Transport configuration copy
     ImpairmentEngine m_impairment;                    ///< Impairment simulator
     RingBuffer      m_recv_queue;                     ///< Inbound message ring buffer
