@@ -278,11 +278,11 @@ two categories is a defect, not a ceiling.
 | platform/ImpairmentConfigLoader.cpp | 174 | 28 | 83.91% | ≥83% | SC |
 | platform/SocketUtils.cpp | 306 | 74 | 75.82% | ≥75% | NSC |
 | platform/PosixSyscallsImpl.cpp | 54 | 16 | 70.37% | ≥70% (NSC) | NSC |
-| platform/TcpBackend.cpp | 445 | 107 | 75.96% | ≥75% | SC |
+| platform/TcpBackend.cpp | 461 | 110 | 76.14% | ≥75% | SC |
 | platform/TlsSessionStore.cpp | 12 | 4 | 66.67% | ≥66% | SC |
-| platform/TlsTcpBackend.cpp | 791 | 170 | 78.51% | ≥78% | SC |
-| platform/UdpBackend.cpp | 194 | 50 | 74.23% | ≥74% | SC |
-| platform/DtlsUdpBackend.cpp | 487 | 111 | 77.21% | ≥77% | SC |
+| platform/TlsTcpBackend.cpp | 867 | 193 | 77.74% | ≥77% | SC |
+| platform/UdpBackend.cpp | 200 | 51 | 74.50% | ≥74% | SC |
+| platform/DtlsUdpBackend.cpp | 513 | 116 | 77.39% | ≥77% | SC |
 | platform/LocalSimHarness.cpp | 122 | 36 | 70.49% | ≥70% | SC |
 | platform/MbedtlsOpsImpl.cpp | 150 | 46 | 69.33% | ≥69% | SC |
 | platform/SocketOpsImpl.cpp | 72 | 24 | 66.67% | ≥66% (NSC) | NSC |
@@ -1138,6 +1138,23 @@ and `try_save_client_session()`, CI must include a build configuration with
 for SC function verification of the session-resumption paths.
 
 Threshold: **≥78%** (maximum achievable; updated after `make coverage` run on PR 3 branch).
+
+**2026-04-15 (round 19 — Logger __func__ change effect / INSP-032 / INSP-033):**
+After the Logger PR (INSP-032, `feat/logger-func-name-2026-04`) replaced `LOG_FILE`
+(`__builtin_strrchr(__FILE__, '/')` ternary) with `__func__` across all LOG_* macros and
+updated `Assert.hpp` to pass `__func__`, LLVM recomputed TlsTcpBackend branch counts.
+Branch count changed from 791 → 867 (+76); missed from 170 → 193 (+23). Coverage: 77.74%.
+
+Investigation (INSP-033): Our changes (DEF-031-1 fix — `m_delay_buf` member + test
+heap-allocation) added 0 new NEVER_COMPILED_OUT_ASSERT calls (count: 143, unchanged) and
+changed no control flow in TlsTcpBackend.cpp. The branch count increase predates our commit
+(confirmed: same 867 branches at HEAD~1). The 23 additional missed branches fall into the
+same structural-ceiling categories (a), (c), (d) documented above (NEVER_COMPILED_OUT_ASSERT
+True paths and defensive guards). No previously-covered branch is now uncovered due to our
+code change.
+
+New threshold: **≥77%** (867 branches, ≤193 missed; reflects post-INSP-032 baseline).
+A future round may recover the 0.77% gap by targeting the newly-counted branches.
 
 ---
 

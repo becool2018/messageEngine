@@ -115,14 +115,14 @@ static void setup_two_nodes(LocalSimHarness&    harness_a,
 static void test_rre_basic_request_response()
 {
     // Verifies: REQ-3.2.4, REQ-3.3.3
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
 
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // A sends request
     const uint8_t req_data[] = {0x01U, 0x02U, 0x03U};
@@ -161,8 +161,10 @@ static void test_rre_basic_request_response()
     assert(rx_resp[0] == 0xAAU);
     assert(rx_resp[1] == 0xBBU);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_basic_request_response\n");
 }
 
@@ -176,14 +178,14 @@ static void test_rre_basic_request_response()
 static void test_rre_response_correlation()
 {
     // Verifies: REQ-3.2.4, REQ-3.3.3
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
 
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // A sends request 1
     const uint8_t req1[] = {0x11U};
@@ -240,8 +242,10 @@ static void test_rre_response_correlation()
     assert(out2_len == 1U);
     assert(out2[0] == 0xCCU);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_response_correlation\n");
 }
 
@@ -255,14 +259,14 @@ static void test_rre_response_correlation()
 static void test_rre_response_timeout()
 {
     // Verifies: REQ-3.2.4, REQ-3.3.2
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
 
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Use a short timeout: expires at NOW_US + 1000
     const uint8_t req[] = {0x55U};
@@ -283,8 +287,10 @@ static void test_rre_response_timeout()
     r = rrea.receive_response(cid, out, 64U, out_len, later_us);
     assert(r == Result::ERR_INVALID);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_response_timeout\n");
 }
 
@@ -297,14 +303,14 @@ static void test_rre_response_timeout()
 static void test_rre_pending_table_full()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
 
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     const uint8_t dummy[] = {0x00U};
     uint64_t cids[RequestReplyEngine::MAX_PENDING_REQUESTS];
@@ -323,8 +329,10 @@ static void test_rre_pending_table_full()
                                  TIMEOUT_5S, NOW_US, extra_cid);
     assert(r == Result::ERR_FULL);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_pending_table_full\n");
 }
 
@@ -339,14 +347,14 @@ static void test_rre_pending_table_full()
 static void test_rre_unmatched_response_stash()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
 
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // B sends a response for a correlation_id that A never sent as a request.
     const uint64_t UNKNOWN_CID = 0xDEADBEEFCAFEU;
@@ -361,8 +369,10 @@ static void test_rre_unmatched_response_stash()
     r = rrea.receive_response(UNKNOWN_CID, out, 64U, out_len, NOW_US);
     assert(r == Result::ERR_INVALID);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_unmatched_response_stash\n");
 }
 
@@ -376,14 +386,14 @@ static void test_rre_unmatched_response_stash()
 static void test_rre_receive_request_then_reply()
 {
     // Verifies: REQ-3.2.4, REQ-3.3.2, REQ-3.3.3
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
 
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Build a multi-byte request payload
     const uint8_t req_data[] = {0x10U, 0x20U, 0x30U, 0x40U, 0x50U};
@@ -419,8 +429,10 @@ static void test_rre_receive_request_then_reply()
     assert(obuf[1] == 0xE2U);
     assert(obuf[2] == 0xE3U);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_receive_request_then_reply\n");
 }
 
@@ -435,14 +447,14 @@ static void test_rre_receive_request_then_reply()
 static void test_rre_request_stash_full()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
 
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Send MAX_STASH_SIZE + 2 requests from B to A.
     // The extra ones are expected to be dropped gracefully.
@@ -486,8 +498,10 @@ static void test_rre_request_stash_full()
                                     final_src, final_cid, NOW_US);
     assert(r == Result::ERR_EMPTY);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_request_stash_full\n");
 }
 
@@ -502,13 +516,13 @@ static void test_rre_request_stash_full()
 static void test_rre_non_rr_passthrough()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Build a plain DATA envelope (no RR header — raw application payload).
     MessageEnvelope raw_env;
@@ -536,8 +550,10 @@ static void test_rre_non_rr_passthrough()
     assert(out.payload[0] == 0xCAU);
     assert(out.payload[1] == 0xFEU);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_non_rr_passthrough\n");
 }
 
@@ -551,13 +567,13 @@ static void test_rre_non_rr_passthrough()
 static void test_rre_non_rr_fifo_order()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     static const uint32_t FRAME_COUNT = 3U;
     static const uint8_t  MARKERS[FRAME_COUNT] = { 0x11U, 0x22U, 0x33U };
@@ -591,8 +607,10 @@ static void test_rre_non_rr_fifo_order()
     Result rem = rrea.receive_non_rr(empty_out, NOW_US);
     assert(rem == Result::ERR_EMPTY);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_non_rr_fifo_order\n");
 }
 
@@ -606,13 +624,13 @@ static void test_rre_non_rr_fifo_order()
 static void test_rre_non_rr_stash_overflow()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Send MAX_STASH_SIZE + 1 raw DATA frames from B to A.
     // Strategy: trigger pump_inbound() while the stash is already at capacity
@@ -674,8 +692,10 @@ static void test_rre_non_rr_stash_overflow()
     }
     assert(received == CAP);   // exactly CAP; the extra frame was dropped
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_non_rr_stash_overflow\n");
 }
 
@@ -690,13 +710,13 @@ static void test_rre_non_rr_stash_overflow()
 static void test_rre_zero_cid_rejected()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Build a DATA envelope whose payload starts with a malformed RRHeader:
     // kind=REQUEST(0), cid=0 (all zero bytes 1-8), pad=0.
@@ -740,8 +760,10 @@ static void test_rre_zero_cid_rejected()
     assert(nr == Result::OK);
     assert(stashed.payload_length == 12U);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_zero_cid_rejected\n");
 }
 
@@ -755,13 +777,13 @@ static void test_rre_zero_cid_rejected()
 static void test_rre_nonzero_pad_rejected()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Build a DATA envelope with a valid kind and non-zero cid, but pad[0] = 0xAA.
     MessageEnvelope raw_env;
@@ -802,8 +824,10 @@ static void test_rre_nonzero_pad_rejected()
     Result nr = rrea.receive_non_rr(stashed, NOW_US);
     assert(nr == Result::OK);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_nonzero_pad_rejected\n");
 }
 
@@ -818,13 +842,13 @@ static void test_rre_nonzero_pad_rejected()
 static void test_rre_big_endian_cid_encoding()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Craft a DATA frame whose RRHeader has a known non-trivial big-endian cid.
     // The high bytes (0x01 through 0x04) exercise the MSB-first shift decoding.
@@ -868,8 +892,10 @@ static void test_rre_big_endian_cid_encoding()
     assert(req_len == 1U);
     assert(req_buf[0] == 0x42U);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_big_endian_cid_encoding\n");
 }
 
@@ -888,14 +914,14 @@ static void test_rre_big_endian_cid_encoding()
 static void test_rre_request_stash_fifo_reuse()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
 
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Payload bytes used as unique identifiers for each request
     static const uint8_t PAY_A = 0x0AU;
@@ -953,8 +979,10 @@ static void test_rre_request_stash_fifo_reuse()
     Result r5 = rreb.receive_request(buf, 64U, blen, bsrc, bcid, NOW_US);
     assert(r5 == Result::ERR_EMPTY);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_request_stash_fifo_reuse\n");
 }
 
@@ -970,13 +998,13 @@ static void test_rre_request_stash_fifo_reuse()
 static void test_rre_build_wire_overflow()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Payload one byte larger than APP_PAYLOAD_CAP = MSG_MAX_PAYLOAD_BYTES - RR_HEADER_SIZE.
     // RR_HEADER_SIZE = sizeof(RRHeader) = 12; MSG_MAX_PAYLOAD_BYTES = 4096.
@@ -992,8 +1020,10 @@ static void test_rre_build_wire_overflow()
     assert(r == Result::ERR_FULL);
     assert(cid == 0U);  // Assert: cid not assigned on failure
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_build_wire_overflow\n");
 }
 
@@ -1008,13 +1038,13 @@ static void test_rre_build_wire_overflow()
 static void test_rre_invalid_kind_rejected()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Build a DATA frame with kind = 0x02 (neither REQUEST=0 nor RESPONSE=1).
     // CID = 0x0000000000000001 (non-zero, valid in every other respect).
@@ -1056,8 +1086,10 @@ static void test_rre_invalid_kind_rejected()
     assert(nr == Result::OK);          // Assert: routed to non-RR stash
     assert(stashed.payload_length == 12U);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_invalid_kind_rejected\n");
 }
 
@@ -1071,13 +1103,13 @@ static void test_rre_invalid_kind_rejected()
 static void test_rre_duplicate_response_dropped()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // A sends one request.
     const uint8_t req[] = {0x42U};
@@ -1115,8 +1147,10 @@ static void test_rre_duplicate_response_dropped()
     // Assert: first response payload retrieved (duplicate was silently discarded)
     assert(out[0] == 0x11U);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_duplicate_response_dropped\n");
 }
 
@@ -1135,13 +1169,13 @@ static void test_rre_duplicate_response_dropped()
 static void test_rre_request_stash_overflow_raw()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Inject MAX_STASH_SIZE + 1 raw RR REQUEST frames via eb.send().
     // Each frame has: kind=REQUEST(0), unique non-zero cid, zero pad, 1-byte app payload.
@@ -1203,8 +1237,10 @@ static void test_rre_request_stash_overflow_raw()
     // Assert: exactly MAX_STASH_SIZE requests buffered; 17th was gracefully dropped
     assert(received == RequestReplyEngine::MAX_STASH_SIZE);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_request_stash_overflow_raw\n");
 }
 
@@ -1219,13 +1255,13 @@ static void test_rre_request_stash_overflow_raw()
 static void test_rre_receive_request_small_buf()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // A sends a 10-byte request.
     uint8_t req_data[10];
@@ -1248,8 +1284,10 @@ static void test_rre_receive_request_small_buf()
     assert(small_buf[0] == 0x01U);      // Assert: first bytes correct
     assert(small_buf[4] == 0x05U);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_receive_request_small_buf\n");
 }
 
@@ -1264,13 +1302,13 @@ static void test_rre_receive_request_small_buf()
 static void test_rre_send_response_overflow()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Any non-zero correlation ID is accepted by send_response.
     static const uint64_t DUMMY_CID    = 0x1234567890ABCDEFULL;
@@ -1282,8 +1320,10 @@ static void test_rre_send_response_overflow()
     // build_wire_payload returns 0; send_response returns ERR_FULL.
     assert(r == Result::ERR_FULL);   // Assert: overflow correctly reported
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_send_response_overflow\n");
 }
 
@@ -1298,13 +1338,13 @@ static void test_rre_send_response_overflow()
 static void test_rre_receive_response_not_ready()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // A sends request.
     const uint8_t req[] = {0x77U};
@@ -1320,8 +1360,10 @@ static void test_rre_receive_response_not_ready()
     r = rrea.receive_response(cid, out, 64U, out_len, NOW_US);
     assert(r == Result::ERR_EMPTY);   // Assert: not yet available (lines 729–730)
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_receive_response_not_ready\n");
 }
 
@@ -1336,13 +1378,13 @@ static void test_rre_receive_response_not_ready()
 static void test_rre_receive_response_small_buf()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // A sends a 1-byte request.
     const uint8_t req[] = {0x55U};
@@ -1373,8 +1415,10 @@ static void test_rre_receive_response_small_buf()
     assert(small_out[0] == 0x10U);  // Assert: first bytes present
     assert(small_out[3] == 0x40U);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_receive_response_small_buf\n");
 }
 
@@ -1389,13 +1433,13 @@ static void test_rre_receive_response_small_buf()
 static void test_rre_sweep_never_expires()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Send request with timeout_us = 0 → expiry_us stays 0 (never-expires).
     const uint8_t req[] = {0x99U};
@@ -1410,8 +1454,10 @@ static void test_rre_sweep_never_expires()
     uint32_t freed = rrea.sweep_timeouts(FAR_FUTURE);
     assert(freed == 0U);   // Assert: slot preserved (never-expires skipped)
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_sweep_never_expires\n");
 }
 
@@ -1426,13 +1472,13 @@ static void test_rre_sweep_never_expires()
 static void test_rre_send_request_engine_full()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Fill the AckTracker (and RetryManager) by sending ACK_TRACKER_CAPACITY
     // RELIABLE_RETRY messages directly via engine_a without consuming any ACKs.
@@ -1462,8 +1508,10 @@ static void test_rre_send_request_engine_full()
     Result r = rrea.send_request(NODE_B, dummy, 1U, TIMEOUT_5S, NOW_US, cid);
     assert(r != Result::OK);   // Assert: engine.send failed as expected
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_send_request_engine_full\n");
 }
 
@@ -1478,13 +1526,13 @@ static void test_rre_send_request_engine_full()
 static void test_rre_send_response_engine_full()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Flood ha's receive queue by sending MSG_RING_CAPACITY BEST_EFFORT messages
     // from eb to NODE_A.  ea never calls receive(), so all slots are occupied.
@@ -1519,8 +1567,10 @@ static void test_rre_send_response_engine_full()
     // Either way the code path must not crash; we just verify no assertion failure.
     (void)r;
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_send_response_engine_full\n");
 }
 
@@ -1541,13 +1591,13 @@ static void test_rre_send_response_engine_full()
 static void test_rre_zero_payload_round_trip()
 {
     // Verifies: REQ-3.2.4, REQ-3.3.2, REQ-3.3.3
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // A sends a request with zero application payload (app_payload_len = 0).
     // build_wire_payload: app_len == 0 → line 142 False (memcpy skipped).
@@ -1584,8 +1634,10 @@ static void test_rre_zero_payload_round_trip()
     // receive_response: copy_len == 0 → line 737 False (memcpy skipped)
     assert(resp_len == 0U);         // Assert: zero payload echoed back
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_zero_payload_round_trip\n");
 }
 
@@ -1600,13 +1652,13 @@ static void test_rre_zero_payload_round_trip()
 static void test_rre_parse_pad_byte1_nonzero()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Craft a DATA envelope: valid kind + non-zero cid + pad[0]=0 pad[1]=0xBB pad[2]=0.
     MessageEnvelope raw_env;
@@ -1646,8 +1698,10 @@ static void test_rre_parse_pad_byte1_nonzero()
     Result nr = rrea.receive_non_rr(stashed, NOW_US);
     assert(nr == Result::OK);  // Assert: non-RR stash received the frame
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_parse_pad_byte1_nonzero\n");
 }
 
@@ -1661,13 +1715,13 @@ static void test_rre_parse_pad_byte1_nonzero()
 static void test_rre_parse_pad_byte2_nonzero()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     MessageEnvelope raw_env;
     envelope_init(raw_env);
@@ -1704,8 +1758,10 @@ static void test_rre_parse_pad_byte2_nonzero()
     Result nr = rrea.receive_non_rr(stashed, NOW_US);
     assert(nr == Result::OK);  // Assert: frame in non-RR stash
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_parse_pad_byte2_nonzero\n");
 }
 
@@ -1723,13 +1779,13 @@ static void test_rre_parse_pad_byte2_nonzero()
 static void test_rre_timeout_overflow_saturation()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     static const uint8_t req[] = {0x42U};
     uint64_t cid = 0U;
@@ -1747,8 +1803,10 @@ static void test_rre_timeout_overflow_saturation()
     // (now_us = UINT64_MAX − 1 < UINT64_MAX = expiry_us).
     assert(freed == 0U);  // Assert: slot not freed (saturated expiry)
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_timeout_overflow_saturation\n");
 }
 
@@ -1762,13 +1820,13 @@ static void test_rre_timeout_overflow_saturation()
 static void test_rre_response_expiry_overflow()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Choose a now_us value that would cause 5 000 000 + now_us to overflow.
     // UINT64_MAX = 18446744073709551615; UINT64_MAX − 5000000 + 1 = 18446744073704551616.
@@ -1785,8 +1843,10 @@ static void test_rre_response_expiry_overflow()
     // the guard fired (no crash/abort) and the function returned.
     (void)r;
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_response_expiry_overflow\n");
 }
 
@@ -1800,13 +1860,13 @@ static void test_rre_response_expiry_overflow()
 static void test_rre_sweep_not_yet_expired()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness    ha;
+    LocalSimHarness*   ha = new LocalSimHarness();
     DeliveryEngine     ea;
     RequestReplyEngine rrea;
-    LocalSimHarness    hb;
+    LocalSimHarness*   hb = new LocalSimHarness();
     DeliveryEngine     eb;
     RequestReplyEngine rreb;
-    setup_two_nodes(ha, ea, rrea, hb, eb, rreb);
+    setup_two_nodes(*ha, ea, rrea, *hb, eb, rreb);
 
     // Send a request with a 10-second timeout.  expiry_us = NOW_US + 10 000 000.
     static const uint64_t TIMEOUT_10S = 10000000ULL;
@@ -1821,8 +1881,10 @@ static void test_rre_sweep_not_yet_expired()
     uint32_t freed = rrea.sweep_timeouts(NOW_US + 1U);
     assert(freed == 0U);  // Assert: slot not freed (not yet expired)
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_rre_sweep_not_yet_expired\n");
 }
 

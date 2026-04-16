@@ -158,6 +158,10 @@ private:
     bool            m_peer_hello_received;            ///< True once HELLO received from peer. REQ-6.1.8
     uint32_t        m_connections_opened;             ///< REQ-7.2.4: successful handshake/bind events
     uint32_t        m_connections_closed;             ///< REQ-7.2.4: close events
+    // Power of 10 Rule 3: pre-allocated impairment flush buffer; avoids ~130 KB stack frame
+    // in flush_delayed_to_wire() and send_message(). Zero-initialized at declaration.
+    // Both callers are serialized by the single-threaded send path (SC: HAZ-005, HAZ-006).
+    MessageEnvelope m_delay_buf[IMPAIR_DELAY_BUF_SIZE] = {}; ///< Impairment flush scratch buffer
     /// SEC-018: local NodeId stored by register_local_id() for future use
     /// (e.g., source_id stamping in outbound frames). NODE_ID_INVALID until set.
     NodeId          m_local_node_id;                  ///< Local NodeId (REQ-6.1.10, SEC-018)

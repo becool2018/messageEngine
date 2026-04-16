@@ -1728,8 +1728,7 @@ Result TlsTcpBackend::flush_delayed_to_clients(const MessageEnvelope& current_en
     NEVER_COMPILED_OUT_ASSERT(now_us > 0ULL);
     NEVER_COMPILED_OUT_ASSERT(m_open);
 
-    MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];
-    uint32_t count = m_impairment.collect_deliverable(now_us, delayed,
+    uint32_t count = m_impairment.collect_deliverable(now_us, m_delay_buf,
                                                       IMPAIR_DELAY_BUF_SIZE);
 
     Result final_result = Result::OK;
@@ -1737,9 +1736,9 @@ Result TlsTcpBackend::flush_delayed_to_clients(const MessageEnvelope& current_en
     // Power of 10 Rule 2: bounded loop — at most IMPAIR_DELAY_BUF_SIZE iterations
     for (uint32_t i = 0U; i < count; ++i) {
         NEVER_COMPILED_OUT_ASSERT(i < IMPAIR_DELAY_BUF_SIZE);
-        bool is_current = (delayed[i].source_id  == current_env.source_id) &&
-                          (delayed[i].message_id  == current_env.message_id);
-        Result r = route_one_delayed(delayed[i], is_current);
+        bool is_current = (m_delay_buf[i].source_id  == current_env.source_id) &&
+                          (m_delay_buf[i].message_id  == current_env.message_id);
+        Result r = route_one_delayed(m_delay_buf[i], is_current);
         if (!result_ok(r) && is_current) {
             final_result = r;
         }

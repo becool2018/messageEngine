@@ -132,21 +132,22 @@ static void test_udp_config()
 
 static void test_udp_bind_and_close()
 {
-    UdpBackend backend;
-    assert(!backend.is_open());
+    UdpBackend* backend = new UdpBackend();
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t bind_p19602 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19603 = alloc_ephemeral_port(SOCK_DGRAM);
     make_udp_cfg(cfg, bind_p19602, peer_p19603);  // peer not needed for bind-only test
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
-    backend.close();
-    assert(!backend.is_open());
+    backend->close();
+    assert(!backend->is_open());
 
+    delete backend;
     printf("PASS: test_udp_bind_and_close\n");
 }
 
@@ -157,20 +158,21 @@ static void test_udp_bind_and_close()
 
 static void test_udp_receive_timeout()
 {
-    UdpBackend backend;
+    UdpBackend* backend = new UdpBackend();
     TransportConfig cfg;
     const uint16_t bind_p19604 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19605 = alloc_ephemeral_port(SOCK_DGRAM);
     make_udp_cfg(cfg, bind_p19604, peer_p19605);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
 
     MessageEnvelope env;
-    r = backend.receive_message(env, 200U);  // 200 ms: 2 poll iterations
+    r = backend->receive_message(env, 200U);  // 200 ms: 2 poll iterations
     assert(r == Result::ERR_TIMEOUT);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_udp_receive_timeout\n");
 }
 
@@ -186,36 +188,38 @@ static void test_udp_loopback_send_receive()
     const uint16_t PORT_B   = alloc_ephemeral_port(SOCK_DGRAM);
     static const uint64_t TEST_ID  = 0xCAFEBABEULL;
 
-    UdpBackend side_a;
-    UdpBackend side_b;
+    UdpBackend* side_a = new UdpBackend();
+    UdpBackend* side_b = new UdpBackend();
 
     TransportConfig cfg_a;
     TransportConfig cfg_b;
     make_udp_cfg(cfg_a, PORT_A, PORT_B);
     make_udp_cfg(cfg_b, PORT_B, PORT_A);
 
-    assert(side_a.init(cfg_a) == Result::OK);
-    assert(side_b.init(cfg_b) == Result::OK);
+    assert(side_a->init(cfg_a) == Result::OK);
+    assert(side_b->init(cfg_b) == Result::OK);
 
     // REQ-6.1.8 / REQ-6.1.10 / REQ-6.2.4: register_local_id() sends HELLO on wire
     // so side_b can accept DATA frames from source_id=1.
-    assert(side_a.register_local_id(1U) == Result::OK);
+    assert(side_a->register_local_id(1U) == Result::OK);
 
     // Side A sends; datagram enters OS kernel buffer immediately (non-blocking)
     MessageEnvelope send_env;
     make_test_envelope(send_env, TEST_ID);
-    Result r = side_a.send_message(send_env);
+    Result r = side_a->send_message(send_env);
     assert(r == Result::OK);
 
     // Side B polls; HELLO is consumed, then DATA is retrieved
     MessageEnvelope recv_env;
-    r = side_b.receive_message(recv_env, 1000U);
+    r = side_b->receive_message(recv_env, 1000U);
     assert(r == Result::OK);
     assert(recv_env.message_id == TEST_ID);
     assert(recv_env.message_type == MessageType::DATA);
 
-    side_a.close();
-    side_b.close();
+    side_a->close();
+    side_b->close();
+    delete side_a;
+    delete side_b;
     printf("PASS: test_udp_loopback_send_receive\n");
 }
 
@@ -230,26 +234,26 @@ static void test_udp_multiple_messages()
     const uint16_t PORT_B = alloc_ephemeral_port(SOCK_DGRAM);
     static const uint32_t N      = 4U;
 
-    UdpBackend side_a;
-    UdpBackend side_b;
+    UdpBackend* side_a = new UdpBackend();
+    UdpBackend* side_b = new UdpBackend();
 
     TransportConfig cfg_a;
     TransportConfig cfg_b;
     make_udp_cfg(cfg_a, PORT_A, PORT_B);
     make_udp_cfg(cfg_b, PORT_B, PORT_A);
 
-    assert(side_a.init(cfg_a) == Result::OK);
-    assert(side_b.init(cfg_b) == Result::OK);
+    assert(side_a->init(cfg_a) == Result::OK);
+    assert(side_b->init(cfg_b) == Result::OK);
 
     // REQ-6.1.8 / REQ-6.1.10 / REQ-6.2.4: register_local_id() sends HELLO to peer.
-    assert(side_a.register_local_id(1U) == Result::OK);
+    assert(side_a->register_local_id(1U) == Result::OK);
 
     // Send N messages from A to B
     // Power of 10 Rule 2: fixed loop bound (N = 4)
     for (uint32_t i = 0U; i < N; ++i) {
         MessageEnvelope env;
         make_test_envelope(env, static_cast<uint64_t>(i) + 1U);
-        Result r = side_a.send_message(env);
+        Result r = side_a->send_message(env);
         assert(r == Result::OK);
     }
 
@@ -261,7 +265,7 @@ static void test_udp_multiple_messages()
     // Power of 10 Rule 2: fixed loop bound
     for (uint32_t attempt = 0U; attempt < N * 2U; ++attempt) {
         MessageEnvelope env;
-        Result r = side_b.receive_message(env, 200U);
+        Result r = side_b->receive_message(env, 200U);
         if (r == Result::OK) {
             assert(env.message_type == MessageType::DATA);
             ++received;
@@ -270,8 +274,10 @@ static void test_udp_multiple_messages()
     }
     assert(received == N);
 
-    side_a.close();
-    side_b.close();
+    side_a->close();
+    side_b->close();
+    delete side_a;
+    delete side_b;
     printf("PASS: test_udp_multiple_messages\n");
 }
 
@@ -281,13 +287,14 @@ static void test_udp_multiple_messages()
 
 static void test_udp_close_before_init()
 {
-    UdpBackend backend;
-    assert(!backend.is_open());
+    UdpBackend* backend = new UdpBackend();
+    assert(!backend->is_open());
 
-    backend.close();  // must not crash
-    backend.close();  // double close also safe
+    backend->close();  // must not crash
+    backend->close();  // double close also safe
 
-    assert(!backend.is_open());
+    assert(!backend->is_open());
+    delete backend;
     printf("PASS: test_udp_close_before_init\n");
 }
 
@@ -297,24 +304,25 @@ static void test_udp_close_before_init()
 
 static void test_udp_is_open_lifecycle()
 {
-    UdpBackend backend;
-    assert(!backend.is_open());
+    UdpBackend* backend = new UdpBackend();
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t bind_p19610 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19611 = alloc_ephemeral_port(SOCK_DGRAM);
     make_udp_cfg(cfg, bind_p19610, peer_p19611);
 
-    assert(backend.init(cfg) == Result::OK);
-    assert(backend.is_open());
+    assert(backend->init(cfg) == Result::OK);
+    assert(backend->is_open());
 
-    backend.close();
-    assert(!backend.is_open());
+    backend->close();
+    assert(!backend->is_open());
 
     // close again (idempotent)
-    backend.close();
-    assert(!backend.is_open());
+    backend->close();
+    assert(!backend->is_open());
 
+    delete backend;
     printf("PASS: test_udp_is_open_lifecycle\n");
 }
 
@@ -326,21 +334,22 @@ static void test_udp_is_open_lifecycle()
 
 static void test_udp_send_to_unreachable()
 {
-    UdpBackend backend;
+    UdpBackend* backend = new UdpBackend();
     TransportConfig cfg;
     const uint16_t bind_p19612 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19699 = alloc_ephemeral_port(SOCK_DGRAM);
     make_udp_cfg(cfg, bind_p19612, peer_p19699);  // nothing listening on peer port
 
-    assert(backend.init(cfg) == Result::OK);
+    assert(backend->init(cfg) == Result::OK);
 
     MessageEnvelope env;
     make_test_envelope(env, 0xFEEDULL);
-    Result r = backend.send_message(env);
+    Result r = backend->send_message(env);
     // UDP sendto() to an unreachable port succeeds at the socket layer
     assert(r == Result::OK);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_udp_send_to_unreachable\n");
 }
 
@@ -352,7 +361,7 @@ static void test_udp_send_to_unreachable()
 
 static void test_udp_bind_bad_ip()
 {
-    UdpBackend backend;
+    UdpBackend* backend = new UdpBackend();
     TransportConfig cfg;
     const uint16_t bind_p19613 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19614 = alloc_ephemeral_port(SOCK_DGRAM);
@@ -361,10 +370,11 @@ static void test_udp_bind_bad_ip()
     const char bad_ip[] = "999.999.999.999";
     (void)memcpy(cfg.bind_ip, bad_ip, sizeof(bad_ip));
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r != Result::OK);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
+    delete backend;
     printf("PASS: test_udp_bind_bad_ip\n");
 }
 
@@ -376,18 +386,19 @@ static void test_udp_bind_bad_ip()
 
 static void test_udp_num_channels_zero()
 {
-    UdpBackend backend;
+    UdpBackend* backend = new UdpBackend();
     TransportConfig cfg;
     const uint16_t bind_p19615 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19616 = alloc_ephemeral_port(SOCK_DGRAM);
     make_udp_cfg(cfg, bind_p19615, peer_p19616);
     cfg.num_channels = 0U;
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_udp_num_channels_zero\n");
 }
 
@@ -402,11 +413,11 @@ static void test_udp_recv_garbage_datagram()
     const uint16_t BIND_PORT = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19618 = alloc_ephemeral_port(SOCK_DGRAM);
 
-    UdpBackend backend;
+    UdpBackend* backend = new UdpBackend();
     TransportConfig cfg;
     make_udp_cfg(cfg, BIND_PORT, peer_p19618);
 
-    assert(backend.init(cfg) == Result::OK);
+    assert(backend->init(cfg) == Result::OK);
 
     // Send 5 garbage bytes to the backend's bind port via a raw POSIX socket.
     // recv_one_datagram calls Serializer::deserialize(5 bytes) which rejects
@@ -433,10 +444,11 @@ static void test_udp_recv_garbage_datagram()
     // receive_message: garbage fails deserialize; no valid message is queued.
     // Loop times out → ERR_TIMEOUT.
     MessageEnvelope env;
-    Result r = backend.receive_message(env, 300U);
+    Result r = backend->receive_message(env, 300U);
     assert(r == Result::ERR_TIMEOUT);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_udp_recv_garbage_datagram\n");
 }
 
@@ -451,18 +463,19 @@ static void test_mock_udp_create_fail()
     MockSocketOps mock;
     mock.fail_create_udp = true;
 
-    UdpBackend backend(mock);
-    assert(!backend.is_open());
+    UdpBackend* backend = new UdpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t bind_p19650 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19651 = alloc_ephemeral_port(SOCK_DGRAM);
     make_udp_cfg(cfg, bind_p19650, peer_p19651);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
+    delete backend;
     printf("PASS: test_mock_udp_create_fail\n");
 }
 
@@ -472,19 +485,20 @@ static void test_mock_udp_reuseaddr_fail()
     MockSocketOps mock;
     mock.fail_set_reuseaddr = true;
 
-    UdpBackend backend(mock);
-    assert(!backend.is_open());
+    UdpBackend* backend = new UdpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t bind_p19652 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19653 = alloc_ephemeral_port(SOCK_DGRAM);
     make_udp_cfg(cfg, bind_p19652, peer_p19653);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
     assert(mock.n_do_close >= 1);  // do_close called after reuseaddr failure
 
+    delete backend;
     printf("PASS: test_mock_udp_reuseaddr_fail\n");
 }
 
@@ -503,7 +517,7 @@ static void test_mock_udp_reuseaddr_fail()
 static void test_udp_impairment_delay_paths()
 {
     MockSocketOps mock;
-    UdpBackend backend(mock);
+    UdpBackend* backend = new UdpBackend(mock);
 
     TransportConfig cfg;
     const uint16_t bind_p19620 = alloc_ephemeral_port(SOCK_DGRAM);
@@ -512,15 +526,15 @@ static void test_udp_impairment_delay_paths()
     cfg.channels[0U].impairment.enabled          = true;
     cfg.channels[0U].impairment.fixed_latency_ms = 1U;  // 1 ms delay
 
-    assert(backend.init(cfg) == Result::OK);
-    assert(backend.is_open());
+    assert(backend->init(cfg) == Result::OK);
+    assert(backend->is_open());
 
     MessageEnvelope env1;
     make_test_envelope(env1, 0xDE100001ULL);
 
     // First send: process_outbound queues env1 (release = now_us + 1 ms).
     // collect_deliverable returns 0 (not yet due) — delayed loop does NOT run.
-    assert(backend.send_message(env1) == Result::OK);
+    assert(backend->send_message(env1) == Result::OK);
 
     usleep(10000U);  // 10 ms >> 1 ms: env1 is now past its release time
 
@@ -531,7 +545,7 @@ static void test_udp_impairment_delay_paths()
     // (env1 past its release time) — delayed-message loop runs once, sending
     // env1 to the wire via send_one_envelope().
     // Covers: send_message delayed-message loop body (path (a) above).
-    assert(backend.send_message(env2) == Result::OK);
+    assert(backend->send_message(env2) == Result::OK);
 
     usleep(10000U);  // 10 ms >> 1 ms: env2 is now past its release time
 
@@ -540,7 +554,7 @@ static void test_udp_impairment_delay_paths()
     // recv_queue stays empty → receive_message returns ERR_TIMEOUT.
     // Covers: flush_delayed_to_wire() loop body (path (b)).
     MessageEnvelope recv_env;
-    Result r = backend.receive_message(recv_env, 500U);
+    Result r = backend->receive_message(recv_env, 500U);
     assert(r == Result::ERR_TIMEOUT);
 
     // Verify flush_delayed_to_wire() actually called send_to() — not a silent drop.
@@ -548,7 +562,8 @@ static void test_udp_impairment_delay_paths()
     // (1 more send_to call).  Total: 2 send_to() calls at this point.
     assert(mock.sent_count == 2U);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_udp_impairment_delay_paths\n");
 }
 
@@ -568,7 +583,7 @@ static void test_udp_impairment_delay_paths()
 // Verifies: REQ-4.1.2, REQ-5.1.3
 static void test_udp_send_loss_impairment()
 {
-    UdpBackend backend;
+    UdpBackend* backend = new UdpBackend();
     TransportConfig cfg;
     const uint16_t bind_p19625 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19626 = alloc_ephemeral_port(SOCK_DGRAM);
@@ -579,24 +594,25 @@ static void test_udp_send_loss_impairment()
     cfg.channels[0U].impairment.enabled          = true;
     cfg.channels[0U].impairment.loss_probability = 1.0;
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     MessageEnvelope env;
     make_test_envelope(env, 0xD5A1D5A1ULL);
 
     // send_message must hit the ERR_IO silent-drop path and return OK.
-    r = backend.send_message(env);
+    r = backend->send_message(env);
     assert(r == Result::OK);
 
     // Nothing was delivered: receive with 0 ms timeout (poll_count = 0, loop
     // does not run) → ERR_TIMEOUT.
     MessageEnvelope recv_env;
-    r = backend.receive_message(recv_env, 0U);
+    r = backend->receive_message(recv_env, 0U);
     assert(r == Result::ERR_TIMEOUT);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_udp_send_loss_impairment\n");
 }
 
@@ -620,30 +636,31 @@ static void test_mock_send_to_fail()
     MockSocketOps mock;
     mock.fail_send_to = true;  // inject failure into the socket-layer send path
 
-    UdpBackend backend(mock);
-    assert(!backend.is_open());
+    UdpBackend* backend = new UdpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t bind_p19660 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19661 = alloc_ephemeral_port(SOCK_DGRAM);
     make_udp_cfg(cfg, bind_p19660, peer_p19661);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     MessageEnvelope env;
     make_test_envelope(env, 0xFA115E1DULL);
 
     // send_to fails for the current envelope — UdpBackend must propagate ERR_IO
     // per TransportInterface contract.
-    r = backend.send_message(env);
+    r = backend->send_message(env);
     assert(r == Result::ERR_IO);
 
     // Backend remains open after a send failure.
-    assert(backend.is_open());
+    assert(backend->is_open());
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_mock_send_to_fail\n");
 }
 
@@ -685,7 +702,7 @@ static void test_udp_recv_queue_initial_pop()
     // Serializer::deserialize on 0 bytes → ERR_INVALID → recv_one_datagram
     // returns false on every call (nothing pushed from the socket path).
 
-    UdpBackend backend(mock);
+    UdpBackend* backend = new UdpBackend(mock);
 
     TransportConfig cfg;
     const uint16_t bind_p19662 = alloc_ephemeral_port(SOCK_DGRAM);
@@ -696,9 +713,9 @@ static void test_udp_recv_queue_initial_pop()
     cfg.channels[0U].impairment.enabled          = true;
     cfg.channels[0U].impairment.fixed_latency_ms = 1U;
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     // Send N_SEND messages → fills delay buffer; collect_deliverable in
     // send_message finds nothing expired (release_us = now_us + 1 ms > now_us).
@@ -706,7 +723,7 @@ static void test_udp_recv_queue_initial_pop()
     for (uint32_t i = 0U; i < N_SEND; ++i) {
         MessageEnvelope env;
         make_test_envelope(env, static_cast<uint64_t>(0xBEEF0000ULL + i));
-        Result rs = backend.send_message(env);
+        Result rs = backend->send_message(env);
         assert(rs == Result::OK);
     }
 
@@ -716,7 +733,7 @@ static void test_udp_recv_queue_initial_pop()
     // receive_message: flush_delayed_to_wire() sends expired items to the wire
     // (not into recv_queue).  recv_queue remains empty → ERR_TIMEOUT.
     MessageEnvelope env_a;
-    r = backend.receive_message(env_a, 500U);
+    r = backend->receive_message(env_a, 500U);
     assert(r == Result::ERR_TIMEOUT);
 
     // Verify all N_SEND delayed envelopes were forwarded to the wire via send_to().
@@ -724,7 +741,8 @@ static void test_udp_recv_queue_initial_pop()
     // flush_delayed_to_wire() during receive_message() calls send_to() once per item.
     assert(mock.sent_count == N_SEND);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_udp_recv_queue_initial_pop\n");
 }
 
@@ -749,8 +767,8 @@ static void test_mock_udp_recv_from_fail()
     MockSocketOps mock;
     mock.fail_recv_from = true;   // inject recvfrom() OS failure
 
-    UdpBackend backend(mock);
-    assert(!backend.is_open());
+    UdpBackend* backend = new UdpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t bind_p19670 = alloc_ephemeral_port(SOCK_DGRAM);
@@ -758,21 +776,22 @@ static void test_mock_udp_recv_from_fail()
     make_udp_cfg(cfg, bind_p19670, peer_p19671);
 
     // init must succeed: create_udp / set_reuseaddr / do_bind all unblocked
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     // Every recv_one_datagram call returns false (recv_from injected failure).
     // receive_message exhausts poll_count (timeout_ms=200 → 2 iterations) and
     // returns ERR_TIMEOUT — the recv_from False branch is covered.
     MessageEnvelope env;
-    r = backend.receive_message(env, 200U);
+    r = backend->receive_message(env, 200U);
     assert(r == Result::ERR_TIMEOUT);
 
     // Backend remains open after a receive failure.
-    assert(backend.is_open());
+    assert(backend->is_open());
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_mock_udp_recv_from_fail\n");
 }
 
@@ -801,27 +820,28 @@ static void test_recv_wrong_source_dropped()
     const uint16_t peer_p  = alloc_ephemeral_port(SOCK_DGRAM);
     mock.recv_src_port = peer_p;  // arbitrary port for the spoofed source
 
-    UdpBackend backend(mock);
-    assert(!backend.is_open());
+    UdpBackend* backend = new UdpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     make_udp_cfg(cfg, bind_p, peer_p);  // peer_ip="127.0.0.1"
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     // receive_message: recv_from returns true (mock), validate_source sees
     // src_ip="192.168.1.99" != peer_ip="127.0.0.1" -> drops datagram.
     // All poll iterations exhaust without queuing -> ERR_TIMEOUT.
     MessageEnvelope env;
-    r = backend.receive_message(env, 200U);  // 2 poll iterations
+    r = backend->receive_message(env, 200U);  // 2 poll iterations
     assert(r == Result::ERR_TIMEOUT);
 
     // Backend remains open after source validation drop.
-    assert(backend.is_open());
+    assert(backend->is_open());
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_recv_wrong_source_dropped\n");
 }
 
@@ -846,8 +866,8 @@ static void test_udp_inbound_partition_drops_received()
     const uint16_t SIDE_A_PORT = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t SIDE_B_PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
-    UdpBackend side_a;  // sender — no impairment
-    UdpBackend side_b;  // receiver — partition active on inbound
+    UdpBackend* side_a = new UdpBackend();  // sender — no impairment
+    UdpBackend* side_b = new UdpBackend();  // receiver — partition active on inbound
 
     TransportConfig cfg_a;
     make_udp_cfg(cfg_a, SIDE_A_PORT, SIDE_B_PORT);
@@ -860,17 +880,17 @@ static void test_udp_inbound_partition_drops_received()
     cfg_b.channels[0U].impairment.partition_gap_ms      = 10U;     // 10 ms gap
     cfg_b.channels[0U].impairment.partition_duration_ms = 60000U;  // stays 60 s
 
-    Result r = side_a.init(cfg_a);
+    Result r = side_a->init(cfg_a);
     assert(r == Result::OK);
-    assert(side_a.is_open() == true);
+    assert(side_a->is_open() == true);
 
-    r = side_b.init(cfg_b);
+    r = side_b->init(cfg_b);
     assert(r == Result::OK);
-    assert(side_b.is_open() == true);
+    assert(side_b->is_open() == true);
 
     // REQ-6.1.8 / REQ-6.1.10 / REQ-6.2.4: register_local_id() sends HELLO to peer.
     // source_id=2 matches warmup and test datagram source_id.
-    r = side_a.register_local_id(2U);
+    r = side_a->register_local_id(2U);
     assert(r == Result::OK);
 
     // Step 1: send a warm-up datagram; side_b receives it (partition not yet
@@ -879,12 +899,12 @@ static void test_udp_inbound_partition_drops_received()
     make_test_envelope(warmup, 0xAB90ULL);
     warmup.source_id      = 2U;
     warmup.destination_id = 1U;
-    r = side_a.send_message(warmup);
+    r = side_a->send_message(warmup);
     assert(r == Result::OK);
 
     // HELLO is consumed first, then warmup DATA arrives in the same receive_message call.
     MessageEnvelope warmup_recv;
-    r = side_b.receive_message(warmup_recv, 500U);
+    r = side_b->receive_message(warmup_recv, 500U);
     assert(r == Result::OK);  // warm-up message must arrive (partition not active yet)
 
     // Step 2: wait > 10 ms so the partition gap elapses and partition becomes active
@@ -895,15 +915,17 @@ static void test_udp_inbound_partition_drops_received()
     make_test_envelope(env, 0xAB91ULL);
     env.source_id      = 2U;
     env.destination_id = 1U;
-    r = side_a.send_message(env);
+    r = side_a->send_message(env);
     assert(r == Result::OK);
 
     MessageEnvelope recv_env;
-    r = side_b.receive_message(recv_env, 500U);
+    r = side_b->receive_message(recv_env, 500U);
     assert(r == Result::ERR_TIMEOUT);  // partition dropped the datagram
 
-    side_a.close();
-    side_b.close();
+    side_a->close();
+    side_b->close();
+    delete side_a;
+    delete side_b;
     printf("PASS: test_udp_inbound_partition_drops_received\n");
 }
 
@@ -919,37 +941,39 @@ static void test_udp_hello_registration()
     const uint16_t PORT_A = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t PORT_B = alloc_ephemeral_port(SOCK_DGRAM);
 
-    UdpBackend side_a;
-    UdpBackend side_b;
+    UdpBackend* side_a = new UdpBackend();
+    UdpBackend* side_b = new UdpBackend();
 
     TransportConfig cfg_a;
     TransportConfig cfg_b;
     make_udp_cfg(cfg_a, PORT_A, PORT_B);
     make_udp_cfg(cfg_b, PORT_B, PORT_A);
 
-    assert(side_a.init(cfg_a) == Result::OK);
-    assert(side_b.init(cfg_b) == Result::OK);
+    assert(side_a->init(cfg_a) == Result::OK);
+    assert(side_b->init(cfg_b) == Result::OK);
 
     // Step 1: register_local_id() sends HELLO on wire; side_b consumes it internally.
     // receive_message must NOT return the HELLO to the caller (REQ-6.1.10).
-    assert(side_a.register_local_id(1U) == Result::OK);
+    assert(side_a->register_local_id(1U) == Result::OK);
 
     MessageEnvelope recv_hello;
-    Result r = side_b.receive_message(recv_hello, 500U);
+    Result r = side_b->receive_message(recv_hello, 500U);
     assert(r == Result::ERR_TIMEOUT);  // HELLO consumed; never reaches app layer
 
     // Step 2: DATA with matching source_id is accepted after HELLO.
     MessageEnvelope data;
     make_test_envelope(data, 0xAB12ULL);
-    assert(side_a.send_message(data) == Result::OK);
+    assert(side_a->send_message(data) == Result::OK);
 
     MessageEnvelope recv_data;
-    r = side_b.receive_message(recv_data, 500U);
+    r = side_b->receive_message(recv_data, 500U);
     assert(r == Result::OK);
     assert(recv_data.message_id == 0xAB12ULL);
 
-    side_a.close();
-    side_b.close();
+    side_a->close();
+    side_b->close();
+    delete side_a;
+    delete side_b;
     printf("PASS: test_udp_hello_registration\n");
 }
 
@@ -964,28 +988,30 @@ static void test_udp_data_before_hello_dropped()
     const uint16_t PORT_A = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t PORT_B = alloc_ephemeral_port(SOCK_DGRAM);
 
-    UdpBackend side_a;
-    UdpBackend side_b;
+    UdpBackend* side_a = new UdpBackend();
+    UdpBackend* side_b = new UdpBackend();
 
     TransportConfig cfg_a;
     TransportConfig cfg_b;
     make_udp_cfg(cfg_a, PORT_A, PORT_B);
     make_udp_cfg(cfg_b, PORT_B, PORT_A);
 
-    assert(side_a.init(cfg_a) == Result::OK);
-    assert(side_b.init(cfg_b) == Result::OK);
+    assert(side_a->init(cfg_a) == Result::OK);
+    assert(side_b->init(cfg_b) == Result::OK);
 
     // Send DATA without prior HELLO — side_b must drop it (WARNING_HI logged).
     MessageEnvelope data;
     make_test_envelope(data, 0xBAD1ULL);
-    assert(side_a.send_message(data) == Result::OK);
+    assert(side_a->send_message(data) == Result::OK);
 
     MessageEnvelope recv;
-    Result r = side_b.receive_message(recv, 500U);
+    Result r = side_b->receive_message(recv, 500U);
     assert(r == Result::ERR_TIMEOUT);  // data-before-HELLO dropped
 
-    side_a.close();
-    side_b.close();
+    side_a->close();
+    side_b->close();
+    delete side_a;
+    delete side_b;
     printf("PASS: test_udp_data_before_hello_dropped\n");
 }
 
@@ -1001,37 +1027,39 @@ static void test_udp_source_id_rotation_rejected()
     const uint16_t PORT_A = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t PORT_B = alloc_ephemeral_port(SOCK_DGRAM);
 
-    UdpBackend side_a;
-    UdpBackend side_b;
+    UdpBackend* side_a = new UdpBackend();
+    UdpBackend* side_b = new UdpBackend();
 
     TransportConfig cfg_a;
     TransportConfig cfg_b;
     make_udp_cfg(cfg_a, PORT_A, PORT_B);
     make_udp_cfg(cfg_b, PORT_B, PORT_A);
 
-    assert(side_a.init(cfg_a) == Result::OK);
-    assert(side_b.init(cfg_b) == Result::OK);
+    assert(side_a->init(cfg_a) == Result::OK);
+    assert(side_b->init(cfg_b) == Result::OK);
 
     // Register with source_id=1 via register_local_id(); side_b consumes HELLO.
-    assert(side_a.register_local_id(1U) == Result::OK);
+    assert(side_a->register_local_id(1U) == Result::OK);
 
     MessageEnvelope recv_hello;
-    Result r = side_b.receive_message(recv_hello, 500U);
+    Result r = side_b->receive_message(recv_hello, 500U);
     assert(r == Result::ERR_TIMEOUT);  // HELLO consumed
 
     // Attempt source_id rotation: send DATA with source_id=99 (not registered).
     MessageEnvelope spoofed;
     make_test_envelope(spoofed, 0xBAD2ULL);
     spoofed.source_id = 99U;  // does not match registered NodeId 1
-    assert(side_a.send_message(spoofed) == Result::OK);
+    assert(side_a->send_message(spoofed) == Result::OK);
 
     // side_b must drop — source_id mismatch (WARNING_HI logged).
     MessageEnvelope recv_data;
-    r = side_b.receive_message(recv_data, 500U);
+    r = side_b->receive_message(recv_data, 500U);
     assert(r == Result::ERR_TIMEOUT);
 
-    side_a.close();
-    side_b.close();
+    side_a->close();
+    side_b->close();
+    delete side_a;
+    delete side_b;
     printf("PASS: test_udp_source_id_rotation_rejected\n");
 }
 
@@ -1048,39 +1076,41 @@ static void test_udp_duplicate_hello_dropped()
     const uint16_t PORT_A = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t PORT_B = alloc_ephemeral_port(SOCK_DGRAM);
 
-    UdpBackend side_a;
-    UdpBackend side_b;
+    UdpBackend* side_a = new UdpBackend();
+    UdpBackend* side_b = new UdpBackend();
 
     TransportConfig cfg_a;
     TransportConfig cfg_b;
     make_udp_cfg(cfg_a, PORT_A, PORT_B);
     make_udp_cfg(cfg_b, PORT_B, PORT_A);
 
-    assert(side_a.init(cfg_a) == Result::OK);
-    assert(side_b.init(cfg_b) == Result::OK);
+    assert(side_a->init(cfg_a) == Result::OK);
+    assert(side_b->init(cfg_b) == Result::OK);
 
     // First HELLO: register_local_id() sends HELLO; registers source_id=1 at side_b.
-    assert(side_a.register_local_id(1U) == Result::OK);
+    assert(side_a->register_local_id(1U) == Result::OK);
 
     // Second HELLO: duplicate; dropped with WARNING_HI.
     MessageEnvelope hello2;
     make_hello_envelope(hello2, 1U);
-    assert(side_a.send_message(hello2) == Result::OK);
+    assert(side_a->send_message(hello2) == Result::OK);
 
     // DATA with registered source_id=1 must still be accepted.
     MessageEnvelope data;
     make_test_envelope(data, 0xAB34ULL);
-    assert(side_a.send_message(data) == Result::OK);
+    assert(side_a->send_message(data) == Result::OK);
 
     // receive_message iterates: HELLO1 consumed, HELLO2 (duplicate) dropped,
     // then DATA accepted.
     MessageEnvelope recv;
-    Result r = side_b.receive_message(recv, 1000U);
+    Result r = side_b->receive_message(recv, 1000U);
     assert(r == Result::OK);
     assert(recv.message_id == 0xAB34ULL);
 
-    side_a.close();
-    side_b.close();
+    side_a->close();
+    side_b->close();
+    delete side_a;
+    delete side_b;
     printf("PASS: test_udp_duplicate_hello_dropped\n");
 }
 
@@ -1095,19 +1125,20 @@ static void test_mock_udp_bind_fail()
     MockSocketOps mock;
     mock.fail_do_bind = true;
 
-    UdpBackend backend(mock);
-    assert(!backend.is_open());
+    UdpBackend* backend = new UdpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t bind_p19710 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19711 = alloc_ephemeral_port(SOCK_DGRAM);
     make_udp_cfg(cfg, bind_p19710, peer_p19711);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
     assert(mock.n_do_close >= 1);
 
+    delete backend;
     printf("PASS: test_mock_udp_bind_fail\n");
 }
 
@@ -1117,21 +1148,22 @@ static void test_mock_udp_send_hello_send_to_fail()
     // Covers: UdpBackend::send_hello_datagram() send_to-failure path
     // Strategy: init succeeds; inject send_to failure; register_local_id → ERR_IO.
     MockSocketOps mock;
-    UdpBackend backend(mock);
+    UdpBackend* backend = new UdpBackend(mock);
 
     TransportConfig cfg;
     const uint16_t bind_p19712 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19713 = alloc_ephemeral_port(SOCK_DGRAM);
     make_udp_cfg(cfg, bind_p19712, peer_p19713);
-    assert(backend.init(cfg) == Result::OK);
-    assert(backend.is_open());
+    assert(backend->init(cfg) == Result::OK);
+    assert(backend->is_open());
 
     mock.fail_send_to = true;  // inject after init
 
-    Result r = backend.register_local_id(3U);
+    Result r = backend->register_local_id(3U);
     assert(r == Result::ERR_IO);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_mock_udp_send_hello_send_to_fail\n");
 }
 
@@ -1145,7 +1177,9 @@ static void test_mock_udp_send_hello_no_peer()
     // NOTE: The old send_hello_datagram() peer_ip guard (peer_ip[0] == '\0') is now
     // an architectural ceiling — init() prevents empty peer_ip from reaching
     // send_hello_datagram. Documented in COVERAGE_CEILINGS.md.
-    UdpBackend backend_empty, backend_v4, backend_v6;
+    UdpBackend* backend_empty = new UdpBackend();
+    UdpBackend* backend_v4   = new UdpBackend();
+    UdpBackend* backend_v6   = new UdpBackend();
 
     TransportConfig cfg_empty, cfg_v4, cfg_v6;
     const uint16_t p1 = alloc_ephemeral_port(SOCK_DGRAM);
@@ -1155,23 +1189,26 @@ static void test_mock_udp_send_hello_no_peer()
     // Case 1: empty peer_ip → ERR_INVALID
     make_udp_cfg(cfg_empty, p1, 9000U);
     cfg_empty.peer_ip[0] = '\0';
-    assert(backend_empty.init(cfg_empty) == Result::ERR_INVALID);
-    assert(!backend_empty.is_open());
+    assert(backend_empty->init(cfg_empty) == Result::ERR_INVALID);
+    assert(!backend_empty->is_open());
 
     // Case 2: IPv4 wildcard "0.0.0.0" → ERR_INVALID
     make_udp_cfg(cfg_v4, p2, 9000U);
     (void)strncpy(cfg_v4.peer_ip, "0.0.0.0", sizeof(cfg_v4.peer_ip) - 1U);
     cfg_v4.peer_ip[sizeof(cfg_v4.peer_ip) - 1U] = '\0';
-    assert(backend_v4.init(cfg_v4) == Result::ERR_INVALID);
-    assert(!backend_v4.is_open());
+    assert(backend_v4->init(cfg_v4) == Result::ERR_INVALID);
+    assert(!backend_v4->is_open());
 
     // Case 3: IPv6 wildcard "::" → ERR_INVALID
     make_udp_cfg(cfg_v6, p3, 9000U);
     (void)strncpy(cfg_v6.peer_ip, "::", sizeof(cfg_v6.peer_ip) - 1U);
     cfg_v6.peer_ip[sizeof(cfg_v6.peer_ip) - 1U] = '\0';
-    assert(backend_v6.init(cfg_v6) == Result::ERR_INVALID);
-    assert(!backend_v6.is_open());
+    assert(backend_v6->init(cfg_v6) == Result::ERR_INVALID);
+    assert(!backend_v6->is_open());
 
+    delete backend_empty;
+    delete backend_v4;
+    delete backend_v6;
     printf("PASS: test_mock_udp_send_hello_no_peer\n");
 }
 
@@ -1180,23 +1217,24 @@ static void test_mock_udp_get_stats()
     // Verifies: REQ-7.2.4
     // Covers: UdpBackend::get_transport_stats() — all lines previously uncovered.
     MockSocketOps mock;
-    UdpBackend backend(mock);
+    UdpBackend* backend = new UdpBackend(mock);
 
     TransportConfig cfg;
     const uint16_t bind_p19715 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19716 = alloc_ephemeral_port(SOCK_DGRAM);
     make_udp_cfg(cfg, bind_p19715, peer_p19716);
-    assert(backend.init(cfg) == Result::OK);
+    assert(backend->init(cfg) == Result::OK);
 
     TransportStats stats;
     transport_stats_init(stats);
-    backend.get_transport_stats(stats);
+    backend->get_transport_stats(stats);
 
     // UDP bind counts as a connection event (REQ-7.2.4).
     assert(stats.connections_opened >= 1U);
     assert(stats.connections_closed == 0U);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_mock_udp_get_stats\n");
 }
 
@@ -1205,16 +1243,17 @@ static void test_udp_invalid_num_channels()
     // Verifies: REQ-4.2.1
     // Covers: UdpBackend::init() transport_config_valid() False branch (L86)
     // Strategy: set num_channels > MAX_CHANNELS (8) → ERR_INVALID before any bind.
-    UdpBackend backend;
+    UdpBackend* backend = new UdpBackend();
     TransportConfig cfg;
     const uint16_t bind_p19717 = alloc_ephemeral_port(SOCK_DGRAM);
     const uint16_t peer_p19718 = alloc_ephemeral_port(SOCK_DGRAM);
     make_udp_cfg(cfg, bind_p19717, peer_p19718);
     cfg.num_channels = 9U;  // exceeds MAX_CHANNELS = 8
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::ERR_INVALID);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
+    delete backend;
     printf("PASS: test_udp_invalid_num_channels\n");
 }
 
@@ -1224,18 +1263,19 @@ static void test_udp_send_hello_peer_port_zero()
     // Covers: send_hello_datagram() || second sub-branch: peer_ip[0] != '\0'
     //         AND peer_port == 0 → ERR_INVALID (complements test_mock_udp_send_hello_no_peer
     //         which hits the first sub-branch: peer_ip[0] == '\0').
-    UdpBackend backend;
+    UdpBackend* backend = new UdpBackend();
     TransportConfig cfg;
     const uint16_t bind_p19719 = alloc_ephemeral_port(SOCK_DGRAM);
     make_udp_cfg(cfg, bind_p19719, 0U);  // peer_ip stays "127.0.0.1"; peer_port = 0
 
-    assert(backend.init(cfg) == Result::OK);
-    assert(backend.is_open());
+    assert(backend->init(cfg) == Result::OK);
+    assert(backend->is_open());
 
-    Result r = backend.register_local_id(3U);
+    Result r = backend->register_local_id(3U);
     assert(r == Result::ERR_INVALID);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_udp_send_hello_peer_port_zero\n");
 }
 

@@ -169,13 +169,13 @@ static void* dtls_client_thread(void* arg)
     // sends the first datagram (which triggers the DTLS handshake).
     usleep(150000U);  // 150 ms
 
-    DtlsUdpBackend client;
+    DtlsUdpBackend* client = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, false, a->port, a->tls_on);
 
-    a->result = client.init(cfg);
+    a->result = client->init(cfg);
     assert(a->result == Result::OK);
-    assert(client.is_open() == true);
+    assert(client->is_open() == true);
 
     // REQ-6.1.8: send HELLO before DATA so server registers this NodeId (F-2 fix).
     MessageEnvelope hello;
@@ -184,7 +184,7 @@ static void* dtls_client_thread(void* arg)
     hello.source_id      = 2U;
     hello.destination_id = NODE_ID_INVALID;
     hello.payload_length = 0U;
-    Result hello_r = client.send_message(hello);
+    Result hello_r = client->send_message(hello);
     assert(hello_r == Result::OK);
     usleep(20000U);  // 20 ms: let server process HELLO before DATA arrives
 
@@ -196,12 +196,13 @@ static void* dtls_client_thread(void* arg)
     env.destination_id    = 1U;
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
 
-    a->result = client.send_message(env);
+    a->result = client->send_message(env);
     assert(a->result == Result::OK);
 
     usleep(100000U);  // 100 ms: let server drain receive queue
-    client.close();
-    assert(client.is_open() == false);
+    client->close();
+    assert(client->is_open() == false);
+    delete client;
     return nullptr;
 }
 
@@ -214,18 +215,19 @@ static void test_plaintext_server_bind()
 {
     // Verifies: REQ-4.1.1, REQ-4.1.4, REQ-6.4.5
     const uint16_t port_14580 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14580, false);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::OK);
-    assert(backend.is_open() == true);
+    assert(backend->is_open() == true);
 
-    backend.close();
-    assert(backend.is_open() == false);
+    backend->close();
+    assert(backend->is_open() == false);
 
     printf("PASS: test_plaintext_server_bind\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -237,7 +239,7 @@ static void test_dtls_bad_cert()
 {
     // Verifies: REQ-6.4.1
     const uint16_t port_14582 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14582, true);
     // Override cert to a non-existent path
@@ -245,11 +247,12 @@ static void test_dtls_bad_cert()
                   static_cast<uint32_t>(sizeof(cfg.tls.cert_file)) - 1U);
     cfg.tls.cert_file[sizeof(cfg.tls.cert_file) - 1U] = '\0';
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
 
     printf("PASS: test_dtls_bad_cert\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -263,12 +266,12 @@ static void test_plaintext_loopback()
     const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     // Server: plaintext UDP receives from any sender — no handshake needed
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig srv_cfg;
     make_dtls_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     DtlsClientArg args;
     args.port   = PORT;
@@ -284,10 +287,10 @@ static void test_plaintext_loopback()
     (void)pthread_attr_destroy(&attr);
 
     MessageEnvelope received;
-    Result recv_res = server.receive_message(received, 3000U);
+    Result recv_res = server->receive_message(received, 3000U);
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     assert(recv_res == Result::OK);
     assert(args.result == Result::OK);
@@ -295,6 +298,7 @@ static void test_plaintext_loopback()
     assert(received.source_id  == 2U);
 
     printf("PASS: test_plaintext_loopback\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -316,22 +320,24 @@ static void* dtls_server_thread(void* arg)
     DtlsLoopbackArg* a = static_cast<DtlsLoopbackArg*>(arg);
     assert(a != nullptr);
 
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, a->port, a->tls_on);
 
-    a->init_result = server.init(cfg);  // blocks until client connects
+    a->init_result = server->init(cfg);  // blocks until client connects
     if (a->init_result != Result::OK) {
+        delete server;
         return nullptr;
     }
 
     MessageEnvelope received;
-    a->recv_result = server.receive_message(received, 5000U);
+    a->recv_result = server->receive_message(received, 5000U);
     if (a->recv_result == Result::OK) {
         a->recv_message_id = received.message_id;
     }
 
-    server.close();
+    server->close();
+    delete server;
     return nullptr;
 }
 
@@ -390,13 +396,13 @@ static void test_oversized_payload_rejected()
 {
     // Verifies: REQ-6.4.4
     const uint16_t port_14585 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14585, false);
 
-    Result init_res = backend.init(cfg);
+    Result init_res = backend->init(cfg);
     assert(init_res == Result::OK);
-    assert(backend.is_open() == true);
+    assert(backend->is_open() == true);
 
     // Build an envelope whose serialized form exceeds DTLS_MAX_DATAGRAM_BYTES.
     // With MSG_MAX_PAYLOAD_BYTES = 4096, a max-payload message serializes to
@@ -412,12 +418,13 @@ static void test_oversized_payload_rejected()
     (void)memset(env.payload, 0xABU, MSG_MAX_PAYLOAD_BYTES);
     env.payload_length = MSG_MAX_PAYLOAD_BYTES;
 
-    Result send_res = backend.send_message(env);
+    Result send_res = backend->send_message(env);
     assert(send_res == Result::ERR_INVALID);
 
-    backend.close();
+    backend->close();
 
     printf("PASS: test_oversized_payload_rejected\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -429,21 +436,22 @@ static void test_receive_timeout()
 {
     // Verifies: REQ-4.1.3
     const uint16_t port_14586 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14586, false);
 
-    Result init_res = backend.init(cfg);
+    Result init_res = backend->init(cfg);
     assert(init_res == Result::OK);
-    assert(backend.is_open() == true);
+    assert(backend->is_open() == true);
 
     MessageEnvelope env;
-    Result recv_res = backend.receive_message(env, 300U);  // 300 ms
+    Result recv_res = backend->receive_message(env, 300U);  // 300 ms
     assert(recv_res == Result::ERR_TIMEOUT);
 
-    backend.close();
+    backend->close();
 
     printf("PASS: test_receive_timeout\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -463,17 +471,18 @@ static void* dtls_simple_server_thread(void* arg)
     DtlsSimpleServerArg* a = static_cast<DtlsSimpleServerArg*>(arg);
     assert(a != nullptr);
 
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, a->port, true);
 
-    a->init_result = server.init(cfg);
-    if (a->init_result != Result::OK) { return nullptr; }
+    a->init_result = server->init(cfg);
+    if (a->init_result != Result::OK) { delete server; return nullptr; }
 
     MessageEnvelope env;
-    a->recv_result = server.receive_message(env, a->recv_timeout_ms);
+    a->recv_result = server->receive_message(env, a->recv_timeout_ms);
 
-    server.close();
+    server->close();
+    delete server;
     return nullptr;
 }
 
@@ -486,17 +495,18 @@ static void* dtls_early_close_client_thread(void* arg)
 
     usleep(150000U);  // 150 ms: let server enter server_wait_and_handshake
 
-    DtlsUdpBackend client;
+    DtlsUdpBackend* client = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, false, a->port, a->tls_on);
 
-    a->result = client.init(cfg);
-    if (a->result != Result::OK) { return nullptr; }
+    a->result = client->init(cfg);
+    if (a->result != Result::OK) { delete client; return nullptr; }
 
     usleep(50000U);  // 50 ms: let server's init() finish before close_notify
     // Sends DTLS close_notify alert — exercises ssl_read PEER_CLOSE_NOTIFY
     // error path in server's receive_message() on the next call
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -560,7 +570,7 @@ static void test_dtls_bad_key_path()
 {
     // Verifies: REQ-6.4.1
     const uint16_t port_14587 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14587, true);
     // Valid cert, non-existent key → pk_parse_keyfile returns error
@@ -568,11 +578,12 @@ static void test_dtls_bad_key_path()
     (void)strncpy(cfg.tls.key_file, "/tmp/does_not_exist.key", path_max);
     cfg.tls.key_file[path_max] = '\0';
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
 
     printf("PASS: test_dtls_bad_key_path\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -585,7 +596,7 @@ static void test_dtls_bad_ca_cert_file()
 {
     // Verifies: REQ-6.4.1
     const uint16_t port_14588 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14588, true);
     cfg.tls.verify_peer = true;
@@ -593,11 +604,12 @@ static void test_dtls_bad_ca_cert_file()
     (void)strncpy(cfg.tls.ca_file, "/tmp/bad_ca.crt", path_max);
     cfg.tls.ca_file[path_max] = '\0';
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
 
     printf("PASS: test_dtls_bad_ca_cert_file\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -610,16 +622,17 @@ static void test_dtls_server_init_timeout()
 {
     // Verifies: REQ-4.1.2, REQ-6.4.1
     const uint16_t port_14589 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14589, true);
     cfg.connect_timeout_ms = 250U;  // short timeout; no client will connect
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_TIMEOUT);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
 
     printf("PASS: test_dtls_server_init_timeout\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -632,7 +645,7 @@ static void test_dtls_client_bad_peer_ip()
 {
     // Verifies: REQ-6.4.1
     const uint16_t port_14590 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     // is_server=false, tls_on=true; bind_port=0 (OS assigns ephemeral)
     make_dtls_config(cfg, false, port_14590, true);
@@ -643,11 +656,12 @@ static void test_dtls_client_bad_peer_ip()
 
     // init() → setup_dtls_config (succeeds) → client_connect_and_handshake
     // → inet_pton("999.999.999.999") returns 0 → ERR_IO
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
 
     printf("PASS: test_dtls_client_bad_peer_ip\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -660,7 +674,7 @@ static void test_init_bad_bind_ip()
 {
     // Verifies: REQ-4.1.1
     const uint16_t port_14591 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14591, false);
     // Override bind_ip to an address that inet_aton() will reject
@@ -668,11 +682,12 @@ static void test_init_bad_bind_ip()
                   static_cast<uint32_t>(sizeof(cfg.bind_ip)) - 1U);
     cfg.bind_ip[sizeof(cfg.bind_ip) - 1U] = '\0';
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
 
     printf("PASS: test_init_bad_bind_ip\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -740,12 +755,12 @@ static void test_plaintext_recv_garbage_datagram()
     // Verifies: REQ-4.1.3, REQ-6.4.5
     const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, PORT, false);
-    Result init_res = backend.init(cfg);
+    Result init_res = backend->init(cfg);
     assert(init_res == Result::OK);
-    assert(backend.is_open() == true);
+    assert(backend->is_open() == true);
 
     // Send 5 garbage bytes via raw UDP socket — Serializer::deserialize will fail
     int raw = socket(AF_INET, SOCK_DGRAM, 0);
@@ -768,12 +783,13 @@ static void test_plaintext_recv_garbage_datagram()
     // receive_message times out: recv_one_dtls_datagram logs deserialize failure
     // and returns false; no valid envelope ever arrives.
     MessageEnvelope env;
-    Result recv_res = backend.receive_message(env, 400U);
+    Result recv_res = backend->receive_message(env, 400U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
-    backend.close();
+    backend->close();
 
     printf("PASS: test_plaintext_recv_garbage_datagram\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -801,22 +817,23 @@ static void test_dtls_server_handshake_garbage()
     (void)pthread_attr_destroy(&attr);
 
     // Server waits for first datagram, gets garbage, handshake fails → ERR_IO
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, PORT, true);
     cfg.connect_timeout_ms = 3000U;
 
-    Result init_res = backend.init(cfg);
+    Result init_res = backend->init(cfg);
 
     (void)pthread_join(tid, nullptr);
 
     // Garbage record causes fatal handshake error (not WANT_READ/WANT_WRITE/
     // HELLO_VERIFY_REQUIRED) → run_dtls_handshake returns ERR_IO
     assert(init_res != Result::OK);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
     assert(sender_arg.result == 0);
 
     printf("PASS: test_dtls_server_handshake_garbage\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -829,7 +846,7 @@ static void test_plaintext_send_bad_peer_ip()
 {
     // Verifies: REQ-4.1.2, REQ-6.4.5
     const uint16_t port_14595 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     // Plaintext client: valid bind_ip, ephemeral bind_port, bad peer_ip.
     // init() (plaintext) binds the socket without using peer_ip → succeeds.
@@ -839,9 +856,9 @@ static void test_plaintext_send_bad_peer_ip()
                   static_cast<uint32_t>(sizeof(cfg.peer_ip)) - 1U);
     cfg.peer_ip[sizeof(cfg.peer_ip) - 1U] = '\0';
 
-    Result init_res = backend.init(cfg);
+    Result init_res = backend->init(cfg);
     assert(init_res == Result::OK);
-    assert(backend.is_open() == true);
+    assert(backend->is_open() == true);
 
     MessageEnvelope env;
     envelope_init(env);
@@ -853,11 +870,12 @@ static void test_plaintext_send_bad_peer_ip()
 
     // send_to fails for the current envelope — DtlsUdpBackend must propagate ERR_IO
     // per TransportInterface contract.
-    Result send_res = backend.send_message(env);
+    Result send_res = backend->send_message(env);
     assert(send_res == Result::ERR_IO);
 
-    backend.close();
+    backend->close();
     printf("PASS: test_plaintext_send_bad_peer_ip\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -871,12 +889,12 @@ static void test_receive_long_timeout_clamp()
     // Verifies: REQ-4.1.3
     const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig srv_cfg;
     make_dtls_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // Client sends after 150 ms
     DtlsClientArg cli_arg;
@@ -894,15 +912,16 @@ static void test_receive_long_timeout_clamp()
     // timeout_ms=5001 → poll_count = (5001+99)/100 = 51 > 50 → clamped to 50.
     // Message arrives at ~150 ms so receive exits on the first or second poll.
     MessageEnvelope received;
-    Result recv_res = server.receive_message(received, 5001U);
+    Result recv_res = server->receive_message(received, 5001U);
 
     (void)pthread_join(cli_tid, nullptr);
-    server.close();
+    server->close();
 
     assert(recv_res == Result::OK);
     assert(cli_arg.result == Result::OK);
     assert(received.message_id == 0xD715ULL);
     printf("PASS: test_receive_long_timeout_clamp\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -915,7 +934,7 @@ static void test_dtls_server_verify_peer_no_ca()
 {
     // Verifies: REQ-6.3.6
     const uint16_t port_14597 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14597, true);
     // REQ-6.3.6 / H-1: verify_peer=true but ca_file="" → init must return ERR_IO
@@ -923,10 +942,11 @@ static void test_dtls_server_verify_peer_no_ca()
     cfg.tls.verify_peer    = true;
     // ca_file remains "" (zero-initialized by transport_config_default).
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
     printf("PASS: test_dtls_server_verify_peer_no_ca\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -940,7 +960,7 @@ static void test_dtls_server_valid_ca_cert_load()
 {
     // Verifies: REQ-6.4.1
     const uint16_t port_14598 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14598, true);
     // Use the self-signed test cert as both CA and server cert.
@@ -952,10 +972,11 @@ static void test_dtls_server_valid_ca_cert_load()
     cfg.tls.ca_file[path_max]  = '\0';
     cfg.connect_timeout_ms     = 200U;
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_TIMEOUT);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
     printf("PASS: test_dtls_server_valid_ca_cert_load\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -986,18 +1007,18 @@ static void test_dtls_server_zero_connect_timeout()
 
     // Server in main test body: connect_timeout_ms=0 → ternary False → wait_ms=30000U.
     // Client arrives at ~150 ms so poll() returns well before the 30 s limit.
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig srv_cfg;
     make_dtls_config(srv_cfg, true, PORT, true);
     srv_cfg.connect_timeout_ms = 0U;
 
-    Result init_res = server.init(srv_cfg);  // blocks ~150 ms while client connects
+    Result init_res = server->init(srv_cfg);  // blocks ~150 ms while client connects
 
     MessageEnvelope received;
     Result recv_res = Result::ERR_IO;
     if (init_res == Result::OK) {
-        recv_res = server.receive_message(received, 5000U);
-        server.close();
+        recv_res = server->receive_message(received, 5000U);
+        server->close();
     }
 
     (void)pthread_join(cli_tid, nullptr);
@@ -1007,6 +1028,7 @@ static void test_dtls_server_zero_connect_timeout()
     assert(recv_res == Result::OK);
     assert(received.message_id == 0xD715ULL);
     printf("PASS: test_dtls_server_zero_connect_timeout\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1257,18 +1279,19 @@ static void test_mock_crypto_init_fail()
     DtlsMockOps mock;
     mock.r_crypto_init = static_cast<psa_status_t>(-1);  // any non-zero failure
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     const uint16_t port_14600 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_mock_server_cfg(cfg, port_14600);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_mock_crypto_init_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1283,18 +1306,19 @@ static void test_mock_ssl_config_defaults_fail()
     DtlsMockOps mock;
     mock.r_ssl_config_defaults = -1;
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     const uint16_t port_14601 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_mock_server_cfg(cfg, port_14601);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_mock_ssl_config_defaults_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1309,18 +1333,19 @@ static void test_mock_ssl_conf_own_cert_fail()
     DtlsMockOps mock;
     mock.r_ssl_conf_own_cert = -1;  // crypto/config_defaults/x509/pk all succeed
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     const uint16_t port_14602 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_mock_server_cfg(cfg, port_14602);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_mock_ssl_conf_own_cert_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1335,18 +1360,19 @@ static void test_mock_ssl_cookie_setup_fail()
     DtlsMockOps mock;
     mock.r_ssl_cookie_setup = -1;
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     const uint16_t port_14603 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_mock_server_cfg(cfg, port_14603);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_mock_ssl_cookie_setup_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1367,20 +1393,21 @@ static void test_mock_server_recvfrom_peek_fail()
     MockTriggerArg trig_arg;
     pthread_t trig_tid = start_trigger_thread(trig_arg, PORT);
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     make_mock_server_cfg(cfg, PORT);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
 
     (void)pthread_join(trig_tid, nullptr);
 
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_mock_server_recvfrom_peek_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1400,20 +1427,21 @@ static void test_mock_server_net_connect_fail()
     MockTriggerArg trig_arg;
     pthread_t trig_tid = start_trigger_thread(trig_arg, PORT);
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     make_mock_server_cfg(cfg, PORT);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
 
     (void)pthread_join(trig_tid, nullptr);
 
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_mock_server_net_connect_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1433,20 +1461,21 @@ static void test_mock_server_ssl_setup_fail()
     MockTriggerArg trig_arg;
     pthread_t trig_tid = start_trigger_thread(trig_arg, PORT);
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     make_mock_server_cfg(cfg, PORT);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
 
     (void)pthread_join(trig_tid, nullptr);
 
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_mock_server_ssl_setup_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1467,20 +1496,21 @@ static void test_mock_server_ssl_set_transport_id_fail()
     MockTriggerArg trig_arg;
     pthread_t trig_tid = start_trigger_thread(trig_arg, PORT);
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     make_mock_server_cfg(cfg, PORT);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
 
     (void)pthread_join(trig_tid, nullptr);
 
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_mock_server_ssl_set_transport_id_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1496,18 +1526,19 @@ static void test_mock_client_net_connect_fail()
     DtlsMockOps mock;
     mock.r_net_connect = -1;  // inet_pton (mock) succeeds; connect fails
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     const uint16_t port_14608 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_mock_client_cfg(cfg, port_14608);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_mock_client_net_connect_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1523,18 +1554,19 @@ static void test_mock_client_ssl_setup_fail()
     // connect succeeds (mock returns 0); ssl_setup fails
     mock.r_ssl_setup = -1;
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     const uint16_t port_14609 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_mock_client_cfg(cfg, port_14609);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_mock_client_ssl_setup_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1549,7 +1581,7 @@ static void test_mock_client_ssl_set_hostname_fail()
     // When ssl_set_hostname returns an error, client path must return ERR_IO.
     DtlsMockOps mock;
     mock.r_ssl_set_hostname = MBEDTLS_ERR_SSL_BAD_INPUT_DATA;
-    DtlsUdpBackend backend(mock);
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
     const uint16_t port_14610 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_mock_client_cfg(cfg, port_14610);
@@ -1565,10 +1597,11 @@ static void test_mock_client_ssl_set_hostname_fail()
         (void)strncpy(cfg.tls.ca_file, DTLS_TEST_CERT_FILE, path_max);
         cfg.tls.ca_file[path_max] = '\0';
     }
-    const Result r = backend.init(cfg);
+    const Result r = backend->init(cfg);
     assert(r == Result::ERR_IO);  // Verifies: REQ-6.4.6
     assert(mock.last_set_hostname[0] != '\0');  // hostname was attempted
     printf("PASS: test_mock_client_ssl_set_hostname_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1582,7 +1615,7 @@ static void test_mock_client_ssl_set_hostname_called()
 {
     // When peer_hostname is set, ssl_set_hostname must be called with that value.
     DtlsMockOps mock;
-    DtlsUdpBackend backend(mock);
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
     const uint16_t port_14611 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_mock_client_cfg(cfg, port_14611);
@@ -1598,11 +1631,12 @@ static void test_mock_client_ssl_set_hostname_called()
         (void)strncpy(cfg.tls.ca_file, DTLS_TEST_CERT_FILE, path_max);
         cfg.tls.ca_file[path_max] = '\0';
     }
-    (void)backend.init(cfg);
+    (void)backend->init(cfg);
     assert(mock.last_set_hostname[0] != '\0');  // hostname was passed  // Verifies: REQ-6.4.6
     assert(strncmp(mock.last_set_hostname, "test.example.com",
                    sizeof(mock.last_set_hostname)) == 0);
     printf("PASS: test_mock_client_ssl_set_hostname_called\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1619,18 +1653,19 @@ static void test_mock_sock_create_udp_fail()
 
     DtlsMockOps tls_mock;  // all TLS ops succeed (not called in plaintext mode)
 
-    DtlsUdpBackend backend(sock_mock, tls_mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(sock_mock, tls_mock);
+    assert(!backend->is_open());
 
     const uint16_t port_14620 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14620, false);  // plaintext server
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_mock_sock_create_udp_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1647,19 +1682,20 @@ static void test_mock_sock_reuseaddr_fail()
 
     DtlsMockOps tls_mock;  // all TLS ops succeed (not called in plaintext mode)
 
-    DtlsUdpBackend backend(sock_mock, tls_mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(sock_mock, tls_mock);
+    assert(!backend->is_open());
 
     const uint16_t port_14621 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14621, false);  // plaintext server
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
     assert(sock_mock.n_do_close >= 1);  // do_close called after reuseaddr failure
 
     printf("PASS: test_mock_sock_reuseaddr_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1675,19 +1711,20 @@ static void test_init_num_channels_zero()
     // With num_channels == 0 the False branch of `if (config.num_channels > 0U)`
     // is taken and impairment_config_default() provides the ImpairmentConfig.
     const uint16_t port_14622 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_14622, false);
     cfg.num_channels = 0U;  // force False branch at L554
 
-    Result init_res = backend.init(cfg);
+    Result init_res = backend->init(cfg);
     assert(init_res == Result::OK);
-    assert(backend.is_open() == true);
+    assert(backend->is_open() == true);
 
-    backend.close();
-    assert(backend.is_open() == false);
+    backend->close();
+    assert(backend->is_open() == false);
 
     printf("PASS: test_init_num_channels_zero\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1708,24 +1745,24 @@ static void test_loss_impairment_drops_send()
     const uint16_t SRV_PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     // Server (receiver): bind plaintext UDP, no impairment
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig srv_cfg;
     make_dtls_config(srv_cfg, true, SRV_PORT, false);
-    Result srv_init = server.init(srv_cfg);
+    Result srv_init = server->init(srv_cfg);
     assert(srv_init == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // Client (sender): loss_probability = 1.0 → every outbound message dropped
-    DtlsUdpBackend client;
+    DtlsUdpBackend* client = new DtlsUdpBackend();
     TransportConfig cli_cfg;
     make_dtls_config(cli_cfg, false, SRV_PORT, false);
     cli_cfg.num_channels = 1U;
     cli_cfg.channels[0U].impairment.enabled          = true;
     cli_cfg.channels[0U].impairment.loss_probability = 1.0;
 
-    Result cli_init = client.init(cli_cfg);
+    Result cli_init = client->init(cli_cfg);
     assert(cli_init == Result::OK);
-    assert(client.is_open() == true);
+    assert(client->is_open() == true);
 
     MessageEnvelope env;
     envelope_init(env);
@@ -1736,18 +1773,20 @@ static void test_loss_impairment_drops_send()
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
 
     // send_message returns OK (ERR_IO from impairment → silently converted to OK)
-    Result send_res = client.send_message(env);
+    Result send_res = client->send_message(env);
     assert(send_res == Result::OK);
 
     // Nothing was transmitted; server must time out immediately
     MessageEnvelope received;
-    Result recv_res = server.receive_message(received, 0U);
+    Result recv_res = server->receive_message(received, 0U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
-    client.close();
-    server.close();
+    client->close();
+    server->close();
 
     printf("PASS: test_loss_impairment_drops_send\n");
+    delete client;
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1771,35 +1810,35 @@ static void test_delay_impairment_flush_and_recv()
     const uint16_t SRV_PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     // Server (receiver): no impairment — just receives
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig srv_cfg;
     make_dtls_config(srv_cfg, true, SRV_PORT, false);
-    Result srv_init = server.init(srv_cfg);
+    Result srv_init = server->init(srv_cfg);
     assert(srv_init == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // Client (sender): 1 ms fixed latency → message goes into delay buffer
-    DtlsUdpBackend client;
+    DtlsUdpBackend* client = new DtlsUdpBackend();
     TransportConfig cli_cfg;
     make_dtls_config(cli_cfg, false, SRV_PORT, false);
     cli_cfg.num_channels = 1U;
     cli_cfg.channels[0U].impairment.enabled        = true;
     cli_cfg.channels[0U].impairment.fixed_latency_ms = 1U;
 
-    Result cli_init = client.init(cli_cfg);
+    Result cli_init = client->init(cli_cfg);
     assert(cli_init == Result::OK);
-    assert(client.is_open() == true);
+    assert(client->is_open() == true);
 
     // REQ-6.1.8: send HELLO before DATA so server registers this NodeId (F-2 fix).
     // With fixed_latency_ms=1, the HELLO also goes into the delay buffer and is
-    // flushed together with the DATA by client.receive_message().
+    // flushed together with the DATA by client->receive_message().
     MessageEnvelope hello_env;
     envelope_init(hello_env);
     hello_env.message_type   = MessageType::HELLO;
     hello_env.source_id      = 2U;
     hello_env.destination_id = NODE_ID_INVALID;
     hello_env.payload_length = 0U;
-    Result hello_res = client.send_message(hello_env);
+    Result hello_res = client->send_message(hello_env);
     assert(hello_res == Result::OK);
 
     MessageEnvelope env;
@@ -1811,7 +1850,7 @@ static void test_delay_impairment_flush_and_recv()
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
 
     // Send: goes into delay buffer (not sent to socket yet)
-    Result send_res = client.send_message(env);
+    Result send_res = client->send_message(env);
     assert(send_res == Result::OK);
 
     // Wait for the 1 ms latency to expire so the message is deliverable
@@ -1821,21 +1860,23 @@ static void test_delay_impairment_flush_and_recv()
     // envelope to the wire (not into recv_queue).  recv_queue stays empty →
     // receive_message returns ERR_TIMEOUT.
     MessageEnvelope received;
-    Result recv_res = client.receive_message(received, 500U);
+    Result recv_res = client->receive_message(received, 500U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
     // Verify the peer (server) actually received the delayed message.
     // flush_delayed_to_wire() sent the envelope to the real UDP socket;
-    // server.receive_message() should return OK with the correct message.
+    // server->receive_message() should return OK with the correct message.
     MessageEnvelope server_received;
-    Result srv_res = server.receive_message(server_received, 200U);
+    Result srv_res = server->receive_message(server_received, 200U);
     assert(srv_res == Result::OK);
     assert(server_received.message_type == MessageType::DATA);
 
-    client.close();
-    server.close();
+    client->close();
+    server->close();
 
     printf("PASS: test_delay_impairment_flush_and_recv\n");
+    delete client;
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1855,34 +1896,34 @@ static void test_two_delayed_messages_second_recv_prequeue()
     const uint16_t SRV_PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
     // Server: needed so the client UDP connect() has a valid peer address.
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig srv_cfg;
     make_dtls_config(srv_cfg, true, SRV_PORT, false);
-    Result srv_init = server.init(srv_cfg);
+    Result srv_init = server->init(srv_cfg);
     assert(srv_init == Result::OK);
 
     // Client: 1 ms fixed latency → both sends buffer in the delay queue.
-    DtlsUdpBackend sender;
+    DtlsUdpBackend* sender = new DtlsUdpBackend();
     TransportConfig cli_cfg;
     make_dtls_config(cli_cfg, false, SRV_PORT, false);
     cli_cfg.num_channels = 1U;
     cli_cfg.channels[0U].impairment.enabled         = true;
     cli_cfg.channels[0U].impairment.fixed_latency_ms = 1U;
 
-    Result cli_init = sender.init(cli_cfg);
+    Result cli_init = sender->init(cli_cfg);
     assert(cli_init == Result::OK);
-    assert(sender.is_open());
+    assert(sender->is_open());
 
     // REQ-6.1.8: send HELLO before DATA so server registers this NodeId (F-2 fix).
     // With fixed_latency_ms=1, the HELLO also goes into the delay buffer and is
-    // flushed together with the DATA messages by sender.receive_message().
+    // flushed together with the DATA messages by sender->receive_message().
     MessageEnvelope hello_cc;
     envelope_init(hello_cc);
     hello_cc.message_type   = MessageType::HELLO;
     hello_cc.source_id      = 3U;
     hello_cc.destination_id = NODE_ID_INVALID;
     hello_cc.payload_length = 0U;
-    Result hello_r = sender.send_message(hello_cc);
+    Result hello_r = sender->send_message(hello_cc);
     assert(hello_r == Result::OK);
 
     // Build two minimal DATA envelopes.
@@ -1903,9 +1944,9 @@ static void test_two_delayed_messages_second_recv_prequeue()
     env_b.reliability_class = ReliabilityClass::BEST_EFFORT;
 
     // Both sends are buffered in the delay queue.
-    Result r_a = sender.send_message(env_a);
+    Result r_a = sender->send_message(env_a);
     assert(r_a == Result::OK);
-    Result r_b = sender.send_message(env_b);
+    Result r_b = sender->send_message(env_b);
     assert(r_b == Result::OK);
 
     // Wait for both 1 ms delays to expire.
@@ -1914,32 +1955,34 @@ static void test_two_delayed_messages_second_recv_prequeue()
     // First receive: flush_delayed_to_wire() sends A and B to the wire;
     // recv_queue stays empty → ERR_TIMEOUT.
     MessageEnvelope recv_1;
-    Result r1 = sender.receive_message(recv_1, 500U);
+    Result r1 = sender->receive_message(recv_1, 500U);
     assert(r1 == Result::ERR_TIMEOUT);
 
     // Verify the peer (server) received the first delayed message on the wire.
     // flush_delayed_to_wire() transmitted at least one envelope to the real UDP socket.
     MessageEnvelope srv_recv_a;
-    Result srv_r1 = server.receive_message(srv_recv_a, 200U);
+    Result srv_r1 = server->receive_message(srv_recv_a, 200U);
     assert(srv_r1 == Result::OK);
     assert(srv_recv_a.message_type == MessageType::DATA);
 
     // Verify the peer (server) received the second delayed message on the wire.
     MessageEnvelope srv_recv_b;
-    Result srv_r2 = server.receive_message(srv_recv_b, 200U);
+    Result srv_r2 = server->receive_message(srv_recv_b, 200U);
     assert(srv_r2 == Result::OK);
     assert(srv_recv_b.message_type == MessageType::DATA);
 
     // Second receive: delay buffer already drained; recv_queue still empty →
     // ERR_TIMEOUT again.
     MessageEnvelope recv_2;
-    Result r2 = sender.receive_message(recv_2, 500U);
+    Result r2 = sender->receive_message(recv_2, 500U);
     assert(r2 == Result::ERR_TIMEOUT);
 
-    sender.close();
-    server.close();
+    sender->close();
+    server->close();
 
     printf("PASS: test_two_delayed_messages_second_recv_prequeue\n");
+    delete sender;
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1963,16 +2006,16 @@ static void test_mock_dtls_ssl_write_fail()
     // All init paths succeed; handshake completes in one call
     mock.r_ssl_handshake = 0;
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     const uint16_t port_14630 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_mock_client_cfg(cfg, port_14630);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     // Inject ssl_write failure for the send call
     mock.r_ssl_write = -1;
@@ -1987,11 +2030,12 @@ static void test_mock_dtls_ssl_write_fail()
 
     // ssl_write fails for the current envelope — DtlsUdpBackend must propagate ERR_IO
     // per TransportInterface contract.
-    Result send_res = backend.send_message(env);
+    Result send_res = backend->send_message(env);
     assert(send_res == Result::ERR_IO);
 
-    backend.close();
+    backend->close();
     printf("PASS: test_mock_dtls_ssl_write_fail\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2012,18 +2056,19 @@ static void test_mock_dtls_handshake_iteration_limit()
     // Always return WANT_READ so the 32-iteration limit is hit
     mock.r_ssl_handshake = MBEDTLS_ERR_SSL_WANT_READ;
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     const uint16_t port_14631 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_mock_client_cfg(cfg, port_14631);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_mock_dtls_handshake_iteration_limit\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2046,23 +2091,24 @@ static void test_mock_dtls_ssl_read_error()
     mock.r_ssl_handshake = 0;                              // init succeeds
     mock.r_ssl_read      = MBEDTLS_ERR_SSL_INTERNAL_ERROR; // fatal read error
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     const uint16_t port_14632 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_mock_client_cfg(cfg, port_14632);
 
-    Result init_res = backend.init(cfg);
+    Result init_res = backend->init(cfg);
     assert(init_res == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     MessageEnvelope received;
-    Result recv_res = backend.receive_message(received, 200U);
+    Result recv_res = backend->receive_message(received, 200U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
-    backend.close();
+    backend->close();
     printf("PASS: test_mock_dtls_ssl_read_error\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2082,8 +2128,8 @@ static void test_dtls_inbound_partition_drops_received()
     // Verifies: REQ-5.1.6, REQ-4.1.3, REQ-6.4.5
     const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
-    DtlsUdpBackend side_b;  // server / receiver — has partition active
-    DtlsUdpBackend side_a;  // client / sender   — no impairment
+    DtlsUdpBackend* side_b = new DtlsUdpBackend();
+    DtlsUdpBackend* side_a = new DtlsUdpBackend();
 
     TransportConfig cfg_b;
     make_dtls_config(cfg_b, true, PORT, false);  // plaintext server
@@ -2096,13 +2142,13 @@ static void test_dtls_inbound_partition_drops_received()
     TransportConfig cfg_a;
     make_dtls_config(cfg_a, false, PORT, false);  // plaintext client
 
-    Result r = side_b.init(cfg_b);
+    Result r = side_b->init(cfg_b);
     assert(r == Result::OK);
-    assert(side_b.is_open() == true);
+    assert(side_b->is_open() == true);
 
-    r = side_a.init(cfg_a);
+    r = side_a->init(cfg_a);
     assert(r == Result::OK);
-    assert(side_a.is_open() == true);
+    assert(side_a->is_open() == true);
 
     // REQ-6.1.8: send HELLO before DATA so side_b registers side_a's NodeId (F-2 fix).
     MessageEnvelope hello_part;
@@ -2111,11 +2157,11 @@ static void test_dtls_inbound_partition_drops_received()
     hello_part.source_id      = 2U;
     hello_part.destination_id = NODE_ID_INVALID;
     hello_part.payload_length = 0U;
-    r = side_a.send_message(hello_part);
+    r = side_a->send_message(hello_part);
     assert(r == Result::OK);
 
-    // Step 1: warm-up datagram initialises the partition timer in side_b.
-    // side_b.receive_message will consume the HELLO then deliver the warmup DATA.
+    // Step 1: warm-up datagram initialises the partition timer in side_b->
+    // side_b->receive_message will consume the HELLO then deliver the warmup DATA.
     MessageEnvelope warmup;
     envelope_init(warmup);
     warmup.message_type      = MessageType::DATA;
@@ -2124,11 +2170,11 @@ static void test_dtls_inbound_partition_drops_received()
     warmup.destination_id    = 1U;
     warmup.reliability_class = ReliabilityClass::BEST_EFFORT;
 
-    r = side_a.send_message(warmup);
+    r = side_a->send_message(warmup);
     assert(r == Result::OK);
 
     MessageEnvelope warmup_recv;
-    r = side_b.receive_message(warmup_recv, 500U);
+    r = side_b->receive_message(warmup_recv, 500U);
     assert(r == Result::OK);  // warm-up must arrive (partition not active yet)
 
     // Step 2: wait > 10 ms so partition gap elapses and partition becomes active
@@ -2143,16 +2189,18 @@ static void test_dtls_inbound_partition_drops_received()
     env.destination_id    = 1U;
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
 
-    r = side_a.send_message(env);
+    r = side_a->send_message(env);
     assert(r == Result::OK);
 
     MessageEnvelope recv_env;
-    r = side_b.receive_message(recv_env, 500U);
+    r = side_b->receive_message(recv_env, 500U);
     assert(r == Result::ERR_TIMEOUT);  // partition dropped the datagram
 
-    side_a.close();
-    side_b.close();
+    side_a->close();
+    side_b->close();
     printf("PASS: test_dtls_inbound_partition_drops_received\n");
+    delete side_a;
+    delete side_b;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2170,19 +2218,19 @@ static void test_hello_registers_peer_and_data_passes()
     // reach receive_message() as Result::OK.
     const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig srv_cfg;
     make_dtls_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
-    DtlsUdpBackend client;
+    DtlsUdpBackend* client = new DtlsUdpBackend();
     TransportConfig cli_cfg;
     make_dtls_config(cli_cfg, false, PORT, false);
-    Result cli_init = client.init(cli_cfg);
+    Result cli_init = client->init(cli_cfg);
     assert(cli_init == Result::OK);
-    assert(client.is_open() == true);
+    assert(client->is_open() == true);
 
     // Send HELLO: registers source_id=2 as the peer on the server
     MessageEnvelope hello_env;
@@ -2194,13 +2242,13 @@ static void test_hello_registers_peer_and_data_passes()
     hello_env.reliability_class = ReliabilityClass::BEST_EFFORT;
     hello_env.payload_length    = 0U;
 
-    Result send_h = client.send_message(hello_env);
+    Result send_h = client->send_message(hello_env);
     assert(send_h == Result::OK);
 
     // First receive on server: HELLO arrives but is consumed → ERR_TIMEOUT
     // (nothing pushed into recv_queue per REQ-6.1.8)
     MessageEnvelope rcv1;
-    Result r1 = server.receive_message(rcv1, 500U);
+    Result r1 = server->receive_message(rcv1, 500U);
     assert(r1 == Result::ERR_TIMEOUT);  // HELLO consumed, not delivered
 
     // Now send a DATA envelope with same source_id=2
@@ -2212,20 +2260,22 @@ static void test_hello_registers_peer_and_data_passes()
     data_env.destination_id    = 1U;
     data_env.reliability_class = ReliabilityClass::BEST_EFFORT;
 
-    Result send_d = client.send_message(data_env);
+    Result send_d = client->send_message(data_env);
     assert(send_d == Result::OK);
 
     // Server: DATA from source_id=2 matches registered peer → delivered
     MessageEnvelope rcv2;
-    Result r2 = server.receive_message(rcv2, 500U);
+    Result r2 = server->receive_message(rcv2, 500U);
     assert(r2 == Result::OK);
     assert(rcv2.source_id   == 2U);
     assert(rcv2.message_type == MessageType::DATA);
 
-    client.close();
-    server.close();
+    client->close();
+    server->close();
 
     printf("PASS: test_hello_registers_peer_and_data_passes\n");
+    delete client;
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2243,17 +2293,17 @@ static void test_source_id_spoof_after_hello_dropped()
     // dropped: server receive_message() returns ERR_TIMEOUT.
     const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig srv_cfg;
     make_dtls_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
-    DtlsUdpBackend client;
+    DtlsUdpBackend* client = new DtlsUdpBackend();
     TransportConfig cli_cfg;
     make_dtls_config(cli_cfg, false, PORT, false);
-    Result cli_init = client.init(cli_cfg);
+    Result cli_init = client->init(cli_cfg);
     assert(cli_init == Result::OK);
 
     // Step 1: send HELLO to register source_id=2
@@ -2266,12 +2316,12 @@ static void test_source_id_spoof_after_hello_dropped()
     hello_env.reliability_class = ReliabilityClass::BEST_EFFORT;
     hello_env.payload_length = 0U;
 
-    Result sh = client.send_message(hello_env);
+    Result sh = client->send_message(hello_env);
     assert(sh == Result::OK);
 
     // Drain the HELLO (consumed internally, timeout expected)
     MessageEnvelope dummy;
-    Result rh = server.receive_message(dummy, 500U);
+    Result rh = server->receive_message(dummy, 500U);
     assert(rh == Result::ERR_TIMEOUT);  // HELLO consumed
 
     // Step 2: send DATA with spoofed source_id=99
@@ -2284,18 +2334,20 @@ static void test_source_id_spoof_after_hello_dropped()
     spoof_env.reliability_class = ReliabilityClass::BEST_EFFORT;
 
     // Use a second client (source_id is in the envelope, not the socket address)
-    Result sd = client.send_message(spoof_env);
+    Result sd = client->send_message(spoof_env);
     assert(sd == Result::OK);
 
     // Server must drop the spoofed frame → ERR_TIMEOUT
     MessageEnvelope rcv;
-    Result r = server.receive_message(rcv, 500U);
+    Result r = server->receive_message(rcv, 500U);
     assert(r == Result::ERR_TIMEOUT);  // spoofed frame silently dropped
 
-    client.close();
-    server.close();
+    client->close();
+    server->close();
 
     printf("PASS: test_source_id_spoof_after_hello_dropped\n");
+    delete client;
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2307,22 +2359,22 @@ static void test_source_id_spoof_after_hello_dropped()
 static void test_duplicate_hello_rejected()
 {
     // Verifies: REQ-6.1.8
-    // Strategy: send two HELLO frames from the same client. The first is
+    // Strategy: send two HELLO frames from the same client-> The first is
     // accepted (peer registered). The second must be rejected (WARNING_HI).
     // After both, a DATA with the registered source_id must be delivered.
     const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig srv_cfg;
     make_dtls_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
-    DtlsUdpBackend client;
+    DtlsUdpBackend* client = new DtlsUdpBackend();
     TransportConfig cli_cfg;
     make_dtls_config(cli_cfg, false, PORT, false);
-    Result cli_init = client.init(cli_cfg);
+    Result cli_init = client->init(cli_cfg);
     assert(cli_init == Result::OK);
 
     // First HELLO — accepted
@@ -2335,10 +2387,10 @@ static void test_duplicate_hello_rejected()
     h1.reliability_class = ReliabilityClass::BEST_EFFORT;
     h1.payload_length = 0U;
 
-    assert(client.send_message(h1) == Result::OK);
+    assert(client->send_message(h1) == Result::OK);
     // Drain first HELLO (consumed; ERR_TIMEOUT expected)
     MessageEnvelope d1;
-    assert(server.receive_message(d1, 500U) == Result::ERR_TIMEOUT);
+    assert(server->receive_message(d1, 500U) == Result::ERR_TIMEOUT);
 
     // Second HELLO — must be rejected (duplicate HELLO)
     MessageEnvelope h2;
@@ -2350,10 +2402,10 @@ static void test_duplicate_hello_rejected()
     h2.reliability_class = ReliabilityClass::BEST_EFFORT;
     h2.payload_length = 0U;
 
-    assert(client.send_message(h2) == Result::OK);
+    assert(client->send_message(h2) == Result::OK);
     // Duplicate HELLO dropped; ERR_TIMEOUT still expected
     MessageEnvelope d2;
-    assert(server.receive_message(d2, 500U) == Result::ERR_TIMEOUT);
+    assert(server->receive_message(d2, 500U) == Result::ERR_TIMEOUT);
 
     // DATA from registered peer (source_id=3) must be delivered
     MessageEnvelope data;
@@ -2364,17 +2416,19 @@ static void test_duplicate_hello_rejected()
     data.destination_id = 1U;
     data.reliability_class = ReliabilityClass::BEST_EFFORT;
 
-    assert(client.send_message(data) == Result::OK);
+    assert(client->send_message(data) == Result::OK);
 
     MessageEnvelope rcv;
-    Result r = server.receive_message(rcv, 500U);
+    Result r = server->receive_message(rcv, 500U);
     assert(r == Result::OK);
     assert(rcv.source_id == 3U);
 
-    client.close();
-    server.close();
+    client->close();
+    server->close();
 
     printf("PASS: test_duplicate_hello_rejected\n");
+    delete client;
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2390,7 +2444,7 @@ static void test_server_hello_response_enables_client_recv()
 {
     // Strategy (SEC-026 bidirectional HELLO):
     //   1. Server calls register_local_id() to record its NodeId.
-    //   2. Client sends HELLO(source_id=CLIENT_ID) to server.
+    //   2. Client sends HELLO(source_id=CLIENT_ID) to server->
     //   3. Server drains HELLO (consumed → ERR_TIMEOUT); SEC-026 causes server
     //      to send HELLO(source_id=SERVER_ID) back to client socket.
     //   4. Client drains server HELLO (consumed → ERR_TIMEOUT); client now has
@@ -2400,24 +2454,24 @@ static void test_server_hello_response_enables_client_recv()
     static const NodeId   SERVER_ID  = 1U;
     static const NodeId   CLIENT_ID  = 2U;
 
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig srv_cfg;
     make_dtls_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // Register server NodeId so the HELLO response includes a valid source_id.
-    Result rli = server.register_local_id(SERVER_ID);
+    Result rli = server->register_local_id(SERVER_ID);
     assert(rli == Result::OK);
 
-    DtlsUdpBackend client;
+    DtlsUdpBackend* client = new DtlsUdpBackend();
     TransportConfig cli_cfg;
     make_dtls_config(cli_cfg, false, PORT, false);
-    Result cli_init = client.init(cli_cfg);
+    Result cli_init = client->init(cli_cfg);
     assert(cli_init == Result::OK);
 
-    // Step 2: client sends HELLO to server.
+    // Step 2: client sends HELLO to server->
     MessageEnvelope hello;
     envelope_init(hello);
     hello.message_type      = MessageType::HELLO;
@@ -2426,19 +2480,19 @@ static void test_server_hello_response_enables_client_recv()
     hello.destination_id    = SERVER_ID;
     hello.reliability_class = ReliabilityClass::BEST_EFFORT;
     hello.payload_length    = 0U;
-    assert(client.send_message(hello) == Result::OK);
+    assert(client->send_message(hello) == Result::OK);
 
     // Step 3: server drains HELLO (consumed); SEC-026 fires HELLO response.
     MessageEnvelope srv_drain;
-    Result r3 = server.receive_message(srv_drain, 500U);
+    Result r3 = server->receive_message(srv_drain, 500U);
     assert(r3 == Result::ERR_TIMEOUT);  // HELLO consumed, not delivered
 
     // Step 4: client drains the server's HELLO response (consumed).
     MessageEnvelope cli_drain;
-    Result r4 = client.receive_message(cli_drain, 500U);
+    Result r4 = client->receive_message(cli_drain, 500U);
     assert(r4 == Result::ERR_TIMEOUT);  // server HELLO consumed, not delivered
 
-    // Step 5: server sends DATA to client.
+    // Step 5: server sends DATA to client->
     MessageEnvelope data;
     envelope_init(data);
     data.message_type      = MessageType::DATA;
@@ -2447,18 +2501,20 @@ static void test_server_hello_response_enables_client_recv()
     data.destination_id    = CLIENT_ID;
     data.reliability_class = ReliabilityClass::BEST_EFFORT;
     data.payload_length    = 0U;
-    assert(server.send_message(data) == Result::OK);
+    assert(server->send_message(data) == Result::OK);
 
     // Client must receive the DATA (m_peer_hello_received is now true).
     MessageEnvelope rcv;
-    Result r5 = client.receive_message(rcv, 500U);
+    Result r5 = client->receive_message(rcv, 500U);
     assert(r5 == Result::OK);
     assert(rcv.source_id == SERVER_ID);
 
-    client.close();
-    server.close();
+    client->close();
+    server->close();
 
     printf("PASS: test_server_hello_response_enables_client_recv\n");
+    delete client;
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2484,19 +2540,19 @@ static void test_early_data_does_not_poison_port_lock()
     //   4. client2 sends DATA → server delivers it (source_id matches, port matches).
     const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig srv_cfg;
     make_dtls_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
-    assert(server.register_local_id(1U) == Result::OK);
+    assert(server->is_open() == true);
+    assert(server->register_local_id(1U) == Result::OK);
 
     // Step 2: client1 sends DATA before HELLO (should be dropped; must not lock port).
-    DtlsUdpBackend client1;
+    DtlsUdpBackend* client1 = new DtlsUdpBackend();
     TransportConfig cli1_cfg;
     make_dtls_config(cli1_cfg, false, PORT, false);
-    assert(client1.init(cli1_cfg) == Result::OK);
+    assert(client1->init(cli1_cfg) == Result::OK);
 
     MessageEnvelope early_data;
     envelope_init(early_data);
@@ -2505,17 +2561,17 @@ static void test_early_data_does_not_poison_port_lock()
     early_data.source_id         = 7U;
     early_data.destination_id    = 1U;
     early_data.reliability_class = ReliabilityClass::BEST_EFFORT;
-    assert(client1.send_message(early_data) == Result::OK);
+    assert(client1->send_message(early_data) == Result::OK);
 
     // Server drops the DATA-before-HELLO; port must NOT be locked to client1's port.
     MessageEnvelope d1;
-    assert(server.receive_message(d1, 500U) == Result::ERR_TIMEOUT);
+    assert(server->receive_message(d1, 500U) == Result::ERR_TIMEOUT);
 
     // Step 3: client2 (different ephemeral port) sends HELLO — must be accepted.
-    DtlsUdpBackend client2;
+    DtlsUdpBackend* client2 = new DtlsUdpBackend();
     TransportConfig cli2_cfg;
     make_dtls_config(cli2_cfg, false, PORT, false);
-    assert(client2.init(cli2_cfg) == Result::OK);
+    assert(client2->init(cli2_cfg) == Result::OK);
 
     MessageEnvelope hello;
     envelope_init(hello);
@@ -2525,15 +2581,15 @@ static void test_early_data_does_not_poison_port_lock()
     hello.destination_id    = 1U;
     hello.reliability_class = ReliabilityClass::BEST_EFFORT;
     hello.payload_length    = 0U;
-    assert(client2.send_message(hello) == Result::OK);
+    assert(client2->send_message(hello) == Result::OK);
 
     // Server accepts HELLO from client2; port locked to client2's ephemeral port.
     MessageEnvelope d2;
-    assert(server.receive_message(d2, 500U) == Result::ERR_TIMEOUT);  // HELLO consumed
+    assert(server->receive_message(d2, 500U) == Result::ERR_TIMEOUT);  // HELLO consumed
 
     // Drain server HELLO response on client2's side.
     MessageEnvelope d3;
-    assert(client2.receive_message(d3, 500U) == Result::ERR_TIMEOUT);
+    assert(client2->receive_message(d3, 500U) == Result::ERR_TIMEOUT);
 
     // Step 4: client2 sends DATA → must be delivered.
     MessageEnvelope data;
@@ -2543,18 +2599,21 @@ static void test_early_data_does_not_poison_port_lock()
     data.source_id         = 8U;
     data.destination_id    = 1U;
     data.reliability_class = ReliabilityClass::BEST_EFFORT;
-    assert(client2.send_message(data) == Result::OK);
+    assert(client2->send_message(data) == Result::OK);
 
     MessageEnvelope rcv;
-    Result r = server.receive_message(rcv, 500U);
+    Result r = server->receive_message(rcv, 500U);
     assert(r == Result::OK);
     assert(rcv.source_id == 8U);
 
-    client1.close();
-    client2.close();
-    server.close();
+    client1->close();
+    client2->close();
+    server->close();
 
     printf("PASS: test_early_data_does_not_poison_port_lock\n");
+    delete client1;
+    delete client2;
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2575,18 +2634,18 @@ static void test_plaintext_server_wrong_port_after_learn_dropped()
     //   4. server must silently drop the DATA (port mismatch) → ERR_TIMEOUT.
     const uint16_t PORT = alloc_ephemeral_port(SOCK_DGRAM);
 
-    DtlsUdpBackend server;
+    DtlsUdpBackend* server = new DtlsUdpBackend();
     TransportConfig srv_cfg;
     make_dtls_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // client1: sends HELLO, establishing the locked source port.
-    DtlsUdpBackend client1;
+    DtlsUdpBackend* client1 = new DtlsUdpBackend();
     TransportConfig cli1_cfg;
     make_dtls_config(cli1_cfg, false, PORT, false);
-    Result cli1_init = client1.init(cli1_cfg);
+    Result cli1_init = client1->init(cli1_cfg);
     assert(cli1_init == Result::OK);
 
     MessageEnvelope hello;
@@ -2598,18 +2657,18 @@ static void test_plaintext_server_wrong_port_after_learn_dropped()
     hello.reliability_class = ReliabilityClass::BEST_EFFORT;
     hello.payload_length    = 0U;
 
-    assert(client1.send_message(hello) == Result::OK);
+    assert(client1->send_message(hello) == Result::OK);
 
     // Drain the HELLO: consumed internally; port is now locked to client1's port.
     MessageEnvelope dummy;
-    Result rh = server.receive_message(dummy, 500U);
+    Result rh = server->receive_message(dummy, 500U);
     assert(rh == Result::ERR_TIMEOUT);  // HELLO consumed, not delivered
 
     // client2: OS assigns a different ephemeral source port.
-    DtlsUdpBackend client2;
+    DtlsUdpBackend* client2 = new DtlsUdpBackend();
     TransportConfig cli2_cfg;
     make_dtls_config(cli2_cfg, false, PORT, false);
-    Result cli2_init = client2.init(cli2_cfg);
+    Result cli2_init = client2->init(cli2_cfg);
     assert(cli2_init == Result::OK);
 
     MessageEnvelope data;
@@ -2620,18 +2679,21 @@ static void test_plaintext_server_wrong_port_after_learn_dropped()
     data.destination_id    = 1U;
     data.reliability_class = ReliabilityClass::BEST_EFFORT;
 
-    assert(client2.send_message(data) == Result::OK);
+    assert(client2->send_message(data) == Result::OK);
 
     // Server must drop the datagram (source port ≠ locked port) → ERR_TIMEOUT.
     MessageEnvelope rcv;
-    Result r = server.receive_message(rcv, 500U);
+    Result r = server->receive_message(rcv, 500U);
     assert(r == Result::ERR_TIMEOUT);  // SEC-023: rogue-port datagram dropped
 
-    client1.close();
-    client2.close();
-    server.close();
+    client1->close();
+    client2->close();
+    server->close();
 
     printf("PASS: test_plaintext_server_wrong_port_after_learn_dropped\n");
+    delete client1;
+    delete client2;
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2648,19 +2710,20 @@ static void test_mock_dtls_sock_bind_fail()
 
     DtlsMockOps tls_mock;
 
-    DtlsUdpBackend backend(sock_mock, tls_mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(sock_mock, tls_mock);
+    assert(!backend->is_open());
 
     const uint16_t port_15001 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_15001, false);  // plaintext server
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
     assert(sock_mock.n_do_close >= 1);
 
     printf("PASS: test_mock_dtls_sock_bind_fail\n");
+    delete backend;
 }
 
 static void test_mock_dtls_plaintext_recv_from_fail()
@@ -2675,23 +2738,24 @@ static void test_mock_dtls_plaintext_recv_from_fail()
 
     DtlsMockOps tls_mock;
 
-    DtlsUdpBackend backend(sock_mock, tls_mock);
+    DtlsUdpBackend* backend = new DtlsUdpBackend(sock_mock, tls_mock);
 
     const uint16_t port_15002 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_15002, false);  // plaintext server
 
-    Result init_res = backend.init(cfg);
+    Result init_res = backend->init(cfg);
     assert(init_res == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     MessageEnvelope env;
-    Result r = backend.receive_message(env, 200U);
+    Result r = backend->receive_message(env, 200U);
     assert(r == Result::ERR_TIMEOUT);
 
-    assert(backend.is_open());  // backend remains open after receive failure
-    backend.close();
+    assert(backend->is_open());  // backend remains open after receive failure
+    backend->close();
     printf("PASS: test_mock_dtls_plaintext_recv_from_fail\n");
+    delete backend;
 }
 
 static void test_mock_dtls_plaintext_send_to_fail()
@@ -2703,13 +2767,13 @@ static void test_mock_dtls_plaintext_send_to_fail()
     MockSocketOps sock_mock;
     DtlsMockOps tls_mock;
 
-    DtlsUdpBackend backend(sock_mock, tls_mock);
+    DtlsUdpBackend* backend = new DtlsUdpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     const uint16_t port_15003 = alloc_ephemeral_port(SOCK_DGRAM);
     make_dtls_config(cfg, false, port_15003, false);  // plaintext client
-    assert(backend.init(cfg) == Result::OK);
-    assert(backend.is_open());
+    assert(backend->init(cfg) == Result::OK);
+    assert(backend->is_open());
 
     sock_mock.fail_send_to = true;  // inject after init
 
@@ -2721,11 +2785,12 @@ static void test_mock_dtls_plaintext_send_to_fail()
     env.destination_id    = 1U;
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
 
-    Result r = backend.send_message(env);
+    Result r = backend->send_message(env);
     assert(r == Result::ERR_IO);
 
-    backend.close();
+    backend->close();
     printf("PASS: test_mock_dtls_plaintext_send_to_fail\n");
+    delete backend;
 }
 
 static void test_mock_dtls_get_stats()
@@ -2735,23 +2800,24 @@ static void test_mock_dtls_get_stats()
     MockSocketOps sock_mock;
     DtlsMockOps tls_mock;
 
-    DtlsUdpBackend backend(sock_mock, tls_mock);
+    DtlsUdpBackend* backend = new DtlsUdpBackend(sock_mock, tls_mock);
 
     const uint16_t port_15004 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_15004, false);  // plaintext server
-    assert(backend.init(cfg) == Result::OK);
+    assert(backend->init(cfg) == Result::OK);
 
     TransportStats stats;
     transport_stats_init(stats);
-    backend.get_transport_stats(stats);
+    backend->get_transport_stats(stats);
 
     // UDP bind counts as a connection event (REQ-7.2.4).
     assert(stats.connections_opened >= 1U);
     assert(stats.connections_closed == 0U);
 
-    backend.close();
+    backend->close();
     printf("PASS: test_mock_dtls_get_stats\n");
+    delete backend;
 }
 
 static void test_dtls_cert_is_directory()
@@ -2761,7 +2827,7 @@ static void test_dtls_cert_is_directory()
     // Strategy: pass /tmp (always-present directory) as cert_file so lstat()
     //           succeeds but S_ISREG() returns false → ERR_IO.
     const uint16_t port_15005 = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, port_15005, true);
 
@@ -2770,10 +2836,11 @@ static void test_dtls_cert_is_directory()
     (void)strncpy(cfg.tls.cert_file, "/tmp", path_max);
     cfg.tls.cert_file[path_max] = '\0';
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
     printf("PASS: test_dtls_cert_is_directory\n");
+    delete backend;
 }
 
 // Verifies: REQ-4.1.1
@@ -2783,17 +2850,18 @@ static void test_dtls_cert_is_directory()
 static void test_init_max_channels_exceeded()
 {
     // Verifies: REQ-4.1.1
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     transport_config_default(cfg);
     cfg.kind         = TransportKind::DTLS_UDP;
     cfg.num_channels = static_cast<uint32_t>(MAX_CHANNELS) + 1U;  // exceeds limit
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_INVALID);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_init_max_channels_exceeded\n");
+    delete backend;
 }
 
 // Verifies: REQ-6.4.1
@@ -2803,7 +2871,7 @@ static void test_init_max_channels_exceeded()
 static void test_init_ipv6_peer_rejected()
 {
     // Verifies: REQ-6.4.1
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     // Use a dummy port (0); init() returns before creating any socket.
     make_dtls_config(cfg, false, 0U, false);
@@ -2811,11 +2879,12 @@ static void test_init_ipv6_peer_rejected()
     (void)strncpy(cfg.peer_ip, "::1", sizeof(cfg.peer_ip) - 1U);
     cfg.peer_ip[sizeof(cfg.peer_ip) - 1U] = '\0';
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_INVALID);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_init_ipv6_peer_rejected\n");
+    delete backend;
 }
 
 // Verifies: REQ-6.4.6
@@ -2832,8 +2901,8 @@ static void test_client_verify_peer_empty_hostname()
     // ca_file must be non-empty to pass the REQ-6.3.6 H-1 check first.
     DtlsMockOps mock;
 
-    DtlsUdpBackend backend(mock);
-    assert(!backend.is_open());
+    DtlsUdpBackend* backend = new DtlsUdpBackend(mock);
+    assert(!backend->is_open());
 
     const uint16_t port_15006 = alloc_ephemeral_port(SOCK_DGRAM);
     TransportConfig cfg;
@@ -2847,11 +2916,12 @@ static void test_client_verify_peer_empty_hostname()
     // peer_hostname remains "" (zero-initialised by transport_config_default)
     // → REQ-6.4.6 check in client_connect_and_handshake() rejects with ERR_INVALID.
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_INVALID);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
     printf("PASS: test_client_verify_peer_empty_hostname\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2865,7 +2935,7 @@ static void test_dtls_require_crl_empty_crl_file_rejected()
     // require_crl=true with an empty crl_file and verify_peer=true must return
     // ERR_INVALID and log FATAL before any state mutation (REQ-6.3.7, H-2, HAZ-020).
     const uint16_t port = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, true, port, true);
     cfg.tls.verify_peer = true;
@@ -2876,10 +2946,11 @@ static void test_dtls_require_crl_empty_crl_file_rejected()
     cfg.tls.ca_file[path_max] = '\0';
     // crl_file remains "" → triggers H-2 rejection.
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_INVALID);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
     printf("PASS: test_dtls_require_crl_empty_crl_file_rejected\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2894,7 +2965,7 @@ static void test_dtls_verify_peer_false_with_hostname_rejected()
     // configuration (CWE-297); init must return ERR_INVALID and log WARNING_HI
     // (REQ-6.3.9, H-8, HAZ-025).
     const uint16_t port = alloc_ephemeral_port(SOCK_DGRAM);
-    DtlsUdpBackend backend;
+    DtlsUdpBackend* backend = new DtlsUdpBackend();
     TransportConfig cfg;
     make_dtls_config(cfg, false, port, true);
     cfg.tls.verify_peer = false;
@@ -2902,10 +2973,11 @@ static void test_dtls_verify_peer_false_with_hostname_rejected()
     (void)strncpy(cfg.tls.peer_hostname, "example.com", path_max);
     cfg.tls.peer_hostname[path_max] = '\0';
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_INVALID);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
     printf("PASS: test_dtls_verify_peer_false_with_hostname_rejected\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

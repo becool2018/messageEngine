@@ -295,14 +295,13 @@ Result LocalSimHarness::send_message(const MessageEnvelope& envelope)
     // Do NOT also inject `envelope` directly — that would double-send every message
     // and bypass configured delay for the current message. (HAZ-003, HAZARD_ANALYSIS §2)
     // flush_outbound_batch() handles the three-case attribution (see its comment).
-    MessageEnvelope delayed_envelopes[IMPAIR_DELAY_BUF_SIZE];
     uint32_t delayed_count = m_impairment.collect_deliverable(now_us,
-                                                              delayed_envelopes,
+                                                              m_delay_buf,
                                                               IMPAIR_DELAY_BUF_SIZE);
 
     // flush_outbound_batch routes each envelope through the peer's inbound
     // impairment (deliver_from_peer), then returns OK or ERR_IO.
-    return flush_outbound_batch(envelope, delayed_envelopes, delayed_count, now_us);
+    return flush_outbound_batch(envelope, m_delay_buf, delayed_count, now_us);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

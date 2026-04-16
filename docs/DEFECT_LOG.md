@@ -1801,7 +1801,7 @@ Outcome: documentation-only update. `docs/STACK_ANALYSIS.md` updated with detail
 
 | ID | Severity | Description | Status |
 |----|----------|-------------|--------|
-| DEF-031-1 | MAJOR | `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]` in five flush helpers allocates ~130 KB of stack on every call, making the library unsuitable for embedded targets with ≤ 256 KB per-thread stacks | DEFER — fix requires heap-allocating backends in ~60 test functions; tracked as follow-on |
+| DEF-031-1 | MAJOR | `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]` in five flush helpers allocates ~130 KB of stack on every call, making the library unsuitable for embedded targets with ≤ 256 KB per-thread stacks | FIX — INSP-033: `m_delay_buf` member added to all five backends; tests heap-allocate backends |
 
 **Acceptance criteria:**
 
@@ -1865,3 +1865,73 @@ truncation/padding boundary conditions (T-2.15–T-2.18) and a rename of T-2.13.
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-04-15. `make lint`, `make run_tests` (40/40 Logger tests), and `make check_traceability` all PASS. `make coverage` confirms Logger.cpp 70.31% — no regression from round 17 baseline. `docs/COVERAGE_CEILINGS.md` updated for `func != nullptr` parameter rename and round-18 test additions. No defects found. Inspection INSP-032 closed PASS.
+
+---
+
+### INSP-033 — DEF-031-1 fix: move impairment flush buffer from stack to member; heap-allocate backends in tests (2026-04-15)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-15 |
+| Author      | Claude Sonnet 4.6 (AI-assisted) |
+| Moderator   | Don Jessup |
+| Reviewer    | Don Jessup |
+| Branch      | fix/stack-delay-buf-member-2026-04 |
+| Outcome     | PASS |
+
+#### Scope
+
+Closure of DEF-031-1 (deferred in INSP-031). INSP-031 identified that all five transport
+backends declared `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]` as a stack-local array
+in their flush helpers, allocating ~130 KB per call. The member-buffer approach was
+investigated but deferred because adding a 132 KB member to each backend struct (~540 KB →
+~674 KB) caused SIGSEGV in LLVM coverage builds when tests stack-allocated backend objects
+on macOS ARM64 (lazy stack-page-mapping).
+
+This inspection covers the complete fix in two parts:
+
+**Part 1 — Source fix (5 backends):**
+`MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]` replaced with pre-allocated private member
+`MessageEnvelope m_delay_buf[IMPAIR_DELAY_BUF_SIZE] = {}` in:
+- `TcpBackend` (`.hpp` + `flush_delayed_to_clients()` in `.cpp`)
+- `TlsTcpBackend` (`.hpp` + `flush_delayed_to_clients()` in `.cpp`)
+- `UdpBackend` (`.hpp` + `flush_delayed_to_wire()` + `send_message()` in `.cpp`)
+- `DtlsUdpBackend` (`.hpp` + `flush_delayed_to_wire()` + `send_message()` in `.cpp`)
+- `LocalSimHarness` (`.hpp` + `send_message()` in `.cpp`)
+
+**Part 2 — Test infrastructure fix (7 test files):**
+All test functions that stack-declared backend objects converted to heap-allocate them
+(`new`/`delete`). Permitted by CLAUDE.md §1b (dynamic allocation in test fixture setup/teardown).
+Files: `test_TcpBackend.cpp`, `test_TlsTcpBackend.cpp`, `test_UdpBackend.cpp`,
+`test_DtlsUdpBackend.cpp`, `test_LocalSim.cpp`, `test_DeliveryEngine.cpp`,
+`test_RequestReplyEngine.cpp`.
+
+**Stack impact:** Flush-path frame: ~130 KB → ~48 B. Chain 3 (retry pump): ~130 KB → ~592 B.
+New worst case by stack size: Chain 5 (DTLS outbound) ~764 B (~1,326 B with Logger).
+
+#### Defects found
+
+| ID | Severity | Description | Status |
+|----|----------|-------------|--------|
+| DEF-031-1 | MAJOR | (from INSP-031) `delayed[]` stack allocation ~130 KB in five flush helpers | FIX — `m_delay_buf` member added; tests heap-allocate backends |
+
+#### Acceptance criteria
+
+| Criterion | Status |
+|-----------|--------|
+| `m_delay_buf` member added to all five backend headers with required comment | PASS |
+| All five `.cpp` flush helpers use `m_delay_buf` instead of stack-local `delayed[]` | PASS |
+| All test functions that stack-declared backends converted to heap-allocate | PASS |
+| `docs/STACK_ANALYSIS.md` "Known Limitation" updated to "Resolved"; Chain 3 / Summary table updated | PASS |
+| `CLAUDE.md §15` updated with new worst-case figures | PASS |
+| `make lint` PASS | PASS |
+| `make run_tests` 24/24 PASS | PASS |
+| `make check_traceability` PASS | PASS |
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-15. DEF-031-1 closed FIX. All five backends updated with
+`m_delay_buf` member; all seven test files converted to heap-allocate backends. Stack analysis
+updated: Chain 3 ~130 KB → ~592 B; Chain 5 (~764 B) is now the stack-size worst case.
+`make lint`, `make run_tests` (24/24), `make check_traceability` all PASS.
+Inspection INSP-033 closed PASS.

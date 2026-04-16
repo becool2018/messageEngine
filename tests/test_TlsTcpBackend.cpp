@@ -180,19 +180,21 @@ static void* client_thread_func(void* arg)
 
     usleep(80000U);  // 80 ms: wait for server to start listening
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, a->tls_on);
-    a->result = client.init(cfg);
+    a->result = client->init(cfg);
     if (a->result != Result::OK) {
+        delete client;
         return nullptr;
     }
 
     // REQ-6.1.8: client must send HELLO before any DATA frame so the server
     // can register the NodeId and accept subsequent data frames (F-3 fix).
-    Result hello_r = client.register_local_id(2U);
+    Result hello_r = client->register_local_id(2U);
     if (hello_r != Result::OK) {
         a->result = hello_r;
+        delete client;
         return nullptr;
     }
     usleep(20000U);  // 20 ms: let server process HELLO before DATA arrives
@@ -205,9 +207,10 @@ static void* client_thread_func(void* arg)
     env.destination_id = 1U;
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
 
-    a->result = client.send_message(env);
+    a->result = client->send_message(env);
     usleep(50000U);  // 50 ms: let server drain
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -255,18 +258,19 @@ static void test_transport_config_includes_tls()
 static void test_server_bind_plaintext()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
-    TlsTcpBackend backend;
+    TlsTcpBackend* backend = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, PORT, false);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::OK);
-    assert(backend.is_open() == true);
+    assert(backend->is_open() == true);
 
-    backend.close();
-    assert(backend.is_open() == false);
+    backend->close();
+    assert(backend->is_open() == false);
 
     printf("PASS: test_server_bind_plaintext\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -276,7 +280,7 @@ static void test_server_bind_plaintext()
 static void test_init_bad_cert_path()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
-    TlsTcpBackend backend;
+    TlsTcpBackend* backend = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, PORT, true);
     // Override cert_file to a path that does not exist
@@ -284,11 +288,12 @@ static void test_init_bad_cert_path()
                   static_cast<uint32_t>(sizeof(cfg.tls.cert_file)) - 1U);
     cfg.tls.cert_file[sizeof(cfg.tls.cert_file) - 1U] = '\0';
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
 
     printf("PASS: test_init_bad_cert_path\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -298,18 +303,19 @@ static void test_init_bad_cert_path()
 static void test_server_bind_tls()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
-    TlsTcpBackend backend;
+    TlsTcpBackend* backend = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, PORT, true);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::OK);
-    assert(backend.is_open() == true);
+    assert(backend->is_open() == true);
 
-    backend.close();
-    assert(backend.is_open() == false);
+    backend->close();
+    assert(backend->is_open() == false);
 
     printf("PASS: test_server_bind_tls\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -321,13 +327,13 @@ static void test_plaintext_loopback()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
 
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     ClientThreadArg args;
     args.port   = PORT;
@@ -348,16 +354,17 @@ static void test_plaintext_loopback()
     (void)pthread_attr_destroy(&attr);
 
     MessageEnvelope received;
-    Result recv_res = server.receive_message(received, 3000U);
+    Result recv_res = server->receive_message(received, 3000U);
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     assert(recv_res == Result::OK);
     assert(args.result == Result::OK);
     assert(received.message_id == 0xABCDULL);
 
     printf("PASS: test_plaintext_loopback\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -369,13 +376,13 @@ static void test_tls_loopback()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);
 
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     ClientThreadArg args;
     args.port   = PORT;
@@ -396,16 +403,17 @@ static void test_tls_loopback()
     (void)pthread_attr_destroy(&attr);
 
     MessageEnvelope received;
-    Result recv_res = server.receive_message(received, 5000U);
+    Result recv_res = server->receive_message(received, 5000U);
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     assert(recv_res == Result::OK);
     assert(args.result == Result::OK);
     assert(received.message_id == 0xABCDULL);
 
     printf("PASS: test_tls_loopback\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -427,19 +435,21 @@ static void* echo_client_thread_func(void* raw_arg)
 
     usleep(80000U);  // 80 ms: wait for server
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, a->tls_on);
-    a->send_result = client.init(cfg);
+    a->send_result = client->init(cfg);
     if (a->send_result != Result::OK) {
+        delete client;
         return nullptr;
     }
 
     // REQ-6.1.8: send HELLO before DATA so the server registers this NodeId.
-    Result hello_r = client.register_local_id(2U);
+    Result hello_r = client->register_local_id(2U);
     if (hello_r != Result::OK) {
         a->send_result = hello_r;
-        client.close();
+        client->close();
+        delete client;
         return nullptr;
     }
     usleep(20000U);  // 20 ms: let server process HELLO before DATA arrives
@@ -452,20 +462,22 @@ static void* echo_client_thread_func(void* raw_arg)
     env.destination_id    = 1U;
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
 
-    a->send_result = client.send_message(env);
+    a->send_result = client->send_message(env);
     if (a->send_result != Result::OK) {
-        client.close();
+        client->close();
+        delete client;
         return nullptr;
     }
 
     // Receive echo reply — exercises client-mode poll_clients_once() (L607 False)
     MessageEnvelope reply;
-    a->recv_result = client.receive_message(reply, 3000U);
+    a->recv_result = client->receive_message(reply, 3000U);
     if (a->recv_result == Result::OK) {
         a->echo_msg_id = reply.message_id;
     }
 
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -477,17 +489,18 @@ static void* echo_client_thread_func(void* raw_arg)
 static void test_connect_bad_host()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, false);
     // PORT has no server → connect_to_server() fails at L247
     cfg.connect_timeout_ms = 500U;
 
-    Result res = client.init(cfg);
+    Result res = client->init(cfg);
     assert(res != Result::OK);
-    assert(client.is_open() == false);
+    assert(client->is_open() == false);
 
     printf("PASS: test_connect_bad_host\n");
+    delete client;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -498,21 +511,22 @@ static void test_connect_bad_host()
 static void test_receive_timeout()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, PORT, false);
 
-    Result init_res = server.init(cfg);
+    Result init_res = server->init(cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // receive_message with short timeout: no client → all pops fail → ERR_TIMEOUT
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 300U);
+    Result recv_res = server->receive_message(env, 300U);
     assert(recv_res == Result::ERR_TIMEOUT);  // L734
 
-    server.close();
+    server->close();
     printf("PASS: test_receive_timeout\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -522,11 +536,11 @@ static void test_receive_timeout()
 static void test_server_send_no_clients()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, PORT, false);
 
-    Result init_res = server.init(cfg);
+    Result init_res = server->init(cfg);
     assert(init_res == Result::OK);
 
     MessageEnvelope env;
@@ -538,12 +552,13 @@ static void test_server_send_no_clients()
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
 
     // send_message with m_client_count==0 → L691 True: discards, returns OK
-    Result send_res = server.send_message(env);
+    Result send_res = server->send_message(env);
     assert(send_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
-    server.close();
+    server->close();
     printf("PASS: test_server_send_no_clients\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -559,13 +574,13 @@ static void test_echo_loopback_plaintext()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
 
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     EchoClientArg args;
     args.port        = PORT;
@@ -588,7 +603,7 @@ static void test_echo_loopback_plaintext()
 
     // Server: receive client message
     MessageEnvelope received;
-    Result recv_res = server.receive_message(received, 3000U);
+    Result recv_res = server->receive_message(received, 3000U);
     assert(recv_res == Result::OK);
 
     // Server: send echo reply to the originating client (REQ-6.1.9 / F-4 fix).
@@ -597,18 +612,19 @@ static void test_echo_loopback_plaintext()
     const NodeId client_node_id = received.source_id;  // 2U (registered via HELLO)
     received.destination_id = client_node_id;
     received.source_id      = 1U;  // server's NodeId
-    Result send_res = server.send_message(received);
+    Result send_res = server->send_message(received);
     assert(send_res == Result::OK);
 
     // Wait for client to receive the echo before closing
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     assert(args.send_result == Result::OK);
     assert(args.recv_result == Result::OK);         // client received echo
     assert(args.echo_msg_id == 0xBEEFULL);
 
     printf("PASS: test_echo_loopback_plaintext\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -639,14 +655,15 @@ static void* tls_close_thread_func(void* raw_arg)
     assert(a != nullptr);
     usleep(80000U);  // 80 ms: wait for server
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, a->tls_on);
-    a->result = client.init(cfg);
+    a->result = client->init(cfg);
     if (a->result == Result::OK) {
         usleep(50000U);  // 50 ms: let handshake settle on server side
-        client.close();  // sends ssl_close_notify then frees resources
+        client->close();  // sends ssl_close_notify then frees resources
     }
+    delete client;
     return nullptr;
 }
 
@@ -669,7 +686,7 @@ static void* verify_peer_client_func(void* raw_arg)
     assert(a != nullptr);
     usleep(80000U);
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, a->tls_on);
     cfg.tls.verify_peer = a->verify_peer;
@@ -683,13 +700,14 @@ static void* verify_peer_client_func(void* raw_arg)
         (void)strncpy(cfg.tls.peer_hostname, a->peer_hostname, len);
         cfg.tls.peer_hostname[len] = '\0';
     }
-    a->result = client.init(cfg);
+    a->result = client->init(cfg);
     if (a->result == Result::OK) {
         // REQ-6.1.8: send HELLO before DATA so server registers this NodeId.
-        Result hello_r = client.register_local_id(2U);
+        Result hello_r = client->register_local_id(2U);
         if (hello_r != Result::OK) {
             a->result = hello_r;
-            client.close();
+            client->close();
+            delete client;
             return nullptr;
         }
         usleep(20000U);  // 20 ms: let server process HELLO before DATA arrives
@@ -701,10 +719,11 @@ static void* verify_peer_client_func(void* raw_arg)
         env.source_id         = 2U;
         env.destination_id    = 1U;
         env.reliability_class = ReliabilityClass::BEST_EFFORT;
-        (void)client.send_message(env);
+        (void)client->send_message(env);
         usleep(50000U);
-        client.close();
+        client->close();
     }
+    delete client;
     return nullptr;
 }
 
@@ -781,20 +800,21 @@ static void* multi_msg_client_func(void* raw_arg)
     assert(a->num_msgs <= MAX_MSGS);
     usleep(a->delay_us);
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, a->tls_on);
     // SEC-012: use per-client NodeId (must be unique; default 2 for single-client tests).
     const NodeId node_id = (a->local_node_id != NODE_ID_INVALID) ? a->local_node_id : 2U;
     cfg.local_node_id = node_id;
-    a->result = client.init(cfg);
+    a->result = client->init(cfg);
     if (a->result != Result::OK) { return nullptr; }
 
     // REQ-6.1.8: send HELLO before DATA so server registers this NodeId (F-3 fix).
-    Result hello_r = client.register_local_id(node_id);
+    Result hello_r = client->register_local_id(node_id);
     if (hello_r != Result::OK) {
         a->result = hello_r;
-        client.close();
+        client->close();
+        delete client;
         return nullptr;
     }
     usleep(20000U);  // 20 ms: let server process HELLO before DATA arrives
@@ -807,10 +827,11 @@ static void* multi_msg_client_func(void* raw_arg)
         env.source_id         = node_id;
         env.destination_id    = 1U;
         env.reliability_class = ReliabilityClass::BEST_EFFORT;
-        (void)client.send_message(env);
+        (void)client->send_message(env);
     }
     usleep(a->stay_alive_us);
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -826,10 +847,10 @@ static void test_post_echo_remove_client_plaintext()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
 
     EchoClientArg args;
@@ -844,12 +865,12 @@ static void test_post_echo_remove_client_plaintext()
     // Server: receive, echo, wait for client to receive echo and close.
     // Swap src/dst so the reply is unicast-routed to the client's NodeId (F-4 fix).
     MessageEnvelope received;
-    Result recv_res = server.receive_message(received, 3000U);
+    Result recv_res = server->receive_message(received, 3000U);
     assert(recv_res == Result::OK);
     const NodeId echo_client_id = received.source_id;  // 2U
     received.destination_id = echo_client_id;
     received.source_id      = 1U;  // server's NodeId
-    Result send_res = server.send_message(received);
+    Result send_res = server->send_message(received);
     assert(send_res == Result::OK);
     (void)pthread_join(tid, nullptr);
 
@@ -863,19 +884,20 @@ static void test_post_echo_remove_client_plaintext()
     // recv2: covers L612 False (m_client_count==1 → listen-poll skipped)
     // Result may be OK (extra copy) or ERR_TIMEOUT (socket already gone).
     MessageEnvelope env2;
-    (void)server.receive_message(env2, 400U);
+    (void)server->receive_message(env2, 400U);
 
     // recv3: by now the client socket is closed; recv_from_client encounters
     // EOF or ECONNRESET → L511 True → remove_client in plaintext mode:
     // L375 False (no ssl_close_notify), L384 False (j<0 loop never entered)
     MessageEnvelope env3;
-    Result recv3 = server.receive_message(env3, 400U);
+    Result recv3 = server->receive_message(env3, 400U);
     assert(recv3 == Result::ERR_TIMEOUT);
 
-    server.close();
+    server->close();
     assert(args.send_result == Result::OK);
     assert(args.recv_result == Result::OK);
     printf("PASS: test_post_echo_remove_client_plaintext\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -890,10 +912,10 @@ static void test_tls_verify_peer_with_ca()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
 
     // Client: verify_peer=true, ca_file=TEST_CERT_FILE (the server's self-signed cert)
@@ -910,10 +932,10 @@ static void test_tls_verify_peer_with_ca()
     pthread_t tid = create_thread_4mb(verify_peer_client_func, &args);
 
     MessageEnvelope received;
-    Result recv_res = server.receive_message(received, 5000U);
+    Result recv_res = server->receive_message(received, 5000U);
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     // The server cert IS the CA cert (self-signed), so peer verification succeeds.
     // Coverage points L152 True, L158:9 True, L158:32 True, L160 False are confirmed
@@ -922,6 +944,7 @@ static void test_tls_verify_peer_with_ca()
     assert(recv_res == Result::OK);
     assert(received.message_id == 0xCAFEULL);
     printf("PASS: test_tls_verify_peer_with_ca\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -934,10 +957,10 @@ static void test_tls_verify_peer_no_ca()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
 
     // Client: verify_peer=true but ca_file="" → CA chain never loaded →
@@ -954,14 +977,15 @@ static void test_tls_verify_peer_no_ca()
 
     MessageEnvelope received;
     // Server: handshake will fail on the client side; server sees no message.
-    Result recv_res = server.receive_message(received, 3000U);
+    Result recv_res = server->receive_message(received, 3000U);
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     assert(args.result == Result::ERR_IO);   // L273 True: ssl_handshake (client) failed
     assert(recv_res == Result::ERR_TIMEOUT); // no message received
     printf("PASS: test_tls_verify_peer_no_ca\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -972,7 +996,7 @@ static void test_tls_verify_peer_no_ca()
 
 static void test_init_bad_key_path()
 {
-    TlsTcpBackend backend;
+    TlsTcpBackend* backend = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, 0U, true);   // TLS server (port irrelevant)
 
@@ -981,10 +1005,11 @@ static void test_init_bad_key_path()
                   static_cast<uint32_t>(sizeof(cfg.tls.key_file)) - 1U);
     cfg.tls.key_file[sizeof(cfg.tls.key_file) - 1U] = '\0';
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
     printf("PASS: test_init_bad_key_path\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1000,12 +1025,12 @@ static void test_server_num_channels_zero()
     // i.e. the condition (val > 0U) is False before (i < 5U) is False → L52:41 False.
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
     srv_cfg.num_channels = 0U;   // L644 False in init(); 1000U timeout fallback in send_to_slot
 
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
 
     ClientThreadArg args;
@@ -1016,21 +1041,22 @@ static void test_server_num_channels_zero()
     pthread_t tid = create_thread_4mb(client_thread_func, &args);
 
     MessageEnvelope received;
-    Result recv_res = server.receive_message(received, 3000U);
+    Result recv_res = server->receive_message(received, 3000U);
     assert(recv_res == Result::OK);
 
     // Unicast reply to client: swap src/dst. num_channels==0 → send_to_slot uses 1000U fallback.
     const NodeId ch0_client_id = received.source_id;  // 2U
     received.destination_id = ch0_client_id;
     received.source_id      = 1U;
-    Result send_res = server.send_message(received);
+    Result send_res = server->send_message(received);
     assert(send_res == Result::OK);
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     assert(args.result == Result::OK);
     printf("PASS: test_server_num_channels_zero\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1046,10 +1072,10 @@ static void test_tls_client_close_and_long_timeout()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
 
     ClientThreadArg args;
@@ -1064,14 +1090,15 @@ static void test_tls_client_close_and_long_timeout()
     //   L454 True (ssl_read ≤ 0), L455 True (not WANT_READ) → remove_client:
     //   L375 True (tls_enabled → ssl_close_notify + ssl_free)
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 5100U);
+    Result recv_res = server->receive_message(env, 5100U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     assert(args.result == Result::OK);
     printf("PASS: test_tls_client_close_and_long_timeout\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1081,16 +1108,17 @@ static void test_tls_client_close_and_long_timeout()
 
 static void test_server_bind_port_zero()
 {
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, 0U, false);  // port 0 → L48 True in port_to_str
 
-    Result res = server.init(cfg);
+    Result res = server->init(cfg);
     assert(res == Result::OK);       // OS assigns an ephemeral port
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
-    server.close();
+    server->close();
     printf("PASS: test_server_bind_port_zero\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1102,10 +1130,10 @@ static void test_raw_socket_no_tls_handshake()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
 
     RawSocketArg args;
@@ -1119,14 +1147,15 @@ static void test_raw_socket_no_tls_handshake()
     pthread_t tid = create_thread_4mb(raw_socket_thread_func, &args);
 
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 2000U);
+    Result recv_res = server->receive_message(env, 2000U);
     assert(recv_res == Result::ERR_TIMEOUT);  // handshake failed; no message queued
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     assert(args.result == Result::OK);
     printf("PASS: test_raw_socket_no_tls_handshake\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1138,10 +1167,10 @@ static void test_garbage_frame_deserialize_fail()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
 
     RawSocketArg args;
@@ -1156,14 +1185,15 @@ static void test_garbage_frame_deserialize_fail()
     MessageEnvelope env;
     // The deserialize error is logged; recv_from_client returns ERR_INVALID.
     // poll_clients_once discards the return; receive_message loops until timeout.
-    Result recv_res = server.receive_message(env, 1500U);
+    Result recv_res = server->receive_message(env, 1500U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     assert(args.result == Result::OK);
     printf("PASS: test_garbage_frame_deserialize_fail\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1188,10 +1218,10 @@ static void test_two_client_queue_prefill()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
 
     // Thread1 sends 2 msgs; Thread2 sends 1 msg.  Each send_message places
@@ -1226,7 +1256,7 @@ static void test_two_client_queue_prefill()
     // Call A: poll listen → accept Thread1 (first in backlog); read Thread1 msg1
     //         → push → pop → return.  Thread2 remains in the accept backlog.
     MessageEnvelope envA;
-    Result resA = server.receive_message(envA, 3000U);
+    Result resA = server->receive_message(envA, 3000U);
     assert(resA == Result::OK);
 
     // Call B: m_client_count=1; accept Thread2 (slot 1, m_client_count→2);
@@ -1235,22 +1265,23 @@ static void test_two_client_queue_prefill()
     //   Queue = [Thread2_msg1, Thread1_msg2].  Pop Thread2_msg1 → return.
     //   Thread1_msg2 remains in the recv_queue.
     MessageEnvelope envB;
-    Result resB = server.receive_message(envB, 3000U);
+    Result resB = server->receive_message(envB, 3000U);
     assert(resB == Result::OK);
 
     // Call C: recv_queue is non-empty at entry → L713 True → pop Thread1_msg2
     //         immediately without polling.
     MessageEnvelope envC;
-    Result resC = server.receive_message(envC, 3000U);
+    Result resC = server->receive_message(envC, 3000U);
     assert(resC == Result::OK);   // L713 True: popped without polling
 
-    server.close();
+    server->close();
     (void)pthread_join(t1, nullptr);
     (void)pthread_join(t2, nullptr);
 
     assert(arg1.result == Result::OK);
     assert(arg2.result == Result::OK);
     printf("PASS: test_two_client_queue_prefill\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1280,10 +1311,10 @@ static void test_two_client_compact_loop()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
 
     // Thread1: connect at 5 ms, send 1 msg, close immediately.
@@ -1314,7 +1345,7 @@ static void test_two_client_compact_loop()
 
     // Call A: Thread1 connects at 5 ms; server accepts it (slot 0); reads msg1.
     MessageEnvelope envA;
-    Result resA = server.receive_message(envA, 3000U);
+    Result resA = server->receive_message(envA, 3000U);
     assert(resA == Result::OK);
 
     // Pause: Thread2 connects at 50 ms. Let it reach the backlog before Call B.
@@ -1327,22 +1358,23 @@ static void test_two_client_compact_loop()
     //   Thread2 shifts slot 1 → slot 0; m_client_count→1.
     //   Pop Thread2_msg1 → return.
     MessageEnvelope envB;
-    Result resB = server.receive_message(envB, 3000U);
+    Result resB = server->receive_message(envB, 3000U);
     assert(resB == Result::OK);
 
     // Call C: queue empty; poll Thread2 (slot 0 after compact); reads Thread2 msg2
     //         → push → pop → return.
     MessageEnvelope envC;
-    Result resC = server.receive_message(envC, 3000U);
+    Result resC = server->receive_message(envC, 3000U);
     assert(resC == Result::OK);   // L384 True covered in Call B
 
-    server.close();
+    server->close();
     (void)pthread_join(t1, nullptr);
     (void)pthread_join(t2, nullptr);
 
     assert(arg1.result == Result::OK);
     assert(arg2.result == Result::OK);
     printf("PASS: test_two_client_compact_loop\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1353,7 +1385,7 @@ static void test_two_client_compact_loop()
 
 static void test_tls_bad_ca_file()
 {
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, 0U, true);  // TLS client
     cfg.tls.verify_peer = true;
@@ -1368,10 +1400,11 @@ static void test_tls_bad_ca_file()
                   static_cast<uint32_t>(sizeof(cfg.tls.ca_file)) - 1U);
     cfg.tls.ca_file[sizeof(cfg.tls.ca_file) - 1U] = '\0';
 
-    Result res = client.init(cfg);
+    Result res = client->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(client.is_open() == false);
+    assert(client->is_open() == false);
     printf("PASS: test_tls_bad_ca_file\n");
+    delete client;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1406,15 +1439,16 @@ static void test_bind_port_in_use()
 
     // Now TlsTcpBackend tries to bind the same address → mbedtls_net_bind fails
     // (EADDRINUSE even with SO_REUSEADDR on an active LISTEN socket) → L211 True
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, PORT, false);
-    Result res = server.init(cfg);
+    Result res = server->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(server.is_open() == false);
+    assert(server->is_open() == false);
 
     (void)::close(blocker);
     printf("PASS: test_bind_port_in_use\n");
+    delete server;
 }
 
 
@@ -1445,10 +1479,10 @@ static void test_server_send_before_client_connects()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
 
     // Build a valid envelope: type!=INVALID, source_id!=0, payload_length=0
@@ -1464,7 +1498,7 @@ static void test_server_send_before_client_connects()
 
     // send_message: process_outbound stages to delay buf (release_us=now_us);
     // m_client_count==0 → early return; delay buf retains message.
-    Result send_res = server.send_message(env);
+    Result send_res = server->send_message(env);
     assert(send_res == Result::OK);
 
     // receive_message: poll loop → flush_delayed_to_clients → 0 clients → no-op;
@@ -1472,11 +1506,12 @@ static void test_server_send_before_client_connects()
     // Bug fix: the former self-loop behavior (flush_delayed_to_queue pushing
     // outbound delayed messages into m_recv_queue) is intentionally removed.
     MessageEnvelope received;
-    Result recv_res = server.receive_message(received, 300U);
+    Result recv_res = server->receive_message(received, 300U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
-    server.close();
+    server->close();
     printf("PASS: test_server_send_before_client_connects\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1500,10 +1535,10 @@ static void test_max_connections_exceeded()
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
     static const uint32_t N_CLIENTS = 9U;   // one more than MAX_TCP_CONNECTIONS
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
 
     MultiMsgClientArg args[N_CLIENTS];
@@ -1533,10 +1568,10 @@ static void test_max_connections_exceeded()
     // are needed; 50 gives a comfortable margin.
     for (uint32_t k = 0U; k < 50U; ++k) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 300U);
+        (void)server->receive_message(env, 300U);
     }
 
-    server.close();
+    server->close();
     for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
         (void)pthread_join(tids[k], nullptr);
     }
@@ -1547,6 +1582,7 @@ static void test_max_connections_exceeded()
         assert(args[k].result == Result::OK);
     }
     printf("PASS: test_max_connections_exceeded\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1663,10 +1699,10 @@ static void test_tls_zero_length_frame()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);  // TLS server
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
 
     TlsZeroFrameArg args;
@@ -1677,14 +1713,15 @@ static void test_tls_zero_length_frame()
 
     // Server: zero-length frame → L466:9 True → no valid message queued.
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 2000U);
+    Result recv_res = server->receive_message(env, 2000U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     assert(args.result == Result::OK);
     printf("PASS: test_tls_zero_length_frame\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1707,10 +1744,10 @@ static void* heavy_sender_func(void* raw_arg)
 
     usleep(80000U);  // 80 ms: wait for server to be ready
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, false);  // plaintext client
-    a->result = client.init(cfg);
+    a->result = client->init(cfg);
     if (a->result != Result::OK) { return nullptr; }
 
     // Power of 10 Rule 2 deviation (test loop): bounded by a->num_msgs;
@@ -1725,11 +1762,12 @@ static void* heavy_sender_func(void* raw_arg)
         env.reliability_class = ReliabilityClass::BEST_EFFORT;
         env.timestamp_us      = 1U;
         env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
-        (void)client.send_message(env);
+        (void)client->send_message(env);
     }
 
     usleep(a->stay_alive_us);
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -1751,9 +1789,9 @@ static void test_di_constructor_executes()
 
     // Construct using the DI constructor — this is the branch that was never
     // called; it exercises the constructor loop (i < MAX_TCP_CONNECTIONS).
-    TlsTcpBackend backend(mock);
+    TlsTcpBackend* backend = new TlsTcpBackend(mock);
 
-    assert(!backend.is_open());  // precondition: not yet initialised
+    assert(!backend->is_open());  // precondition: not yet initialised
 
     // Plain server bind: mbedtls_net_bind uses POSIX sockets directly, so
     // the mock is not involved here and the bind should succeed.
@@ -1761,14 +1799,15 @@ static void test_di_constructor_executes()
     TransportConfig cfg;
     make_transport_config(cfg, true, port_di, false);
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::OK);
-    assert(backend.is_open() == true);
+    assert(backend->is_open() == true);
 
-    backend.close();
-    assert(backend.is_open() == false);
+    backend->close();
+    assert(backend->is_open() == false);
 
     printf("PASS: test_di_constructor_executes\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1801,12 +1840,12 @@ static void test_recv_queue_overflow()
     // push-fail WARNING_HI branch in recv_from_client().
     static const uint32_t N_MSGS    = 20U;
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // Launch N_CLIENTS concurrently; each sends N_MSGS messages then stays alive
     // long enough for the server to flood its recv_queue.
@@ -1832,10 +1871,10 @@ static void test_recv_queue_overflow()
     // runtime termination after all messages consumed.
     for (uint32_t k = 0U; k < 400U; ++k) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
-    server.close();
+    server->close();
 
     for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
         (void)pthread_join(tids[k], nullptr);
@@ -1846,6 +1885,7 @@ static void test_recv_queue_overflow()
     }
 
     printf("PASS: test_recv_queue_overflow\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1862,7 +1902,7 @@ static void test_send_impairment_loss_drop()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
 
@@ -1872,9 +1912,9 @@ static void test_send_impairment_loss_drop()
     srv_cfg.channels[0].impairment.enabled          = true;
     srv_cfg.channels[0].impairment.loss_probability = 1.0;
 
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // Build a valid envelope to send.
     MessageEnvelope env;
@@ -1889,16 +1929,17 @@ static void test_send_impairment_loss_drop()
 
     // send_message: process_outbound returns ERR_IO (loss) → L709 True →
     // returns Result::OK (silent drop).
-    Result send_res = server.send_message(env);
+    Result send_res = server->send_message(env);
     assert(send_res == Result::OK);  // OK means "silently dropped"
 
     // Verify nothing was queued: receive_message must timeout.
     MessageEnvelope received;
-    Result recv_res = server.receive_message(received, 300U);
+    Result recv_res = server->receive_message(received, 300U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
-    server.close();
+    server->close();
     printf("PASS: test_send_impairment_loss_drop\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1945,21 +1986,23 @@ static void* session_client_func(void* raw_arg)
 
     usleep(80000U);  // 80 ms: let server bind
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, true);
     // Enable session resumption on the client side.
     cfg.tls.session_resumption_enabled = true;
-    a->init_result = client.init(cfg);
+    a->init_result = client->init(cfg);
     if (a->init_result != Result::OK) {
+        delete client;
         return nullptr;
     }
 
     // REQ-6.1.8: send HELLO before DATA so server registers this NodeId (F-3 fix).
-    Result hello_r = client.register_local_id(2U);
+    Result hello_r = client->register_local_id(2U);
     if (hello_r != Result::OK) {
         a->init_result = hello_r;
-        client.close();
+        client->close();
+        delete client;
         return nullptr;
     }
     usleep(20000U);  // 20 ms: let server process HELLO before DATA arrives
@@ -1972,9 +2015,10 @@ static void* session_client_func(void* raw_arg)
     env.destination_id    = 1U;
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
 
-    a->send_result = client.send_message(env);
+    a->send_result = client->send_message(env);
     usleep(50000U);  // 50 ms: let server drain
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -1995,15 +2039,15 @@ static void test_tls_session_saved_after_handshake()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);
     // Enable session tickets on server so it can service resuming clients.
     srv_cfg.tls.session_resumption_enabled = true;
 
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     SessionClientArg args;
     args.port        = PORT;
@@ -2014,10 +2058,10 @@ static void test_tls_session_saved_after_handshake()
 
     // Server waits up to 5 s for the message from the client.
     MessageEnvelope received;
-    Result recv_res = server.receive_message(received, 5000U);
+    Result recv_res = server->receive_message(received, 5000U);
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     // Verify the full handshake + send completed successfully on both sides.
     assert(args.init_result == Result::OK);
@@ -2026,6 +2070,7 @@ static void test_tls_session_saved_after_handshake()
     assert(received.message_id == 0xCAFEULL);
 
     printf("PASS: test_tls_session_saved_after_handshake\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2054,14 +2099,15 @@ static void* resume_client_func(void* raw_arg)
     // TlsTcpBackend is designed for single-lifecycle: init once, use, close.
     // Use a local scope to fully destroy the first instance before the second.
     {
-        TlsTcpBackend client1;
-        a->first_init = client1.init(cfg);
+        TlsTcpBackend* client1 = new TlsTcpBackend();
+        a->first_init = client1->init(cfg);
         if (a->first_init != Result::OK) {
+            delete client1;
             return nullptr;
         }
         // REQ-6.1.8: HELLO before DATA (F-3 fix).
-        Result hello1 = client1.register_local_id(2U);
-        if (hello1 != Result::OK) { a->first_init = hello1; client1.close(); return nullptr; }
+        Result hello1 = client1->register_local_id(2U);
+        if (hello1 != Result::OK) { a->first_init = hello1; client1->close(); return nullptr; }
         usleep(20000U);  // 20 ms: let server process HELLO
 
         MessageEnvelope env1;
@@ -2071,9 +2117,10 @@ static void* resume_client_func(void* raw_arg)
         env1.source_id         = 2U;
         env1.destination_id    = 1U;
         env1.reliability_class = ReliabilityClass::BEST_EFFORT;
-        (void)client1.send_message(env1);
+        (void)client1->send_message(env1);
         usleep(50000U);  // give server time to receive
-        client1.close();
+        client1->close();
+        delete client1;
     }  // client1 destructor frees all mbedTLS resources
 
     // ── Second connection: fresh TlsTcpBackend with session_resumption_enabled
@@ -2082,14 +2129,15 @@ static void* resume_client_func(void* raw_arg)
     // session.  This verifies the reconnect path does not crash or leak.
     usleep(30000U);  // 30 ms: brief pause before reconnect
     {
-        TlsTcpBackend client2;
-        a->second_init = client2.init(cfg);
+        TlsTcpBackend* client2 = new TlsTcpBackend();
+        a->second_init = client2->init(cfg);
         if (a->second_init != Result::OK) {
+            delete client2;
             return nullptr;
         }
         // REQ-6.1.8: HELLO before DATA (F-3 fix).
-        Result hello2 = client2.register_local_id(2U);
-        if (hello2 != Result::OK) { a->second_init = hello2; client2.close(); return nullptr; }
+        Result hello2 = client2->register_local_id(2U);
+        if (hello2 != Result::OK) { a->second_init = hello2; client2->close(); return nullptr; }
         usleep(20000U);  // 20 ms: let server process HELLO
 
         MessageEnvelope env2;
@@ -2099,9 +2147,10 @@ static void* resume_client_func(void* raw_arg)
         env2.source_id         = 2U;
         env2.destination_id    = 1U;
         env2.reliability_class = ReliabilityClass::BEST_EFFORT;
-        a->second_send = client2.send_message(env2);
+        a->second_send = client2->send_message(env2);
         usleep(50000U);
-        client2.close();
+        client2->close();
+        delete client2;
     }
     return nullptr;
 }
@@ -2124,14 +2173,14 @@ static void test_tls_session_resumption_reconnect_cycle()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);
     srv_cfg.tls.session_resumption_enabled = true;
 
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     ResumeClientArg args;
     args.port        = PORT;
@@ -2146,14 +2195,14 @@ static void test_tls_session_resumption_reconnect_cycle()
     uint32_t received_count = 0U;
     for (uint32_t k = 0U; k < 100U && received_count < 2U; ++k) {
         MessageEnvelope env;
-        Result r = server.receive_message(env, 200U);
+        Result r = server->receive_message(env, 200U);
         if (r == Result::OK) {
             ++received_count;
         }
     }
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     // Both client connections must have succeeded.
     assert(args.first_init  == Result::OK);
@@ -2163,6 +2212,7 @@ static void test_tls_session_resumption_reconnect_cycle()
     assert(received_count == 2U);
 
     printf("PASS: test_tls_session_resumption_reconnect_cycle\n");
+    delete server;
 }
 
 
@@ -2189,7 +2239,7 @@ static void* tls_partition_srv_thread(void* raw)
     TlsPartSrvArg* a = static_cast<TlsPartSrvArg*>(raw);
     assert(a != nullptr);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, a->port, false);  // plaintext
     cfg.channels[0U].impairment.enabled              = true;
@@ -2197,7 +2247,7 @@ static void* tls_partition_srv_thread(void* raw)
     cfg.channels[0U].impairment.partition_gap_ms      = 10U;     // 10 ms gap
     cfg.channels[0U].impairment.partition_duration_ms = 30000U;  // 30 s
 
-    a->init_result = server.init(cfg);
+    a->init_result = server->init(cfg);
     if (a->init_result != Result::OK) { return nullptr; }
 
     // Prime the partition timer: call receive_message() with a short timeout
@@ -2206,14 +2256,15 @@ static void* tls_partition_srv_thread(void* raw)
     // returns ERR_TIMEOUT (no client yet).  After this returns the partition
     // is guaranteed to be active (10 ms gap < 10 ms poll duration).
     MessageEnvelope prime_env;
-    (void)server.receive_message(prime_env, 10U);
+    (void)server->receive_message(prime_env, 10U);
 
     // Now wait for the client to connect and send a message.
     // The partition must already be active by the time the frame arrives.
     MessageEnvelope env;
-    a->recv_result = server.receive_message(env, 500U);
+    a->recv_result = server->receive_message(env, 500U);
 
-    server.close();
+    server->close();
+    delete server;
     return nullptr;
 }
 
@@ -2231,10 +2282,10 @@ static void test_tls_inbound_partition_drops_received()
 
     usleep(50000U);  // 50 ms: give server time to bind and partition to activate
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cli_cfg;
     make_transport_config(cli_cfg, false, PORT, false);  // plaintext client
-    Result cli_init = client.init(cli_cfg);
+    Result cli_init = client->init(cli_cfg);
 
     if (cli_init == Result::OK) {
         MessageEnvelope env;
@@ -2246,8 +2297,8 @@ static void test_tls_inbound_partition_drops_received()
         env.reliability_class = ReliabilityClass::BEST_EFFORT;
         env.timestamp_us      = 1U;
         env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
-        (void)client.send_message(env);
-        client.close();
+        (void)client->send_message(env);
+        client->close();
     }
 
     (void)pthread_join(srv_tid, nullptr);
@@ -2257,6 +2308,7 @@ static void test_tls_inbound_partition_drops_received()
     assert(srv_arg.recv_result == Result::ERR_TIMEOUT);
 
     printf("PASS: test_tls_inbound_partition_drops_received\n");
+    delete client;
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // Test 34: F2 — tls_recv_frame() returns false on short header read
@@ -2290,13 +2342,13 @@ static void test_f2_recv_frame_short_read_via_mock()
     MockSocketOps mock;
     mock.fail_recv_frame = true;  // configure: always return false
 
-    TlsTcpBackend backend(mock);
+    TlsTcpBackend* backend = new TlsTcpBackend(mock);
     TransportConfig cfg;
     make_transport_config(cfg, true, PORT, false);  // plaintext server
 
-    Result init_res = backend.init(cfg);
+    Result init_res = backend->init(cfg);
     assert(init_res == Result::OK);
-    assert(backend.is_open() == true);
+    assert(backend->is_open() == true);
 
     // Connect a plain client so m_client_count > 0; then the injected mock's
     // recv_frame returns false on the first poll → remove_client → ERR_IO.
@@ -2310,16 +2362,17 @@ static void test_f2_recv_frame_short_read_via_mock()
     // Server polls; plaintext recv_frame delegates to mock → false → ERR_IO.
     // receive_message() drains poll iterations and returns ERR_TIMEOUT.
     MessageEnvelope env;
-    Result recv_res = backend.receive_message(env, 1000U);
+    Result recv_res = backend->receive_message(env, 1000U);
 
     (void)pthread_join(tid, nullptr);
-    backend.close();
+    backend->close();
 
     // Client connects and sends OK; server-side mock causes recv failure.
     // receive_message must not return OK (no valid message was delivered).
     assert(recv_res == Result::ERR_TIMEOUT);
 
     printf("PASS: test_f2_recv_frame_short_read_via_mock\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2550,12 +2603,12 @@ static void test_f3_bio_reassoc_after_remove_client()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);  // TLS server
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // Shared state between the two raw client threads.
     F3SharedState shared;
@@ -2591,7 +2644,7 @@ static void test_f3_bio_reassoc_after_remove_client()
     // Power of 10 Rule 2: bounded loop (at most 80 × 200 ms = 16 s max)
     for (uint32_t k = 0U; k < 80U && got < 3U; ++k) {
         MessageEnvelope env;
-        Result r = server.receive_message(env, 200U);
+        Result r = server->receive_message(env, 200U);
         if (r == Result::OK) {
             if (got < 3U) {
                 ids[got] = env.message_id;
@@ -2600,7 +2653,7 @@ static void test_f3_bio_reassoc_after_remove_client()
         }
     }
 
-    server.close();
+    server->close();
     (void)pthread_join(t1, nullptr);
     (void)pthread_join(t2, nullptr);
 
@@ -2621,6 +2674,7 @@ static void test_f3_bio_reassoc_after_remove_client()
     assert(saw_f301 && saw_f302 && saw_f303);
 
     printf("PASS: test_f3_bio_reassoc_after_remove_client\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2658,10 +2712,10 @@ static void* tls_hello1_server_thread(void* raw)
     TlsHello1ServerArg* a = static_cast<TlsHello1ServerArg*>(raw);
     assert(a != nullptr);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, a->port, false);
-    a->result = server.init(cfg);
+    a->result = server->init(cfg);
     if (a->result != Result::OK) { return nullptr; }
 
     // Poll for 600 ms to accept and drain the HELLO; hold connection open.
@@ -2669,9 +2723,10 @@ static void* tls_hello1_server_thread(void* raw)
     static const int MAX_POLL_ITERS = 12;
     for (int i = 0; i < MAX_POLL_ITERS; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 50U);
+        (void)server->receive_message(env, 50U);
     }
-    server.close();
+    server->close();
+    delete server;
     return nullptr;
 }
 
@@ -2689,22 +2744,23 @@ static void test_tls_register_local_id_client_sends_hello()
     pthread_t srv_tid = create_thread_4mb(tls_hello1_server_thread, &srv_arg);
     usleep(80000U);  // 80 ms: allow server to bind and listen
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cli_cfg;
     make_transport_config(cli_cfg, false, PORT, false);
-    Result r = client.init(cli_cfg);
+    Result r = client->init(cli_cfg);
     assert(r == Result::OK);
-    assert(client.is_open() == true);
+    assert(client->is_open() == true);
 
     // register_local_id in client mode calls send_hello_frame(); the frame is
     // sent on the real socket; the return value propagates the send result.
-    r = client.register_local_id(42U);
+    r = client->register_local_id(42U);
     assert(r == Result::OK);
 
-    client.close();
+    client->close();
     (void)pthread_join(srv_tid, nullptr);
     assert(srv_arg.result == Result::OK);
     printf("PASS: test_tls_register_local_id_client_sends_hello\n");
+    delete client;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2717,26 +2773,27 @@ static void test_tls_register_local_id_client_sends_hello()
 static void test_tls_register_local_id_server_no_hello()
 {
     MockSocketOps mock;
-    TlsTcpBackend backend(mock);
+    TlsTcpBackend* backend = new TlsTcpBackend(mock);
 
     // Server mode, plaintext: mock bind/listen succeed; do_accept returns -1.
     const uint16_t port_server_no_hello = alloc_ephemeral_port(SOCK_STREAM);
     TransportConfig cfg;
     make_transport_config(cfg, true, port_server_no_hello, false);
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open() == true);
+    assert(backend->is_open() == true);
 
     // In server mode, register_local_id stores the id but sends no HELLO.
     uint32_t frames_before = mock.send_frame_count;
-    r = backend.register_local_id(7U);
+    r = backend->register_local_id(7U);
     assert(r == Result::OK);
 
     // Server must NOT call send_frame for its own HELLO.
     assert(mock.send_frame_count == frames_before);
 
-    backend.close();
+    backend->close();
     printf("PASS: test_tls_register_local_id_server_no_hello\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2759,18 +2816,19 @@ static void* tls_hello_client_thread(void* raw)
 
     usleep(a->connect_delay_us);
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, a->tls_on);
-    a->result = client.init(cfg);
+    a->result = client->init(cfg);
     if (a->result != Result::OK) { return nullptr; }
 
     // Send HELLO to server; server routing table is populated.
-    a->result = client.register_local_id(a->local_id);
+    a->result = client->register_local_id(a->local_id);
 
     uint32_t const stay = (a->stay_alive_us > 0U) ? a->stay_alive_us : 300000U;
     usleep(stay);  // keep connection alive while server tests routing
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -2790,12 +2848,12 @@ static void test_tls_hello_received_by_server_populates_routing_table()
     const uint16_t PORT          = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLI_ID = 55U;
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     TlsHelloClientArg cli_arg;
     cli_arg.port             = PORT;
@@ -2809,7 +2867,7 @@ static void test_tls_hello_received_by_server_populates_routing_table()
     // Drain until HELLO is consumed (Power of 10: fixed bound, 10 iters × 100 ms)
     for (uint32_t i = 0U; i < 10U; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
     // Unicast DATA to CLI_ID — routing table must have the slot.
@@ -2823,14 +2881,15 @@ static void test_tls_hello_received_by_server_populates_routing_table()
     data_env.timestamp_us      = 1U;
     data_env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
 
-    Result send_r = server.send_message(data_env);
+    Result send_r = server->send_message(data_env);
     assert(send_r == Result::OK);  // unicast to registered CLI_ID succeeds
 
     (void)pthread_join(cli_tid, nullptr);
-    server.close();
+    server->close();
 
     assert(cli_arg.result == Result::OK);
     printf("PASS: test_tls_hello_received_by_server_populates_routing_table\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2847,10 +2906,10 @@ static void test_tls_hello_frame_not_delivered_to_delivery_engine()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
 
     TlsHelloClientArg cli_arg;
@@ -2864,14 +2923,15 @@ static void test_tls_hello_frame_not_delivered_to_delivery_engine()
 
     // receive_message must NOT return OK for a HELLO frame.
     MessageEnvelope env;
-    Result recv_r = server.receive_message(env, 500U);
+    Result recv_r = server->receive_message(env, 500U);
     assert(recv_r != Result::OK);  // HELLO consumed internally; not delivered
 
     (void)pthread_join(cli_tid, nullptr);
-    server.close();
+    server->close();
 
     assert(cli_arg.result == Result::OK);
     printf("PASS: test_tls_hello_frame_not_delivered_to_delivery_engine\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2891,10 +2951,10 @@ static void test_tls_pop_hello_peer()
     const uint16_t PORT          = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLI_ID = 42U;
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
 
     TlsHelloClientArg cli_arg;
@@ -2910,22 +2970,23 @@ static void test_tls_pop_hello_peer()
     // Power of 10: fixed loop bound (10 iterations × 100 ms = 1 s max).
     for (uint32_t i = 0U; i < 10U; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
     // Non-empty path: HELLO was queued; pop returns CLI_ID.
-    NodeId const peer = server.pop_hello_peer();
+    NodeId const peer = server->pop_hello_peer();
     assert(peer == CLI_ID);
 
     // Empty path: queue now empty; pop returns NODE_ID_INVALID.
-    NodeId const empty = server.pop_hello_peer();
+    NodeId const empty = server->pop_hello_peer();
     assert(empty == NODE_ID_INVALID);
 
     (void)pthread_join(cli_tid, nullptr);
-    server.close();
+    server->close();
 
     assert(cli_arg.result == Result::OK);
     printf("PASS: test_tls_pop_hello_peer\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2948,10 +3009,10 @@ static void test_tls_hello_queue_overflow()
     static_assert(TLS_HELLO_OVERFLOW_NUM_CLIENTS == static_cast<uint32_t>(MAX_TCP_CONNECTIONS),
                   "update TLS_HELLO_OVERFLOW_NUM_CLIENTS if MAX_TCP_CONNECTIONS changes");
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
 
     TlsHelloClientArg cli_args[TLS_HELLO_OVERFLOW_NUM_CLIENTS];
@@ -2974,7 +3035,7 @@ static void test_tls_hello_queue_overflow()
     // Power of 10: fixed loop bound (50 iterations × 100 ms = 5 s max).
     for (uint32_t i = 0U; i < 50U; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
     // Exactly MAX_TCP_CONNECTIONS-1 = 7 entries were queued; the 8th was
@@ -2982,7 +3043,7 @@ static void test_tls_hello_queue_overflow()
     uint32_t valid_count = 0U;
     // Power of 10: fixed loop bound (TLS_HELLO_OVERFLOW_NUM_CLIENTS = 8).
     for (uint32_t i = 0U; i < TLS_HELLO_OVERFLOW_NUM_CLIENTS; ++i) {
-        NodeId const peer = server.pop_hello_peer();
+        NodeId const peer = server->pop_hello_peer();
         if (peer != static_cast<NodeId>(NODE_ID_INVALID)) {
             ++valid_count;
         }
@@ -2990,14 +3051,14 @@ static void test_tls_hello_queue_overflow()
     assert(valid_count == TLS_HELLO_OVERFLOW_NUM_CLIENTS - 1U);  // exactly 7
 
     // Confirm queue is empty — 8th was dropped, not just delayed.
-    NodeId const tail = server.pop_hello_peer();
+    NodeId const tail = server->pop_hello_peer();
     assert(tail == static_cast<NodeId>(NODE_ID_INVALID));
 
     // Power of 10: fixed loop bound (TLS_HELLO_OVERFLOW_NUM_CLIENTS = 8).
     for (uint32_t i = 0U; i < TLS_HELLO_OVERFLOW_NUM_CLIENTS; ++i) {
         (void)pthread_join(cli_tids[i], nullptr);
     }
-    server.close();
+    server->close();
 
     // All 8 clients must have successfully sent HELLO; if any failed to connect
     // the test would not prove the overflow path.
@@ -3007,6 +3068,7 @@ static void test_tls_hello_queue_overflow()
     }
 
     printf("PASS: test_tls_hello_queue_overflow\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3023,12 +3085,12 @@ static void test_tls_unicast_routes_to_registered_slot()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     TlsHelloClientArg cli1_arg;
     cli1_arg.port             = PORT;
@@ -3050,7 +3112,7 @@ static void test_tls_unicast_routes_to_registered_slot()
     // Drain HELLOs: Power of 10 fixed bound (20 iters × 100 ms = 2 s max)
     for (uint32_t i = 0U; i < 20U; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
     // Unicast to node 10.
@@ -3063,7 +3125,7 @@ static void test_tls_unicast_routes_to_registered_slot()
     d1.reliability_class = ReliabilityClass::BEST_EFFORT;
     d1.timestamp_us      = 1U;
     d1.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
-    Result s1 = server.send_message(d1);
+    Result s1 = server->send_message(d1);
     assert(s1 == Result::OK);
 
     // Unicast to node 20.
@@ -3076,16 +3138,17 @@ static void test_tls_unicast_routes_to_registered_slot()
     d2.reliability_class = ReliabilityClass::BEST_EFFORT;
     d2.timestamp_us      = 1U;
     d2.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
-    Result s2 = server.send_message(d2);
+    Result s2 = server->send_message(d2);
     assert(s2 == Result::OK);
 
     (void)pthread_join(cli1_tid, nullptr);
     (void)pthread_join(cli2_tid, nullptr);
-    server.close();
+    server->close();
 
     assert(cli1_arg.result == Result::OK);
     assert(cli2_arg.result == Result::OK);
     printf("PASS: test_tls_unicast_routes_to_registered_slot\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3102,12 +3165,12 @@ static void test_tls_broadcast_when_destination_id_zero()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     TlsHelloClientArg cli1_arg;
     cli1_arg.port             = PORT;
@@ -3129,7 +3192,7 @@ static void test_tls_broadcast_when_destination_id_zero()
     // Drain HELLOs: Power of 10 fixed bound (20 iters × 100 ms = 2 s max)
     for (uint32_t i = 0U; i < 20U; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
     // Broadcast to all connected clients.
@@ -3143,16 +3206,17 @@ static void test_tls_broadcast_when_destination_id_zero()
     bcast.timestamp_us      = 1U;
     bcast.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
 
-    Result send_r = server.send_message(bcast);
+    Result send_r = server->send_message(bcast);
     assert(send_r == Result::OK);  // broadcast to all connected clients succeeds
 
     (void)pthread_join(cli1_tid, nullptr);
     (void)pthread_join(cli2_tid, nullptr);
-    server.close();
+    server->close();
 
     assert(cli1_arg.result == Result::OK);
     assert(cli2_arg.result == Result::OK);
     printf("PASS: test_tls_broadcast_when_destination_id_zero\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3294,12 +3358,12 @@ static void test_tls_source_id_mismatch_dropped()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     SrcValidationClientArg args;
     args.port            = PORT;
@@ -3313,14 +3377,15 @@ static void test_tls_source_id_mismatch_dropped()
     // validate_source_id() returns false → recv_from_client returns ERR_INVALID.
     // receive_message() discards and continues polling until timeout.
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 1000U);
+    Result recv_res = server->receive_message(env, 1000U);
     assert(recv_res != Result::OK);  // spoofed frame must NOT be delivered
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     assert(args.result == Result::OK);  // client sent successfully
     printf("PASS: test_tls_source_id_mismatch_dropped\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3339,12 +3404,12 @@ static void test_tls_source_id_match_accepted()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     SrcValidationClientArg args;
     args.port            = PORT;
@@ -3357,15 +3422,16 @@ static void test_tls_source_id_match_accepted()
     // Server: the DATA frame source_id==1 matches registered id==1.
     // validate_source_id() returns true → frame is delivered to receive_message().
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 1000U);
+    Result recv_res = server->receive_message(env, 1000U);
     assert(recv_res == Result::OK);
     assert(env.source_id == 1U);  // correct source_id delivered
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     assert(args.result == Result::OK);
     printf("PASS: test_tls_source_id_match_accepted\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3392,26 +3458,27 @@ static void test_tls_send_hello_frame_fail_via_mock()
     usleep(80000U);  // allow server to bind and listen
 
     MockSocketOps mock;
-    TlsTcpBackend client(mock);
+    TlsTcpBackend* client = new TlsTcpBackend(mock);
 
     TransportConfig cli_cfg;
     make_transport_config(cli_cfg, false, PORT, false);  // plaintext client
 
-    Result r = client.init(cli_cfg);
+    Result r = client->init(cli_cfg);
     assert(r == Result::OK);
-    assert(client.is_open() == true);
+    assert(client->is_open() == true);
 
     mock.fail_send_frame = true;  // inject after init: next send_frame fails
 
     // register_local_id() → send_hello_frame() → tls_send_frame() →
     // m_sock_ops->send_frame() (mock, returns false) → ERR_IO
-    r = client.register_local_id(9U);
+    r = client->register_local_id(9U);
     assert(r == Result::ERR_IO);
 
-    client.close();
+    client->close();
     (void)pthread_join(srv_tid, nullptr);
 
     printf("PASS: test_tls_send_hello_frame_fail_via_mock\n");
+    delete client;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3427,22 +3494,23 @@ static void test_tls_get_stats()
     // 0 executions.  This test exercises the function and verifies the
     // counters are zero for a freshly-initialised server with no connections.
     MockSocketOps mock;
-    TlsTcpBackend backend(mock);
+    TlsTcpBackend* backend = new TlsTcpBackend(mock);
 
     const uint16_t port_stats = alloc_ephemeral_port(SOCK_STREAM);
     TransportConfig cfg;
     make_transport_config(cfg, true, port_stats, false);  // plaintext server
-    assert(backend.init(cfg) == Result::OK);
+    assert(backend->init(cfg) == Result::OK);
 
     TransportStats stats;
     transport_stats_init(stats);
-    backend.get_transport_stats(stats);
+    backend->get_transport_stats(stats);
 
     assert(stats.connections_opened == 0U);
     assert(stats.connections_closed == 0U);
 
-    backend.close();
+    backend->close();
     printf("PASS: test_tls_get_stats\n");
+    delete backend;
 }
 
 static void test_tls_cert_is_directory()
@@ -3452,7 +3520,7 @@ static void test_tls_cert_is_directory()
     // Strategy: pass /tmp (always-present directory) as cert_file so lstat()
     //           succeeds but S_ISREG() returns false → ERR_IO.
     const uint16_t port_cert_dir = alloc_ephemeral_port(SOCK_STREAM);
-    TlsTcpBackend backend;
+    TlsTcpBackend* backend = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, port_cert_dir, true);
 
@@ -3461,10 +3529,11 @@ static void test_tls_cert_is_directory()
     (void)strncpy(cfg.tls.cert_file, "/tmp", path_max);
     cfg.tls.cert_file[path_max] = '\0';
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
     printf("PASS: test_tls_cert_is_directory\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3518,18 +3587,20 @@ static void* load_client_func(void* raw_arg)
 
     // ── First connection: full handshake; save session into store ─────────
     {
-        TlsTcpBackend client1;
+        TlsTcpBackend* client1 = new TlsTcpBackend();
         // Inject store before init() so try_save_client_session() can save.
-        client1.set_session_store(&a->store);
-        a->first_init = client1.init(cfg);
+        client1->set_session_store(&a->store);
+        a->first_init = client1->init(cfg);
         if (a->first_init != Result::OK) {
+            delete client1;
             return nullptr;
         }
         // REQ-6.1.8: HELLO before DATA.
-        Result hello1 = client1.register_local_id(2U);
+        Result hello1 = client1->register_local_id(2U);
         if (hello1 != Result::OK) {
             a->first_init = hello1;
-            client1.close();
+            client1->close();
+            delete client1;
             return nullptr;
         }
         usleep(20000U);  // let server process HELLO
@@ -3543,9 +3614,10 @@ static void* load_client_func(void* raw_arg)
         env1.reliability_class = ReliabilityClass::BEST_EFFORT;
         env1.timestamp_us      = 1U;
         env1.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
-        a->first_send = client1.send_message(env1);
+        a->first_send = client1->send_message(env1);
         usleep(50000U);
-        client1.close();
+        client1->close();
+        delete client1;
     }  // client1 destroyed; store.session_valid should be true if tickets enabled
 
     // Record whether session was saved (True = try_save succeeded).
@@ -3555,19 +3627,21 @@ static void* load_client_func(void* raw_arg)
 
     // ── Second connection: inject same store; exercises try_load True branch ─
     {
-        TlsTcpBackend client2;
+        TlsTcpBackend* client2 = new TlsTcpBackend();
         // Same non-null store; has_resumable_session() returns true when
         // store.session_valid == true — exercises try_load_client_session().
-        client2.set_session_store(&a->store);
-        a->second_init = client2.init(cfg);
+        client2->set_session_store(&a->store);
+        a->second_init = client2->init(cfg);
         if (a->second_init != Result::OK) {
+            delete client2;
             return nullptr;
         }
         // REQ-6.1.8: HELLO before DATA.
-        Result hello2 = client2.register_local_id(2U);
+        Result hello2 = client2->register_local_id(2U);
         if (hello2 != Result::OK) {
             a->second_init = hello2;
-            client2.close();
+            client2->close();
+            delete client2;
             return nullptr;
         }
         usleep(20000U);
@@ -3581,9 +3655,10 @@ static void* load_client_func(void* raw_arg)
         env2.reliability_class = ReliabilityClass::BEST_EFFORT;
         env2.timestamp_us      = 1U;
         env2.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
-        a->second_send = client2.send_message(env2);
+        a->second_send = client2->send_message(env2);
         usleep(50000U);
-        client2.close();
+        client2->close();
+        delete client2;
     }
 
     a->store_valid_after_second = a->store.session_valid.load();
@@ -3601,15 +3676,15 @@ static void test_tls_session_resumption_load_path()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);
     // Enable session tickets on server so clients may resume.
     srv_cfg.tls.session_resumption_enabled = true;
 
-    Result srv_init = server.init(srv_cfg);
+    Result srv_init = server->init(srv_cfg);
     assert(srv_init == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     LoadClientArg args;
     args.port                   = PORT;
@@ -3625,13 +3700,13 @@ static void test_tls_session_resumption_load_path()
     // Server: receive two messages (one per connection).
     // Use 5 s timeout; loopback should deliver well within that.
     MessageEnvelope msg1;
-    Result recv1 = server.receive_message(msg1, 5000U);
+    Result recv1 = server->receive_message(msg1, 5000U);
 
     MessageEnvelope msg2;
-    Result recv2 = server.receive_message(msg2, 5000U);
+    Result recv2 = server->receive_message(msg2, 5000U);
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     // Both connections must have completed the handshake and sent successfully.
     assert(args.first_init  == Result::OK);
@@ -3666,6 +3741,7 @@ static void test_tls_session_resumption_load_path()
             "HAZ-017 invariant assert and try_load True branch not tested; "
             "rebuild with MBEDTLS_SSL_SESSION_TICKETS to satisfy Class B M4\n");
     (void)args.store_valid_after_first;
+    delete server;
     return;
 #endif
     (void)args.store_valid_after_second;  // informational
@@ -3674,6 +3750,7 @@ static void test_tls_session_resumption_load_path()
     assert(args.store.session_valid.load() == false);
 
     printf("PASS: test_tls_session_resumption_load_path\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3734,7 +3811,7 @@ static void test_log_fs_warning_tls13_ver()
 static void test_tls_init_channels_exceed_max()
 {
     const uint16_t port_ch_max = alloc_ephemeral_port(SOCK_STREAM);
-    TlsTcpBackend backend;
+    TlsTcpBackend* backend = new TlsTcpBackend();
     TransportConfig cfg;
     transport_config_default(cfg);
     cfg.is_server    = true;
@@ -3744,11 +3821,12 @@ static void test_tls_init_channels_exceed_max()
     // transport_config_valid() returns false → init() returns ERR_INVALID.
     cfg.num_channels = static_cast<uint32_t>(MAX_CHANNELS) + 1U;
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_INVALID);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
 
     printf("PASS: test_tls_init_channels_exceed_max\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3779,7 +3857,7 @@ static void test_tls_bad_ca_file_content()
     int cret = fclose(fp);
     assert(cret == 0);
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, 0U, true);  // TLS client; no connect yet
     cfg.tls.verify_peer = true;
@@ -3797,12 +3875,13 @@ static void test_tls_bad_ca_file_content()
 
     // setup_tls_config → load_tls_certs → load_ca_and_crl → x509_crt_parse_file
     // returns non-zero (bad content) → ERR_IO
-    Result res = client.init(cfg);
+    Result res = client->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(client.is_open() == false);
+    assert(client->is_open() == false);
 
     (void)remove(BAD_CA_FILE);
     printf("PASS: test_tls_bad_ca_file_content\n");
+    delete client;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3832,7 +3911,7 @@ static void test_tls_bad_cert_file_content()
     int cret = fclose(fp);
     assert(cret == 0);
 
-    TlsTcpBackend backend;
+    TlsTcpBackend* backend = new TlsTcpBackend();
     TransportConfig cfg;
     // Use server mode so we do not trigger net_connect (which would fail immediately).
     make_transport_config(cfg, true, 0U, true);
@@ -3842,12 +3921,13 @@ static void test_tls_bad_cert_file_content()
     cfg.tls.cert_file[path_max] = '\0';
 
     // cert_file is non-empty and regular; x509_crt_parse_file returns non-zero → ERR_IO
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
 
     (void)remove(BAD_CERT_FILE);
     printf("PASS: test_tls_bad_cert_file_content\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3877,7 +3957,7 @@ static void test_tls_bad_key_file_content()
     int cret = fclose(fp);
     assert(cret == 0);
 
-    TlsTcpBackend backend;
+    TlsTcpBackend* backend = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, 0U, true);  // TLS server; valid cert
 
@@ -3886,12 +3966,13 @@ static void test_tls_bad_key_file_content()
     (void)strncpy(cfg.tls.key_file, BAD_KEY_FILE, path_max);
     cfg.tls.key_file[path_max] = '\0';
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
 
     (void)remove(BAD_KEY_FILE);
     printf("PASS: test_tls_bad_key_file_content\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3921,7 +4002,7 @@ static void test_tls_crl_symlink_rejected()
     int sym_ret = symlink(TEST_CERT_FILE, CRL_SYMLINK);
     assert(sym_ret == 0);
 
-    TlsTcpBackend backend;
+    TlsTcpBackend* backend = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, 0U, true);  // TLS server
     cfg.tls.verify_peer = true;
@@ -3936,12 +4017,13 @@ static void test_tls_crl_symlink_rejected()
     (void)strncpy(cfg.tls.crl_file, CRL_SYMLINK, path_max);
     cfg.tls.crl_file[path_max] = '\0';
 
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
 
     (void)remove(CRL_SYMLINK);
     printf("PASS: test_tls_crl_symlink_rejected\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3972,7 +4054,7 @@ static void test_tls_crl_bad_content()
     int cret = fclose(fp);
     assert(cret == 0);
 
-    TlsTcpBackend backend;
+    TlsTcpBackend* backend = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, 0U, true);  // TLS server
     cfg.tls.verify_peer = true;
@@ -3986,12 +4068,13 @@ static void test_tls_crl_bad_content()
     cfg.tls.crl_file[path_max] = '\0';
 
     // CA parse succeeds; x509_crl_parse_file fails (garbage content) → ERR_IO
-    Result res = backend.init(cfg);
+    Result res = backend->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(backend.is_open() == false);
+    assert(backend->is_open() == false);
 
     (void)remove(BAD_CRL_FILE);
     printf("PASS: test_tls_crl_bad_content\n");
+    delete backend;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4021,7 +4104,7 @@ static void* sec021_client_func(void* raw_arg)
 
     usleep(80000U);  // 80 ms: wait for server to bind and listen
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, true);  // TLS client
     cfg.tls.verify_peer = true;
@@ -4035,11 +4118,12 @@ static void* sec021_client_func(void* raw_arg)
     // Leave peer_hostname empty ('\0') — SEC-021 guard must fire.
     cfg.tls.peer_hostname[0] = '\0';
 
-    a->result = client.init(cfg);
+    a->result = client->init(cfg);
     // init() should fail with ERR_INVALID (SEC-021 fires in tls_connect_handshake)
     if (a->result == Result::OK) {
-        client.close();
+        client->close();
     }
+    delete client;
     return nullptr;
 }
 
@@ -4048,12 +4132,12 @@ static void test_tls_verify_peer_empty_hostname_rejected()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);  // TLS server
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     Sec021ClientArg args;
     args.port   = PORT;
@@ -4063,16 +4147,17 @@ static void test_tls_verify_peer_empty_hostname_rejected()
 
     // Server polls but client init() fails before the handshake completes.
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 2000U);
+    Result recv_res = server->receive_message(env, 2000U);
     assert(recv_res == Result::ERR_TIMEOUT);  // no message from the failed client
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     // Client must have received ERR_INVALID from the SEC-021 guard.
     assert(args.result == Result::ERR_INVALID);
 
     printf("PASS: test_tls_verify_peer_empty_hostname_rejected\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4107,17 +4192,18 @@ static void* sec012_client_thread(void* raw_arg)
 
     usleep(a->connect_delay_us);
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, false);  // plaintext client
-    a->result = client.init(cfg);
+    a->result = client->init(cfg);
     if (a->result != Result::OK) { return nullptr; }
 
     // Send HELLO with local_id — may be duplicate (SEC-012 test).
-    a->result = client.register_local_id(a->local_id);
+    a->result = client->register_local_id(a->local_id);
 
     usleep(a->stay_alive_us);
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -4127,12 +4213,12 @@ static void test_tls_sec012_duplicate_node_id()
     const uint16_t PORT               = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   DUP_NODE_ID  = 99U;
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // Client A: connects first with NodeId=99; server registers it on slot 0.
     Sec012ClientArg arg_a;
@@ -4159,12 +4245,12 @@ static void test_tls_sec012_duplicate_node_id()
     // Power of 10 Rule 2: bounded loop (40 iterations × 100 ms = 4 s max).
     for (uint32_t i = 0U; i < 40U; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
     (void)pthread_join(tid_a, nullptr);
     (void)pthread_join(tid_b, nullptr);
-    server.close();
+    server->close();
 
     // Both clients connected at the TCP level (kernel backlog accepts all).
     // Client A's register_local_id must have succeeded.
@@ -4175,6 +4261,7 @@ static void test_tls_sec012_duplicate_node_id()
     assert(arg_b.result == Result::OK);
 
     printf("PASS: test_tls_sec012_duplicate_node_id\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4257,12 +4344,12 @@ static void test_tls_sec013_duplicate_hello()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     Sec013ClientArg args;
     args.port   = PORT;
@@ -4274,16 +4361,17 @@ static void test_tls_sec013_duplicate_hello()
     // Second HELLO on same slot → SEC-013 → remove_client → ERR_INVALID.
     // receive_message returns ERR_TIMEOUT (no DATA ever queued).
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 2000U);
+    Result recv_res = server->receive_message(env, 2000U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
 
     // Client sent both frames without socket-level error.
     assert(args.result == Result::OK);
 
     printf("PASS: test_tls_sec013_duplicate_hello\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4305,7 +4393,7 @@ static void test_tls_delay_buffer_full()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
     // Enable impairment with a very large fixed latency so delayed messages
@@ -4313,9 +4401,9 @@ static void test_tls_delay_buffer_full()
     srv_cfg.channels[0U].impairment.enabled          = true;
     srv_cfg.channels[0U].impairment.fixed_latency_ms = 60000U;  // 60 s
 
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // Fill the delay buffer to capacity; IMPAIR_DELAY_BUF_SIZE = 32.
     // Power of 10 Rule 2: fixed loop bound (IMPAIR_DELAY_BUF_SIZE + 2 iterations).
@@ -4332,18 +4420,19 @@ static void test_tls_delay_buffer_full()
         env.reliability_class = ReliabilityClass::BEST_EFFORT;
         env.timestamp_us      = 1U;
         env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
-        last_res = server.send_message(env);
+        last_res = server->send_message(env);
         if (last_res != Result::OK) {
             break;
         }
     }
 
-    server.close();
+    server->close();
 
     // At least one send must have returned ERR_FULL once the buffer overflowed.
     assert(last_res == Result::ERR_FULL);
 
     printf("PASS: test_tls_delay_buffer_full\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4413,12 +4502,12 @@ static void test_tls_full_frame_deserialize_fail()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     FullGarbageFrameArg args;
     args.port   = PORT;
@@ -4429,14 +4518,15 @@ static void test_tls_full_frame_deserialize_fail()
     // Server: size check passes (52 >= 52), deserialize fails → ERR_INVALID from
     // recv_from_client → poll loop exhausted → ERR_TIMEOUT.
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 1500U);
+    Result recv_res = server->receive_message(env, 1500U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
     (void)pthread_join(tid, nullptr);
-    server.close();
+    server->close();
     assert(args.result == Result::OK);
 
     printf("PASS: test_tls_full_frame_deserialize_fail\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4484,15 +4574,15 @@ static void* tls_hello_data_client_thread(void* raw_arg)
 
     usleep(a->connect_delay_us);
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, false);  // plaintext client
-    a->result = client.init(cfg);
+    a->result = client->init(cfg);
     if (a->result != Result::OK) { return nullptr; }
 
     // REQ-6.1.8: register NodeId via HELLO before sending DATA.
-    a->result = client.register_local_id(a->local_id);
-    if (a->result != Result::OK) { client.close(); return nullptr; }
+    a->result = client->register_local_id(a->local_id);
+    if (a->result != Result::OK) { client->close(); return nullptr; }
 
     usleep(a->data_delay_us);  // let server process HELLO before DATA arrives
 
@@ -4505,10 +4595,11 @@ static void* tls_hello_data_client_thread(void* raw_arg)
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
     env.timestamp_us      = 1U;
     env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
-    (void)client.send_message(env);
+    (void)client->send_message(env);
 
     usleep(a->stay_alive_us);
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -4533,15 +4624,15 @@ static void* tls_partition_client_thread(void* raw_arg)
 
     usleep(a->connect_delay_us);
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, false);  // plaintext client
-    a->result = client.init(cfg);
+    a->result = client->init(cfg);
     if (a->result != Result::OK) { return nullptr; }
 
     // REQ-6.1.8: HELLO registers slot on server side.
-    a->result = client.register_local_id(a->local_id);
-    if (a->result != Result::OK) { client.close(); return nullptr; }
+    a->result = client->register_local_id(a->local_id);
+    if (a->result != Result::OK) { client->close(); return nullptr; }
 
     usleep(a->hello_to_prime_us);
 
@@ -4556,7 +4647,7 @@ static void* tls_partition_client_thread(void* raw_arg)
     prime.reliability_class = ReliabilityClass::BEST_EFFORT;
     prime.timestamp_us      = 1U;
     prime.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
-    (void)client.send_message(prime);
+    (void)client->send_message(prime);
 
     // Wait >> partition_gap_ms so the partition window opens.
     usleep(a->prime_to_victim_us);
@@ -4572,11 +4663,12 @@ static void* tls_partition_client_thread(void* raw_arg)
     victim.reliability_class = ReliabilityClass::BEST_EFFORT;
     victim.timestamp_us      = 2U;
     victim.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
-    (void)client.send_message(victim);
+    (void)client->send_message(victim);
 
     usleep(a->stay_alive_us);
-    client.close();
+    client->close();
     a->result = Result::OK;
+    delete client;
     return nullptr;
 }
 
@@ -4586,7 +4678,7 @@ static void test_tls_inbound_partition_with_hello()
     const uint16_t PORT          = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLI_ID = 77U;
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
     srv_cfg.channels[0U].impairment.enabled               = true;
@@ -4594,9 +4686,9 @@ static void test_tls_inbound_partition_with_hello()
     srv_cfg.channels[0U].impairment.partition_gap_ms       = 5U;      // 5 ms gap
     srv_cfg.channels[0U].impairment.partition_duration_ms  = 30000U;  // 30 s
 
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // Client timeline:
     //   T=0     : server init complete
@@ -4619,22 +4711,23 @@ static void test_tls_inbound_partition_with_hello()
     // apply_inbound_impairment → is_partition_active (first call, initializes
     // timer, returns false) → DATA pushed to queue → OK.
     MessageEnvelope prime_recv;
-    Result prime_res = server.receive_message(prime_recv, 1000U);
+    Result prime_res = server->receive_message(prime_recv, 1000U);
     assert(prime_res == Result::OK);
 
     // Second receive: gets victim DATA.
     // apply_inbound_impairment → is_partition_active (timer elapsed, active)
     // → drop → lines 1451-1454 → ERR_TIMEOUT.
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 1000U);
+    Result recv_res = server->receive_message(env, 1000U);
 
     (void)pthread_join(cli_tid, nullptr);
-    server.close();
+    server->close();
 
     assert(recv_res == Result::ERR_TIMEOUT);
     assert(cli_arg.result == Result::OK);
 
     printf("PASS: test_tls_inbound_partition_with_hello\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4671,15 +4764,15 @@ static void* hello_heavy_sender_func(void* raw_arg)
 
     usleep(80000U);  // 80 ms: wait for server
 
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, a->port, false);  // plaintext client
-    a->result = client.init(cfg);
+    a->result = client->init(cfg);
     if (a->result != Result::OK) { return nullptr; }
 
     // REQ-6.1.8: register NodeId via HELLO before sending DATA.
-    a->result = client.register_local_id(a->node_id);
-    if (a->result != Result::OK) { client.close(); return nullptr; }
+    a->result = client->register_local_id(a->node_id);
+    if (a->result != Result::OK) { client->close(); return nullptr; }
     usleep(20000U);  // 20 ms: let server process HELLO before DATA flood
 
     // Power of 10 Rule 2 deviation (test loop): bounded by a->num_msgs;
@@ -4695,11 +4788,12 @@ static void* hello_heavy_sender_func(void* raw_arg)
         env.reliability_class = ReliabilityClass::BEST_EFFORT;
         env.timestamp_us      = 1U;
         env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
-        (void)client.send_message(env);
+        (void)client->send_message(env);
     }
 
     usleep(a->stay_alive_us);
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -4710,12 +4804,12 @@ static void test_tls_recv_queue_overflow_with_hello()
     static const uint32_t N_CLIENTS = 8U;
     static const uint32_t N_MSGS    = 20U;  // 8×20=160 DATAs; overflows queue at 65th
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     HelloHeavySenderArg args[N_CLIENTS];
     pthread_t           tids[N_CLIENTS];
@@ -4738,10 +4832,10 @@ static void test_tls_recv_queue_overflow_with_hello()
     // runtime termination after all messages consumed.
     for (uint32_t k = 0U; k < 400U; ++k) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
-    server.close();
+    server->close();
 
     for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
         (void)pthread_join(tids[k], nullptr);
@@ -4751,6 +4845,7 @@ static void test_tls_recv_queue_overflow_with_hello()
     }
 
     printf("PASS: test_tls_recv_queue_overflow_with_hello\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4774,16 +4869,16 @@ static void test_tls_inbound_reorder_buffers_message()
     const uint16_t PORT          = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLI_ID  = 88U;
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);  // plaintext
     srv_cfg.channels[0U].impairment.enabled           = true;
     srv_cfg.channels[0U].impairment.reorder_enabled   = true;
     srv_cfg.channels[0U].impairment.reorder_window_size = 4U;   // buffer up to 4 frames
 
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // Client: connect, HELLO, then exactly one DATA frame.
     // reuse TlsHelloDataClientArg / tls_hello_data_client_thread.
@@ -4801,15 +4896,16 @@ static void test_tls_inbound_reorder_buffers_message()
     // (count=1 < window=4, out_count=0) → lines 1472-1473 → not pushed →
     // receive_message returns ERR_TIMEOUT.
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 1000U);
+    Result recv_res = server->receive_message(env, 1000U);
 
     (void)pthread_join(cli_tid, nullptr);
-    server.close();
+    server->close();
 
     assert(recv_res == Result::ERR_TIMEOUT);
     assert(cli_arg.result == Result::OK);
 
     printf("PASS: test_tls_inbound_reorder_buffers_message\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4896,12 +4992,12 @@ static void test_tls_send_to_slot_fail()
     // crash; but receive_message(100ms) = 1 poll iteration so recv_from_client
     // is never called a second time.
 
-    TlsTcpBackend server(mock);
+    TlsTcpBackend* server = new TlsTcpBackend(mock);
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     // Dummy client: connect → write 1 byte → stay alive 2 s.
     DummyRawClientArg cli_arg;
@@ -4918,7 +5014,7 @@ static void test_tls_send_to_slot_fail()
     //   classify_inbound_frame: HELLO → register TARGET_ID in routing table
     // ERR_TIMEOUT (HELLO consumed, not queued as a message).
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 100U);
+    Result recv_res = server->receive_message(env, 100U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
     // Inject send failure; send unicast to TARGET_ID.
@@ -4935,15 +5031,16 @@ static void test_tls_send_to_slot_fail()
     data_env.timestamp_us      = 1U;
     data_env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
 
-    Result send_res = server.send_message(data_env);
+    Result send_res = server->send_message(data_env);
     assert(send_res == Result::ERR_IO);  // send_to_slot failed → ERR_IO
 
     (void)pthread_join(cli_tid, nullptr);
-    server.close();
+    server->close();
 
     assert(cli_arg.result == Result::OK);
 
     printf("PASS: test_tls_send_to_slot_fail\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4982,12 +5079,12 @@ static void test_tls_broadcast_send_fail()
     (void)memcpy(mock.recv_frame_once_buf, hello_buf, hello_len);
     mock.recv_frame_once_len = hello_len;
 
-    TlsTcpBackend server(mock);
+    TlsTcpBackend* server = new TlsTcpBackend(mock);
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);  // plaintext server
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open() == true);
+    assert(server->is_open() == true);
 
     DummyRawClientArg cli_arg;
     cli_arg.port          = PORT;
@@ -4998,7 +5095,7 @@ static void test_tls_broadcast_send_fail()
 
     // One iteration: accept client, read HELLO one-shot, register TARGET_ID.
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 100U);
+    Result recv_res = server->receive_message(env, 100U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
     // Inject send failure; broadcast (destination_id = NODE_ID_INVALID = 0).
@@ -5016,15 +5113,16 @@ static void test_tls_broadcast_send_fail()
     bcast_env.timestamp_us      = 1U;
     bcast_env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
 
-    Result send_res = server.send_message(bcast_env);
+    Result send_res = server->send_message(bcast_env);
     assert(send_res == Result::ERR_IO);  // send_to_all_clients failed → ERR_IO
 
     (void)pthread_join(cli_tid, nullptr);
-    server.close();
+    server->close();
 
     assert(cli_arg.result == Result::OK);
 
     printf("PASS: test_tls_broadcast_send_fail\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -5036,7 +5134,7 @@ static void test_tls_broadcast_send_fail()
 // be triggered in a loopback environment (VVP-001 §4.3 e-i, Class B requirement).
 //
 // Usage pattern (two phases):
-//   Phase 1 — init: all flags false (delegate), call backend.init(); handshake
+//   Phase 1 — init: all flags false (delegate), call backend->init(); handshake
 //             completes via the real mbedTLS library.
 //   Phase 2 — test: set the fail_* flag of interest, then call the operation
 //             under test; it must reach the error handler.
@@ -5321,19 +5419,20 @@ static void* m5_tls_server_thread(void* raw_arg)
     M5ServerArg* a = static_cast<M5ServerArg*>(raw_arg);
     assert(a != nullptr);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, a->port, true);  // TLS server
-    a->result = server.init(srv_cfg);
+    a->result = server->init(srv_cfg);
     if (a->result != Result::OK) { return nullptr; }
 
     // Accept the client (blocks until client connects and handshake completes).
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 3000U);
+    Result recv_res = server->receive_message(env, 3000U);
     // ERR_TIMEOUT is expected if no DATA arrives (accept still happened).
     if (recv_res != Result::OK && recv_res != Result::ERR_TIMEOUT) {
         a->result = recv_res;
-        server.close();
+        server->close();
+        delete server;
         return nullptr;
     }
 
@@ -5349,12 +5448,13 @@ static void* m5_tls_server_thread(void* raw_arg)
         out.reliability_class = ReliabilityClass::BEST_EFFORT;
         out.timestamp_us      = 1U;
         out.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
-        (void)server.send_message(out);
+        (void)server->send_message(out);
     }
 
     usleep(a->stay_alive_us);
-    server.close();
+    server->close();
     a->result = Result::OK;
+    delete server;
     return nullptr;
 }
 
@@ -5382,15 +5482,16 @@ static void test_m5_psa_crypto_init_fail()
     tls_mock.fail_crypto_init = true;
 
     MockSocketOps sock_mock;  // not used in TLS-mode init
-    TlsTcpBackend server(sock_mock, tls_mock);
+    TlsTcpBackend* server = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, true, 0U, true);  // TLS server; port irrelevant
-    Result res = server.init(cfg);
+    Result res = server->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!server.is_open());
+    assert(!server->is_open());
 
     printf("PASS: test_m5_psa_crypto_init_fail\n");
+    delete server;
 }
 
 // ── Test M5-2: ssl_config_defaults failure ────────────────────────────────────
@@ -5401,15 +5502,16 @@ static void test_m5_ssl_config_defaults_fail()
     tls_mock.fail_ssl_config_defaults = true;
 
     MockSocketOps sock_mock;
-    TlsTcpBackend server(sock_mock, tls_mock);
+    TlsTcpBackend* server = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, true, 0U, true);
-    Result res = server.init(cfg);
+    Result res = server->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!server.is_open());
+    assert(!server->is_open());
 
     printf("PASS: test_m5_ssl_config_defaults_fail\n");
+    delete server;
 }
 
 // ── Test M5-3: ssl_conf_own_cert failure ──────────────────────────────────────
@@ -5422,15 +5524,16 @@ static void test_m5_ssl_conf_own_cert_fail()
     tls_mock.fail_ssl_conf_own_cert = true;
 
     MockSocketOps sock_mock;
-    TlsTcpBackend server(sock_mock, tls_mock);
+    TlsTcpBackend* server = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, true, 0U, true);  // cert/key paths set
-    Result res = server.init(cfg);
+    Result res = server->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!server.is_open());
+    assert(!server->is_open());
 
     printf("PASS: test_m5_ssl_conf_own_cert_fail\n");
+    delete server;
 }
 
 // ── Test M5-4: ssl_ticket_setup failure ───────────────────────────────────────
@@ -5443,19 +5546,20 @@ static void test_m5_ssl_ticket_setup_fail()
     tls_mock.fail_ssl_ticket_setup = true;
 
     MockSocketOps sock_mock;
-    TlsTcpBackend server(sock_mock, tls_mock);
+    TlsTcpBackend* server = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, true, 0U, true);
     cfg.tls.session_resumption_enabled = true;
-    Result res = server.init(cfg);
+    Result res = server->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!server.is_open());
+    assert(!server->is_open());
 
     printf("PASS: test_m5_ssl_ticket_setup_fail\n");
 #else
     printf("SKIP: test_m5_ssl_ticket_setup_fail (MBEDTLS_SSL_SESSION_TICKETS not defined)\n");
 #endif
+    delete server;
 }
 
 // ── Test M5-5: net_tcp_bind failure ───────────────────────────────────────────
@@ -5469,15 +5573,16 @@ static void test_m5_net_tcp_bind_fail()
     tls_mock.fail_net_tcp_bind = true;
 
     MockSocketOps sock_mock;
-    TlsTcpBackend server(sock_mock, tls_mock);
+    TlsTcpBackend* server = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, true, PORT, true);
-    Result res = server.init(cfg);
+    Result res = server->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!server.is_open());
+    assert(!server->is_open());
 
     printf("PASS: test_m5_net_tcp_bind_fail\n");
+    delete server;
 }
 
 // ── Test M5-6: net_set_nonblock failure on listen socket ──────────────────────
@@ -5492,15 +5597,16 @@ static void test_m5_net_set_nonblock_listen_fail()
     tls_mock.nonblock_fail_on      = 0;  // fail on the first call (listen socket)
 
     MockSocketOps sock_mock;
-    TlsTcpBackend server(sock_mock, tls_mock);
+    TlsTcpBackend* server = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, true, PORT, true);
-    Result res = server.init(cfg);
+    Result res = server->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!server.is_open());
+    assert(!server->is_open());
 
     printf("PASS: test_m5_net_set_nonblock_listen_fail\n");
+    delete server;
 }
 
 // ── Test M5-7: net_tcp_connect failure ────────────────────────────────────────
@@ -5514,7 +5620,7 @@ static void test_m5_net_tcp_connect_fail()
     tls_mock.fail_net_tcp_connect = true;
 
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, port_19938, true);
@@ -5523,11 +5629,12 @@ static void test_m5_net_tcp_connect_fail()
                   static_cast<uint32_t>(sizeof(cfg.peer_ip) - 1U));
     cfg.peer_ip[sizeof(cfg.peer_ip) - 1U] = '\0';
 
-    Result res = client.init(cfg);
+    Result res = client->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!client.is_open());
+    assert(!client->is_open());
 
     printf("PASS: test_m5_net_tcp_connect_fail\n");
+    delete client;
 }
 
 // ── Test M5-8: net_set_block failure (client tls_connect_handshake) ───────────
@@ -5548,18 +5655,19 @@ static void test_m5_net_set_block_client_fail()
     tls_mock.fail_net_set_block = true;
 
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
-    Result res = client.init(cfg);
+    Result res = client->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!client.is_open());
+    assert(!client->is_open());
 
     (void)pthread_join(raw_tid, nullptr);
     assert(raw_arg.result == Result::OK);
 
     printf("PASS: test_m5_net_set_block_client_fail\n");
+    delete client;
 }
 
 // ── Test M5-9: ssl_setup failure (client tls_connect_handshake) ───────────────
@@ -5580,18 +5688,19 @@ static void test_m5_ssl_setup_client_fail()
     tls_mock.fail_ssl_setup = true;
 
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
-    Result res = client.init(cfg);
+    Result res = client->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!client.is_open());
+    assert(!client->is_open());
 
     (void)pthread_join(raw_tid, nullptr);
     assert(raw_arg.result == Result::OK);
 
     printf("PASS: test_m5_ssl_setup_client_fail\n");
+    delete client;
 }
 
 // ── Test M5-10: ssl_set_hostname failure (client tls_connect_handshake) ───────
@@ -5612,20 +5721,21 @@ static void test_m5_ssl_set_hostname_fail()
     tls_mock.fail_ssl_set_hostname = true;
 
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
 
     // verify_peer=false so the SEC-021 empty-hostname guard is not triggered
     // before ssl_set_hostname is called.
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
-    Result res = client.init(cfg);
+    Result res = client->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!client.is_open());
+    assert(!client->is_open());
 
     (void)pthread_join(raw_tid, nullptr);
     assert(raw_arg.result == Result::OK);
 
     printf("PASS: test_m5_ssl_set_hostname_fail\n");
+    delete client;
 }
 
 // ── Test M5-11: ssl_handshake failure (client tls_connect_handshake) ──────────
@@ -5647,18 +5757,19 @@ static void test_m5_ssl_handshake_client_fail()
     tls_mock.fail_ssl_handshake = true;
 
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
-    Result res = client.init(cfg);
+    Result res = client->init(cfg);
     assert(res == Result::ERR_IO);
-    assert(!client.is_open());
+    assert(!client->is_open());
 
     (void)pthread_join(raw_tid, nullptr);
     assert(raw_arg.result == Result::OK);
 
     printf("PASS: test_m5_ssl_handshake_client_fail\n");
+    delete client;
 }
 
 // ── Test M5-12: net_set_block failure (server do_tls_server_handshake) ────────
@@ -5673,13 +5784,13 @@ static void test_m5_server_net_set_block_fail()
     tls_mock.fail_net_set_block = true;
 
     MockSocketOps sock_mock;
-    TlsTcpBackend server(sock_mock, tls_mock);
+    TlsTcpBackend* server = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     // Raw client connects to trigger accept_and_handshake on the server.
     DummyRawClientArg cli_arg;
@@ -5691,14 +5802,15 @@ static void test_m5_server_net_set_block_fail()
     // Server: accept → do_tls_server_handshake → net_set_block FAIL → ERR_IO
     // internally; receive_message returns ERR_TIMEOUT (no deliverable message).
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 500U);
+    Result recv_res = server->receive_message(env, 500U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
     (void)pthread_join(cli_tid, nullptr);
-    server.close();
+    server->close();
     assert(cli_arg.result == Result::OK);
 
     printf("PASS: test_m5_server_net_set_block_fail\n");
+    delete server;
 }
 
 // ── Test M5-13: ssl_setup failure (server do_tls_server_handshake) ────────────
@@ -5712,13 +5824,13 @@ static void test_m5_server_ssl_setup_fail()
     tls_mock.fail_ssl_setup = true;
 
     MockSocketOps sock_mock;
-    TlsTcpBackend server(sock_mock, tls_mock);
+    TlsTcpBackend* server = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     DummyRawClientArg cli_arg;
     cli_arg.port          = PORT;
@@ -5727,14 +5839,15 @@ static void test_m5_server_ssl_setup_fail()
     pthread_t cli_tid = create_thread_4mb(dummy_raw_client_thread, &cli_arg);
 
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 500U);
+    Result recv_res = server->receive_message(env, 500U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
     (void)pthread_join(cli_tid, nullptr);
-    server.close();
+    server->close();
     assert(cli_arg.result == Result::OK);
 
     printf("PASS: test_m5_server_ssl_setup_fail\n");
+    delete server;
 }
 
 // ── Test M5-14: ssl_handshake failure (server do_tls_server_handshake) ────────
@@ -5748,13 +5861,13 @@ static void test_m5_server_ssl_handshake_fail()
     tls_mock.fail_ssl_handshake = true;
 
     MockSocketOps sock_mock;
-    TlsTcpBackend server(sock_mock, tls_mock);
+    TlsTcpBackend* server = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, true);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     DummyRawClientArg cli_arg;
     cli_arg.port          = PORT;
@@ -5763,14 +5876,15 @@ static void test_m5_server_ssl_handshake_fail()
     pthread_t cli_tid = create_thread_4mb(dummy_raw_client_thread, &cli_arg);
 
     MessageEnvelope env;
-    Result recv_res = server.receive_message(env, 500U);
+    Result recv_res = server->receive_message(env, 500U);
     assert(recv_res == Result::ERR_TIMEOUT);
 
     (void)pthread_join(cli_tid, nullptr);
-    server.close();
+    server->close();
     assert(cli_arg.result == Result::OK);
 
     printf("PASS: test_m5_server_ssl_handshake_fail\n");
+    delete server;
 }
 
 // ── Test M5-15: ssl_get_session failure (try_save_client_session) ─────────────
@@ -5798,20 +5912,20 @@ static void test_m5_ssl_get_session_fail()
 
     MockSocketOps sock_mock;
     TlsSessionStore store;
-    TlsTcpBackend client(sock_mock, tls_mock);
-    client.set_session_store(&store);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
+    client->set_session_store(&store);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
     cfg.tls.session_resumption_enabled = true;
 
     // init() must succeed: ssl_get_session failure is non-fatal (WARNING_LO).
-    Result init_res = client.init(cfg);
+    Result init_res = client->init(cfg);
     assert(init_res == Result::OK);
     // Session was NOT saved (ssl_get_session failed).
     assert(!store.session_valid.load());
 
-    client.close();
+    client->close();
     (void)pthread_join(srv_tid, nullptr);
     assert(srv_arg.result == Result::OK);
     store.zeroize();
@@ -5820,6 +5934,7 @@ static void test_m5_ssl_get_session_fail()
 #else
     printf("SKIP: test_m5_ssl_get_session_fail (MBEDTLS_SSL_SESSION_TICKETS not defined)\n");
 #endif
+    delete client;
 }
 
 // ── Test M5-16: ssl_set_session failure (try_load_client_session) ─────────────
@@ -5850,18 +5965,18 @@ static void test_m5_ssl_set_session_fail()
     tls_mock.fail_ssl_set_session = true;
 
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
-    client.set_session_store(&store);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
+    client->set_session_store(&store);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
     cfg.tls.session_resumption_enabled = true;
 
     // init() must succeed: ssl_set_session failure is non-fatal (full handshake).
-    Result init_res = client.init(cfg);
+    Result init_res = client->init(cfg);
     assert(init_res == Result::OK);
 
-    client.close();
+    client->close();
     (void)pthread_join(srv_tid, nullptr);
     assert(srv_arg.result == Result::OK);
     store.zeroize();
@@ -5870,6 +5985,7 @@ static void test_m5_ssl_set_session_fail()
 #else
     printf("SKIP: test_m5_ssl_set_session_fail (MBEDTLS_SSL_SESSION_TICKETS not defined)\n");
 #endif
+    delete client;
 }
 
 // ── Test M5-17: ssl_write hard failure (tls_write_all) ────────────────────────
@@ -5891,11 +6007,11 @@ static void test_m5_ssl_write_hard_fail()
     // Client: all TlsMockOps delegates during init (handshake succeeds).
     TlsMockOps tls_mock;
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
-    Result init_res = client.init(cfg);
+    Result init_res = client->init(cfg);
     assert(init_res == Result::OK);
 
     // Inject ssl_write failure AFTER the handshake.
@@ -5911,14 +6027,15 @@ static void test_m5_ssl_write_hard_fail()
     env.timestamp_us      = 1U;
     env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
 
-    Result send_res = client.send_message(env);
+    Result send_res = client->send_message(env);
     assert(send_res == Result::ERR_IO);
 
-    client.close();
+    client->close();
     (void)pthread_join(srv_tid, nullptr);
     assert(srv_arg.result == Result::OK);
 
     printf("PASS: test_m5_ssl_write_hard_fail\n");
+    delete client;
 }
 
 // ── Test M5-18: ssl_write WANT_WRITE → short-write path ───────────────────────
@@ -5939,11 +6056,11 @@ static void test_m5_ssl_write_want_write_short()
 
     TlsMockOps tls_mock;
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
-    Result init_res = client.init(cfg);
+    Result init_res = client->init(cfg);
     assert(init_res == Result::OK);
 
     // After handshake: make ssl_write always return WANT_WRITE.
@@ -5960,14 +6077,15 @@ static void test_m5_ssl_write_want_write_short()
     env.expiry_time_us    = 0xFFFFFFFFFFFFFFFFULL;
 
     // tls_write_all(header, 4): loop runs 4 times, sent=0 → short write → false.
-    Result send_res = client.send_message(env);
+    Result send_res = client->send_message(env);
     assert(send_res == Result::ERR_IO);
 
-    client.close();
+    client->close();
     (void)pthread_join(srv_tid, nullptr);
     assert(srv_arg.result == Result::OK);
 
     printf("PASS: test_m5_ssl_write_want_write_short\n");
+    delete client;
 }
 
 // ── Test M5-19: ssl_read hard failure in read_tls_header ──────────────────────
@@ -5989,15 +6107,15 @@ static void test_m5_ssl_read_header_hard_fail()
 
     TlsMockOps tls_mock;
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
-    Result init_res = client.init(cfg);
+    Result init_res = client->init(cfg);
     assert(init_res == Result::OK);
 
     // Send HELLO so server's routing table is populated (enables broadcast send).
-    (void)client.register_local_id(2U);
+    (void)client->register_local_id(2U);
     usleep(100000U);  // 100 ms: let server process HELLO and send DATA
 
     // Fail ssl_read from the first call (header read).
@@ -6006,16 +6124,17 @@ static void test_m5_ssl_read_header_hard_fail()
 
     // Client receive: POLLIN fires → read_tls_header → ssl_read → hard error.
     MessageEnvelope env;
-    Result recv_res = client.receive_message(env, 500U);
+    Result recv_res = client->receive_message(env, 500U);
     // Hard ssl_read error → recv_from_client returns ERR_IO internally;
     // receive_message propagates the error or returns ERR_TIMEOUT after retries.
     assert(recv_res == Result::ERR_IO || recv_res == Result::ERR_TIMEOUT);
 
-    client.close();
+    client->close();
     (void)pthread_join(srv_tid, nullptr);
     assert(srv_arg.result == Result::OK);
 
     printf("PASS: test_m5_ssl_read_header_hard_fail\n");
+    delete client;
 }
 
 // ── Test M5-20: ssl_read WANT_READ + net_poll timeout in read_tls_header ──────
@@ -6036,14 +6155,14 @@ static void test_m5_ssl_read_header_want_read_timeout()
 
     TlsMockOps tls_mock;
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
-    Result init_res = client.init(cfg);
+    Result init_res = client->init(cfg);
     assert(init_res == Result::OK);
 
-    (void)client.register_local_id(2U);
+    (void)client->register_local_id(2U);
     usleep(100000U);
 
     // WANT_READ on first ssl_read call + net_poll timeout.
@@ -6052,14 +6171,15 @@ static void test_m5_ssl_read_header_want_read_timeout()
     tls_mock.fail_net_poll      = true;
 
     MessageEnvelope env;
-    Result recv_res = client.receive_message(env, 500U);
+    Result recv_res = client->receive_message(env, 500U);
     assert(recv_res == Result::ERR_IO || recv_res == Result::ERR_TIMEOUT);
 
-    client.close();
+    client->close();
     (void)pthread_join(srv_tid, nullptr);
     assert(srv_arg.result == Result::OK);
 
     printf("PASS: test_m5_ssl_read_header_want_read_timeout\n");
+    delete client;
 }
 
 // ── Test M5-21: ssl_read hard failure in tls_read_payload ─────────────────────
@@ -6080,14 +6200,14 @@ static void test_m5_ssl_read_payload_hard_fail()
 
     TlsMockOps tls_mock;
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
-    Result init_res = client.init(cfg);
+    Result init_res = client->init(cfg);
     assert(init_res == Result::OK);
 
-    (void)client.register_local_id(2U);
+    (void)client->register_local_id(2U);
     usleep(100000U);
 
     // Call 0 (header) delegates to real impl; call 1+ returns hard error.
@@ -6096,14 +6216,15 @@ static void test_m5_ssl_read_payload_hard_fail()
     tls_mock.ssl_read_want_read = false;  // hard error
 
     MessageEnvelope env;
-    Result recv_res = client.receive_message(env, 500U);
+    Result recv_res = client->receive_message(env, 500U);
     assert(recv_res == Result::ERR_IO || recv_res == Result::ERR_TIMEOUT);
 
-    client.close();
+    client->close();
     (void)pthread_join(srv_tid, nullptr);
     assert(srv_arg.result == Result::OK);
 
     printf("PASS: test_m5_ssl_read_payload_hard_fail\n");
+    delete client;
 }
 
 // ── Test M5-22: ssl_read WANT_READ + net_poll timeout in tls_read_payload ─────
@@ -6124,14 +6245,14 @@ static void test_m5_ssl_read_payload_want_read_timeout()
 
     TlsMockOps tls_mock;
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
-    Result init_res = client.init(cfg);
+    Result init_res = client->init(cfg);
     assert(init_res == Result::OK);
 
-    (void)client.register_local_id(2U);
+    (void)client->register_local_id(2U);
     usleep(100000U);
 
     // Call 0 (header) delegates; call 1+ returns WANT_READ then net_poll timeouts.
@@ -6140,14 +6261,15 @@ static void test_m5_ssl_read_payload_want_read_timeout()
     tls_mock.fail_net_poll      = true;
 
     MessageEnvelope env;
-    Result recv_res = client.receive_message(env, 500U);
+    Result recv_res = client->receive_message(env, 500U);
     assert(recv_res == Result::ERR_IO || recv_res == Result::ERR_TIMEOUT);
 
-    client.close();
+    client->close();
     (void)pthread_join(srv_tid, nullptr);
     assert(srv_arg.result == Result::OK);
 
     printf("PASS: test_m5_ssl_read_payload_want_read_timeout\n");
+    delete client;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6226,7 +6348,7 @@ static void test_i1_peer_hostname_nonnull()
     tls_mock.fail_ssl_handshake = true;  // inject failure after ssl_set_hostname
 
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
@@ -6248,14 +6370,15 @@ static void test_i1_peer_hostname_nonnull()
     (void)strncpy(cfg.tls.peer_hostname, "127.0.0.1", HLEN);
     cfg.tls.peer_hostname[HLEN] = '\0';
 
-    Result res = client.init(cfg);
+    Result res = client->init(cfg);
     assert(res == Result::ERR_IO);      // handshake mock fails → ERR_IO
-    assert(!client.is_open());
+    assert(!client->is_open());
 
     (void)pthread_join(raw_tid, nullptr);
     assert(raw_arg.result == Result::OK);
 
     printf("PASS: test_i1_peer_hostname_nonnull\n");
+    delete client;
 }
 
 // ── Test I-2: log_stale_ticket_warning True branch (had_session=true) ─────────
@@ -6299,16 +6422,16 @@ static void test_i2_stale_ticket_warning_with_session()
     tls_mock.fail_ssl_handshake = true;  // handshake fails → had_session=true fires
 
     MockSocketOps sock_mock;
-    TlsTcpBackend client(sock_mock, tls_mock);
-    client.set_session_store(&store);
+    TlsTcpBackend* client = new TlsTcpBackend(sock_mock, tls_mock);
+    client->set_session_store(&store);
 
     TransportConfig cfg;
     make_transport_config(cfg, false, PORT, true);
     cfg.tls.session_resumption_enabled = true;  // makes has_resumable_session()=true
 
-    Result res = client.init(cfg);
+    Result res = client->init(cfg);
     assert(res == Result::ERR_IO);   // handshake mock fails → ERR_IO
-    assert(!client.is_open());
+    assert(!client->is_open());
 
     // session_valid is intentionally not cleared by a handshake failure;
     // caller must call store.zeroize() to dispose of the material safely.
@@ -6318,6 +6441,7 @@ static void test_i2_stale_ticket_warning_with_session()
     assert(raw_arg.result == Result::OK);
 
     printf("PASS: test_i2_stale_ticket_warning_with_session\n");
+    delete client;
 }
 
 // ── Test I-3: session_ticket_lifetime_s == 0 → ternary False (default used) ──
@@ -6340,7 +6464,7 @@ static void test_i3_session_ticket_zero_lifetime()
     // Verifies: REQ-6.3.4
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, true, PORT, true);
     // I-3: explicitly zero the lifetime so the ternary at
@@ -6349,14 +6473,15 @@ static void test_i3_session_ticket_zero_lifetime()
     cfg.tls.session_resumption_enabled = true;
     cfg.tls.session_ticket_lifetime_s  = 0U;
 
-    Result res = server.init(cfg);
+    Result res = server->init(cfg);
     assert(res == Result::OK);         // default lifetime substituted → OK
-    assert(server.is_open());
+    assert(server->is_open());
 
-    server.close();
-    assert(!server.is_open());
+    server->close();
+    assert(!server->is_open());
 
     printf("PASS: test_i3_session_ticket_zero_lifetime\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6373,16 +6498,17 @@ static void test_i3_session_ticket_zero_lifetime()
 static void test_j1_verify_peer_no_ca_init_rejected()
 {
     // Verifies: REQ-6.3.6
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, 19980U, true);  // TLS client
     cfg.tls.verify_peer   = true;
     cfg.tls.ca_file[0]    = '\0';  // REQ-6.3.6: empty ca_file triggers FATAL guard
 
-    Result res = client.init(cfg);
+    Result res = client->init(cfg);
     assert(res == Result::ERR_IO);   // H-1: validate_tls_init_config → ERR_IO
-    assert(!client.is_open());       // backend must not be open after failure
+    assert(!client->is_open());       // backend must not be open after failure
     printf("PASS: test_j1_verify_peer_no_ca_init_rejected\n");
+    delete client;
 }
 
 // ── Test J-2: REQ-6.3.7 — require_crl=true with empty crl_file → ERR_INVALID ─
@@ -6395,7 +6521,7 @@ static void test_j1_verify_peer_no_ca_init_rejected()
 static void test_j2_require_crl_no_crl_file_rejected()
 {
     // Verifies: REQ-6.3.7
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, 19981U, true);  // TLS client
     cfg.tls.verify_peer  = true;
@@ -6406,10 +6532,11 @@ static void test_j2_require_crl_no_crl_file_rejected()
     cfg.tls.require_crl  = true;
     cfg.tls.crl_file[0]  = '\0';   // REQ-6.3.7: empty crl_file triggers FATAL guard
 
-    Result res = client.init(cfg);
+    Result res = client->init(cfg);
     assert(res == Result::ERR_INVALID);  // H-2: validate_tls_init_config → ERR_INVALID
-    assert(!client.is_open());
+    assert(!client->is_open());
     printf("PASS: test_j2_require_crl_no_crl_file_rejected\n");
+    delete client;
 }
 
 // ── Test J-3: REQ-6.3.8 — check_forward_secrecy TLS 1.2 rejection paths ──────
@@ -6461,7 +6588,7 @@ static void test_j3_check_forward_secrecy_branches()
 static void test_j4_verify_peer_false_hostname_set_rejected()
 {
     // Verifies: REQ-6.3.9
-    TlsTcpBackend client;
+    TlsTcpBackend* client = new TlsTcpBackend();
     TransportConfig cfg;
     make_transport_config(cfg, false, 19982U, true);  // TLS client (verify_peer=false)
     assert(cfg.tls.verify_peer == false);  // confirm default from make_transport_config
@@ -6470,10 +6597,11 @@ static void test_j4_verify_peer_false_hostname_set_rejected()
     (void)strncpy(cfg.tls.peer_hostname, "messageEngine-test", HLEN);
     cfg.tls.peer_hostname[HLEN] = '\0';
 
-    Result res = client.init(cfg);
+    Result res = client->init(cfg);
     assert(res == Result::ERR_INVALID);  // H-8: validate_tls_init_config → ERR_INVALID
-    assert(!client.is_open());
+    assert(!client->is_open());
     printf("PASS: test_j4_verify_peer_false_hostname_set_rejected\n");
+    delete client;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6580,14 +6708,14 @@ static void test_l1_hello_timeout_evicts_slot_plaintext()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TlsTcpBackend server;
+    TlsTcpBackend* server = new TlsTcpBackend();
     TransportConfig srv_cfg;
     make_transport_config(srv_cfg, true, PORT, false);  // tls_enabled=false
     srv_cfg.channels[0U].recv_timeout_ms = 10U;  // short HELLO timeout
 
-    Result init_r = server.init(srv_cfg);
+    Result init_r = server->init(srv_cfg);
     assert(init_r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     TlsHelloTimeoutArg arg;
     arg.port         = PORT;
@@ -6601,15 +6729,16 @@ static void test_l1_hello_timeout_evicts_slot_plaintext()
 
     // Power of 10 Rule 2: fixed loop bound — receive_message polls 6 × 100 ms.
     MessageEnvelope env;
-    Result recv_r = server.receive_message(env, 600U);
+    Result recv_r = server->receive_message(env, 600U);
     assert(recv_r != Result::OK);
 
     (void)pthread_join(tid, nullptr);
     (void)pthread_attr_destroy(&attr);
-    server.close();
+    server->close();
 
     assert(arg.server_closed);
     printf("PASS: test_l1_hello_timeout_evicts_slot_plaintext\n");
+    delete server;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

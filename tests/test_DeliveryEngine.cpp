@@ -130,8 +130,8 @@ static void make_ack_envelope(MessageEnvelope&       ack,
 // harness_a is the local node (id=1); harness_b is the remote node (id=2)
 // engine uses harness_a as its transport
 // ─────────────────────────────────────────────────────────────────────────────
-static void setup_engine(LocalSimHarness& harness_a,
-                          LocalSimHarness& harness_b,
+static void setup_engine(LocalSimHarness* harness_a,
+                          LocalSimHarness* harness_b,
                           DeliveryEngine&  engine)
 {
     TransportConfig cfg_a;
@@ -141,19 +141,19 @@ static void setup_engine(LocalSimHarness& harness_a,
     cfg_a.channels[0].retry_backoff_ms = 100U;
     cfg_a.channels[0].recv_timeout_ms  = 1000U;
 
-    Result r_a = harness_a.init(cfg_a);
+    Result r_a = harness_a->init(cfg_a);
     assert(r_a == Result::OK);
 
     TransportConfig cfg_b;
     create_local_sim_config(cfg_b, 2U);
-    Result r_b = harness_b.init(cfg_b);
+    Result r_b = harness_b->init(cfg_b);
     assert(r_b == Result::OK);
 
     // Bidirectional link
-    harness_a.link(&harness_b);
-    harness_b.link(&harness_a);
+    harness_a->link(harness_b);
+    harness_b->link(harness_a);
 
-    engine.init(&harness_a, cfg_a.channels[0], 1U);
+    engine.init(harness_a, cfg_a.channels[0], 1U);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -161,8 +161,8 @@ static void setup_engine(LocalSimHarness& harness_a,
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_send_best_effort()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -175,11 +175,13 @@ static void test_send_best_effort()
 
     // Verify message arrived at harness_b
     MessageEnvelope recv_env;
-    Result recv_res = harness_b.receive_message(recv_env, 100U);
+    Result recv_res = harness_b->receive_message(recv_env, 100U);
     assert(recv_res == Result::OK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_send_best_effort\n");
 }
@@ -189,8 +191,8 @@ static void test_send_best_effort()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_send_reliable_ack()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -202,11 +204,13 @@ static void test_send_reliable_ack()
     assert(res == Result::OK);
 
     MessageEnvelope recv_env;
-    Result recv_res = harness_b.receive_message(recv_env, 100U);
+    Result recv_res = harness_b->receive_message(recv_env, 100U);
     assert(recv_res == Result::OK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_send_reliable_ack\n");
 }
@@ -216,8 +220,8 @@ static void test_send_reliable_ack()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_send_reliable_retry()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -229,11 +233,13 @@ static void test_send_reliable_retry()
     assert(res == Result::OK);
 
     MessageEnvelope recv_env;
-    Result recv_res = harness_b.receive_message(recv_env, 100U);
+    Result recv_res = harness_b->receive_message(recv_env, 100U);
     assert(recv_res == Result::OK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_send_reliable_retry\n");
 }
@@ -243,15 +249,15 @@ static void test_send_reliable_retry()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_receive_data_best_effort()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
     // Inject directly into harness_a's receive queue
     MessageEnvelope inject_env;
     make_data_envelope(inject_env, 2U, 1U, 12345ULL, ReliabilityClass::BEST_EFFORT);
-    Result inject_res = harness_a.inject(inject_env);
+    Result inject_res = harness_a->inject(inject_env);
     assert(inject_res == Result::OK);
 
     MessageEnvelope recv_env;
@@ -260,8 +266,10 @@ static void test_receive_data_best_effort()
     assert(recv_res == Result::OK);
     assert(recv_env.message_id == 12345ULL);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_receive_data_best_effort\n");
 }
@@ -271,14 +279,14 @@ static void test_receive_data_best_effort()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_receive_expired()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
     MessageEnvelope expired_env;
     make_expired_envelope(expired_env, 2U, 1U);
-    Result inject_res = harness_a.inject(expired_env);
+    Result inject_res = harness_a->inject(expired_env);
     assert(inject_res == Result::OK);
 
     MessageEnvelope recv_env;
@@ -288,8 +296,10 @@ static void test_receive_expired()
     assert(recv_res == Result::ERR_EXPIRED);
     assert(recv_res != Result::OK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_receive_expired\n");
 }
@@ -303,8 +313,8 @@ static void test_receive_expired()
 // Verifies: REQ-3.2.7, REQ-3.3.4
 static void test_send_expired_returns_err()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -318,11 +328,13 @@ static void test_send_expired_returns_err()
 
     // Nothing should have been sent to harness_b
     MessageEnvelope dummy;
-    Result rr = harness_b.receive_message(dummy, 10U);
+    Result rr = harness_b->receive_message(dummy, 10U);
     assert(rr != Result::OK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
     printf("PASS: test_send_expired_returns_err\n");
 }
 
@@ -332,8 +344,8 @@ static void test_send_expired_returns_err()
 // Verifies: REQ-3.2.7, REQ-3.3.4
 static void test_receive_expired_at_boundary()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -342,15 +354,17 @@ static void test_receive_expired_at_boundary()
     make_data_envelope(env, 2U, 1U, 88888ULL, ReliabilityClass::BEST_EFFORT);
     env.expiry_time_us = NOW_US;
 
-    Result inj = harness_a.inject(env);
+    Result inj = harness_a->inject(env);
     assert(inj == Result::OK);
 
     MessageEnvelope out;
     Result res = engine.receive(out, 100U, NOW_US);
     assert(res == Result::ERR_EXPIRED);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
     printf("PASS: test_receive_expired_at_boundary\n");
 }
 
@@ -360,8 +374,8 @@ static void test_receive_expired_at_boundary()
 // Verifies: REQ-3.2.7, REQ-3.3.4
 static void test_receive_zero_expiry_never_drops()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -369,7 +383,7 @@ static void test_receive_zero_expiry_never_drops()
     make_data_envelope(env, 2U, 1U, 99999ULL, ReliabilityClass::BEST_EFFORT);
     env.expiry_time_us = 0ULL;  // 0 == never expires
 
-    Result inj = harness_a.inject(env);
+    Result inj = harness_a->inject(env);
     assert(inj == Result::OK);
 
     MessageEnvelope out;
@@ -378,8 +392,10 @@ static void test_receive_zero_expiry_never_drops()
     assert(res == Result::OK);
     assert(out.message_id == 99999ULL);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
     printf("PASS: test_receive_zero_expiry_never_drops\n");
 }
 
@@ -389,8 +405,8 @@ static void test_receive_zero_expiry_never_drops()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_receive_ack_cancels_retry()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -402,7 +418,7 @@ static void test_receive_ack_cancels_retry()
 
     // Retrieve message_id assigned by the engine (from harness_b's queue)
     MessageEnvelope received_at_b;
-    Result rb_res = harness_b.receive_message(received_at_b, 100U);
+    Result rb_res = harness_b->receive_message(received_at_b, 100U);
     assert(rb_res == Result::OK);
     uint64_t sent_msg_id = received_at_b.message_id;
 
@@ -413,7 +429,7 @@ static void test_receive_ack_cancels_retry()
     make_ack_envelope(ack_env, 2U, 1U, sent_msg_id);
 
     // Inject the ACK into harness_a's receive queue
-    Result inject_res = harness_a.inject(ack_env);
+    Result inject_res = harness_a->inject(ack_env);
     assert(inject_res == Result::OK);
 
     // engine.receive() processes the ACK; returns OK (control messages pass through)
@@ -428,8 +444,10 @@ static void test_receive_ack_cancels_retry()
     uint32_t retried = engine.pump_retries(NOW_US + 1000000000ULL);
     assert(retried == 0U);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_receive_ack_cancels_retry\n");
 }
@@ -439,8 +457,8 @@ static void test_receive_ack_cancels_retry()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_receive_duplicate()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -449,9 +467,9 @@ static void test_receive_duplicate()
     make_data_envelope(data_env, 2U, 1U, 42000ULL, ReliabilityClass::RELIABLE_RETRY);
 
     // Inject the same envelope twice into harness_a
-    Result inj1 = harness_a.inject(data_env);
+    Result inj1 = harness_a->inject(data_env);
     assert(inj1 == Result::OK);
-    Result inj2 = harness_a.inject(data_env);
+    Result inj2 = harness_a->inject(data_env);
     assert(inj2 == Result::OK);
 
     // First receive: OK
@@ -464,8 +482,10 @@ static void test_receive_duplicate()
     Result res2 = engine.receive(out2, 100U, NOW_US);
     assert(res2 == Result::ERR_DUPLICATE);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_receive_duplicate\n");
 }
@@ -475,8 +495,8 @@ static void test_receive_duplicate()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_receive_timeout()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -487,8 +507,10 @@ static void test_receive_timeout()
     assert(res == Result::ERR_TIMEOUT);
     assert(res != Result::OK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_receive_timeout\n");
 }
@@ -498,8 +520,8 @@ static void test_receive_timeout()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_pump_retries_no_retries()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -508,8 +530,10 @@ static void test_pump_retries_no_retries()
     assert(count == 0U);
     assert(count == 0U);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_pump_retries_no_retries\n");
 }
@@ -520,8 +544,8 @@ static void test_pump_retries_no_retries()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_pump_retries_fires()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -533,7 +557,7 @@ static void test_pump_retries_fires()
 
     // Drain harness_b's initial send
     MessageEnvelope drain_env;
-    (void)harness_b.receive_message(drain_env, 10U);
+    (void)harness_b->receive_message(drain_env, 10U);
 
     // pump_retries with now_us slightly advanced; first retry is due immediately
     uint32_t retried = engine.pump_retries(NOW_US + 1ULL);
@@ -541,8 +565,10 @@ static void test_pump_retries_fires()
     assert(retried >= 1U);
     assert(retried <= MSG_RING_CAPACITY);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_pump_retries_fires\n");
 }
@@ -552,8 +578,8 @@ static void test_pump_retries_fires()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_sweep_no_timeouts()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -562,8 +588,10 @@ static void test_sweep_no_timeouts()
     assert(count == 0U);
     assert(count == 0U);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_sweep_no_timeouts\n");
 }
@@ -574,8 +602,8 @@ static void test_sweep_no_timeouts()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_sweep_detects_timeout()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -592,8 +620,10 @@ static void test_sweep_detects_timeout()
     assert(count == 1U);
     assert(count >= 1U);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_sweep_detects_timeout\n");
 }
@@ -605,8 +635,8 @@ static void test_sweep_detects_timeout()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_send_ack_tracker_full()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -619,7 +649,7 @@ static void test_send_ack_tracker_full()
         assert(r == Result::OK);
         // Drain harness_b to prevent its queue from filling
         MessageEnvelope drain;
-        (void)harness_b.receive_message(drain, 10U);
+        (void)harness_b->receive_message(drain, 10U);
     }
 
     // AckTracker is now full; next RELIABLE_ACK must return ERR_FULL because
@@ -637,11 +667,13 @@ static void test_send_ack_tracker_full()
     // queue is empty (ERR_TIMEOUT confirms no message arrived).
     // Verifies: at-most-once contract — ERR_FULL means peer never saw the message.
     MessageEnvelope not_sent;
-    Result not_recv = harness_b.receive_message(not_sent, 10U);
+    Result not_recv = harness_b->receive_message(not_sent, 10U);
     assert(not_recv != Result::OK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_send_ack_tracker_full\n");
 }
@@ -662,8 +694,8 @@ static void test_send_ack_tracker_full()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_send_retry_manager_full()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -677,7 +709,7 @@ static void test_send_retry_manager_full()
         assert(r == Result::OK);
         // Drain harness_b so its queue never fills
         MessageEnvelope drain;
-        (void)harness_b.receive_message(drain, 10U);
+        (void)harness_b->receive_message(drain, 10U);
     }
 
     // Expire all AckTracker slots by advancing time 2 s past the 1 s recv_timeout_ms
@@ -704,11 +736,13 @@ static void test_send_retry_manager_full()
     // The peer must NOT have received the overflow message (bookkeeping reserved
     // before transport, rolled back after schedule() failure — at-most-once contract).
     MessageEnvelope not_sent;
-    Result not_recv = harness_b.receive_message(not_sent, 10U);
+    Result not_recv = harness_b->receive_message(not_sent, 10U);
     assert(not_recv != Result::OK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_send_retry_manager_full\n");
 }
@@ -719,8 +753,8 @@ static void test_send_retry_manager_full()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_pump_retries_send_fails()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -736,7 +770,7 @@ static void test_pump_retries_send_fails()
     for (uint32_t i = 0U; i < MSG_RING_CAPACITY - 1U; ++i) {
         MessageEnvelope filler;
         make_data_envelope(filler, 2U, 1U, static_cast<uint64_t>(i) + 100U, ReliabilityClass::BEST_EFFORT);
-        Result r = harness_b.inject(filler);
+        Result r = harness_b->inject(filler);
         assert(r == Result::OK);
     }
 
@@ -748,8 +782,10 @@ static void test_pump_retries_send_fails()
     assert(retried >= 1U);
     assert(retried <= MSG_RING_CAPACITY);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_pump_retries_send_fails\n");
 }
@@ -763,8 +799,8 @@ static void test_pump_retries_send_fails()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_send_transport_queue_full()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -772,7 +808,7 @@ static void test_send_transport_queue_full()
     for (uint32_t i = 0U; i < MSG_RING_CAPACITY; ++i) {
         MessageEnvelope filler;
         make_data_envelope(filler, 2U, 1U, static_cast<uint64_t>(i) + 1U, ReliabilityClass::BEST_EFFORT);
-        Result r = harness_b.inject(filler);
+        Result r = harness_b->inject(filler);
         assert(r == Result::OK);
     }
 
@@ -784,8 +820,10 @@ static void test_send_transport_queue_full()
     assert(res == Result::ERR_FULL);
     assert(res != Result::OK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_send_transport_queue_full\n");
 }
@@ -796,8 +834,8 @@ static void test_send_transport_queue_full()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_receive_nak_control()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -815,7 +853,7 @@ static void test_receive_nak_control()
     nak_env.payload_length    = 0U;
 
     // Inject into harness_a's receive queue
-    Result inject_res = harness_a.inject(nak_env);
+    Result inject_res = harness_a->inject(nak_env);
     assert(inject_res == Result::OK);
 
     // engine.receive() should handle NAK as control; returns OK
@@ -825,8 +863,10 @@ static void test_receive_nak_control()
     assert(recv_res == Result::OK);
     assert(out_env.message_type == MessageType::NAK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_receive_nak_control\n");
 }
@@ -837,8 +877,8 @@ static void test_receive_nak_control()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_receive_heartbeat_control()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -854,7 +894,7 @@ static void test_receive_heartbeat_control()
     hb_env.expiry_time_us    = 0U;
     hb_env.payload_length    = 0U;
 
-    Result inject_res = harness_a.inject(hb_env);
+    Result inject_res = harness_a->inject(hb_env);
     assert(inject_res == Result::OK);
 
     MessageEnvelope out_env;
@@ -863,8 +903,10 @@ static void test_receive_heartbeat_control()
     assert(recv_res == Result::OK);
     assert(out_env.message_type == MessageType::HEARTBEAT);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_receive_heartbeat_control\n");
 }
@@ -875,8 +917,8 @@ static void test_receive_heartbeat_control()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_pump_retries_resends()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -893,8 +935,8 @@ static void test_pump_retries_resends()
 
     // Drain harness_b's initial sends
     MessageEnvelope drain_env;
-    (void)harness_b.receive_message(drain_env, 10U);
-    (void)harness_b.receive_message(drain_env, 10U);
+    (void)harness_b->receive_message(drain_env, 10U);
+    (void)harness_b->receive_message(drain_env, 10U);
 
     // pump_retries: both retries fire immediately (scheduled at NOW_US)
     uint32_t retried = engine.pump_retries(NOW_US + 1ULL);
@@ -902,8 +944,10 @@ static void test_pump_retries_resends()
     assert(retried >= 1U);
     assert(retried <= MSG_RING_CAPACITY);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_pump_retries_resends\n");
 }
@@ -916,8 +960,8 @@ static void test_pump_retries_resends()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_init_retry_buf_is_zeroed()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -927,8 +971,10 @@ static void test_init_retry_buf_is_zeroed()
     assert(count == 0U);
     assert(count <= MSG_RING_CAPACITY);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_init_retry_buf_is_zeroed\n");
 }
@@ -941,8 +987,8 @@ static void test_init_retry_buf_is_zeroed()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_init_timeout_buf_is_zeroed()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -952,8 +998,10 @@ static void test_init_timeout_buf_is_zeroed()
     assert(count == 0U);
     assert(count <= ACK_TRACKER_CAPACITY);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_init_timeout_buf_is_zeroed\n");
 }
@@ -966,8 +1014,8 @@ static void test_init_timeout_buf_is_zeroed()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_pump_retries_capacity()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -980,7 +1028,7 @@ static void test_pump_retries_capacity()
         assert(r == Result::OK);
         // Drain harness_b to prevent its queue filling
         MessageEnvelope drain;
-        (void)harness_b.receive_message(drain, 10U);
+        (void)harness_b->receive_message(drain, 10U);
     }
 
     // Advance time well past all retry deadlines (first retry_us == NOW_US)
@@ -990,8 +1038,10 @@ static void test_pump_retries_capacity()
     assert(collected == ACK_TRACKER_CAPACITY);
     assert(collected <= MSG_RING_CAPACITY);  // buffer never overrun
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_pump_retries_capacity\n");
 }
@@ -1004,8 +1054,8 @@ static void test_pump_retries_capacity()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_sweep_ack_timeouts_capacity()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -1018,7 +1068,7 @@ static void test_sweep_ack_timeouts_capacity()
         assert(r == Result::OK);
         // Drain harness_b to prevent its queue filling
         MessageEnvelope drain;
-        (void)harness_b.receive_message(drain, 10U);
+        (void)harness_b->receive_message(drain, 10U);
     }
 
     // Sweep with far-future now_us (past all deadlines = NOW_US + recv_timeout_ms*1000)
@@ -1028,8 +1078,10 @@ static void test_sweep_ack_timeouts_capacity()
     assert(collected == ACK_TRACKER_CAPACITY);
     assert(collected <= ACK_TRACKER_CAPACITY);  // buffer never overrun
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_sweep_ack_timeouts_capacity\n");
 }
@@ -1232,15 +1284,15 @@ static void test_mock_reliable_retry_send_err_rolls_back_both_slots()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_receive_reliable_ack_data_emits_ack()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
     // Inject RELIABLE_ACK DATA from node 2 → node 1
     MessageEnvelope data_env;
     make_data_envelope(data_env, 2U, 1U, 55555ULL, ReliabilityClass::RELIABLE_ACK);
-    Result inj = harness_a.inject(data_env);
+    Result inj = harness_a->inject(data_env);
     assert(inj == Result::OK);
 
     // engine.receive() accepts the data and auto-sends an ACK via the transport
@@ -1251,7 +1303,7 @@ static void test_receive_reliable_ack_data_emits_ack()
 
     // Exactly one ACK must have arrived at harness_b (the "remote" side)
     MessageEnvelope ack;
-    Result rack = harness_b.receive_message(ack, 100U);
+    Result rack = harness_b->receive_message(ack, 100U);
     assert(rack == Result::OK);
     assert(ack.message_type == MessageType::ACK);
     assert(ack.message_id   == 55555ULL);
@@ -1263,11 +1315,13 @@ static void test_receive_reliable_ack_data_emits_ack()
 
     // No second ACK should be present
     MessageEnvelope extra;
-    Result rextra = harness_b.receive_message(extra, 10U);
+    Result rextra = harness_b->receive_message(extra, 10U);
     assert(rextra != Result::OK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_receive_reliable_ack_data_emits_ack\n");
 }
@@ -1279,15 +1333,15 @@ static void test_receive_reliable_ack_data_emits_ack()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_receive_reliable_retry_data_emits_ack()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
     // Inject RELIABLE_RETRY DATA from node 2 → node 1 (first occurrence)
     MessageEnvelope data_env;
     make_data_envelope(data_env, 2U, 1U, 66666ULL, ReliabilityClass::RELIABLE_RETRY);
-    Result inj = harness_a.inject(data_env);
+    Result inj = harness_a->inject(data_env);
     assert(inj == Result::OK);
 
     // engine.receive() accepts the data and auto-sends an ACK via the transport
@@ -1298,7 +1352,7 @@ static void test_receive_reliable_retry_data_emits_ack()
 
     // Exactly one ACK must have arrived at harness_b
     MessageEnvelope ack;
-    Result rack = harness_b.receive_message(ack, 100U);
+    Result rack = harness_b->receive_message(ack, 100U);
     assert(rack == Result::OK);
     assert(ack.message_type == MessageType::ACK);
     assert(ack.message_id   == 66666ULL);
@@ -1310,11 +1364,13 @@ static void test_receive_reliable_retry_data_emits_ack()
 
     // No second ACK should be present
     MessageEnvelope extra;
-    Result rextra = harness_b.receive_message(extra, 10U);
+    Result rextra = harness_b->receive_message(extra, 10U);
     assert(rextra != Result::OK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_receive_reliable_retry_data_emits_ack\n");
 }
@@ -1328,8 +1384,8 @@ static void test_receive_reliable_retry_data_emits_ack()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_receive_duplicate_resends_ack()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -1338,9 +1394,9 @@ static void test_receive_duplicate_resends_ack()
     make_data_envelope(data_env, 2U, 1U, 77777ULL, ReliabilityClass::RELIABLE_RETRY);
 
     // Inject the same envelope twice (simulates a retry when original ACK was lost)
-    Result inj1 = harness_a.inject(data_env);
+    Result inj1 = harness_a->inject(data_env);
     assert(inj1 == Result::OK);
-    Result inj2 = harness_a.inject(data_env);
+    Result inj2 = harness_a->inject(data_env);
     assert(inj2 == Result::OK);
 
     // First receive: first occurrence → OK; engine sends ACK → harness_b
@@ -1355,7 +1411,7 @@ static void test_receive_duplicate_resends_ack()
 
     // harness_b should now hold exactly 2 ACK envelopes (one from each receive call)
     MessageEnvelope ack1;
-    Result rack1 = harness_b.receive_message(ack1, 100U);
+    Result rack1 = harness_b->receive_message(ack1, 100U);
     assert(rack1 == Result::OK);
     assert(ack1.message_type == MessageType::ACK);
     assert(ack1.message_id   == 77777ULL);
@@ -1366,7 +1422,7 @@ static void test_receive_duplicate_resends_ack()
     assert(ack1.payload_length    == 0U);                              // ACKs carry no payload
 
     MessageEnvelope ack2;
-    Result rack2 = harness_b.receive_message(ack2, 100U);
+    Result rack2 = harness_b->receive_message(ack2, 100U);
     assert(rack2 == Result::OK);
     assert(ack2.message_type == MessageType::ACK);
     assert(ack2.message_id   == 77777ULL);
@@ -1378,11 +1434,13 @@ static void test_receive_duplicate_resends_ack()
 
     // No third ACK should be present
     MessageEnvelope ack3;
-    Result rack3 = harness_b.receive_message(ack3, 10U);
+    Result rack3 = harness_b->receive_message(ack3, 10U);
     assert(rack3 != Result::OK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_receive_duplicate_resends_ack\n");
 }
@@ -1393,8 +1451,8 @@ static void test_receive_duplicate_resends_ack()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_stats_msgs_sent()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -1415,8 +1473,10 @@ static void test_stats_msgs_sent()
     assert(s1.msgs_sent == 1U);
     assert(s1.msgs_received == 0U);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_stats_msgs_sent\n");
 }
@@ -1427,15 +1487,15 @@ static void test_stats_msgs_sent()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_stats_msgs_received()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
     // Inject a DATA message directly into harness_a's inbox
     MessageEnvelope inject;
     make_data_envelope(inject, 2U, 1U, 50001ULL, ReliabilityClass::BEST_EFFORT);
-    Result inj = harness_b.send_message(inject);
+    Result inj = harness_b->send_message(inject);
     assert(inj == Result::OK);
 
     MessageEnvelope out;
@@ -1448,8 +1508,10 @@ static void test_stats_msgs_received()
     assert(s.msgs_received == 1U);
     assert(s.msgs_sent == 0U);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_stats_msgs_received\n");
 }
@@ -1460,8 +1522,8 @@ static void test_stats_msgs_received()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_stats_dropped_expired()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -1482,8 +1544,10 @@ static void test_stats_dropped_expired()
     assert(s1.msgs_dropped_expired == 1U);
     assert(s1.msgs_sent == 0U);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_stats_dropped_expired\n");
 }
@@ -1494,8 +1558,8 @@ static void test_stats_dropped_expired()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_stats_dropped_duplicate()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -1509,9 +1573,9 @@ static void test_stats_dropped_duplicate()
     make_data_envelope(env1, 2U, 1U, 50100ULL, ReliabilityClass::RELIABLE_RETRY);
     MessageEnvelope env2 = env1;  // identical — same source_id + message_id
 
-    Result inj1 = harness_b.send_message(env1);
+    Result inj1 = harness_b->send_message(env1);
     assert(inj1 == Result::OK);
-    Result inj2 = harness_b.send_message(env2);
+    Result inj2 = harness_b->send_message(env2);
     assert(inj2 == Result::OK);
 
     // First receive: accepted
@@ -1530,8 +1594,10 @@ static void test_stats_dropped_duplicate()
     assert(s1.msgs_dropped_duplicate == 1U);
     assert(s1.msgs_received == 1U);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_stats_dropped_duplicate\n");
 }
@@ -1543,8 +1609,8 @@ static void test_stats_dropped_duplicate()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_stats_latency()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -1566,7 +1632,7 @@ static void test_stats_latency()
     // Use a slightly later timestamp to produce a non-zero RTT
     ack.timestamp_us = NOW_US + 1000ULL;
 
-    Result inj = harness_b.send_message(ack);
+    Result inj = harness_b->send_message(ack);
     assert(inj == Result::OK);
 
     // receive() processes the ACK and records latency
@@ -1579,8 +1645,10 @@ static void test_stats_latency()
     engine.get_stats(s1);
     assert(s1.latency_sample_count == 1U);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_stats_latency\n");
 }
@@ -1593,8 +1661,8 @@ static void test_stats_latency()
 // Verifies: REQ-7.2.5
 static void test_event_ring_send_ok_emits_event()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -1620,8 +1688,10 @@ static void test_event_ring_send_ok_emits_event()
     // Ring is now empty
     assert(engine.pending_event_count() == 0U);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_event_ring_send_ok_emits_event\n");
 }
@@ -1667,8 +1737,8 @@ static void test_event_ring_send_fail_emits_event()
 // Verifies: REQ-7.2.5
 static void test_event_ring_ack_timeout_emits_event()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -1706,8 +1776,10 @@ static void test_event_ring_ack_timeout_emits_event()
     }
     assert(found);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_event_ring_ack_timeout_emits_event\n");
 }
@@ -1716,17 +1788,17 @@ static void test_event_ring_ack_timeout_emits_event()
 // Verifies: REQ-7.2.5
 static void test_event_ring_duplicate_drop_emits_event()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
     // Inject the same message twice
     MessageEnvelope inject_env;
     make_data_envelope(inject_env, 2U, 1U, 77777ULL, ReliabilityClass::RELIABLE_RETRY);
-    Result inj1 = harness_a.inject(inject_env);
+    Result inj1 = harness_a->inject(inject_env);
     assert(inj1 == Result::OK);
-    Result inj2 = harness_a.inject(inject_env);
+    Result inj2 = harness_a->inject(inject_env);
     assert(inj2 == Result::OK);
 
     // First receive: accepted
@@ -1756,8 +1828,10 @@ static void test_event_ring_duplicate_drop_emits_event()
     }
     assert(found);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_event_ring_duplicate_drop_emits_event\n");
 }
@@ -1766,14 +1840,14 @@ static void test_event_ring_duplicate_drop_emits_event()
 // Verifies: REQ-7.2.5
 static void test_event_ring_expiry_drop_emits_event()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
     MessageEnvelope expired_env;
     make_expired_envelope(expired_env, 2U, 1U);
-    Result inj = harness_a.inject(expired_env);
+    Result inj = harness_a->inject(expired_env);
     assert(inj == Result::OK);
 
     MessageEnvelope recv_out;
@@ -1797,8 +1871,10 @@ static void test_event_ring_expiry_drop_emits_event()
     }
     assert(found);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_event_ring_expiry_drop_emits_event\n");
 }
@@ -1858,8 +1934,8 @@ static void test_event_ring_overflow_wraps()
 // Verifies: REQ-7.2.5
 static void test_event_ring_retry_fired_emits_event()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -1897,8 +1973,10 @@ static void test_event_ring_retry_fired_emits_event()
     }
     assert(found);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_event_ring_retry_fired_emits_event\n");
 }
@@ -1908,8 +1986,8 @@ static void test_event_ring_retry_fired_emits_event()
 // Verifies: REQ-7.2.5
 static void test_event_ring_ack_received_emits_event()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -1931,7 +2009,7 @@ static void test_event_ring_ack_received_emits_event()
     make_ack_envelope(ack_env, 2U, 1U, sent_id);
 
     // Inject the ACK into harness_a so engine.receive() will pick it up
-    Result inj = harness_a.inject(ack_env);
+    Result inj = harness_a->inject(ack_env);
     assert(inj == Result::OK);
 
     // Process the ACK through the delivery engine
@@ -1956,8 +2034,10 @@ static void test_event_ring_ack_received_emits_event()
     }
     assert(found);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_event_ring_ack_received_emits_event\n");
 }
@@ -1967,8 +2047,8 @@ static void test_event_ring_ack_received_emits_event()
 // Verifies: REQ-7.2.5
 static void test_event_ring_misroute_drop_emits_event()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);  // engine local_id = 1
 
@@ -1977,7 +2057,7 @@ static void test_event_ring_misroute_drop_emits_event()
     make_data_envelope(misrouted, 2U, 3U, 55555ULL, ReliabilityClass::BEST_EFFORT);
 
     // Inject directly into harness_a so engine.receive() will pick it up
-    Result inj = harness_a.inject(misrouted);
+    Result inj = harness_a->inject(misrouted);
     assert(inj == Result::OK);
 
     // engine.receive() should reject the misrouted message
@@ -2002,8 +2082,10 @@ static void test_event_ring_misroute_drop_emits_event()
     }
     assert(found);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
 
     printf("PASS: test_event_ring_misroute_drop_emits_event\n");
 }
@@ -2058,8 +2140,8 @@ static void test_event_ring_drain_events()
 // Engine A is the sender (local_id=1); Engine B is the receiver (local_id=2).
 // Both harnesses are bidirectionally linked.
 // ─────────────────────────────────────────────────────────────────────────────
-static void setup_two_engines(LocalSimHarness& ha,
-                               LocalSimHarness& hb,
+static void setup_two_engines(LocalSimHarness* ha,
+                               LocalSimHarness* hb,
                                DeliveryEngine&  engine_a,
                                DeliveryEngine&  engine_b)
 {
@@ -2068,7 +2150,7 @@ static void setup_two_engines(LocalSimHarness& ha,
     cfg_a.channels[0].max_retries      = 5U;
     cfg_a.channels[0].retry_backoff_ms = 100U;
     cfg_a.channels[0].recv_timeout_ms  = 1000U;
-    Result ra = ha.init(cfg_a);
+    Result ra = ha->init(cfg_a);
     assert(ra == Result::OK);
 
     TransportConfig cfg_b;
@@ -2076,21 +2158,21 @@ static void setup_two_engines(LocalSimHarness& ha,
     cfg_b.channels[0].max_retries      = 5U;
     cfg_b.channels[0].retry_backoff_ms = 100U;
     cfg_b.channels[0].recv_timeout_ms  = 1000U;
-    Result rb = hb.init(cfg_b);
+    Result rb = hb->init(cfg_b);
     assert(rb == Result::OK);
 
-    ha.link(&hb);
-    hb.link(&ha);
+    ha->link(hb);
+    hb->link(ha);
 
-    engine_a.init(&ha, cfg_a.channels[0], 1U);
-    engine_b.init(&hb, cfg_b.channels[0], 2U);
+    engine_a.init(ha, cfg_a.channels[0], 1U);
+    engine_b.init(hb, cfg_b.channels[0], 2U);
 }
 
 // Variant of setup_two_engines() with ORDERED channel mode (Issue 2 fix test helper).
 // Use this for tests that verify per-destination sequence number assignment.
 // Verifies: REQ-3.3.5
-static void setup_two_ordered_engines(LocalSimHarness& ha,
-                                       LocalSimHarness& hb,
+static void setup_two_ordered_engines(LocalSimHarness* ha,
+                                       LocalSimHarness* hb,
                                        DeliveryEngine&  engine_a,
                                        DeliveryEngine&  engine_b)
 {
@@ -2100,7 +2182,7 @@ static void setup_two_ordered_engines(LocalSimHarness& ha,
     cfg_a.channels[0].retry_backoff_ms = 100U;
     cfg_a.channels[0].recv_timeout_ms  = 1000U;
     cfg_a.channels[0].ordering         = OrderingMode::ORDERED;
-    Result ra = ha.init(cfg_a);
+    Result ra = ha->init(cfg_a);
     assert(ra == Result::OK);
 
     TransportConfig cfg_b;
@@ -2109,14 +2191,14 @@ static void setup_two_ordered_engines(LocalSimHarness& ha,
     cfg_b.channels[0].retry_backoff_ms = 100U;
     cfg_b.channels[0].recv_timeout_ms  = 1000U;
     cfg_b.channels[0].ordering         = OrderingMode::ORDERED;
-    Result rb = hb.init(cfg_b);
+    Result rb = hb->init(cfg_b);
     assert(rb == Result::OK);
 
-    ha.link(&hb);
-    hb.link(&ha);
+    ha->link(hb);
+    hb->link(ha);
 
-    engine_a.init(&ha, cfg_a.channels[0], 1U);
-    engine_b.init(&hb, cfg_b.channels[0], 2U);
+    engine_a.init(ha, cfg_a.channels[0], 1U);
+    engine_b.init(hb, cfg_b.channels[0], 2U);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2126,7 +2208,8 @@ static void setup_two_ordered_engines(LocalSimHarness& ha,
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_de_fragmented_send_receive()
 {
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_engines(ha, hb, engine_a, engine_b);
 
@@ -2169,8 +2252,10 @@ static void test_de_fragmented_send_receive()
     assert(out.payload[0] == static_cast<uint8_t>(0U));
     assert(out.payload[2499] == static_cast<uint8_t>(2499U & 0xFFU));
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_de_fragmented_send_receive\n");
 }
 
@@ -2181,7 +2266,8 @@ static void test_de_fragmented_send_receive()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_de_ordered_delivery()
 {
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_ordered_engines(ha, hb, engine_a, engine_b);
 
@@ -2212,8 +2298,10 @@ static void test_de_ordered_delivery()
     // Sequence numbers are monotonically increasing
     assert(out2.sequence_num > out1.sequence_num);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_de_ordered_delivery\n");
 }
 
@@ -2224,7 +2312,8 @@ static void test_de_ordered_delivery()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_de_fragmented_retry()
 {
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_engines(ha, hb, engine_a, engine_b);
 
@@ -2263,7 +2352,7 @@ static void test_de_fragmented_retry()
     // Engine A has a retry pending. Inject ACK for this message into ha's queue.
     MessageEnvelope ack;
     make_ack_envelope(ack, 2U, 1U, out.message_id);
-    Result inj = ha.inject(ack);
+    Result inj = ha->inject(ack);
     assert(inj == Result::OK);
 
     // Engine A processes the ACK — retry is cancelled
@@ -2275,8 +2364,10 @@ static void test_de_fragmented_retry()
     uint32_t retried = engine_a.pump_retries(NOW_US + 1000000000ULL);
     assert(retried == 0U);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_de_fragmented_retry\n");
 }
 
@@ -2287,7 +2378,8 @@ static void test_de_fragmented_retry()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_de_dedup_after_reassembly()
 {
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_engines(ha, hb, engine_a, engine_b);
 
@@ -2311,7 +2403,7 @@ static void test_de_dedup_after_reassembly()
     MessageEnvelope dup;
     envelope_copy(dup, out1);
     dup.destination_id = 2U;
-    Result inj = hb.inject(dup);
+    Result inj = hb->inject(dup);
     assert(inj == Result::OK);
 
     // Engine B's dedup filter should suppress the duplicate
@@ -2322,8 +2414,10 @@ static void test_de_dedup_after_reassembly()
     // Verify first_msg_id was used
     assert(first_msg_id != 0ULL);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_de_dedup_after_reassembly\n");
 }
 
@@ -2334,7 +2428,8 @@ static void test_de_dedup_after_reassembly()
 // ─────────────────────────────────────────────────────────────────────────────
 static void test_de_ack_per_logical_message()
 {
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_engines(ha, hb, engine_a, engine_b);
 
@@ -2371,7 +2466,7 @@ static void test_de_ack_per_logical_message()
     // Inject a single ACK for the logical message_id → cancels tracking
     MessageEnvelope ack;
     make_ack_envelope(ack, 2U, 1U, out.message_id);
-    Result inj = ha.inject(ack);
+    Result inj = ha->inject(ack);
     assert(inj == Result::OK);
 
     // Engine A processes the ACK
@@ -2383,8 +2478,10 @@ static void test_de_ack_per_logical_message()
     uint32_t timed_out = engine_a.sweep_ack_timeouts(NOW_US + 1000000000ULL);
     assert(timed_out == 0U);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_de_ack_per_logical_message\n");
 }
 
@@ -2399,7 +2496,8 @@ static void test_de_ack_per_logical_message()
 static void test_de_idle_ordered_gap_expiry_sweep()
 {
     // Verifies: REQ-3.3.5, REQ-7.2.3, REQ-7.2.5
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_ordered_engines(ha, hb, engine_a, engine_b);
 
@@ -2425,7 +2523,7 @@ static void test_de_idle_ordered_gap_expiry_sweep()
         e1.sequence_num      = 1U;
         e1.payload_length    = 1U;
         e1.payload[0]        = 0x01U;
-        Result inj = hb.inject(e1);
+        Result inj = hb->inject(e1);
         assert(inj == Result::OK);
     }
     MessageEnvelope out1;
@@ -2449,7 +2547,7 @@ static void test_de_idle_ordered_gap_expiry_sweep()
         e3.sequence_num      = 3U;
         e3.payload_length    = 1U;
         e3.payload[0]        = 0x03U;
-        Result inj = hb.inject(e3);
+        Result inj = hb->inject(e3);
         assert(inj == Result::OK);
     }
     // receive() returns ERR_AGAIN: seq=3 is out of order (expecting seq=2).
@@ -2492,7 +2590,7 @@ static void test_de_idle_ordered_gap_expiry_sweep()
         e4.sequence_num      = 4U;
         e4.payload_length    = 1U;
         e4.payload[0]        = 0x04U;
-        Result inj = hb.inject(e4);
+        Result inj = hb->inject(e4);
         assert(inj == Result::OK);
     }
     MessageEnvelope out4;
@@ -2501,8 +2599,10 @@ static void test_de_idle_ordered_gap_expiry_sweep()
     assert(out4.sequence_num == 4U);
     assert(out4.payload[0] == 0x04U);
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_de_idle_ordered_gap_expiry_sweep\n");
 }
 
@@ -2522,7 +2622,8 @@ static void test_de_ordering_full_stat()
     // A single peer can no longer fill all 8 slots; two peers are needed.
     // Strategy: SRC=1 holds 4 slots (seq=2..5), SRC=3 holds 4 slots (seq=2..5),
     // then a third source (SRC=5) triggers ERR_FULL (global buffer exhausted).
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_ordered_engines(ha, hb, engine_a, engine_b);
 
@@ -2548,7 +2649,7 @@ static void test_de_ordering_full_stat()
         e.sequence_num      = static_cast<uint32_t>(i + 2U);  // seq=2,3,4,5
         e.payload_length    = 1U;
         e.payload[0]        = static_cast<uint8_t>(i & 0xFFU);
-        Result inj = hb.inject(e);
+        Result inj = hb->inject(e);
         assert(inj == Result::OK);
         MessageEnvelope out;
         Result r = engine_b.receive(out, 0U, NOW_US + static_cast<uint64_t>(i) + 1ULL);
@@ -2572,7 +2673,7 @@ static void test_de_ordering_full_stat()
         e.sequence_num      = static_cast<uint32_t>(i + 2U);  // seq=2,3,4,5
         e.payload_length    = 1U;
         e.payload[0]        = static_cast<uint8_t>(i & 0xFFU);
-        Result inj = hb.inject(e);
+        Result inj = hb->inject(e);
         assert(inj == Result::OK);
         MessageEnvelope out;
         Result r = engine_b.receive(out, 0U, NOW_US + static_cast<uint64_t>(PER_PEER_MAX + i) + 1ULL);
@@ -2600,7 +2701,7 @@ static void test_de_ordering_full_stat()
         e.sequence_num      = 2U;  // out-of-order (seq=1 never sent for SRC=5)
         e.payload_length    = 1U;
         e.payload[0]        = 0xFFU;
-        Result inj = hb.inject(e);
+        Result inj = hb->inject(e);
         assert(inj == Result::OK);
     }
     MessageEnvelope out_full;
@@ -2613,8 +2714,10 @@ static void test_de_ordering_full_stat()
     assert(stats_after.msgs_dropped_ordering_full ==
            stats_before.msgs_dropped_ordering_full + 1U);  // Assert: counter incremented
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_de_ordering_full_stat\n");
 }
 
@@ -2632,7 +2735,8 @@ static void test_de_ordering_full_stat()
 static void test_de_held_pending_expiry_event()
 {
     // Verifies: REQ-3.3.5, REQ-7.2.3, REQ-7.2.5
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_ordered_engines(ha, hb, engine_a, engine_b);
 
@@ -2657,7 +2761,7 @@ static void test_de_held_pending_expiry_event()
         e1.sequence_num      = 1U;
         e1.payload_length    = 1U;
         e1.payload[0]        = 0x01U;
-        Result inj = hb.inject(e1);
+        Result inj = hb->inject(e1);
         assert(inj == Result::OK);
     }
     MessageEnvelope out1;
@@ -2680,7 +2784,7 @@ static void test_de_held_pending_expiry_event()
         e3.sequence_num      = 3U;
         e3.payload_length    = 1U;
         e3.payload[0]        = 0x03U;
-        Result inj = hb.inject(e3);
+        Result inj = hb->inject(e3);
         assert(inj == Result::OK);
     }
     MessageEnvelope out3;
@@ -2704,7 +2808,7 @@ static void test_de_held_pending_expiry_event()
         e2.sequence_num      = 2U;
         e2.payload_length    = 1U;
         e2.payload[0]        = 0x02U;
-        Result inj = hb.inject(e2);
+        Result inj = hb->inject(e2);
         assert(inj == Result::OK);
     }
     MessageEnvelope out2;
@@ -2745,8 +2849,10 @@ static void test_de_held_pending_expiry_event()
     assert(ev.kind == DeliveryEventKind::EXPIRY_DROP);
     assert(ev.message_id == 5003ULL);  // Assert: event identifies the expired message
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_de_held_pending_expiry_event\n");
 }
 
@@ -2836,7 +2942,8 @@ static void test_mock_fragmented_partial_send_keeps_bookkeeping()
 static void test_mcdc_send_backward_timestamp()
 {
     // Verifies: REQ-3.2.3
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(ha, hb, engine);
 
@@ -2853,8 +2960,10 @@ static void test_mcdc_send_backward_timestamp()
     Result r2 = engine.send(env2, NOW_US / 2ULL);
     assert(r2 == Result::ERR_INVALID);  // Assert: backward timestamp rejected
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_mcdc_send_backward_timestamp\n");
 }
 
@@ -2869,7 +2978,8 @@ static void test_mcdc_send_backward_timestamp()
 static void test_mcdc_receive_backward_timestamp()
 {
     // Verifies: REQ-3.2.3
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(ha, hb, engine);
 
@@ -2885,8 +2995,10 @@ static void test_mcdc_receive_backward_timestamp()
     Result r2 = engine.receive(out2, 0U, NOW_US / 2ULL);
     assert(r2 == Result::ERR_INVALID);  // Assert: backward timestamp rejected
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_mcdc_receive_backward_timestamp\n");
 }
 
@@ -2905,7 +3017,8 @@ static void test_mcdc_receive_backward_timestamp()
 static void test_mcdc_send_non_data_no_sequence()
 {
     // Verifies: REQ-3.3.5
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_ordered_engines(ha, hb, engine_a, engine_b);
 
@@ -2930,8 +3043,10 @@ static void test_mcdc_send_non_data_no_sequence()
     // MC/DC: envelope_is_data(env) was false; sequence_num must remain 0.
     assert(env.sequence_num == 0U);  // Assert: sequence not assigned for non-DATA
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_mcdc_send_non_data_no_sequence\n");
 }
 
@@ -2951,7 +3066,8 @@ static void test_mcdc_send_non_data_no_sequence()
 static void test_mcdc_send_preset_sequence_preserved()
 {
     // Verifies: REQ-3.3.5
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_ordered_engines(ha, hb, engine_a, engine_b);
 
@@ -2967,8 +3083,10 @@ static void test_mcdc_send_preset_sequence_preserved()
     // MC/DC: B was false (99 != 0); sequence_num must NOT have been overwritten.
     assert(env.sequence_num == 99U);  // Assert: preset sequence preserved
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_mcdc_send_preset_sequence_preserved\n");
 }
 
@@ -2995,7 +3113,8 @@ static void test_mcdc_send_preset_sequence_preserved()
 static void test_mcdc_receive_held_pending_ok()
 {
     // Verifies: REQ-3.3.5
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_ordered_engines(ha, hb, engine_a, engine_b);
 
@@ -3018,7 +3137,7 @@ static void test_mcdc_receive_held_pending_ok()
         e1.sequence_num      = 1U;
         e1.payload_length    = 1U;
         e1.payload[0]        = 0x01U;
-        Result inj = hb.inject(e1);
+        Result inj = hb->inject(e1);
         assert(inj == Result::OK);
     }
     MessageEnvelope out1;
@@ -3041,7 +3160,7 @@ static void test_mcdc_receive_held_pending_ok()
         e3.sequence_num      = 3U;
         e3.payload_length    = 1U;
         e3.payload[0]        = 0x03U;
-        Result inj = hb.inject(e3);
+        Result inj = hb->inject(e3);
         assert(inj == Result::OK);
     }
     MessageEnvelope out3;
@@ -3063,7 +3182,7 @@ static void test_mcdc_receive_held_pending_ok()
         e2.sequence_num      = 2U;
         e2.payload_length    = 1U;
         e2.payload[0]        = 0x02U;
-        Result inj = hb.inject(e2);
+        Result inj = hb->inject(e2);
         assert(inj == Result::OK);
     }
     MessageEnvelope out2;
@@ -3080,8 +3199,10 @@ static void test_mcdc_receive_held_pending_ok()
     assert(out4.sequence_num == 3U);      // Assert: seq=3 is the delivered message
     assert(out4.message_id  == 6003ULL);  // Assert: correct message identity
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_mcdc_receive_held_pending_ok\n");
 }
 
@@ -3094,7 +3215,8 @@ static void test_mcdc_receive_held_pending_ok()
 static void test_de_reset_peer_ordering_clears_stale_sequence()
 {
     // Verifies: REQ-3.3.6
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_ordered_engines(ha, hb, engine_a, engine_b);
 
@@ -3125,7 +3247,7 @@ static void test_de_reset_peer_ordering_clears_stale_sequence()
     make_data_envelope(env3, 1U, 2U, 0ULL, ReliabilityClass::BEST_EFFORT);
     env3.sequence_num = 1U;
     env3.message_id   = 9001ULL;  // distinct message_id to pass dedup
-    Result s3 = ha.send_message(env3);
+    Result s3 = ha->send_message(env3);
     assert(s3 == Result::OK);  // Assert: transport send succeeds
 
     MessageEnvelope out3;
@@ -3133,8 +3255,10 @@ static void test_de_reset_peer_ordering_clears_stale_sequence()
     assert(r3 == Result::OK);        // Assert: seq=1 accepted after ordering reset
     assert(out3.sequence_num == 1U); // Assert: correct sequence
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_de_reset_peer_ordering_clears_stale_sequence\n");
 }
 
@@ -3252,8 +3376,8 @@ static void test_mcdc_sweep_ack_timeouts_backward_timestamp()
 static void test_de_sweep_stale_reassembly_freed()
 {
     // Verifies: REQ-3.2.9
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);  // recv_timeout_ms = 1000 ms
 
@@ -3275,7 +3399,7 @@ static void test_de_sweep_stale_reassembly_freed()
     frag0.payload_length       = 4U;
     frag0.payload[0]           = 0xAAU;
 
-    Result inj = harness_a.inject(frag0);
+    Result inj = harness_a->inject(frag0);
     assert(inj == Result::OK);  // Assert: inject accepted
 
     // receive() opens a reassembly slot and returns ERR_AGAIN (missing frag 1).
@@ -3295,14 +3419,16 @@ static void test_de_sweep_stale_reassembly_freed()
     // Verify slot freed: re-injecting frag0 opens a NEW slot (returns ERR_AGAIN).
     // If the stale slot were still present, the fragment would be mis-interpreted
     // as a duplicate and might produce ERR_INVALID instead.
-    Result inj2 = harness_a.inject(frag0);
+    Result inj2 = harness_a->inject(frag0);
     assert(inj2 == Result::OK);  // Assert: re-inject accepted
     MessageEnvelope out2;
     Result r2 = engine.receive(out2, 0U, stale_now + 1ULL);
     assert(r2 == Result::ERR_AGAIN);  // Assert: fresh slot opened after stale freed
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
     printf("PASS: test_de_sweep_stale_reassembly_freed\n");
 }
 
@@ -3322,8 +3448,8 @@ static void test_de_sweep_stale_reassembly_freed()
 static void test_de_reassembly_per_source_cap_drops_fragment()
 {
     // Verifies: REQ-3.2.9, REQ-3.2.3
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -3348,7 +3474,7 @@ static void test_de_reassembly_per_source_cap_drops_fragment()
         f.total_payload_length = 8U;
         f.payload_length       = 4U;
         f.payload[0]           = static_cast<uint8_t>(i & 0xFFU);
-        Result inj = harness_a.inject(f);
+        Result inj = harness_a->inject(f);
         assert(inj == Result::OK);  // Assert: inject succeeds
         MessageEnvelope out;
         Result r = engine.receive(out, 0U,
@@ -3374,14 +3500,16 @@ static void test_de_reassembly_per_source_cap_drops_fragment()
     overflow.payload_length       = 4U;
     overflow.payload[0]           = 0xFFU;
 
-    Result inj_ov = harness_a.inject(overflow);
+    Result inj_ov = harness_a->inject(overflow);
     assert(inj_ov == Result::OK);  // Assert: inject accepted
     MessageEnvelope out_ov;
     Result r_ov = engine.receive(out_ov, 0U, NOW_US + PER_SRC_MAX + 1ULL);
     assert(r_ov == Result::ERR_FULL);  // Assert: per-source cap rejected fragment
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
     printf("PASS: test_de_reassembly_per_source_cap_drops_fragment\n");
 }
 
@@ -3399,8 +3527,8 @@ static void test_de_reassembly_per_source_cap_drops_fragment()
 static void test_de_reassembly_invalid_fragment_drops()
 {
     // Verifies: REQ-3.2.3
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -3422,7 +3550,7 @@ static void test_de_reassembly_invalid_fragment_drops()
     bad_frag.payload_length       = 4U;
     bad_frag.payload[0]           = 0xBBU;
 
-    Result inj = harness_a.inject(bad_frag);
+    Result inj = harness_a->inject(bad_frag);
     assert(inj == Result::OK);  // Assert: raw inject bypasses validation
 
     // receive() must reject the fragment at the reassembly gate.
@@ -3430,8 +3558,10 @@ static void test_de_reassembly_invalid_fragment_drops()
     Result r = engine.receive(out, 0U, NOW_US);
     assert(r == Result::ERR_INVALID);  // Assert: malformed fragment rejected
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
     printf("PASS: test_de_reassembly_invalid_fragment_drops\n");
 }
 
@@ -3458,8 +3588,8 @@ static void test_de_reassembly_invalid_fragment_drops()
 static void test_de_reset_peer_ordering_discards_held_pending()
 {
     // Verifies: REQ-3.3.6
-    LocalSimHarness ha;
-    LocalSimHarness hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a;
     DeliveryEngine  engine_b;
     setup_two_ordered_engines(ha, hb, engine_a, engine_b);
@@ -3483,7 +3613,7 @@ static void test_de_reset_peer_ordering_discards_held_pending()
         e1.sequence_num      = 1U;
         e1.payload_length    = 1U;
         e1.payload[0]        = 0x01U;
-        Result inj = hb.inject(e1);
+        Result inj = hb->inject(e1);
         assert(inj == Result::OK);
     }
     MessageEnvelope out1;
@@ -3506,7 +3636,7 @@ static void test_de_reset_peer_ordering_discards_held_pending()
         e3.sequence_num      = 3U;
         e3.payload_length    = 1U;
         e3.payload[0]        = 0x03U;
-        Result inj = hb.inject(e3);
+        Result inj = hb->inject(e3);
         assert(inj == Result::OK);
     }
     MessageEnvelope out3;
@@ -3529,7 +3659,7 @@ static void test_de_reset_peer_ordering_discards_held_pending()
         e2.sequence_num      = 2U;
         e2.payload_length    = 1U;
         e2.payload[0]        = 0x02U;
-        Result inj = hb.inject(e2);
+        Result inj = hb->inject(e2);
         assert(inj == Result::OK);
     }
     MessageEnvelope out2;
@@ -3557,7 +3687,7 @@ static void test_de_reset_peer_ordering_discards_held_pending()
         e_fresh.sequence_num      = 1U;
         e_fresh.payload_length    = 1U;
         e_fresh.payload[0]        = 0xFFU;
-        Result inj = hb.inject(e_fresh);
+        Result inj = hb->inject(e_fresh);
         assert(inj == Result::OK);
     }
     MessageEnvelope out_fresh;
@@ -3565,8 +3695,10 @@ static void test_de_reset_peer_ordering_discards_held_pending()
     assert(r_fresh == Result::OK);          // Assert: seq=1 accepted after reset
     assert(out_fresh.sequence_num == 1U);   // Assert: correct sequence number
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_de_reset_peer_ordering_discards_held_pending\n");
 }
 
@@ -3629,8 +3761,8 @@ static void test_mock_init_register_local_id_failure()
 static void test_stats_latency_multi_sample()
 {
     // Verifies: REQ-7.2.1
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -3644,11 +3776,11 @@ static void test_stats_latency_multi_sample()
 
     // Drain the DATA frame from harness_b to keep its queue clear.
     MessageEnvelope drain1;
-    (void)harness_b.receive_message(drain1, 0U);
+    (void)harness_b->receive_message(drain1, 0U);
 
     MessageEnvelope ack1;
     make_ack_envelope(ack1, 2U, 1U, msg_id1);
-    Result inj1 = harness_b.send_message(ack1);
+    Result inj1 = harness_b->send_message(ack1);
     assert(inj1 == Result::OK);
 
     MessageEnvelope out1;
@@ -3671,11 +3803,11 @@ static void test_stats_latency_multi_sample()
     const uint64_t msg_id2 = env2.message_id;
 
     MessageEnvelope drain2;
-    (void)harness_b.receive_message(drain2, 0U);
+    (void)harness_b->receive_message(drain2, 0U);
 
     MessageEnvelope ack2;
     make_ack_envelope(ack2, 2U, 1U, msg_id2);
-    Result inj2 = harness_b.send_message(ack2);
+    Result inj2 = harness_b->send_message(ack2);
     assert(inj2 == Result::OK);
 
     MessageEnvelope out2;
@@ -3698,11 +3830,11 @@ static void test_stats_latency_multi_sample()
     const uint64_t msg_id3 = env3.message_id;
 
     MessageEnvelope drain3;
-    (void)harness_b.receive_message(drain3, 0U);
+    (void)harness_b->receive_message(drain3, 0U);
 
     MessageEnvelope ack3;
     make_ack_envelope(ack3, 2U, 1U, msg_id3);
-    Result inj3 = harness_b.send_message(ack3);
+    Result inj3 = harness_b->send_message(ack3);
     assert(inj3 == Result::OK);
 
     MessageEnvelope out3;
@@ -3716,8 +3848,10 @@ static void test_stats_latency_multi_sample()
     assert(s3_stats.latency_max_us == 5000ULL);       // Assert: max raised to RTT3
     assert(s3_stats.latency_sum_us  == 9000ULL);       // Assert: sum = 3000+1000+5000
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
     printf("PASS: test_stats_latency_multi_sample\n");
 }
 
@@ -3744,7 +3878,8 @@ static void test_stats_latency_multi_sample()
 static void test_de_ordered_chain_drain()
 {
     // Verifies: REQ-3.3.5
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_ordered_engines(ha, hb, engine_a, engine_b);
 
@@ -3767,7 +3902,7 @@ static void test_de_ordered_chain_drain()
         e1.sequence_num      = 1U;
         e1.payload_length    = 1U;
         e1.payload[0]        = 0x01U;
-        Result inj = hb.inject(e1);
+        Result inj = hb->inject(e1);
         assert(inj == Result::OK);
     }
     MessageEnvelope out1;
@@ -3790,7 +3925,7 @@ static void test_de_ordered_chain_drain()
         e3.sequence_num      = 3U;
         e3.payload_length    = 1U;
         e3.payload[0]        = 0x03U;
-        Result inj = hb.inject(e3);
+        Result inj = hb->inject(e3);
         assert(inj == Result::OK);
     }
     MessageEnvelope hold3;
@@ -3812,7 +3947,7 @@ static void test_de_ordered_chain_drain()
         e4.sequence_num      = 4U;
         e4.payload_length    = 1U;
         e4.payload[0]        = 0x04U;
-        Result inj = hb.inject(e4);
+        Result inj = hb->inject(e4);
         assert(inj == Result::OK);
     }
     MessageEnvelope hold4;
@@ -3836,7 +3971,7 @@ static void test_de_ordered_chain_drain()
         e2.sequence_num      = 2U;
         e2.payload_length    = 1U;
         e2.payload[0]        = 0x02U;
-        Result inj = hb.inject(e2);
+        Result inj = hb->inject(e2);
         assert(inj == Result::OK);
     }
     MessageEnvelope out2;
@@ -3858,8 +3993,10 @@ static void test_de_ordered_chain_drain()
     assert(r_seq4 == Result::OK);
     assert(out_seq4.sequence_num == 4U);  // Assert: seq=4 delivered from held_pending
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_de_ordered_chain_drain\n");
 }
 
@@ -3883,7 +4020,8 @@ static void test_de_ordered_chain_drain()
 static void test_de_ordered_chain_drain_with_expiry()
 {
     // Verifies: REQ-3.3.5, REQ-3.2.7
-    LocalSimHarness ha, hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a, engine_b;
     setup_two_ordered_engines(ha, hb, engine_a, engine_b);
 
@@ -3908,7 +4046,7 @@ static void test_de_ordered_chain_drain_with_expiry()
         e1.sequence_num      = 1U;
         e1.payload_length    = 1U;
         e1.payload[0]        = 0x01U;
-        Result inj = hb.inject(e1);
+        Result inj = hb->inject(e1);
         assert(inj == Result::OK);
     }
     MessageEnvelope out1;
@@ -3931,7 +4069,7 @@ static void test_de_ordered_chain_drain_with_expiry()
         e3.sequence_num      = 3U;
         e3.payload_length    = 1U;
         e3.payload[0]        = 0x03U;
-        Result inj = hb.inject(e3);
+        Result inj = hb->inject(e3);
         assert(inj == Result::OK);
     }
     MessageEnvelope hold3;
@@ -3953,7 +4091,7 @@ static void test_de_ordered_chain_drain_with_expiry()
         e4.sequence_num      = 4U;
         e4.payload_length    = 1U;
         e4.payload[0]        = 0x04U;
-        Result inj = hb.inject(e4);
+        Result inj = hb->inject(e4);
         assert(inj == Result::OK);
     }
     MessageEnvelope hold4;
@@ -3978,7 +4116,7 @@ static void test_de_ordered_chain_drain_with_expiry()
         e2.sequence_num      = 2U;
         e2.payload_length    = 1U;
         e2.payload[0]        = 0x02U;
-        Result inj = hb.inject(e2);
+        Result inj = hb->inject(e2);
         assert(inj == Result::OK);
     }
     MessageEnvelope out2;
@@ -4010,8 +4148,10 @@ static void test_de_ordered_chain_drain_with_expiry()
     assert(r_seq4 == Result::OK);
     assert(out_seq4.sequence_num == 4U);  // Assert: seq=4 delivered from held_pending
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_de_ordered_chain_drain_with_expiry\n");
 }
 
@@ -4034,8 +4174,8 @@ static void test_de_ordered_chain_drain_with_expiry()
 static void test_de_forge_ack_discarded()
 {
     // Verifies: REQ-3.2.4
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -4054,7 +4194,7 @@ static void test_de_forge_ack_discarded()
     MessageEnvelope spoof_ack;
     make_ack_envelope(spoof_ack, 3U, 1U, assigned_id);  // src=3 (spoofer), dst=1
 
-    Result inj = harness_a.inject(spoof_ack);
+    Result inj = harness_a->inject(spoof_ack);
     assert(inj == Result::OK);  // Assert: injection accepted by transport
 
     // receive() processes the spoofed ACK; FORGE-ACK guard fires inside process_ack()
@@ -4072,8 +4212,10 @@ static void test_de_forge_ack_discarded()
     uint32_t expired = engine.sweep_ack_timeouts(NOW_US + 2000000ULL);
     assert(expired >= 1U);  // Assert: slot timed out (forge-ACK did not cancel it)
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
     printf("PASS: test_de_forge_ack_discarded\n");
 }
 
@@ -4107,8 +4249,8 @@ static void test_de_forge_ack_discarded()
 static void test_de_latency_min_max_updates()
 {
     // Verifies: REQ-7.2.1
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
     DeliveryEngine  engine;
     setup_engine(harness_a, harness_b, engine);
 
@@ -4136,7 +4278,7 @@ static void test_de_latency_min_max_updates()
     // Inject only ACK1 before the first receive; ACK2/ACK3 are injected after Send3.
     MessageEnvelope ack1;
     make_ack_envelope(ack1, 2U, 1U, id1);
-    Result inj1 = harness_a.inject(ack1);
+    Result inj1 = harness_a->inject(ack1);
     assert(inj1 == Result::OK);  // Assert: ACK1 injected
 
     // receive(ACK1) at R1: rtt1=500 → first sample; min=max=500.
@@ -4156,12 +4298,12 @@ static void test_de_latency_min_max_updates()
     // Inject ACK2 and ACK3 (FIFO order).
     MessageEnvelope ack2;
     make_ack_envelope(ack2, 2U, 1U, id2);
-    Result inj2 = harness_a.inject(ack2);
+    Result inj2 = harness_a->inject(ack2);
     assert(inj2 == Result::OK);  // Assert: ACK2 injected
 
     MessageEnvelope ack3;
     make_ack_envelope(ack3, 2U, 1U, id3);
-    Result inj3 = harness_a.inject(ack3);
+    Result inj3 = harness_a->inject(ack3);
     assert(inj3 == Result::OK);  // Assert: ACK3 injected
 
     // receive(ACK2) at R2=NOW_US+600: rtt2=600>max(500) → max-update True branch.
@@ -4180,8 +4322,10 @@ static void test_de_latency_min_max_updates()
     assert(s.latency_min_us == 150ULL);         // Assert: min-update True branch exercised
     assert(s.latency_max_us == 600ULL);         // Assert: max-update True branch exercised
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+    delete harness_a;
+    delete harness_b;
     printf("PASS: test_de_latency_min_max_updates\n");
 }
 
@@ -4202,8 +4346,8 @@ static void test_de_latency_min_max_updates()
 static void test_de_sequence_state_exhaustion()
 {
     // Verifies: REQ-3.3.5
-    LocalSimHarness ha;
-    LocalSimHarness hb;
+    LocalSimHarness* ha = new LocalSimHarness();
+    LocalSimHarness* hb = new LocalSimHarness();
     DeliveryEngine  engine_a;
     DeliveryEngine  engine_b;
     setup_two_ordered_engines(ha, hb, engine_a, engine_b);
@@ -4233,8 +4377,10 @@ static void test_de_sequence_state_exhaustion()
     assert(r_full == Result::OK);               // Assert: send still succeeds (graceful)
     assert(env_full.sequence_num == 0U);        // Assert: 0 returned by exhausted table
 
-    ha.close();
-    hb.close();
+    ha->close();
+    hb->close();
+    delete ha;
+    delete hb;
     printf("PASS: test_de_sequence_state_exhaustion\n");
 }
 
