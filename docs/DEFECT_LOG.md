@@ -1780,7 +1780,7 @@ Moderator: Don Jessup — 2026-04-15. All four deferred requirements (REQ-7.2.1�
 
 ---
 
-### INSP-031 — Logger: replace filename with function name in log output (2026-04-15)
+### INSP-032 — Logger: replace filename with function name in log output (2026-04-15)
 
 | Field       | Value |
 |-------------|-------|
@@ -1820,4 +1820,4 @@ truncation/padding boundary conditions (T-2.15–T-2.18) and a rename of T-2.13.
 
 #### Moderator sign-off
 
-Moderator: Don Jessup — 2026-04-15. `make lint`, `make run_tests` (40/40 Logger tests), and `make check_traceability` all PASS. `make coverage` confirms Logger.cpp 70.31% — no regression from round 17 baseline. `docs/COVERAGE_CEILINGS.md` updated for `func != nullptr` parameter rename and round-18 test additions. No defects found. Inspection INSP-031 closed PASS.
+Moderator: Don Jessup — 2026-04-15. `make lint`, `make run_tests` (40/40 Logger tests), and `make check_traceability` all PASS. `make coverage` confirms Logger.cpp 70.31% — no regression from round 17 baseline. `docs/COVERAGE_CEILINGS.md` updated for `func != nullptr` parameter rename and round-18 test additions. No defects found. Inspection INSP-032 closed PASS.
