@@ -16,7 +16,7 @@ enumerated statically without instrumentation.
 
 ---
 
-## Critical Warning — Large Stack Allocations in flush_delayed_to_clients / flush_delayed_to_wire
+## Known Limitation — Large Stack Allocations in flush helpers
 
 **All four socket backends** (`TcpBackend`, `TlsTcpBackend`, `DtlsUdpBackend`, `UdpBackend`)
 **and `LocalSimHarness`** contain `flush_delayed_to_clients()` / `flush_delayed_to_wire()` /
@@ -29,15 +29,28 @@ MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];  // IMPAIR_DELAY_BUF_SIZE = 32
 `sizeof(MessageEnvelope)` = **4,144 bytes** (MSG_MAX_PAYLOAD_BYTES 4096 + header fields).
 Total per-call stack allocation: **32 × 4,144 = 132,608 bytes (~130 KB)**.
 
-`LocalSimHarness::send_message()` also declares `MessageEnvelope delayed_envelopes[IMPAIR_DELAY_BUF_SIZE]`
-on the stack, carrying the same ~130 KB flush-path allocation as the four socket backends.
-
 This is the actual worst-case stack allocation. The "~764 B" figure quoted below in the
 per-chain estimates is the worst-case **excluding** this flush path.
 
-**For embedded porting:** platforms with per-thread stacks ≤ 512 KB must either:
-(a) restructure these helpers to use a single-element iteration rather than a local array, or
-(b) allocate the delay buffer as a member array (pre-allocated at init time, not on the stack).
+**Why this cannot simply be moved to a member variable:**
+The backends (`TcpBackend`, `TlsTcpBackend`, etc.) are themselves large structs (~540 KB)
+due to their embedded `RingBuffer` and `ImpairmentEngine` member arrays. Adding a 132 KB
+member `m_delay_buf` would increase each backend to ~674 KB. Tests stack-allocate backend
+objects; on macOS ARM64 with LLVM coverage instrumentation, the resulting ~674 KB
+stack-frame allocation overflows the lazy stack-page-mapping threshold and causes `SIGSEGV`
+during constructor execution (DEF-031-1 investigation, 2026-04-15). A correct fix would
+require heap-allocating backends in all test functions (~60+ functions across 4 test files).
+
+**Static-local approach is also unsafe:** A function-static buffer would be shared across
+instances. Since TcpBackend tests run server and client in separate threads simultaneously,
+a shared static would introduce a data race.
+
+**For embedded porting:** platforms with per-thread stacks ≤ 512 KB must use one of:
+(a) heap-allocate or statically declare a single backend instance (the local array then lives
+    in the thread's stack only for the duration of the flush call, not as a permanent member), or
+(b) change the backends to hold `m_delay_buf` as a member (pre-allocated at init time) and
+    ensure tests heap-allocate backends rather than declaring them as local variables.
+
 Validation with a stack-analysis tool (avstack, StackAnalyzer) is mandatory before deployment
 on any target with < 1 MB stack headroom.
 
@@ -221,7 +234,7 @@ add 2 frames below `recv_one_dtls_datagram()`; they are not nested within each o
 | 6 — DTLS inbound receive | 8 | ~568 B |
 | 7 — HELLO registration (init-phase only) | 5–6 | ~256 B |
 | **Worst case (frame depth)** | **11 (Chain 3 — retry pump with send_fragments)** | **~132,608 B (~130 KB)** |
-| **Worst case (stack size)** | **~130 KB (single delayed[] — DtlsUdpBackend, TlsTcpBackend, LocalSimHarness flush paths)** | |
+| **Worst case (stack size)** | **~130 KB (single delayed[] — flush path in all five backends)** | |
 
 The worst-case **frame depth** is **11 frames** (Chain 3 — retry pump with `send_fragments()`).
 The worst-case **stack size** is **~130 KB** (a single `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]`
@@ -251,6 +264,14 @@ pthreads on macOS default to 512 KB; the flush path (~130 KB) leaves ~4× headro
 configuration — adequate for typical use but worth monitoring. Consider calling
 `pthread_attr_setstacksize()` with ≥ 1 MB for application threads that invoke any flush path
 on embedded or resource-constrained deployments.
+
+**Embedded porting guidance:** To fix the ~130 KB stack cost for constrained targets:
+1. Heap-allocate or statically declare the backend objects (not stack-local) in your application.
+2. Move the `delayed[]` array to a pre-allocated private member `m_delay_buf[IMPAIR_DELAY_BUF_SIZE]`
+   in each backend class.
+3. If you do step 2, ensure test code also heap-allocates backend objects rather than
+   stack-declaring them (POSIX ARM64 coverage builds require this due to lazy stack-page mapping
+   interacting poorly with ~674 KB stack frames).
 
 ---
 
