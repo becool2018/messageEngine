@@ -131,16 +131,16 @@ static void* tcp_server_thread(void* raw)
     TcpSrvArg* a = static_cast<TcpSrvArg*>(raw);
     assert(a != nullptr);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     make_tcp_server_cfg(cfg, a->port);
 
-    a->init_result = server.init(cfg);
-    if (a->init_result != Result::OK) { return nullptr; }
+    a->init_result = server->init(cfg);
+    if (a->init_result != Result::OK) { delete server; return nullptr; }
 
     // Receive one message from the client
     MessageEnvelope env;
-    a->recv_result = server.receive_message(env, 5000U);
+    a->recv_result = server->receive_message(env, 5000U);
     if (a->recv_result == Result::OK) {
         a->recv_msg_id = env.message_id;
     }
@@ -149,10 +149,11 @@ static void* tcp_server_thread(void* raw)
     // recv_from_client() calls tcp_recv_frame, which fails on a closed
     // connection → remove_client_fd() is called → ERR_TIMEOUT or ERR_IO.
     MessageEnvelope env2;
-    Result r2 = server.receive_message(env2, 400U);
+    Result r2 = server->receive_message(env2, 400U);
     a->disconn_timeout = (r2 == Result::ERR_TIMEOUT || r2 == Result::ERR_IO);
 
-    server.close();
+    server->close();
+    delete server;
     return nullptr;
 }
 
@@ -167,23 +168,24 @@ static void* tcp_client_thread(void* raw)
 
     usleep(80000U);  // 80 ms: give server time to bind and listen
 
-    TcpBackend client;
+    TcpBackend* client = new TcpBackend();
     TransportConfig cfg;
     make_tcp_client_cfg(cfg, a->port);
 
-    a->result = client.init(cfg);
-    if (a->result != Result::OK) { return nullptr; }
+    a->result = client->init(cfg);
+    if (a->result != Result::OK) { delete client; return nullptr; }
 
     // Fix 3/4: server now requires HELLO before accepting data frames.
     // source_id 2U matches what make_test_envelope() sets so validate_source_id passes.
-    (void)client.register_local_id(2U);
+    (void)client->register_local_id(2U);
 
     MessageEnvelope env;
     make_test_envelope(env, a->send_msg_id);
-    (void)client.send_message(env);
+    (void)client->send_message(env);
 
     usleep(300000U);  // 300 ms: let server drain; then close → disconnect signal
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -226,19 +228,20 @@ static void* garbage_tcp_srv_thread(void* raw)
     GarbageSrvArg* a = static_cast<GarbageSrvArg*>(raw);
     assert(a != nullptr);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     make_tcp_server_cfg(cfg, a->port);
 
-    a->init_result = server.init(cfg);
-    if (a->init_result != Result::OK) { return nullptr; }
+    a->init_result = server->init(cfg);
+    if (a->init_result != Result::OK) { delete server; return nullptr; }
 
     // The sender connects and sends a frame that passes tcp_recv_frame but
     // fails Serializer::deserialize → recv_from_client L249 True branch covered.
     MessageEnvelope env;
-    (void)server.receive_message(env, 300U);
+    (void)server->receive_message(env, 300U);
 
-    server.close();
+    server->close();
+    delete server;
     return nullptr;
 }
 
@@ -288,24 +291,25 @@ static void* two_cli_param_thread(void* raw)
 
     usleep(a->connect_delay_us);
 
-    TcpBackend client;
+    TcpBackend* client = new TcpBackend();
     TransportConfig cfg;
     make_tcp_client_cfg(cfg, a->port);
 
-    a->result = client.init(cfg);
-    if (a->result != Result::OK) { return nullptr; }
+    a->result = client->init(cfg);
+    if (a->result != Result::OK) { delete client; return nullptr; }
 
     // Fix 3/4: must register before sending data frames.
     // F-13: use the per-client node_id so the server rejects duplicate source_ids.
-    (void)client.register_local_id(a->node_id);
+    (void)client->register_local_id(a->node_id);
 
     MessageEnvelope env;
     make_test_envelope(env, a->send_msg_id);
     env.source_id = a->node_id;  // F-13: match envelope source_id to registered node_id
-    (void)client.send_message(env);
+    (void)client->send_message(env);
 
     usleep(a->close_delay_us);
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -315,17 +319,17 @@ static void* two_cli_srv_thread(void* raw)
     TwoCliSrvArg* a = static_cast<TwoCliSrvArg*>(raw);
     assert(a != nullptr);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     make_tcp_server_cfg(cfg, a->port);
 
-    a->init_result = server.init(cfg);
-    if (a->init_result != Result::OK) { return nullptr; }
+    a->init_result = server->init(cfg);
+    if (a->init_result != Result::OK) { delete server; return nullptr; }
 
     // Receive until both client messages arrive. Power of 10: fixed bound.
     for (uint32_t i = 0U; i < 4U; ++i) {
         MessageEnvelope env;
-        if (server.receive_message(env, 300U) == Result::OK) {
+        if (server->receive_message(env, 300U) == Result::OK) {
             ++a->recv_count;
             if (a->recv_count >= 2U) { break; }
         }
@@ -336,10 +340,11 @@ static void* two_cli_srv_thread(void* raw)
     // Compaction inner loop executes: m_client_fds[0] = m_client_fds[1] (fd2).
     {
         MessageEnvelope env;
-        (void)server.receive_message(env, 400U);
+        (void)server->receive_message(env, 400U);
     }
 
-    server.close();
+    server->close();
+    delete server;
     return nullptr;
 }
 
@@ -367,20 +372,21 @@ static void test_tcp_config_default()
 
 static void test_server_bind_and_close()
 {
-    TcpBackend server;
-    assert(!server.is_open());  // false before init
+    TcpBackend* server = new TcpBackend();
+    assert(!server->is_open());  // false before init
 
     TransportConfig cfg;
     const uint16_t port_19700 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19700);
 
-    Result r = server.init(cfg);
+    Result r = server->init(cfg);
     assert(r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
-    server.close();
-    assert(!server.is_open());
+    server->close();
+    assert(!server->is_open());
 
+    delete server;
     printf("PASS: test_server_bind_and_close\n");
 }
 
@@ -391,16 +397,17 @@ static void test_server_bind_and_close()
 
 static void test_client_no_server_fails()
 {
-    TcpBackend client;
+    TcpBackend* client = new TcpBackend();
     TransportConfig cfg;
     const uint16_t port_19701 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_client_cfg(cfg, port_19701);  // no server on this port
     cfg.connect_timeout_ms = 500U;    // short timeout to keep test fast
 
-    Result r = client.init(cfg);
+    Result r = client->init(cfg);
     assert(r != Result::OK);
-    assert(!client.is_open());
+    assert(!client->is_open());
 
+    delete client;
     printf("PASS: test_client_no_server_fails\n");
 }
 
@@ -411,20 +418,21 @@ static void test_client_no_server_fails()
 
 static void test_server_receive_timeout()
 {
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     const uint16_t port_19702 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19702);
 
-    Result r = server.init(cfg);
+    Result r = server->init(cfg);
     assert(r == Result::OK);
 
     MessageEnvelope env;
-    r = server.receive_message(env, 300U);  // 300 ms: 3 poll iterations
+    r = server->receive_message(env, 300U);  // 300 ms: 3 poll iterations
     assert(r == Result::ERR_TIMEOUT);
-    assert(server.is_open());
+    assert(server->is_open());
 
-    server.close();
+    server->close();
+    delete server;
     printf("PASS: test_server_receive_timeout\n");
 }
 
@@ -436,21 +444,22 @@ static void test_server_receive_timeout()
 
 static void test_server_send_no_clients()
 {
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     const uint16_t port_19703 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19703);
 
-    Result r = server.init(cfg);
+    Result r = server->init(cfg);
     assert(r == Result::OK);
 
     MessageEnvelope env;
     make_test_envelope(env, 0xABCDULL);
 
-    r = server.send_message(env);
+    r = server->send_message(env);
     assert(r == Result::OK);  // discarded silently
 
-    server.close();
+    server->close();
+    delete server;
     printf("PASS: test_server_send_no_clients\n");
 }
 
@@ -461,13 +470,14 @@ static void test_server_send_no_clients()
 
 static void test_close_before_init()
 {
-    TcpBackend backend;
-    assert(!backend.is_open());
+    TcpBackend* backend = new TcpBackend();
+    assert(!backend->is_open());
 
-    backend.close();  // must not crash
-    backend.close();  // double close also safe
+    backend->close();  // must not crash
+    backend->close();  // double close also safe
 
-    assert(!backend.is_open());
+    assert(!backend->is_open());
+    delete backend;
     printf("PASS: test_close_before_init\n");
 }
 
@@ -477,24 +487,25 @@ static void test_close_before_init()
 
 static void test_is_open_lifecycle()
 {
-    TcpBackend server;
-    assert(!server.is_open());
+    TcpBackend* server = new TcpBackend();
+    assert(!server->is_open());
 
     TransportConfig cfg;
     const uint16_t port_19704 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19704);
 
-    Result r = server.init(cfg);
+    Result r = server->init(cfg);
     assert(r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
-    server.close();
-    assert(!server.is_open());
+    server->close();
+    assert(!server->is_open());
 
     // close again (idempotent)
-    server.close();
-    assert(!server.is_open());
+    server->close();
+    assert(!server->is_open());
 
+    delete server;
     printf("PASS: test_is_open_lifecycle\n");
 }
 
@@ -559,12 +570,12 @@ static void test_loopback_roundtrip()
 
 static void test_receive_large_timeout_cap()
 {
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     const uint16_t port_19706 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19706);
 
-    Result r = server.init(cfg);
+    Result r = server->init(cfg);
     assert(r == Result::OK);
 
     // timeout_ms = 6000 → poll_count = 60 → capped to 50 → actually
@@ -576,10 +587,11 @@ static void test_receive_large_timeout_cap()
     // and rely on coverage to see the cap branch from the source analysis.
     // Use 200 ms to cover the ≤50 branch fast.
     MessageEnvelope env;
-    r = server.receive_message(env, 200U);
+    r = server->receive_message(env, 200U);
     assert(r == Result::ERR_TIMEOUT);
 
-    server.close();
+    server->close();
+    delete server;
     printf("PASS: test_receive_large_timeout_cap\n");
 }
 
@@ -590,19 +602,20 @@ static void* srv_close_thread(void* raw)
     SrvCloseArg* a = static_cast<SrvCloseArg*>(raw);
     assert(a != nullptr);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     make_tcp_server_cfg(cfg, a->port);
 
-    a->init_result = server.init(cfg);
-    if (a->init_result != Result::OK) { return nullptr; }
+    a->init_result = server->init(cfg);
+    if (a->init_result != Result::OK) { delete server; return nullptr; }
 
     // Accept one client (up to 300 ms), then close — triggering a FIN to the client.
     // The client's subsequent receive_message will detect the FIN, remove its fd,
     // and then hit poll_clients_once with nfds == 0U (True branch).
     MessageEnvelope env;
-    (void)server.receive_message(env, 300U);
-    server.close();
+    (void)server->receive_message(env, 300U);
+    server->close();
+    delete server;
     return nullptr;
 }
 
@@ -614,7 +627,7 @@ static void* srv_close_thread(void* raw)
 
 static void test_server_bind_bad_ip()
 {
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     const uint16_t port_19707 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19707);
@@ -623,10 +636,11 @@ static void test_server_bind_bad_ip()
     const char bad_ip[] = "999.999.999.999";
     (void)memcpy(cfg.bind_ip, bad_ip, sizeof(bad_ip));
 
-    Result r = server.init(cfg);
+    Result r = server->init(cfg);
     assert(r != Result::OK);
-    assert(!server.is_open());
+    assert(!server->is_open());
 
+    delete server;
     printf("PASS: test_server_bind_bad_ip\n");
 }
 
@@ -638,17 +652,18 @@ static void test_server_bind_bad_ip()
 
 static void test_num_channels_zero()
 {
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     const uint16_t port_19708 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19708);
     cfg.num_channels = 0U;
 
-    Result r = server.init(cfg);
+    Result r = server->init(cfg);
     assert(r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
-    server.close();
+    server->close();
+    delete server;
     printf("PASS: test_num_channels_zero\n");
 }
 
@@ -666,16 +681,17 @@ static void test_num_channels_zero()
 // Verifies: REQ-4.1.1
 static void test_tcp_init_invalid_num_channels()
 {
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port);
     cfg.num_channels = static_cast<uint32_t>(MAX_CHANNELS) + 1U;  // exceeds limit
 
-    Result r = server.init(cfg);
+    Result r = server->init(cfg);
     assert(r == Result::ERR_INVALID);
-    assert(!server.is_open());
+    assert(!server->is_open());
 
+    delete server;
     printf("PASS: test_tcp_init_invalid_num_channels\n");
 }
 
@@ -751,12 +767,12 @@ static void test_tcp_data_before_hello_dropped()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     RawDataSenderArg sender_arg;
     sender_arg.port = PORT;
@@ -773,13 +789,14 @@ static void test_tcp_data_before_hello_dropped()
     Result recv_r = Result::OK;
     for (uint32_t i = 0U; i < 5U; ++i) {
         MessageEnvelope env;
-        recv_r = server.receive_message(env, 100U);
+        recv_r = server->receive_message(env, 100U);
         if (recv_r == Result::OK) { break; }
     }
 
     (void)pthread_join(sender_tid, nullptr);
     (void)pthread_attr_destroy(&attr);
-    server.close();
+    server->close();
+    delete server;
 
     assert(recv_r != Result::OK);  // unregistered DATA must be dropped
     printf("PASS: test_tcp_data_before_hello_dropped\n");
@@ -909,11 +926,11 @@ static void test_client_detect_server_close()
 
     usleep(30000U);  // 30 ms: let server bind
 
-    TcpBackend client;
+    TcpBackend* client = new TcpBackend();
     TransportConfig cfg;
     make_tcp_client_cfg(cfg, PORT);
 
-    Result r = client.init(cfg);
+    Result r = client->init(cfg);
     assert(r == Result::OK);
 
     // Wait 150 ms: server's recv_from_client will timeout after 100 ms on the
@@ -923,10 +940,11 @@ static void test_client_detect_server_close()
     // Now receive: first poll_clients_once detects EOF → remove_client_fd →
     // m_client_count=0. Subsequent poll_clients_once calls hit nfds==0U True branch.
     MessageEnvelope env;
-    r = client.receive_message(env, 400U);
+    r = client->receive_message(env, 400U);
     assert(r == Result::ERR_TIMEOUT || r == Result::ERR_IO);
 
-    client.close();
+    client->close();
+    delete client;
 
     (void)pthread_join(srv_tid, nullptr);
     (void)pthread_attr_destroy(&attr);
@@ -946,17 +964,18 @@ static void test_mock_tcp_server_create_fail()
     MockSocketOps mock;
     mock.fail_create_tcp = true;
 
-    TcpBackend backend(mock);
-    assert(!backend.is_open());
+    TcpBackend* backend = new TcpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t port_19721 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19721);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
+    delete backend;
     printf("PASS: test_mock_tcp_server_create_fail\n");
 }
 
@@ -966,18 +985,19 @@ static void test_mock_tcp_server_reuseaddr_fail()
     MockSocketOps mock;
     mock.fail_set_reuseaddr = true;
 
-    TcpBackend backend(mock);
-    assert(!backend.is_open());
+    TcpBackend* backend = new TcpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t port_19722 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19722);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
     assert(mock.n_do_close >= 1);  // do_close called after reuseaddr failure
 
+    delete backend;
     printf("PASS: test_mock_tcp_server_reuseaddr_fail\n");
 }
 
@@ -987,17 +1007,18 @@ static void test_mock_tcp_server_listen_fail()
     MockSocketOps mock;
     mock.fail_do_listen = true;
 
-    TcpBackend backend(mock);
-    assert(!backend.is_open());
+    TcpBackend* backend = new TcpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t port_19723 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19723);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
+    delete backend;
     printf("PASS: test_mock_tcp_server_listen_fail\n");
 }
 
@@ -1007,17 +1028,18 @@ static void test_mock_tcp_server_nonblocking_fail()
     MockSocketOps mock;
     mock.fail_set_nonblocking = true;
 
-    TcpBackend backend(mock);
-    assert(!backend.is_open());
+    TcpBackend* backend = new TcpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t port_19724 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19724);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
+    delete backend;
     printf("PASS: test_mock_tcp_server_nonblocking_fail\n");
 }
 
@@ -1027,17 +1049,18 @@ static void test_mock_tcp_client_create_fail()
     MockSocketOps mock;
     mock.fail_create_tcp = true;
 
-    TcpBackend backend(mock);
-    assert(!backend.is_open());
+    TcpBackend* backend = new TcpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t port_19725 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_client_cfg(cfg, port_19725);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
 
+    delete backend;
     printf("PASS: test_mock_tcp_client_create_fail\n");
 }
 
@@ -1047,18 +1070,19 @@ static void test_mock_tcp_client_reuseaddr_fail()
     MockSocketOps mock;
     mock.fail_set_reuseaddr = true;
 
-    TcpBackend backend(mock);
-    assert(!backend.is_open());
+    TcpBackend* backend = new TcpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t port_19726 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_client_cfg(cfg, port_19726);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
     assert(mock.n_do_close >= 1);  // do_close called after reuseaddr failure
 
+    delete backend;
     printf("PASS: test_mock_tcp_client_reuseaddr_fail\n");
 }
 
@@ -1081,7 +1105,7 @@ static void test_mock_tcp_client_reuseaddr_fail()
 static void test_tcp_impairment_delay_paths()
 {
     MockSocketOps mock;
-    TcpBackend backend(mock);
+    TcpBackend* backend = new TcpBackend(mock);
 
     TransportConfig cfg;
     const uint16_t port_19730 = alloc_ephemeral_port(SOCK_STREAM);
@@ -1090,15 +1114,15 @@ static void test_tcp_impairment_delay_paths()
     cfg.channels[0U].impairment.fixed_latency_ms = 1U;  // 1 ms delay
 
     // mock.connect_with_timeout returns true → m_client_fds[0]=FAKE_FD, m_open=true
-    assert(backend.init(cfg) == Result::OK);
-    assert(backend.is_open());
+    assert(backend->init(cfg) == Result::OK);
+    assert(backend->is_open());
 
     MessageEnvelope env1;
     make_test_envelope(env1, 0xDC100001ULL);
 
     // First send: process_outbound queues env1 (release = now_us + 1 ms).
     // flush_delayed_to_clients finds count=0 (not yet due) — loop does NOT run.
-    assert(backend.send_message(env1) == Result::OK);
+    assert(backend->send_message(env1) == Result::OK);
 
     usleep(10000U);  // 10 ms >> 1 ms: env1 is now past its release time
 
@@ -1108,7 +1132,7 @@ static void test_tcp_impairment_delay_paths()
     // Second send: process_outbound queues env2; flush_delayed_to_clients finds
     // count=1 (env1 past its release time) — loop runs once, sending env1 outbound.
     // Covers: flush_delayed_to_clients() loop body (path (a) above).
-    assert(backend.send_message(env2) == Result::OK);
+    assert(backend->send_message(env2) == Result::OK);
 
     usleep(10000U);  // 10 ms >> 1 ms: env2 is now past its release time
 
@@ -1119,10 +1143,11 @@ static void test_tcp_impairment_delay_paths()
     // Correct behavior: receive_message returns ERR_TIMEOUT because no inbound
     // message was received (env2 was sent outbound, not looped back).
     MessageEnvelope recv_env;
-    Result r = backend.receive_message(recv_env, 500U);
+    Result r = backend->receive_message(recv_env, 500U);
     assert(r == Result::ERR_TIMEOUT);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_tcp_impairment_delay_paths\n");
 }
 
@@ -1157,17 +1182,17 @@ static void* two_cli_srv_b_thread(void* raw)
     TwoCliSrvArgB* a = static_cast<TwoCliSrvArgB*>(raw);
     assert(a != nullptr);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     make_tcp_server_cfg(cfg, a->port);
 
-    a->init_result = server.init(cfg);
-    if (a->init_result != Result::OK) { return nullptr; }
+    a->init_result = server->init(cfg);
+    if (a->init_result != Result::OK) { delete server; return nullptr; }
 
     // Receive both client messages.  Power of 10: fixed bound.
     for (uint32_t i = 0U; i < 6U; ++i) {
         MessageEnvelope env;
-        if (server.receive_message(env, 300U) == Result::OK) {
+        if (server->receive_message(env, 300U) == Result::OK) {
             ++a->recv_count;
             if (a->recv_count >= 2U) { break; }
         }
@@ -1179,10 +1204,11 @@ static void* two_cli_srv_b_thread(void* raw)
     // then i=1 finds fd2 and compacts.
     {
         MessageEnvelope env;
-        (void)server.receive_message(env, 500U);
+        (void)server->receive_message(env, 500U);
     }
 
-    server.close();
+    server->close();
+    delete server;
     return nullptr;
 }
 
@@ -1277,26 +1303,27 @@ static void* heavy_tcp_sender_func(void* raw_arg)
 
     usleep(80000U);  // 80 ms: wait for server to be ready
 
-    TcpBackend client;
+    TcpBackend* client = new TcpBackend();
     TransportConfig cfg;
     make_tcp_client_cfg(cfg, a->port);
-    a->result = client.init(cfg);
-    if (a->result != Result::OK) { return nullptr; }
+    a->result = client->init(cfg);
+    if (a->result != Result::OK) { delete client; return nullptr; }
 
     // REQ-6.1.8: register before sending DATA so server accepts the frames
     // (server rejects data from unregistered slots per REQ-6.1.11).
-    (void)client.register_local_id(a->node_id);
+    (void)client->register_local_id(a->node_id);
 
     // Power of 10 Rule 2 deviation (test loop): bounded by a->num_msgs.
     for (uint32_t m = 0U; m < a->num_msgs; ++m) {
         MessageEnvelope env;
         make_test_envelope(env, 0x8000ULL + static_cast<uint64_t>(m));
         env.source_id = a->node_id;  // match the registered NodeId
-        (void)client.send_message(env);
+        (void)client->send_message(env);
     }
 
     usleep(a->stay_alive_us);
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -1306,12 +1333,12 @@ static void test_recv_queue_overflow()
     static const uint32_t N_CLIENTS = 8U;
     static const uint32_t N_MSGS    = 20U;
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
-    Result init_res = server.init(srv_cfg);
+    Result init_res = server->init(srv_cfg);
     assert(init_res == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     HeavyTcpSenderArg args[N_CLIENTS];
     pthread_t         tids[N_CLIENTS];
@@ -1341,10 +1368,11 @@ static void test_recv_queue_overflow()
     // Power of 10 Rule 2 deviation (test drain loop): bounded 400 iterations.
     for (uint32_t k = 0U; k < 400U; ++k) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
-    server.close();
+    server->close();
+    delete server;
 
     // Power of 10 Rule 2: fixed loop bound (N_CLIENTS = 8)
     for (uint32_t k = 0U; k < N_CLIENTS; ++k) {
@@ -1377,7 +1405,7 @@ static void test_recv_queue_overflow()
 static void test_send_to_all_clients_send_frame_fail()
 {
     MockSocketOps mock;
-    TcpBackend backend(mock);
+    TcpBackend* backend = new TcpBackend(mock);
 
     // Client mode: connect_to_server → create_tcp (FAKE_FD) → reuseaddr →
     // connect_with_timeout → m_client_fds[0]=FAKE_FD, m_open=true.
@@ -1385,9 +1413,9 @@ static void test_send_to_all_clients_send_frame_fail()
     const uint16_t port_19714 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_client_cfg(cfg, port_19714);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     // Now inject send_frame failure.
     mock.fail_send_frame = true;
@@ -1397,11 +1425,12 @@ static void test_send_to_all_clients_send_frame_fail()
     // WARNING_LO logged.  send_frame failure propagated as ERR_IO.
     MessageEnvelope env;
     make_test_envelope(env, 0xDEAD1ULL);
-    r = backend.send_message(env);
+    r = backend->send_message(env);
     assert(r == Result::ERR_IO);  // send_frame failure propagated as ERR_IO
-    assert(backend.is_open());    // transport still open after send failure
+    assert(backend->is_open());    // transport still open after send failure
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_send_to_all_clients_send_frame_fail\n");
 }
 
@@ -1420,7 +1449,7 @@ static void test_send_to_all_clients_send_frame_fail()
 static void test_send_message_loss_impairment_drop()
 {
     MockSocketOps mock;
-    TcpBackend backend(mock);
+    TcpBackend* backend = new TcpBackend(mock);
 
     // Client mode with 100% loss impairment.
     TransportConfig cfg;
@@ -1429,15 +1458,15 @@ static void test_send_message_loss_impairment_drop()
     cfg.channels[0U].impairment.enabled          = true;
     cfg.channels[0U].impairment.loss_probability = 1.0;
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     MessageEnvelope env;
     make_test_envelope(env, 0xDEAD2ULL);
 
     // process_outbound returns ERR_IO → send_message True branch → returns OK.
-    r = backend.send_message(env);
+    r = backend->send_message(env);
     assert(r == Result::OK);   // silent drop: OK returned, not ERR_IO
 
     // Nothing was sent to the mock (send_frame never reached).
@@ -1447,7 +1476,8 @@ static void test_send_message_loss_impairment_drop()
     // and the mock's n_do_close shows only the init-time close count).
     assert(mock.n_do_close == 0);  // no extra close calls from error paths
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_send_message_loss_impairment_drop\n");
 }
 
@@ -1466,12 +1496,12 @@ static void test_connection_limit_reached()
     const uint16_t PORT     = alloc_ephemeral_port(SOCK_STREAM);
     static const int      MAX_CONN = 8;   // MAX_TCP_CONNECTIONS
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     // Build the destination address once.
     struct sockaddr_in addr;
@@ -1501,7 +1531,7 @@ static void test_connection_limit_reached()
     // Power of 10: fixed loop bound (MAX_CONN == 8)
     for (int i = 0; i < MAX_CONN; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 50U);
+        (void)server->receive_message(env, 50U);
     }
 
     // Connect a (MAX_CONN+1)th client.  It queues in the backlog; the server's
@@ -1522,15 +1552,16 @@ static void test_connection_limit_reached()
     // m_client_count == MAX_TCP_CONNECTIONS → L198 True branch fires; server
     // returns OK without accepting and without crashing.
     MessageEnvelope env2;
-    (void)server.receive_message(env2, 100U);
-    assert(server.is_open());  // server still healthy after capacity hit
+    (void)server->receive_message(env2, 100U);
+    assert(server->is_open());  // server still healthy after capacity hit
 
     // Cleanup: close all raw client sockets, then close server.
     // Power of 10: fixed loop bound
     for (int i = 0; i <= MAX_CONN; ++i) {
         if (client_fds[i] >= 0) { (void)close(client_fds[i]); }
     }
-    server.close();
+    server->close();
+    delete server;
 
     printf("PASS: test_connection_limit_reached\n");
 }
@@ -1564,7 +1595,7 @@ static void* tcp_partition_srv_thread(void* raw)
     TcpPartSrvArg* a = static_cast<TcpPartSrvArg*>(raw);
     assert(a != nullptr);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     make_tcp_server_cfg(cfg, a->port);
     cfg.channels[0U].impairment.enabled              = true;
@@ -1572,8 +1603,8 @@ static void* tcp_partition_srv_thread(void* raw)
     cfg.channels[0U].impairment.partition_gap_ms      = 10U;     // 10 ms gap
     cfg.channels[0U].impairment.partition_duration_ms = 30000U;  // 30 s
 
-    a->init_result = server.init(cfg);
-    if (a->init_result != Result::OK) { return nullptr; }
+    a->init_result = server->init(cfg);
+    if (a->init_result != Result::OK) { delete server; return nullptr; }
 
     // Prime the partition timer via send_message() (0 clients → discarded, OK).
     // send_message() calls process_outbound() → is_partition_active(), which on
@@ -1585,13 +1616,14 @@ static void* tcp_partition_srv_thread(void* raw)
     // not from poll_clients_once when m_client_count == 0.
     MessageEnvelope prime_send;
     make_test_envelope(prime_send, 0xDEAD9999ULL);
-    (void)server.send_message(prime_send);  // discarded (no clients); primes timer
+    (void)server->send_message(prime_send);  // discarded (no clients); primes timer
 
     // Now wait for the client to connect and send; partition must already be active.
     MessageEnvelope env;
-    a->recv_result = server.receive_message(env, 500U);
+    a->recv_result = server->receive_message(env, 500U);
 
-    server.close();
+    server->close();
+    delete server;
     return nullptr;
 }
 
@@ -1615,21 +1647,22 @@ static void test_tcp_inbound_partition_drops_received()
 
     usleep(50000U);  // 50 ms: give server time to bind and partition to activate
 
-    TcpBackend client;
+    TcpBackend* client = new TcpBackend();
     TransportConfig cli_cfg;
     make_tcp_client_cfg(cli_cfg, PORT);
-    Result cli_init = client.init(cli_cfg);
+    Result cli_init = client->init(cli_cfg);
 
     if (cli_init == Result::OK) {
         // REQ-6.1.8: send HELLO first so the server registers this slot;
         // without this the data frame is rejected at the unregistered-slot
         // guard (REQ-6.1.11) before apply_inbound_impairment() is reached.
-        (void)client.register_local_id(2U);
+        (void)client->register_local_id(2U);
         MessageEnvelope env;
         make_test_envelope(env, 0xDEAD0001ULL);
-        (void)client.send_message(env);
-        client.close();
+        (void)client->send_message(env);
+        client->close();
     }
+    delete client;
 
     (void)pthread_join(srv_tid, nullptr);
 
@@ -1661,20 +1694,21 @@ static void* tcp_reorder_srv_thread(void* raw)
     TcpReorderSrvArg* a = static_cast<TcpReorderSrvArg*>(raw);
     assert(a != nullptr);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     make_tcp_server_cfg(cfg, a->port);
     cfg.channels[0U].impairment.enabled              = true;
     cfg.channels[0U].impairment.reorder_enabled       = true;
     cfg.channels[0U].impairment.reorder_window_size   = 2U;
 
-    a->init_result = server.init(cfg);
-    if (a->init_result != Result::OK) { return nullptr; }
+    a->init_result = server->init(cfg);
+    if (a->init_result != Result::OK) { delete server; return nullptr; }
 
     MessageEnvelope env;
-    a->recv_result = server.receive_message(env, 500U);
+    a->recv_result = server->receive_message(env, 500U);
 
-    server.close();
+    server->close();
+    delete server;
     return nullptr;
 }
 
@@ -1698,16 +1732,16 @@ static void test_tcp_inbound_reorder_buffers_message()
 
     usleep(50000U);  // 50 ms: give server time to bind
 
-    TcpBackend client;
+    TcpBackend* client = new TcpBackend();
     TransportConfig cli_cfg;
     make_tcp_client_cfg(cli_cfg, PORT);
-    Result cli_init = client.init(cli_cfg);
+    Result cli_init = client->init(cli_cfg);
 
     if (cli_init == Result::OK) {
         // REQ-6.1.8: send HELLO first so the server registers this slot;
         // without this the data frame is rejected at the unregistered-slot
         // guard (REQ-6.1.11) before apply_inbound_impairment() is reached.
-        (void)client.register_local_id(2U);
+        (void)client->register_local_id(2U);
 
         // Send exactly 1 message — with reorder_window_size=2 it is buffered
         // (inbound_count==0) and never pushed to m_recv_queue.  A second
@@ -1715,10 +1749,11 @@ static void test_tcp_inbound_reorder_buffers_message()
         // purpose of this test.
         MessageEnvelope env1;
         make_test_envelope(env1, 0xBEEF0001ULL);
-        (void)client.send_message(env1);
+        (void)client->send_message(env1);
 
-        client.close();
+        client->close();
     }
+    delete client;
 
     (void)pthread_join(srv_tid, nullptr);
 
@@ -1745,27 +1780,28 @@ static void test_tcp_inbound_reorder_buffers_message()
 static void test_register_local_id_client_sends_hello()
 {
     MockSocketOps mock;
-    TcpBackend backend(mock);
+    TcpBackend* backend = new TcpBackend(mock);
 
     // Client mode: connect_to_server succeeds via mock → m_client_fds[0]=FAKE_FD
     TransportConfig cfg;
     const uint16_t port_19742 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_client_cfg(cfg, port_19742);
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     // Baseline: no send_frame calls yet (init does not send HELLO on its own)
     uint32_t frames_before = mock.send_frame_count;
 
     // register_local_id in client mode must call send_hello_frame() → send_frame
-    r = backend.register_local_id(42U);
+    r = backend->register_local_id(42U);
     assert(r == Result::OK);
 
     // At least one send_frame call must have occurred for the HELLO frame.
     assert(mock.send_frame_count > frames_before);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_register_local_id_client_sends_hello\n");
 }
 
@@ -1779,25 +1815,26 @@ static void test_register_local_id_client_sends_hello()
 static void test_register_local_id_server_no_hello()
 {
     MockSocketOps mock;
-    TcpBackend backend(mock);
+    TcpBackend* backend = new TcpBackend(mock);
 
     // Server mode: bind_and_listen uses mock; do_accept returns -1 (EAGAIN).
     TransportConfig cfg;
     const uint16_t port_19743 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19743);
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     // In server mode, register_local_id stores the id but sends no HELLO.
     uint32_t frames_before = mock.send_frame_count;
-    r = backend.register_local_id(7U);
+    r = backend->register_local_id(7U);
     assert(r == Result::OK);
 
     // Server must NOT call send_frame for its own HELLO.
     assert(mock.send_frame_count == frames_before);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_register_local_id_server_no_hello\n");
 }
 
@@ -1821,18 +1858,19 @@ static void* hello_client_thread(void* raw)
 
     usleep(80000U);  // 80 ms: give server time to bind
 
-    TcpBackend client;
+    TcpBackend* client = new TcpBackend();
     TransportConfig cfg;
     make_tcp_client_cfg(cfg, a->port);
-    a->result = client.init(cfg);
-    if (a->result != Result::OK) { return nullptr; }
+    a->result = client->init(cfg);
+    if (a->result != Result::OK) { delete client; return nullptr; }
 
     // Send HELLO to server; server routing table is populated.
-    a->result = client.register_local_id(a->local_id);
+    a->result = client->register_local_id(a->local_id);
 
     uint32_t const stay = (a->stay_alive_us > 0U) ? a->stay_alive_us : 200000U;
     usleep(stay);  // keep connection alive while server tests routing
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -1853,12 +1891,12 @@ static void test_hello_received_by_server_populates_routing_table()
     const uint16_t PORT    = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLI_ID  = 55U;
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     HelloClientArg cli_arg;
     cli_arg.port     = PORT;
@@ -1875,7 +1913,7 @@ static void test_hello_received_by_server_populates_routing_table()
     // Power of 10: fixed loop bound (max 10 iterations × 100 ms = 1 s).
     for (uint32_t i = 0U; i < 10U; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
     // After HELLO is processed, send a unicast DATA to CLI_ID.
@@ -1883,12 +1921,13 @@ static void test_hello_received_by_server_populates_routing_table()
     MessageEnvelope data_env;
     make_test_envelope(data_env, 0xBEEF1001ULL);
     data_env.destination_id = CLI_ID;  // unicast to registered node
-    Result send_r = server.send_message(data_env);
+    Result send_r = server->send_message(data_env);
     assert(send_r == Result::OK);  // slot found → unicast send succeeds
 
     (void)pthread_join(cli_tid, nullptr);
     (void)pthread_attr_destroy(&attr);
-    server.close();
+    server->close();
+    delete server;
 
     assert(cli_arg.result == Result::OK);
     printf("PASS: test_hello_received_by_server_populates_routing_table\n");
@@ -1909,10 +1948,10 @@ static void test_hello_frame_not_delivered_to_delivery_engine()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
 
     HelloClientArg cli_arg;
@@ -1929,12 +1968,13 @@ static void test_hello_frame_not_delivered_to_delivery_engine()
     // A single receive_message call: client sends HELLO after ~80 ms.
     // receive_message must NOT return OK (HELLO is consumed, not delivered).
     MessageEnvelope env;
-    Result recv_r = server.receive_message(env, 500U);
+    Result recv_r = server->receive_message(env, 500U);
     assert(recv_r != Result::OK);  // HELLO consumed internally; not delivered
 
     (void)pthread_join(cli_tid, nullptr);
     (void)pthread_attr_destroy(&attr);
-    server.close();
+    server->close();
+    delete server;
 
     assert(cli_arg.result == Result::OK);
     printf("PASS: test_hello_frame_not_delivered_to_delivery_engine\n");
@@ -1966,10 +2006,10 @@ static void test_tcp_hello_queue_overflow()
     static_assert(HELLO_OVERFLOW_NUM_CLIENTS == static_cast<uint32_t>(MAX_TCP_CONNECTIONS),
                   "update HELLO_OVERFLOW_NUM_CLIENTS if MAX_TCP_CONNECTIONS changes");
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
 
     // Launch all 8 clients.  Each sleeps 80 ms then connects and sends HELLO.
@@ -1999,7 +2039,7 @@ static void test_tcp_hello_queue_overflow()
     // Power of 10: fixed loop bound (50 iterations).
     for (uint32_t i = 0U; i < 50U; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
     // Drain the queue.  Exactly MAX_TCP_CONNECTIONS-1 = 7 entries were queued;
@@ -2007,7 +2047,7 @@ static void test_tcp_hello_queue_overflow()
     uint32_t valid_count = 0U;
     // Power of 10: fixed loop bound (HELLO_OVERFLOW_NUM_CLIENTS = 8).
     for (uint32_t i = 0U; i < HELLO_OVERFLOW_NUM_CLIENTS; ++i) {
-        NodeId const peer = server.pop_hello_peer();
+        NodeId const peer = server->pop_hello_peer();
         if (peer != static_cast<NodeId>(NODE_ID_INVALID)) {
             ++valid_count;
         }
@@ -2015,7 +2055,7 @@ static void test_tcp_hello_queue_overflow()
     assert(valid_count == HELLO_OVERFLOW_NUM_CLIENTS - 1U);  // exactly 7
 
     // One more pop confirms the queue is empty (not just that the 8th was late).
-    NodeId const tail = server.pop_hello_peer();
+    NodeId const tail = server->pop_hello_peer();
     assert(tail == static_cast<NodeId>(NODE_ID_INVALID));
 
     // Power of 10: fixed loop bound (HELLO_OVERFLOW_NUM_CLIENTS = 8).
@@ -2023,7 +2063,8 @@ static void test_tcp_hello_queue_overflow()
         (void)pthread_join(cli_tids[i], nullptr);
     }
     (void)pthread_attr_destroy(&attr);
-    server.close();
+    server->close();
+    delete server;
 
     // All 8 clients must have successfully sent HELLO; if any failed to connect
     // the test would not prove the overflow path.
@@ -2052,10 +2093,10 @@ static void test_tcp_pop_hello_peer()
     const uint16_t PORT   = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLI_ID = 42U;
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
 
     HelloClientArg cli_arg;
@@ -2073,20 +2114,21 @@ static void test_tcp_pop_hello_peer()
     // Power of 10: fixed loop bound (10 iterations × 100 ms = 1 s max).
     for (uint32_t i = 0U; i < 10U; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
     // Non-empty path: HELLO was queued; pop returns CLI_ID.
-    NodeId const peer = server.pop_hello_peer();
+    NodeId const peer = server->pop_hello_peer();
     assert(peer == CLI_ID);
 
     // Empty path: queue now empty; pop returns NODE_ID_INVALID.
-    NodeId const empty = server.pop_hello_peer();
+    NodeId const empty = server->pop_hello_peer();
     assert(empty == NODE_ID_INVALID);
 
     (void)pthread_join(cli_tid, nullptr);
     (void)pthread_attr_destroy(&attr);
-    server.close();
+    server->close();
+    delete server;
 
     assert(cli_arg.result == Result::OK);
     printf("PASS: test_tcp_pop_hello_peer\n");
@@ -2110,17 +2152,18 @@ static void* dual_hello_client_thread(void* raw)
 
     usleep(a->connect_delay_us);
 
-    TcpBackend client;
+    TcpBackend* client = new TcpBackend();
     TransportConfig cfg;
     make_tcp_client_cfg(cfg, a->port);
-    a->result = client.init(cfg);
-    if (a->result != Result::OK) { return nullptr; }
+    a->result = client->init(cfg);
+    if (a->result != Result::OK) { delete client; return nullptr; }
 
     // Register so the server knows our NodeId; HELLO is sent on-wire.
-    a->result = client.register_local_id(a->local_id);
+    a->result = client->register_local_id(a->local_id);
 
     usleep(300000U);  // 300 ms: keep connection alive while server tests routing
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -2139,12 +2182,12 @@ static void test_unicast_routes_to_registered_slot()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     DualHelloCliArg cli1_arg;
     cli1_arg.port             = PORT;
@@ -2169,27 +2212,28 @@ static void test_unicast_routes_to_registered_slot()
     // Drain until both HELLOs are consumed (Power of 10: fixed bound, 20 iters)
     for (uint32_t i = 0U; i < 20U; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
     // Send unicast DATA to node 10 — must succeed (slot found in routing table).
     MessageEnvelope data_env;
     make_test_envelope(data_env, 0xBEEF2001ULL);
     data_env.destination_id = 10U;
-    Result send_r = server.send_message(data_env);
+    Result send_r = server->send_message(data_env);
     assert(send_r == Result::OK);  // unicast to registered node 10
 
     // Send unicast DATA to node 20 — must also succeed.
     MessageEnvelope data_env2;
     make_test_envelope(data_env2, 0xBEEF2002ULL);
     data_env2.destination_id = 20U;
-    Result send_r2 = server.send_message(data_env2);
+    Result send_r2 = server->send_message(data_env2);
     assert(send_r2 == Result::OK);  // unicast to registered node 20
 
     (void)pthread_join(cli1_tid, nullptr);
     (void)pthread_join(cli2_tid, nullptr);
     (void)pthread_attr_destroy(&attr);
-    server.close();
+    server->close();
+    delete server;
 
     assert(cli1_arg.result == Result::OK);
     assert(cli2_arg.result == Result::OK);
@@ -2211,12 +2255,12 @@ static void test_broadcast_when_destination_id_zero()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     DualHelloCliArg cli1_arg;
     cli1_arg.port             = PORT;
@@ -2241,20 +2285,21 @@ static void test_broadcast_when_destination_id_zero()
     // Drain HELLOs: Power of 10 fixed bound (20 iters × 100 ms = 2 s max)
     for (uint32_t i = 0U; i < 20U; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
     // Broadcast: destination_id == NODE_ID_INVALID → all clients receive it.
     MessageEnvelope bcast_env;
     make_test_envelope(bcast_env, 0xBEEF3001ULL);
     bcast_env.destination_id = NODE_ID_INVALID;  // broadcast sentinel
-    Result send_r = server.send_message(bcast_env);
+    Result send_r = server->send_message(bcast_env);
     assert(send_r == Result::OK);  // broadcast succeeds with connected clients
 
     (void)pthread_join(cli1_tid, nullptr);
     (void)pthread_join(cli2_tid, nullptr);
     (void)pthread_attr_destroy(&attr);
-    server.close();
+    server->close();
+    delete server;
 
     assert(cli1_arg.result == Result::OK);
     assert(cli2_arg.result == Result::OK);
@@ -2289,15 +2334,15 @@ static void test_broadcast_when_destination_id_zero()
 static void test_idle_client_not_closed_during_poll()
 {
     MockSocketOps mock;
-    TcpBackend backend(mock);
+    TcpBackend* backend = new TcpBackend(mock);
 
     // Server mode: bind_and_listen via mock (create_tcp → FAKE_FD, all ops succeed).
     TransportConfig cfg;
     const uint16_t port_19750 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19750);
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     // Baseline close count: do_close not called during server init path.
     int close_before = mock.n_do_close;
@@ -2307,7 +2352,7 @@ static void test_idle_client_not_closed_during_poll()
     // is not called → recv_from_client is never invoked on the idle mock fd.
     // receive_message must return ERR_TIMEOUT (no message available).
     MessageEnvelope env;
-    r = backend.receive_message(env, 100U);
+    r = backend->receive_message(env, 100U);
     assert(r == Result::ERR_TIMEOUT);
 
     // Key assertion (B-1 regression): no extra close calls were made.
@@ -2316,7 +2361,8 @@ static void test_idle_client_not_closed_during_poll()
     // false, but returns true/0), and remove_client_fd would have been called.
     assert(mock.n_do_close == close_before);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_idle_client_not_closed_during_poll\n");
 }
 
@@ -2398,15 +2444,15 @@ static void* src_valid_client_thread(void* raw)
 
     usleep(80000U);  // 80 ms: give server time to bind and listen
 
-    TcpBackend client;
+    TcpBackend* client = new TcpBackend();
     TransportConfig cfg;
     make_tcp_client_cfg(cfg, a->port);
-    a->result = client.init(cfg);
-    if (a->result != Result::OK) { return nullptr; }
+    a->result = client->init(cfg);
+    if (a->result != Result::OK) { delete client; return nullptr; }
 
     // Send HELLO to register identity with the server.
-    a->result = client.register_local_id(a->hello_id);
-    if (a->result != Result::OK) { client.close(); return nullptr; }
+    a->result = client->register_local_id(a->hello_id);
+    if (a->result != Result::OK) { client->close(); delete client; return nullptr; }
 
     usleep(100000U);  // 100 ms: let server process the HELLO
 
@@ -2418,10 +2464,11 @@ static void* src_valid_client_thread(void* raw)
     env.source_id         = a->data_src;
     env.destination_id    = 0U;
     env.reliability_class = ReliabilityClass::BEST_EFFORT;
-    (void)client.send_message(env);
+    (void)client->send_message(env);
 
     usleep(200000U);  // 200 ms: let server attempt to receive; then close
-    client.close();
+    client->close();
+    delete client;
     return nullptr;
 }
 
@@ -2442,12 +2489,12 @@ static void test_source_id_mismatch_dropped()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     SrcValidCliArg cli_arg;
     cli_arg.port     = PORT;
@@ -2468,13 +2515,14 @@ static void test_source_id_mismatch_dropped()
     Result recv_r = Result::OK;
     for (uint32_t i = 0U; i < 15U; ++i) {
         MessageEnvelope env;
-        recv_r = server.receive_message(env, 100U);
+        recv_r = server->receive_message(env, 100U);
         if (recv_r == Result::OK) { break; }  // should not happen
     }
 
     (void)pthread_join(cli_tid, nullptr);
     (void)pthread_attr_destroy(&attr);
-    server.close();
+    server->close();
+    delete server;
 
     // The spoofed frame must have been discarded: receive must NOT have returned OK.
     assert(recv_r != Result::OK);
@@ -2500,12 +2548,12 @@ static void test_source_id_match_accepted()
     const uint16_t PORT       = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   CLIENT_ID  = 1U;
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     SrcValidCliArg cli_arg;
     cli_arg.port     = PORT;
@@ -2527,7 +2575,7 @@ static void test_source_id_match_accepted()
     envelope_init(recv_env);
     for (uint32_t i = 0U; i < 15U; ++i) {
         MessageEnvelope env;
-        Result poll_r = server.receive_message(env, 100U);
+        Result poll_r = server->receive_message(env, 100U);
         if (poll_r == Result::OK) {
             recv_r   = Result::OK;
             recv_env = env;
@@ -2537,7 +2585,8 @@ static void test_source_id_match_accepted()
 
     (void)pthread_join(cli_tid, nullptr);
     (void)pthread_attr_destroy(&attr);
-    server.close();
+    server->close();
+    delete server;
 
     // The matching frame must have been accepted and delivered to the application.
     assert(recv_r == Result::OK);
@@ -2578,17 +2627,17 @@ static void* srv_rotate_thread(void* raw)
     SrvRotateArg* a = static_cast<SrvRotateArg*>(raw);
     assert(a != nullptr);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig cfg;
     make_tcp_server_cfg(cfg, a->port);
-    a->init_result = server.init(cfg);
-    if (a->init_result != Result::OK) { return nullptr; }
+    a->init_result = server->init(cfg);
+    if (a->init_result != Result::OK) { delete server; return nullptr; }
 
     // Poll to accept the client connection and process any HELLO frame.
     // Power of 10: fixed loop bound (5 iterations × 100 ms = 500 ms max).
     for (uint32_t i = 0U; i < 5U; ++i) {
         MessageEnvelope dummy;
-        (void)server.receive_message(dummy, 100U);
+        (void)server->receive_message(dummy, 100U);
     }
 
     // Send first DATA frame with first_src; client slot will be locked to this id.
@@ -2599,7 +2648,7 @@ static void* srv_rotate_thread(void* raw)
     e1.source_id         = a->first_src;
     e1.destination_id    = NODE_ID_INVALID;  // broadcast to all connected clients
     e1.reliability_class = ReliabilityClass::BEST_EFFORT;
-    (void)server.send_message(e1);
+    (void)server->send_message(e1);
 
     usleep(200000U);  // 200 ms: let client receive and lock on frame 1
 
@@ -2611,10 +2660,11 @@ static void* srv_rotate_thread(void* raw)
     e2.source_id         = a->second_src;
     e2.destination_id    = NODE_ID_INVALID;  // broadcast
     e2.reliability_class = ReliabilityClass::BEST_EFFORT;
-    (void)server.send_message(e2);
+    (void)server->send_message(e2);
 
     usleep(400000U);  // 400 ms: let client attempt to receive frame 2 (and drop it)
-    server.close();
+    server->close();
+    delete server;
     return nullptr;
 }
 
@@ -2640,15 +2690,15 @@ static void test_tcp_client_server_nodeid_rotation_rejected()
 
     usleep(50000U);  // 50 ms: give server time to bind and listen
 
-    TcpBackend client;
+    TcpBackend* client = new TcpBackend();
     TransportConfig cli_cfg;
     make_tcp_client_cfg(cli_cfg, PORT);
-    Result init_r = client.init(cli_cfg);
+    Result init_r = client->init(cli_cfg);
     assert(init_r == Result::OK);
 
     // Send HELLO to register our identity with the server (ensures the server's
     // routing table is populated before it sends the two test frames).
-    (void)client.register_local_id(CLIENT_ID);
+    (void)client->register_local_id(CLIENT_ID);
 
     // Receive first frame: validate_source_id allows it (slot = NODE_ID_INVALID);
     // SEC-025 then locks m_client_node_ids[0] = SERVER_A.
@@ -2657,7 +2707,7 @@ static void test_tcp_client_server_nodeid_rotation_rejected()
     MessageEnvelope env1;
     envelope_init(env1);
     for (uint32_t i = 0U; i < 15U; ++i) {
-        r1 = client.receive_message(env1, 100U);
+        r1 = client->receive_message(env1, 100U);
         if (r1 == Result::OK) { break; }
     }
 
@@ -2667,13 +2717,14 @@ static void test_tcp_client_server_nodeid_rotation_rejected()
     MessageEnvelope env2;
     envelope_init(env2);
     for (uint32_t i = 0U; i < 8U; ++i) {
-        r2 = client.receive_message(env2, 100U);
+        r2 = client->receive_message(env2, 100U);
         if (r2 == Result::OK) { break; }  // should not happen
     }
 
     (void)pthread_join(srv_tid, nullptr);
     (void)pthread_attr_destroy(&attr);
-    client.close();
+    client->close();
+    delete client;
 
     assert(r1 == Result::OK);               // first frame accepted
     assert(env1.source_id == SERVER_A);     // slot locked to SERVER_A
@@ -2693,18 +2744,19 @@ static void test_mock_tcp_server_bind_fail()
     MockSocketOps mock;
     mock.fail_do_bind = true;
 
-    TcpBackend backend(mock);
-    assert(!backend.is_open());
+    TcpBackend* backend = new TcpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t port_19760 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19760);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
     assert(mock.n_do_close >= 1);
 
+    delete backend;
     printf("PASS: test_mock_tcp_server_bind_fail\n");
 }
 
@@ -2715,18 +2767,19 @@ static void test_mock_tcp_client_connect_fail()
     MockSocketOps mock;
     mock.fail_connect = true;
 
-    TcpBackend backend(mock);
-    assert(!backend.is_open());
+    TcpBackend* backend = new TcpBackend(mock);
+    assert(!backend->is_open());
 
     TransportConfig cfg;
     const uint16_t port_19761 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_client_cfg(cfg, port_19761);
 
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::ERR_IO);
-    assert(!backend.is_open());
+    assert(!backend->is_open());
     assert(mock.n_do_close >= 1);
 
+    delete backend;
     printf("PASS: test_mock_tcp_client_connect_fail\n");
 }
 
@@ -2741,22 +2794,23 @@ static void test_mock_tcp_recv_frame_fail()
     //       injecting fail_recv_frame after a successful mock init causes no crash
     //       and receive_message returns without delivering a message.
     MockSocketOps mock;
-    TcpBackend backend(mock);
+    TcpBackend* backend = new TcpBackend(mock);
 
     TransportConfig cfg;
     const uint16_t port_19762 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_client_cfg(cfg, port_19762);
-    assert(backend.init(cfg) == Result::OK);
-    assert(backend.is_open());
+    assert(backend->init(cfg) == Result::OK);
+    assert(backend->is_open());
 
     mock.fail_recv_frame = true;  // inject after init
 
     MessageEnvelope env;
-    Result r = backend.receive_message(env, 50U);
+    Result r = backend->receive_message(env, 50U);
     // poll() on FAKE_FD yields POLLNVAL or timeout; either is not OK.
     assert(r != Result::OK);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_mock_tcp_recv_frame_fail\n");
 }
 
@@ -2767,20 +2821,21 @@ static void test_mock_tcp_send_hello_frame_fail()
     // Strategy: init succeeds (mock connect → FAKE_FD); inject send_frame failure;
     //           register_local_id() calls send_hello_frame() → ERR_IO.
     MockSocketOps mock;
-    TcpBackend backend(mock);
+    TcpBackend* backend = new TcpBackend(mock);
 
     TransportConfig cfg;
     const uint16_t port_19763 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_client_cfg(cfg, port_19763);
-    assert(backend.init(cfg) == Result::OK);
-    assert(backend.is_open());
+    assert(backend->init(cfg) == Result::OK);
+    assert(backend->is_open());
 
     mock.fail_send_frame = true;  // inject after init
 
-    Result r = backend.register_local_id(5U);
+    Result r = backend->register_local_id(5U);
     assert(r == Result::ERR_IO);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_mock_tcp_send_hello_frame_fail\n");
 }
 
@@ -2789,21 +2844,22 @@ static void test_mock_tcp_get_stats()
     // Verifies: REQ-7.2.4
     // Covers: TcpBackend::get_transport_stats() — all lines previously uncovered.
     MockSocketOps mock;
-    TcpBackend backend(mock);
+    TcpBackend* backend = new TcpBackend(mock);
 
     TransportConfig cfg;
     const uint16_t port_19764 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19764);
-    assert(backend.init(cfg) == Result::OK);
+    assert(backend->init(cfg) == Result::OK);
 
     TransportStats stats;
     transport_stats_init(stats);
-    backend.get_transport_stats(stats);
+    backend->get_transport_stats(stats);
 
     assert(stats.connections_opened == 0U);
     assert(stats.connections_closed == 0U);
 
-    backend.close();
+    backend->close();
+    delete backend;
     printf("PASS: test_mock_tcp_get_stats\n");
 }
 
@@ -2835,12 +2891,12 @@ static void test_tcp_handle_hello_duplicate_nodeid_evicts_impostor()
     const uint16_t PORT    = alloc_ephemeral_port(SOCK_STREAM);
     static const NodeId   DUPL_ID = 77U;
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     DualHelloCliArg cli1_arg;
     cli1_arg.port             = PORT;
@@ -2866,20 +2922,21 @@ static void test_tcp_handle_hello_duplicate_nodeid_evicts_impostor()
     // Power of 10: fixed bound, 25 × 100 ms = 2.5 s max.
     for (uint32_t i = 0U; i < 25U; ++i) {
         MessageEnvelope env;
-        (void)server.receive_message(env, 100U);
+        (void)server->receive_message(env, 100U);
     }
 
     // Client 1's HELLO must be queued; evicted impostor must NOT be queued.
-    NodeId const peer1 = server.pop_hello_peer();
+    NodeId const peer1 = server->pop_hello_peer();
     assert(peer1 == DUPL_ID);
 
-    NodeId const peer2 = server.pop_hello_peer();
+    NodeId const peer2 = server->pop_hello_peer();
     assert(peer2 == NODE_ID_INVALID);
 
     (void)pthread_join(cli1_tid, nullptr);
     (void)pthread_join(cli2_tid, nullptr);
     (void)pthread_attr_destroy(&attr);
-    server.close();
+    server->close();
+    delete server;
 
     assert(cli1_arg.result == Result::OK);
 
@@ -2940,26 +2997,26 @@ static void test_tcp_send_to_slot_failure_logs_warning()
     (void)memcpy(mock.recv_frame_once_buf, hello_buf, hello_len);
     mock.recv_frame_once_len = hello_len;
 
-    TcpBackend backend(mock);
+    TcpBackend* backend = new TcpBackend(mock);
     TransportConfig cfg;
     const uint16_t port_19765 = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_server_cfg(cfg, port_19765);  // port irrelevant; no real bind in mock
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     // Step 1: make listen fd readable → accept_clients() → sp_client[0] added.
     char dummy = 'X';
     ssize_t wn = write(sp_listen[1], &dummy, 1U);
     assert(wn == 1);
     MessageEnvelope env1;
-    (void)backend.receive_message(env1, 100U);  // accept fires; ERR_TIMEOUT expected
+    (void)backend->receive_message(env1, 100U);  // accept fires; ERR_TIMEOUT expected
 
     // Step 2: make client fd readable → recv_from_client() → HELLO processed.
     wn = write(sp_client[1], &dummy, 1U);
     assert(wn == 1);
     MessageEnvelope env2;
-    (void)backend.receive_message(env2, 100U);  // HELLO consumed; ERR_TIMEOUT expected
+    (void)backend->receive_message(env2, 100U);  // HELLO consumed; ERR_TIMEOUT expected
     // Routing table now has m_client_node_ids[0] = TARGET_ID.
 
     // Step 3: inject send failure; send unicast to TARGET_ID.
@@ -2968,12 +3025,13 @@ static void test_tcp_send_to_slot_failure_logs_warning()
     MessageEnvelope data_env;
     make_test_envelope(data_env, 0xDEAD3001ULL);
     data_env.destination_id = TARGET_ID;
-    Result send_r = backend.send_message(data_env);
+    Result send_r = backend->send_message(data_env);
     assert(send_r == Result::ERR_IO);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     // MockSocketOps::do_close() does not close real fds; clean up manually.
-    backend.close();
+    backend->close();
+    delete backend;
     (void)close(sp_listen[0]);
     (void)close(sp_listen[1]);
     (void)close(sp_client[0]);
@@ -3049,12 +3107,12 @@ static void test_tcp_full_frame_deserialize_fail()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
-    Result r = server.init(srv_cfg);
+    Result r = server->init(srv_cfg);
     assert(r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     RawDataSenderArg sender_arg;
     sender_arg.port = PORT;
@@ -3070,13 +3128,14 @@ static void test_tcp_full_frame_deserialize_fail()
     Result recv_r = Result::OK;
     for (uint32_t i = 0U; i < 3U; ++i) {
         MessageEnvelope env;
-        recv_r = server.receive_message(env, 200U);
+        recv_r = server->receive_message(env, 200U);
         if (recv_r == Result::OK) { break; }  // should not happen
     }
 
     (void)pthread_join(sender_tid, nullptr);
     (void)pthread_attr_destroy(&attr);
-    server.close();
+    server->close();
+    delete server;
 
     assert(recv_r != Result::OK);  // bad frame dropped; nothing delivered
     printf("PASS: test_tcp_full_frame_deserialize_fail\n");
@@ -3127,13 +3186,13 @@ static void test_tcp_client_receives_hello_from_server()
     // Use sp[0] as the client connect fd so that poll() fires on it.
     mock.create_tcp_once_fd = sp[0];
 
-    TcpBackend backend(mock);
+    TcpBackend* backend = new TcpBackend(mock);
     TransportConfig cfg;
     const uint16_t port_hello_echo = alloc_ephemeral_port(SOCK_STREAM);
     make_tcp_client_cfg(cfg, port_hello_echo);
-    Result r = backend.init(cfg);
+    Result r = backend->init(cfg);
     assert(r == Result::OK);
-    assert(backend.is_open());
+    assert(backend->is_open());
 
     // Write a byte to sp[1] → sp[0] becomes readable → poll() returns POLLIN.
     char const dummy = 'X';
@@ -3146,11 +3205,12 @@ static void test_tcp_client_receives_hello_from_server()
     // m_is_server == false → ERR_AGAIN returned (line 387) → nothing queued →
     // receive_message exhausts the poll loop and returns ERR_TIMEOUT.
     MessageEnvelope recv_env;
-    r = backend.receive_message(recv_env, 200U);
+    r = backend->receive_message(recv_env, 200U);
     assert(r == Result::ERR_TIMEOUT);  // HELLO echo consumed; not delivered
 
     // MockSocketOps::do_close() does not close real fds; close the pair manually.
-    backend.close();
+    backend->close();
+    delete backend;
     (void)close(sp[0]);
     (void)close(sp[1]);
 
@@ -3227,16 +3287,16 @@ static void test_tcp_hello_timeout_evicts_slot()
 {
     const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
 
-    TcpBackend server;
+    TcpBackend* server = new TcpBackend();
     TransportConfig srv_cfg;
     make_tcp_server_cfg(srv_cfg, PORT);
     // Set a very short HELLO timeout so the sweep fires quickly.
     // recv_timeout_ms is the default HELLO timeout per REQ-6.1.12.
     srv_cfg.channels[0U].recv_timeout_ms = 10U;
 
-    Result init_r = server.init(srv_cfg);
+    Result init_r = server->init(srv_cfg);
     assert(init_r == Result::OK);
-    assert(server.is_open());
+    assert(server->is_open());
 
     HelloTimeoutArg arg;
     arg.port         = PORT;
@@ -3252,12 +3312,13 @@ static void test_tcp_hello_timeout_evicts_slot()
     // (accept → sleep past 10 ms timeout → sweep → evict)
     // Power of 10 Rule 2: fixed poll loop — receive_message runs at most 6 × 100 ms.
     MessageEnvelope env;
-    Result recv_r = server.receive_message(env, 600U);
+    Result recv_r = server->receive_message(env, 600U);
     assert(recv_r != Result::OK);  // nothing was delivered (no valid data frame)
 
     (void)pthread_join(tid, nullptr);
     (void)pthread_attr_destroy(&attr);
-    server.close();
+    server->close();
+    delete server;
 
     // Primary assertion: server closed the connection after HELLO timeout.
     assert(arg.server_closed);

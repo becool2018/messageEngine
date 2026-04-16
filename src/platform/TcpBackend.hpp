@@ -103,6 +103,10 @@ private:
     NodeId             m_local_node_id;                            ///< Our own node identity (set by register_local_id)
     bool               m_client_hello_received[MAX_TCP_CONNECTIONS]; ///< True once HELLO received for this slot — REQ-6.1.8
     uint64_t           m_client_accept_ts[MAX_TCP_CONNECTIONS];      ///< Accept timestamp (µs) for each slot — REQ-6.1.12
+    // Power of 10 Rule 3: pre-allocated impairment flush buffer; avoids ~130 KB stack frame
+    // in flush_delayed_to_clients(). Zero-initialized at declaration. Never simultaneously
+    // live with any receive path — flush is only called from send_message() (SC: HAZ-005, HAZ-006).
+    MessageEnvelope    m_delay_buf[IMPAIR_DELAY_BUF_SIZE] = {};     ///< Impairment flush scratch buffer
 
     // REQ-3.3.6: circular FIFO of NodeIds from recently-registered HELLO frames.
     // Populated by handle_hello_frame(); drained by pop_hello_peer().

@@ -224,6 +224,10 @@ private:
     uint32_t          m_hello_queue_read  = 0U;                  ///< Next read index (mod MAX_TCP_CONNECTIONS)
     uint32_t          m_hello_queue_write = 0U;                  ///< Next write index (mod MAX_TCP_CONNECTIONS)
     bool              m_client_slot_active[MAX_TCP_CONNECTIONS]; ///< Fix 5: true = slot in use; avoids ssl_context copy
+    // Power of 10 Rule 3: pre-allocated impairment flush buffer; avoids ~130 KB stack frame
+    // in flush_delayed_to_clients(). Zero-initialized at declaration. Never simultaneously
+    // live with any receive path — flush is only called from send_message() (SC: HAZ-005, HAZ-006).
+    MessageEnvelope   m_delay_buf[IMPAIR_DELAY_BUF_SIZE] = {};  ///< Impairment flush scratch buffer
 
     // ── Private helpers ──────────────────────────────────────────────────────
 

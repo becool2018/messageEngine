@@ -88,35 +88,36 @@ static void create_test_data_envelope(MessageEnvelope& env,
 static bool test_basic_send_receive()
 {
     // Create two harnesses
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    // Dynamic allocation permitted in test fixture setup (CLAUDE.md §1b tests/ exemption)
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
 
     // Initialize with LOCAL_SIM transport
     TransportConfig cfg_a;
     create_local_sim_config(cfg_a, 1U);
-    Result init_a = harness_a.init(cfg_a);
+    Result init_a = harness_a->init(cfg_a);
     assert(init_a == Result::OK);
-    assert(harness_a.is_open() == true);
+    assert(harness_a->is_open() == true);
 
     TransportConfig cfg_b;
     create_local_sim_config(cfg_b, 2U);
-    Result init_b = harness_b.init(cfg_b);
+    Result init_b = harness_b->init(cfg_b);
     assert(init_b == Result::OK);
-    assert(harness_b.is_open() == true);
+    assert(harness_b->is_open() == true);
 
     // Link A → B (messages from A go to B)
-    harness_a.link(&harness_b);
+    harness_a->link(harness_b);
 
     // Send a message from A to B
     MessageEnvelope send_env;
     create_test_data_envelope(send_env, 1U, 2U, "Hello");
 
-    Result send_r = harness_a.send_message(send_env);
+    Result send_r = harness_a->send_message(send_env);
     assert(send_r == Result::OK);
 
     // Receive on B
     MessageEnvelope recv_env;
-    Result recv_r = harness_b.receive_message(recv_env, 100U);
+    Result recv_r = harness_b->receive_message(recv_env, 100U);
     assert(recv_r == Result::OK);
 
     // Verify message fields match
@@ -130,8 +131,11 @@ static bool test_basic_send_receive()
         assert(recv_env.payload[i] == send_env.payload[i]);
     }
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+
+    delete harness_a;
+    delete harness_b;
 
     return true;
 }
@@ -142,33 +146,34 @@ static bool test_basic_send_receive()
 // Verifies: REQ-4.1.2, REQ-4.1.3
 static bool test_bidirectional()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    // Dynamic allocation permitted in test fixture setup (CLAUDE.md §1b tests/ exemption)
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
 
     // Initialize
     TransportConfig cfg_a;
     create_local_sim_config(cfg_a, 10U);
-    harness_a.init(cfg_a);
+    harness_a->init(cfg_a);
 
     TransportConfig cfg_b;
     create_local_sim_config(cfg_b, 20U);
-    harness_b.init(cfg_b);
+    harness_b->init(cfg_b);
 
     // Link both directions: A → B and B → A
-    harness_a.link(&harness_b);
-    harness_b.link(&harness_a);
+    harness_a->link(harness_b);
+    harness_b->link(harness_a);
 
     // Send from A to B
     MessageEnvelope env_a_to_b;
     create_test_data_envelope(env_a_to_b, 10U, 20U, "A->B");
     env_a_to_b.message_id = 111ULL;
 
-    Result send_a = harness_a.send_message(env_a_to_b);
+    Result send_a = harness_a->send_message(env_a_to_b);
     assert(send_a == Result::OK);
 
     // Receive on B
     MessageEnvelope recv_b;
-    Result recv_b_r = harness_b.receive_message(recv_b, 100U);
+    Result recv_b_r = harness_b->receive_message(recv_b, 100U);
     assert(recv_b_r == Result::OK);
     assert(recv_b.message_id == 111ULL);
 
@@ -177,17 +182,20 @@ static bool test_bidirectional()
     create_test_data_envelope(env_b_to_a, 20U, 10U, "B->A");
     env_b_to_a.message_id = 222ULL;
 
-    Result send_b = harness_b.send_message(env_b_to_a);
+    Result send_b = harness_b->send_message(env_b_to_a);
     assert(send_b == Result::OK);
 
     // Receive on A
     MessageEnvelope recv_a;
-    Result recv_a_r = harness_a.receive_message(recv_a, 100U);
+    Result recv_a_r = harness_a->receive_message(recv_a, 100U);
     assert(recv_a_r == Result::OK);
     assert(recv_a.message_id == 222ULL);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+
+    delete harness_a;
+    delete harness_b;
 
     return true;
 }
@@ -198,18 +206,19 @@ static bool test_bidirectional()
 // Verifies: REQ-4.1.2
 static bool test_queue_full()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    // Dynamic allocation permitted in test fixture setup (CLAUDE.md §1b tests/ exemption)
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
 
     TransportConfig cfg_a;
     create_local_sim_config(cfg_a, 5U);
-    harness_a.init(cfg_a);
+    harness_a->init(cfg_a);
 
     TransportConfig cfg_b;
     create_local_sim_config(cfg_b, 6U);
-    harness_b.init(cfg_b);
+    harness_b->init(cfg_b);
 
-    harness_a.link(&harness_b);
+    harness_a->link(harness_b);
 
     // Inject MSG_RING_CAPACITY messages directly to fill harness_b's receive queue
     // Power of 10: bounded loop
@@ -222,7 +231,7 @@ static bool test_queue_full()
         env.message_id = static_cast<uint64_t>(i);
         env.payload_length = 0U;
 
-        Result r = harness_b.inject(env);
+        Result r = harness_b->inject(env);
         assert(r == Result::OK);
     }
 
@@ -235,11 +244,14 @@ static bool test_queue_full()
     overflow_env.message_id = 999ULL;
     overflow_env.payload_length = 0U;
 
-    Result r = harness_b.inject(overflow_env);
+    Result r = harness_b->inject(overflow_env);
     assert(r == Result::ERR_FULL);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+
+    delete harness_a;
+    delete harness_b;
 
     return true;
 }
@@ -250,20 +262,23 @@ static bool test_queue_full()
 // Verifies: REQ-4.1.3, REQ-6.3.3
 static bool test_recv_timeout()
 {
-    LocalSimHarness harness;
+    // Dynamic allocation permitted in test fixture setup (CLAUDE.md §1b tests/ exemption)
+    LocalSimHarness* harness = new LocalSimHarness();
 
     TransportConfig cfg;
     create_local_sim_config(cfg, 7U);
-    harness.init(cfg);
+    harness->init(cfg);
 
     // Don't send anything; just try to receive with zero timeout (non-blocking)
     MessageEnvelope env;
-    Result r = harness.receive_message(env, 0U);
+    Result r = harness->receive_message(env, 0U);
 
     // Should timeout immediately (no message available)
     assert(r == Result::ERR_TIMEOUT);
 
-    harness.close();
+    harness->close();
+
+    delete harness;
 
     return true;
 }
@@ -275,8 +290,9 @@ static bool test_recv_timeout()
 // ─────────────────────────────────────────────────────────────────────────────
 static bool test_num_channels_zero()
 {
-    LocalSimHarness side_a;
-    LocalSimHarness side_b;
+    // Dynamic allocation permitted in test fixture setup (CLAUDE.md §1b tests/ exemption)
+    LocalSimHarness* side_a = new LocalSimHarness();
+    LocalSimHarness* side_b = new LocalSimHarness();
 
     TransportConfig cfg_a;
     TransportConfig cfg_b;
@@ -285,24 +301,28 @@ static bool test_num_channels_zero()
     cfg_a.num_channels = 0U;
     cfg_b.num_channels = 0U;
 
-    assert(side_a.init(cfg_a) == Result::OK);
-    assert(side_b.init(cfg_b) == Result::OK);
+    assert(side_a->init(cfg_a) == Result::OK);
+    assert(side_b->init(cfg_b) == Result::OK);
 
-    side_a.link(&side_b);
-    side_b.link(&side_a);
+    side_a->link(side_b);
+    side_b->link(side_a);
 
     // Send a message to verify basic operation still works
     MessageEnvelope send_env;
     create_test_data_envelope(send_env, 1U, 2U, "nc0");
-    Result r = side_a.send_message(send_env);
+    Result r = side_a->send_message(send_env);
     assert(r == Result::OK);
 
     MessageEnvelope recv_env;
-    r = side_b.receive_message(recv_env, 0U);
+    r = side_b->receive_message(recv_env, 0U);
     assert(r == Result::OK);
 
-    side_a.close();
-    side_b.close();
+    side_a->close();
+    side_b->close();
+
+    delete side_a;
+    delete side_b;
+
     return true;
 }
 
@@ -314,8 +334,9 @@ static bool test_num_channels_zero()
 // ─────────────────────────────────────────────────────────────────────────────
 static bool test_loss_impairment()
 {
-    LocalSimHarness sender;
-    LocalSimHarness receiver;
+    // Dynamic allocation permitted in test fixture setup (CLAUDE.md §1b tests/ exemption)
+    LocalSimHarness* sender = new LocalSimHarness();
+    LocalSimHarness* receiver = new LocalSimHarness();
 
     TransportConfig cfg_s;
     create_local_sim_config(cfg_s, 30U);
@@ -325,11 +346,11 @@ static bool test_loss_impairment()
     TransportConfig cfg_r;
     create_local_sim_config(cfg_r, 31U);
 
-    assert(sender.init(cfg_s) == Result::OK);
-    assert(receiver.init(cfg_r) == Result::OK);
-    assert(!receiver.is_open() || receiver.is_open());  // suppress unused warning
+    assert(sender->init(cfg_s) == Result::OK);
+    assert(receiver->init(cfg_r) == Result::OK);
+    assert(!receiver->is_open() || receiver->is_open());  // suppress unused warning
 
-    sender.link(&receiver);
+    sender->link(receiver);
 
     MessageEnvelope env;
     create_test_data_envelope(env, 30U, 31U, "drop me");
@@ -337,16 +358,20 @@ static bool test_loss_impairment()
 
     // process_outbound returns ERR_IO (100% loss) → L118 True branch COVERED.
     // send_message silently drops the message and returns OK.
-    Result r = sender.send_message(env);
+    Result r = sender->send_message(env);
     assert(r == Result::OK);
 
     // No message was delivered to receiver; non-blocking receive times out.
     MessageEnvelope recv_env;
-    r = receiver.receive_message(recv_env, 0U);
+    r = receiver->receive_message(recv_env, 0U);
     assert(r == Result::ERR_TIMEOUT);
 
-    sender.close();
-    receiver.close();
+    sender->close();
+    receiver->close();
+
+    delete sender;
+    delete receiver;
+
     return true;
 }
 
@@ -359,8 +384,9 @@ static bool test_loss_impairment()
 // ─────────────────────────────────────────────────────────────────────────────
 static bool test_delay_loop_body()
 {
-    LocalSimHarness sender;
-    LocalSimHarness receiver;
+    // Dynamic allocation permitted in test fixture setup (CLAUDE.md §1b tests/ exemption)
+    LocalSimHarness* sender = new LocalSimHarness();
+    LocalSimHarness* receiver = new LocalSimHarness();
 
     TransportConfig cfg_s;
     create_local_sim_config(cfg_s, 32U);
@@ -370,10 +396,10 @@ static bool test_delay_loop_body()
     TransportConfig cfg_r;
     create_local_sim_config(cfg_r, 33U);
 
-    assert(sender.init(cfg_s) == Result::OK);
-    assert(receiver.init(cfg_r) == Result::OK);
+    assert(sender->init(cfg_s) == Result::OK);
+    assert(receiver->init(cfg_r) == Result::OK);
 
-    sender.link(&receiver);
+    sender->link(receiver);
 
     MessageEnvelope env1;
     create_test_data_envelope(env1, 32U, 33U, "first");
@@ -382,7 +408,7 @@ static bool test_delay_loop_body()
     // First send: process_outbound queues env1 in delay buffer (release=now+1ms),
     // collect_deliverable returns 0 (not yet due) — loop body does NOT run.
     // inject(env1) delivers env1 immediately to receiver (L137).
-    assert(sender.send_message(env1) == Result::OK);
+    assert(sender->send_message(env1) == Result::OK);
 
     usleep(10000U);  // 10 ms >> 1 ms: env1 is past its release time
 
@@ -393,17 +419,21 @@ static bool test_delay_loop_body()
     // Second send: collect_deliverable returns 1 (env1 past release).
     // Loop body runs: inject(env1 dup) into receiver.  COVERED: L131-L134.
     // Then inject(env2) delivers env2 immediately.
-    assert(sender.send_message(env2) == Result::OK);
+    assert(sender->send_message(env2) == Result::OK);
 
     // Receiver queue has: env1 (immediate) + env1-dup (delayed loop) + env2.
     // Non-blocking pop returns env1 first (FIFO).
     MessageEnvelope recv_env;
-    Result r = receiver.receive_message(recv_env, 0U);
+    Result r = receiver->receive_message(recv_env, 0U);
     assert(r == Result::OK);
     assert(recv_env.message_id == 9101ULL);
 
-    sender.close();
-    receiver.close();
+    sender->close();
+    receiver->close();
+
+    delete sender;
+    delete receiver;
+
     return true;
 }
 
@@ -420,19 +450,20 @@ static bool test_delay_loop_body()
 // Verifies: REQ-4.1.2
 static bool test_send_peer_queue_full_returns_err_full()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    // Dynamic allocation permitted in test fixture setup (CLAUDE.md §1b tests/ exemption)
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
 
     TransportConfig cfg_a;
     create_local_sim_config(cfg_a, 40U);
     TransportConfig cfg_b;
     create_local_sim_config(cfg_b, 41U);
 
-    assert(harness_a.init(cfg_a) == Result::OK);
-    assert(harness_b.init(cfg_b) == Result::OK);
+    assert(harness_a->init(cfg_a) == Result::OK);
+    assert(harness_b->init(cfg_b) == Result::OK);
 
     // Link A → B so send_message() on A injects into B's queue.
-    harness_a.link(&harness_b);
+    harness_a->link(harness_b);
 
     // Fill harness_b's receive queue to capacity by injecting directly.
     // Power of 10: bounded loop (MSG_RING_CAPACITY is a compile-time constant).
@@ -444,7 +475,7 @@ static bool test_send_peer_queue_full_returns_err_full()
         fill_env.destination_id = 41U;
         fill_env.message_id     = static_cast<uint64_t>(i);
         fill_env.payload_length = 0U;
-        Result r = harness_b.inject(fill_env);
+        Result r = harness_b->inject(fill_env);
         assert(r == Result::OK);
     }
 
@@ -454,13 +485,17 @@ static bool test_send_peer_queue_full_returns_err_full()
     create_test_data_envelope(overflow_env, 40U, 41U, "overflow");
     overflow_env.message_id = 8888ULL;
 
-    Result send_r = harness_a.send_message(overflow_env);
+    Result send_r = harness_a->send_message(overflow_env);
     // Peer-queue-full is a confirmed delivery failure: ERR_FULL must be returned.
     assert(send_r == Result::ERR_FULL);
     assert(send_r != Result::OK);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+
+    delete harness_a;
+    delete harness_b;
+
     return true;
 }
 
@@ -479,27 +514,31 @@ static bool test_send_peer_queue_full_returns_err_full()
 // Verifies: REQ-7.2.4
 static bool test_init_close_without_link_stats_invariant()
 {
-    LocalSimHarness harness;
+    // Dynamic allocation permitted in test fixture setup (CLAUDE.md §1b tests/ exemption)
+    LocalSimHarness* harness = new LocalSimHarness();
 
     TransportConfig cfg;
     create_local_sim_config(cfg, 50U);
-    assert(harness.init(cfg) == Result::OK);
+    assert(harness->init(cfg) == Result::OK);
 
     // Close without calling link().  Before the fix this produced
     // connections_closed=1, connections_opened=0, which would fire the assertion
     // inside get_transport_stats().
-    harness.close();
+    harness->close();
 
     // Re-initialize so we can call get_transport_stats() (requires m_open).
-    assert(harness.init(cfg) == Result::OK);
+    assert(harness->init(cfg) == Result::OK);
 
     TransportStats stats;
-    harness.get_transport_stats(stats);  // Must not abort — invariant holds.
+    harness->get_transport_stats(stats);  // Must not abort — invariant holds.
     // Fixed: guard in close() ensures closed never exceeds opened.
     assert(stats.connections_opened >= stats.connections_closed);
     assert(stats.connections_closed == 0U);  // no link() was called
 
-    harness.close();
+    harness->close();
+
+    delete harness;
+
     return true;
 }
 
@@ -519,8 +558,9 @@ static bool test_init_close_without_link_stats_invariant()
 // Verifies: REQ-5.1.6
 static bool test_localsim_inbound_partition_drops_linked_delivery()
 {
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    // Dynamic allocation permitted in test fixture setup (CLAUDE.md §1b tests/ exemption)
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
 
     TransportConfig cfg_a;
     create_local_sim_config(cfg_a, 60U);
@@ -536,23 +576,23 @@ static bool test_localsim_inbound_partition_drops_linked_delivery()
     cfg_b.channels[0U].impairment.partition_gap_ms     = 1U;    // 1 ms gap before partition fires
     cfg_b.channels[0U].impairment.partition_duration_ms = 5000U; // 5 s partition (long enough)
 
-    assert(harness_a.init(cfg_a) == Result::OK);
-    assert(harness_b.init(cfg_b) == Result::OK);
+    assert(harness_a->init(cfg_a) == Result::OK);
+    assert(harness_b->init(cfg_b) == Result::OK);
 
     // Link A → B only (we only test A-to-B delivery)
-    harness_a.link(&harness_b);
+    harness_a->link(harness_b);
 
     // Send message 1: primes B's partition timer (first call to is_partition_active()
     // initialises the gap timer and returns false — no partition yet).
     MessageEnvelope env1;
     create_test_data_envelope(env1, 60U, 61U, "prime");
     env1.message_id = 7001ULL;
-    Result r = harness_a.send_message(env1);
+    Result r = harness_a->send_message(env1);
     assert(r == Result::OK);  // Message 1 delivered (partition not yet active)
 
     // Drain message 1 from B's queue so we get a clean baseline.
     MessageEnvelope drain_env;
-    r = harness_b.receive_message(drain_env, 50U);
+    r = harness_b->receive_message(drain_env, 50U);
     assert(r == Result::OK);
     assert(drain_env.message_id == 7001ULL);
 
@@ -565,16 +605,20 @@ static bool test_localsim_inbound_partition_drops_linked_delivery()
     create_test_data_envelope(env2, 60U, 61U, "drop me");
     env2.message_id = 7002ULL;
     // send_message returns ERR_IO (current envelope dropped by inbound partition)
-    r = harness_a.send_message(env2);
+    r = harness_a->send_message(env2);
     assert(r == Result::ERR_IO);
 
     // B's receive queue is empty: non-blocking receive must time out.
     MessageEnvelope recv_env;
-    r = harness_b.receive_message(recv_env, 0U);
+    r = harness_b->receive_message(recv_env, 0U);
     assert(r == Result::ERR_TIMEOUT);
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+
+    delete harness_a;
+    delete harness_b;
+
     return true;
 }
 
@@ -597,8 +641,9 @@ static bool test_localsim_inject_bypasses_impairment()
     // Set up a single harness with partition impairment active.
     // We use two harnesses to prime the partition via deliver_from_peer(), then
     // confirm inject() on the receiver harness is unaffected by the partition.
-    LocalSimHarness harness_a;
-    LocalSimHarness harness_b;
+    // Dynamic allocation permitted in test fixture setup (CLAUDE.md §1b tests/ exemption)
+    LocalSimHarness* harness_a = new LocalSimHarness();
+    LocalSimHarness* harness_b = new LocalSimHarness();
 
     TransportConfig cfg_a;
     create_local_sim_config(cfg_a, 62U);
@@ -612,21 +657,21 @@ static bool test_localsim_inject_bypasses_impairment()
     cfg_b.channels[0U].impairment.partition_gap_ms     = 1U;    // 1 ms gap
     cfg_b.channels[0U].impairment.partition_duration_ms = 5000U; // 5 s partition
 
-    assert(harness_a.init(cfg_a) == Result::OK);
-    assert(harness_b.init(cfg_b) == Result::OK);
+    assert(harness_a->init(cfg_a) == Result::OK);
+    assert(harness_b->init(cfg_b) == Result::OK);
 
-    harness_a.link(&harness_b);
+    harness_a->link(harness_b);
 
     // Prime B's partition timer by sending once (initialises the gap timer).
     MessageEnvelope prime_env;
     create_test_data_envelope(prime_env, 62U, 63U, "prime");
     prime_env.message_id = 8001ULL;
-    Result r = harness_a.send_message(prime_env);
+    Result r = harness_a->send_message(prime_env);
     assert(r == Result::OK);  // Delivered before partition fires
 
     // Drain the primed message from B.
     MessageEnvelope drain;
-    r = harness_b.receive_message(drain, 50U);
+    r = harness_b->receive_message(drain, 50U);
     assert(r == Result::OK);
     assert(drain.message_id == 8001ULL);
 
@@ -637,7 +682,7 @@ static bool test_localsim_inject_bypasses_impairment()
     MessageEnvelope blocked_env;
     create_test_data_envelope(blocked_env, 62U, 63U, "blocked");
     blocked_env.message_id = 8002ULL;
-    r = harness_a.send_message(blocked_env);
+    r = harness_a->send_message(blocked_env);
     assert(r == Result::ERR_IO);  // Partition dropped this
 
     // Now inject() directly into B — bypasses deliver_from_peer() and
@@ -646,17 +691,21 @@ static bool test_localsim_inject_bypasses_impairment()
     MessageEnvelope inject_env;
     create_test_data_envelope(inject_env, 62U, 63U, "injected");
     inject_env.message_id = 8003ULL;
-    r = harness_b.inject(inject_env);
+    r = harness_b->inject(inject_env);
     assert(r == Result::OK);  // inject() must succeed regardless of partition state
 
     // receive_message() on B must return the injected message.
     MessageEnvelope recv_env;
-    r = harness_b.receive_message(recv_env, 0U);
+    r = harness_b->receive_message(recv_env, 0U);
     assert(r == Result::OK);
     assert(recv_env.message_id == 8003ULL);  // injected message delivered
 
-    harness_a.close();
-    harness_b.close();
+    harness_a->close();
+    harness_b->close();
+
+    delete harness_a;
+    delete harness_b;
+
     return true;
 }
 

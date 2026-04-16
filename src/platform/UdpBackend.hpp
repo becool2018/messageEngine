@@ -95,6 +95,10 @@ private:
     NodeId            m_peer_node_id;                    ///< NodeId registered by peer HELLO (REQ-6.1.8, REQ-6.2.4)
     bool              m_peer_hello_received;             ///< True after first valid HELLO from peer
     NodeId            m_local_node_id;                   ///< Local NodeId stored by register_local_id()
+    // Power of 10 Rule 3: pre-allocated impairment flush buffer; avoids ~130 KB stack frame
+    // in send_message() and flush_delayed_to_wire(). Zero-initialized at declaration.
+    // Both callers are serialized by the single-threaded send path (SC: HAZ-005, HAZ-006).
+    MessageEnvelope   m_delay_buf[IMPAIR_DELAY_BUF_SIZE] = {};  ///< Impairment flush scratch buffer
 
     // ───────────────────────────────────────────────────────────────────────
     // Private helper methods (Power of 10: small, single-purpose functions)

@@ -16,53 +16,47 @@ enumerated statically without instrumentation.
 
 ---
 
-## Known Limitation — Large Stack Allocations in flush helpers
+## Resolution of DEF-031-1 — flush-path stack allocation (2026-04-15)
 
-**All four socket backends** (`TcpBackend`, `TlsTcpBackend`, `DtlsUdpBackend`, `UdpBackend`)
-**and `LocalSimHarness`** contain `flush_delayed_to_clients()` / `flush_delayed_to_wire()` /
-`send_message()` flush paths that declare a local array:
+**DEF-031-1 resolved.** All five transport backends (`TcpBackend`, `TlsTcpBackend`,
+`DtlsUdpBackend`, `UdpBackend`, `LocalSimHarness`) previously declared a stack-local
+array in each flush helper:
 
 ```cpp
-MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];  // IMPAIR_DELAY_BUF_SIZE = 32
+MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE];  // was 32 × 4,144 = 132,608 bytes (~130 KB)
 ```
 
-`sizeof(MessageEnvelope)` = **4,144 bytes** (MSG_MAX_PAYLOAD_BYTES 4096 + header fields).
-Total per-call stack allocation: **32 × 4,144 = 132,608 bytes (~130 KB)**.
+**Fix applied:** `delayed[]` replaced with a pre-allocated private member
+`MessageEnvelope m_delay_buf[IMPAIR_DELAY_BUF_SIZE] = {}` in each class. The fix matches
+the existing `m_retry_buf` / `m_timeout_buf` pattern in `DeliveryEngine`.
 
-This is the actual worst-case stack allocation. The "~764 B" figure quoted below in the
-per-chain estimates is the worst-case **excluding** this flush path.
+**Test infrastructure change (required by fix):** Adding the 132 KB member raises each
+backend struct from ~540 KB to ~674 KB. Stack-allocating a ~674 KB struct in test thread
+functions caused SIGSEGV on macOS ARM64 + LLVM coverage (lazy stack-page-mapping). All
+test functions that previously declared backends as stack-local variables now heap-allocate
+them (`new`/`delete`); this is permitted by the test relaxations in CLAUDE.md §1b
+(dynamic allocation in test fixture setup and teardown).
 
-**Why this cannot simply be moved to a member variable:**
-The backends (`TcpBackend`, `TlsTcpBackend`, etc.) are themselves large structs (~540 KB)
-due to their embedded `RingBuffer` and `ImpairmentEngine` member arrays. Adding a 132 KB
-member `m_delay_buf` would increase each backend to ~674 KB. Tests stack-allocate backend
-objects; on macOS ARM64 with LLVM coverage instrumentation, the resulting ~674 KB
-stack-frame allocation overflows the lazy stack-page-mapping threshold and causes `SIGSEGV`
-during constructor execution (DEF-031-1 investigation, 2026-04-15). A correct fix would
-require heap-allocating backends in all test functions (~60+ functions across 4 test files).
+**Stack impact:**
+- Flush-path frame (`flush_delayed_to_clients()` / `flush_delayed_to_wire()`): ~130 KB → ~48 B
+- Chain 3 (retry pump, full path): ~130 KB → ~592 B
+- New worst case by stack size: Chain 5 (DTLS outbound) at ~764 B (~1,326 B with Logger)
 
-**Static-local approach is also unsafe:** A function-static buffer would be shared across
-instances. Since TcpBackend tests run server and client in separate threads simultaneously,
-a shared static would introduce a data race.
-
-**For embedded porting:** platforms with per-thread stacks ≤ 512 KB must use one of:
-(a) heap-allocate or statically declare a single backend instance (the local array then lives
-    in the thread's stack only for the duration of the flush call, not as a permanent member), or
-(b) change the backends to hold `m_delay_buf` as a member (pre-allocated at init time) and
-    ensure tests heap-allocate backends rather than declaring them as local variables.
-
-Validation with a stack-analysis tool (avstack, StackAnalyzer) is mandatory before deployment
-on any target with < 1 MB stack headroom.
+**Embedded porting note:** With this fix applied, all backends now store `m_delay_buf` as
+a pre-allocated member. Applications targeting embedded platforms must heap-allocate or
+statically declare backend objects (not stack-local) to avoid ~674 KB stack frames during
+object construction. Validation with a stack-analysis tool (avstack, StackAnalyzer) is
+still recommended before deployment on any target with < 1 MB stack headroom.
 
 ---
 
 ## Worst-Case Call Chains
 
 Seven independent worst-case paths are identified: send, receive, retry, ACK sweep, DTLS
-outbound, DTLS inbound, and HELLO registration — plus the impairment flush path documented
-above. The worst-case per-path stack cost is ~130 KB (a single `MessageEnvelope delayed[32]`
-array). `DtlsUdpBackend::send_message()` calls `flush_delayed_to_wire()` from `receive_message()`,
-not from `send_message()`; the two arrays are therefore never simultaneously live.
+outbound, DTLS inbound, and HELLO registration. All flush helpers now use `m_delay_buf`
+(a pre-allocated member) rather than a stack-local array (DEF-031-1 resolved).
+`DtlsUdpBackend::send_message()` calls `flush_delayed_to_wire()` from `receive_message()`,
+not from `send_message()`; the two call paths are therefore never simultaneously live.
 
 ### Chain 1 — Outbound message send
 
@@ -113,13 +107,13 @@ main()  [~64 B]
                       └─ DeliveryEngine::send_fragments()  [~48 B]
                            └─ DeliveryEngine::send_via_transport()  [~48 B]
                                 └─ TcpBackend::send_message()  [~48 B]
-                                     └─ TcpBackend::flush_delayed_to_clients()  [~132,608 B]  ← MessageEnvelope delayed[32]
+                                     └─ TcpBackend::flush_delayed_to_clients()  [~48 B]  ← m_delay_buf is now a pre-allocated member (DEF-031-1 resolved)
                                           └─ TcpBackend::send_one_delayed()  [~48 B]
                                                └─ Serializer::serialize()  [~32 B]
 ```
 
 **Depth:** 11 frames  ← **worst-case frame depth across all chains**
-**Estimated peak stack:** ~132,608 B (~130 KB — dominated by `delayed[IMPAIR_DELAY_BUF_SIZE]`)
+**Estimated peak stack:** ~592 B
 
 ---
 
@@ -153,10 +147,9 @@ main()  [~64 B]
                                      └─ ImpairmentEngine::queue_to_delay_buf()  [~32 B]
 ```
 
-Note: `flush_delayed_to_wire()` (which declares `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]`,
-~130 KB) is called only from `DtlsUdpBackend::receive_message()`, not from `send_message()`.
-The two paths are therefore never simultaneously live. The ~130 KB allocation appears on the
-DTLS inbound flush path (Chain 6), not here.
+Note: `flush_delayed_to_wire()` uses `m_delay_buf` (a pre-allocated member, DEF-031-1 resolved)
+and is called only from `DtlsUdpBackend::receive_message()`, not from `send_message()`.
+The two call paths are therefore never simultaneously live.
 
 **`ssl_handshake` note:** `run_dtls_handshake()` (called during `init()`, not at runtime) also
 dispatches through `IMbedtlsOps::ssl_handshake()` → `MbedtlsOpsImpl::ssl_handshake()` for
@@ -228,50 +221,44 @@ add 2 frames below `recv_one_dtls_datagram()`; they are not nested within each o
 |-------|---------------|---------------------|
 | 1 — Outbound send (TCP/UDP) | 9 | ~748 B |
 | 2 — Inbound receive (TCP/UDP) | 9 | ~480 B |
-| 3 — Retry pump (with flush) | **11** | **~132,608 B (~130 KB)** |
+| 3 — Retry pump (with flush) | **11** | ~592 B |
 | 4 — ACK timeout sweep | 6 | ~352 B |
-| 5 — DTLS outbound send | 9 | ~764 B |
+| 5 — DTLS outbound send | 9 | **~764 B** (~1,326 B with Logger) |
 | 6 — DTLS inbound receive | 8 | ~568 B |
 | 7 — HELLO registration (init-phase only) | 5–6 | ~256 B |
-| **Worst case (frame depth)** | **11 (Chain 3 — retry pump with send_fragments)** | **~132,608 B (~130 KB)** |
-| **Worst case (stack size)** | **~130 KB (single delayed[] — flush path in all five backends)** | |
+| **Worst case (frame depth)** | **11 (Chain 3 — retry pump with send_fragments)** | ~592 B |
+| **Worst case (stack size)** | **~764 B (Chain 5 — DTLS outbound; ~1,326 B with Logger)** | |
 
 The worst-case **frame depth** is **11 frames** (Chain 3 — retry pump with `send_fragments()`).
-The worst-case **stack size** is **~130 KB** (a single `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]`
-array on the flush path; present in `TcpBackend`, `TlsTcpBackend`, `DtlsUdpBackend`, `UdpBackend`,
-and `LocalSimHarness`). For non-flush paths the worst-case stack is the "~764 B" non-flush estimate.
+The worst-case **stack size** is **~764 B** (Chain 5, DTLS outbound; ~1,326 B including the
+Logger frame). Chain 3 is now ~592 B after DEF-031-1 was resolved.
 
 DEF-002-1 resolved (2026-04-02): `m_retry_buf` and `m_timeout_buf` moved from stack-local
-arrays to private member arrays in `DeliveryEngine`, zero-initialized in `init()`. Chains 3
-and 4 no longer carry those oversized stack allocations — but the `delayed[]` array in the
-flush helpers remains the dominant stack consumer.
+arrays to private member arrays in `DeliveryEngine`, zero-initialized in `init()`.
+DEF-031-1 resolved (2026-04-15): `delayed[]` in flush helpers replaced with member
+`m_delay_buf` in all five backends; tests heap-allocate backends. Flush-path worst case:
+~130 KB → ~592 B (Chain 3). Chain 5 (DTLS outbound, ~764 B) is now the stack-size worst case.
 
 ---
 
 ## Platform Stack Budget
 
-| Platform | Default per-thread stack | Headroom vs. worst case (~130 KB flush path) |
-|----------|--------------------------|----------------------------------------------|
-| macOS | 8 MB (main), 512 KB (pthreads) | ~61× (main) / ~4× (pthreads) |
-| Linux | 8 MB (main), 8 MB (pthreads) | ~61× |
+| Platform | Default per-thread stack | Headroom vs. worst case (~764 B, Chain 5) |
+|----------|--------------------------|-------------------------------------------|
+| macOS | 8 MB (main), 512 KB (pthreads) | >10 000× |
+| Linux | 8 MB (main), 8 MB (pthreads) | >10 000× |
 
-No stack overflow risk exists on macOS/Linux at the default stack sizes for the main thread.
-The **~130 KB** flush-path worst case (a single `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]`
-array) makes this codebase **unsuitable for embedded targets with ≤ 256 KB stack** without
-first restructuring the flush helpers to use a member buffer rather than a stack-local array.
+No stack overflow risk exists on macOS/Linux at the default stack sizes. The flush-path
+worst case is now ~592 B (Chain 3, after DEF-031-1 resolved); the overall worst case by
+stack size is Chain 5 (DTLS outbound) at ~764 B (~1,326 B with Logger). Both are well
+within any reasonable stack budget.
 
-pthreads on macOS default to 512 KB; the flush path (~130 KB) leaves ~4× headroom on that
-configuration — adequate for typical use but worth monitoring. Consider calling
-`pthread_attr_setstacksize()` with ≥ 1 MB for application threads that invoke any flush path
-on embedded or resource-constrained deployments.
-
-**Embedded porting guidance:** To fix the ~130 KB stack cost for constrained targets:
-1. Heap-allocate or statically declare the backend objects (not stack-local) in your application.
-2. Move the `delayed[]` array to a pre-allocated private member `m_delay_buf[IMPAIR_DELAY_BUF_SIZE]`
-   in each backend class.
-3. If you do step 2, ensure test code also heap-allocates backend objects rather than
-   stack-declaring them (POSIX ARM64 coverage builds require this due to lazy stack-page mapping
-   interacting poorly with ~674 KB stack frames).
+**Embedded porting note:** Backends now store `m_delay_buf[IMPAIR_DELAY_BUF_SIZE]` as a
+pre-allocated member (~132 KB per backend struct). Applications targeting constrained
+platforms must heap-allocate or statically declare backend objects rather than
+stack-declaring them to avoid ~674 KB stack frames during object construction.
+Validation with a stack-analysis tool (avstack, StackAnalyzer) is recommended for
+any target with < 1 MB stack headroom.
 
 ---
 
@@ -309,18 +296,17 @@ worst-case chain because:
    LOG_* macros; the 4-frame Logger chain is already implicitly present in Chain 3's leaf
    calls. No new worst-case depth is introduced.
 
-2. **Stack size:** The 512-byte Logger buffer is dwarfed by the `MessageEnvelope delayed[32]`
-   (~130 KB) allocation in `flush_delayed_to_clients()` and `flush_delayed_to_wire()`. The
-   Logger frame adds at most ~562 B to the ~130 KB flush-path worst case — less than 0.5%
-   change; the Chain 3 and Chain 5 estimates remain accurate within their stated margin.
+2. **Stack size:** After DEF-031-1 was resolved, the flush-path worst case (Chain 3) is ~592 B.
+   The Logger frame (~562 B) raises Chain 3 to at most ~1,154 B when a LOG_* macro fires
+   within the flush path — still well below any platform stack limit. Chain 5 (~764 B) rises
+   to ~1,326 B with Logger, which remains the size worst case.
 
-3. **Non-flush paths:** On non-flush paths the worst-case stack was stated as "~764 B".
-   A call to `Logger::log()` on such a path adds ~562 B, raising the non-flush estimate
-   to at most ~1,326 B — still well within the platform headroom of ≥ 8 MB (macOS/Linux).
+3. **Stack-size worst case (Chain 5):** The worst case by stack size is Chain 5 at ~764 B.
+   A call to `Logger::log()` on that path adds ~562 B, raising the estimate to ~1,326 B —
+   still well within the platform headroom of ≥ 8 MB (macOS/Linux).
 
-**Updated non-flush worst-case estimate:** ~1,326 B (previously ~764 B; difference is the
-Logger::log() buf[512] + locals). This is below the 256-byte mention threshold only for the
-parent caller, not the Logger frame itself; all platform headroom figures remain valid.
+**Updated worst-case estimate:** ~1,326 B (Chain 5 + Logger; previously the dominant concern
+was the ~130 KB flush path, which is now resolved). All platform headroom figures remain valid.
 
 The chain structure is documented here for completeness per the stack-analysis update
 policy. No entry in the Summary table requires revision; the floor and ceiling estimates
@@ -331,10 +317,10 @@ are unchanged.
 ## Update Trigger
 
 This document must be updated when:
-- A new function is added that creates a larger on-stack buffer than `delayed[IMPAIR_DELAY_BUF_SIZE]` (~130 KB).
-- `IMPAIR_DELAY_BUF_SIZE` or `sizeof(MessageEnvelope)` changes (both affect the flush-path worst case).
-- `flush_delayed_to_clients()` / `flush_delayed_to_wire()` is restructured to use a member buffer (worst case drops).
+- A new function is added that creates a stack-allocated buffer > 256 bytes.
+- `IMPAIR_DELAY_BUF_SIZE` or `sizeof(MessageEnvelope)` changes (affects `m_delay_buf` size and Chain 3/5 estimates).
 - A new call chain adds frames beyond depth 11.
+- A new thread entry point is added.
 - A new thread entry point is added (start a new chain analysis from that entry point).
 
 Frame size estimates are conservative upper bounds; actual sizes depend on compiler

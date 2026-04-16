@@ -629,3 +629,7 @@ The following hazards are mitigated exclusively in init-phase initialisation or 
 ---
 
 *End of HAZARD_ANALYSIS.md — update this document whenever a new HAZ entry, FMEA row, or SC classification change is required per CLAUDE.md §11.*
+
+---
+
+**Review record — INSP-033 (2026-04-15):** SC-annotated files changed (all five transport backends). Change is structural only: `MessageEnvelope delayed[IMPAIR_DELAY_BUF_SIZE]` moved from stack-local to pre-allocated member `m_delay_buf` in each backend class. No SC function behavior changed; no new control-flow paths introduced; no existing HAZ entry is invalidated; no new HAZ entries required. All SC function annotations remain accurate. No FMEA rows require revision. Reviewed and confirmed N/A.

@@ -110,6 +110,10 @@ private:
     bool              m_open;              ///< Transport open/closed state
     uint32_t          m_connections_opened; ///< REQ-7.2.4: successful link() events
     uint32_t          m_connections_closed; ///< REQ-7.2.4: close() events while linked
+    // Power of 10 Rule 3: pre-allocated impairment flush buffer; avoids ~130 KB stack frame
+    // in send_message(). Zero-initialized at declaration. Single-threaded use only —
+    // LocalSimHarness is test-only; always used from a single test thread (SC: HAZ-005, HAZ-006).
+    MessageEnvelope   m_delay_buf[IMPAIR_DELAY_BUF_SIZE] = {}; ///< Impairment flush scratch buffer
 
     /// Inject each envelope in @p batch into the peer's receive queue.
     /// Tracks whether the current envelope (matched by source_id + message_id) failed.
