@@ -272,7 +272,7 @@ two categories is a defect, not a ceiling.
 | core/DuplicateFilter.cpp | 67 | 18 | 73.13% | ≥73% | SC |
 | core/AckTracker.cpp | 152 | 35 | 76.97% | ≥76% | SC |
 | core/RetryManager.cpp | 157 | 36 | 77.07% | ≥77% | SC |
-| core/DeliveryEngine.cpp | 479 | ~114 | ~76.2% | ≥75% | SC |
+| core/DeliveryEngine.cpp | 485 | 118 | 75.67% | ≥75% | SC |
 | core/AssertState.cpp | 2 | 1 | 50.00% | ≥50% | NSC-infra |
 | platform/ImpairmentEngine.cpp | 256 | 66 | 74.22% | ≥74% | SC |
 | platform/ImpairmentConfigLoader.cpp | 174 | 28 | 83.91% | ≥83% | SC |
@@ -673,7 +673,25 @@ All branches reachable through the public API in a correctly-configured test har
 are 100% covered. The ~114 remaining missed branches are entirely accounted for by
 category (a) and category (b) above.
 
-Threshold: **≥75%** (maximum achievable; CI run will confirm exact post-rounds-14+6 figure).
+**2026-04-16 (round 20 — REQ-3.3.6 outbound sequence reset fix):**
+`reset_peer_ordering()` extended with a bounded loop over `m_seq_state[]` to reset
+the outbound sequence counter for the reconnecting peer (dst == src). This fixes the
+bug where a fresh client received seq=N+1 from the server after reconnect instead of
+seq=1. The fix adds 6 new branch outcomes:
+- `if (m_seq_state[i].active && (m_seq_state[i].dst == src))` True/False: covered by
+  existing `test_de_drain_hello_reconnects_via_transport` and `test_de_reset_peer_ordering_*`
+  tests (a peer slot exists after at least one send).
+- Loop-exhaustion path (no slot found for dst==src): new architectural gap — only
+  reachable when `reset_peer_ordering()` is called for a peer that has never been
+  an outbound destination. This cannot occur in any current public-API path (HELLO
+  is only queued after a connection that has already exchanged messages), so this
+  is category (b): architecturally-impossible through the public API.
+  LLVM contribution: 2 additional missed branch outcomes.
+
+Result: 479 → 485 branches, 114 → 118 missed, ~76.2% → 75.67%. No regression
+vs ≥75% threshold.
+
+Threshold: **≥75%** (maximum achievable).
 
 ---
 
