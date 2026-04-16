@@ -1935,3 +1935,68 @@ Moderator: Don Jessup — 2026-04-15. DEF-031-1 closed FIX. All five backends up
 updated: Chain 3 ~130 KB → ~592 B; Chain 5 (~764 B) is now the stack-size worst case.
 `make lint`, `make run_tests` (24/24), `make check_traceability` all PASS.
 Inspection INSP-033 closed PASS.
+
+**Post-close finding (2026-04-16):** Runtime testing revealed INSP-033's fix is
+incomplete. Stale `AckTracker` and `RetryManager` entries for the reconnecting peer
+are not cancelled; they retry old envelopes (with pre-reset sequence numbers) on the
+new connection, corrupting new-session ordered delivery. Tracked in INSP-034.
+
+---
+
+### INSP-034 — Complete REQ-3.3.6 reconnect reset: cancel in-flight AckTracker/RetryManager entries on peer reconnect (2026-04-16)
+
+#### Header
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-16 |
+| Author      | TBD |
+| Moderator   | Don Jessup |
+| Reviewer    | Don Jessup |
+| Branch      | TBD |
+| Outcome     | IN PROGRESS |
+
+#### Scope
+
+Follow-on to INSP-033. INSP-033 fixed the outbound sequence counter reset but left
+`AckTracker` and `RetryManager` entries for the reconnecting peer (`dst == src`) live.
+Those entries retry pre-reset envelopes on the new connection, inserting old sequence
+numbers into the new session's ordered delivery stream.
+
+This inspection covers:
+
+1. `src/core/Types.hpp` — add `RECONNECT_CANCEL` to `ObsEvent` enum.
+2. `src/core/AckTracker.hpp/.cpp` — new SC method `cancel_peer(NodeId dst)`: iterate
+   slots, cancel all entries where `dst` matches, return count cancelled.
+3. `src/core/RetryManager.hpp/.cpp` — new SC method `cancel_peer(NodeId dst)`: iterate
+   entries, cancel all matching, return count cancelled.
+4. `src/core/DeliveryEngine.cpp` — `reset_peer_ordering(src)` extended to call
+   `m_ack_tracker.cancel_peer(src)` and `m_retry.cancel_peer(src)`; log `WARN_HI` per
+   cancelled entry; push `RECONNECT_CANCEL` event to observability ring.
+5. New tests in `test_AckTracker.cpp`, `test_RetryManager.cpp`, and
+   `test_DeliveryEngine.cpp` covering the cancel paths and the `RECONNECT_CANCEL` event.
+6. Documentation: `HAZARD_ANALYSIS.md`, `COVERAGE_CEILINGS.md`, `TRACEABILITY_MATRIX.md`,
+   `use_cases/UC_72_peer_reconnect_ordering_reset.md`, `STATE_MACHINES.md`,
+   `WCET_ANALYSIS.md`.
+
+#### Checklist
+
+| Item | Status |
+|------|--------|
+| `make lint` PASS | PENDING |
+| `make run_tests` PASS | PENDING |
+| `make check_traceability` PASS | PENDING |
+| `make coverage` — no SC function regression | PENDING |
+| `docs/COVERAGE_CEILINGS.md` updated | PENDING |
+| `docs/HAZARD_ANALYSIS.md` updated | PENDING |
+| `docs/STATE_MACHINES.md` updated | PENDING |
+| `docs/WCET_ANALYSIS.md` updated | PENDING |
+| `docs/use_cases/UC_72` updated | PENDING |
+
+#### Defects found
+
+TBD — inspection not yet complete.
+
+#### Moderator sign-off
+
+Pending.
