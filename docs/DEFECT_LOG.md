@@ -1865,3 +1865,62 @@ truncation/padding boundary conditions (T-2.15–T-2.18) and a rename of T-2.13.
 #### Moderator sign-off
 
 Moderator: Don Jessup — 2026-04-15. `make lint`, `make run_tests` (40/40 Logger tests), and `make check_traceability` all PASS. `make coverage` confirms Logger.cpp 70.31% — no regression from round 17 baseline. `docs/COVERAGE_CEILINGS.md` updated for `func != nullptr` parameter rename and round-18 test additions. No defects found. Inspection INSP-032 closed PASS.
+
+---
+
+### INSP-033 — fix(core): reset outbound seq counter on peer reconnect (REQ-3.3.6) (2026-04-16)
+
+#### Header
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-16 |
+| Author      | Claude Sonnet 4.6 (AI-assisted) |
+| Moderator   | Don Jessup |
+| Reviewer    | Don Jessup |
+| Branch      | fix/reconnect-seq-reset-2026-04 |
+| Outcome     | PASS |
+
+#### Scope
+
+Single-file change: `src/core/DeliveryEngine.cpp` — `reset_peer_ordering()`.
+
+Added a bounded loop over `m_seq_state[]` (ACK_TRACKER_CAPACITY iterations) inside
+`reset_peer_ordering(src)` to reset the outbound sequence counter for `dst == src`.
+This fixes a missing half of the REQ-3.3.6 peer-reconnect reset: the inbound
+`OrderingBuffer` was already reset (preventing stale expected-seq from discarding
+the new session's seq=1 messages), but the outbound `SeqState` was not reset,
+causing the server to send seq=N+1 to a reconnecting client that expected seq=1.
+
+Root cause confirmed by runtime test:
+- Client 1: 0.6 s, 5/5 echo replies received.
+- Client 2 (before fix): 9.0 s, 0/5 — all held in ordering buffer as out-of-order.
+- Client 2 (after fix): 0.4 s, 5/5 echo replies received.
+
+HAZ-016 updated to cover both the inbound (already mitigated) and outbound (newly
+mitigated) stall mechanisms. FMEA table extended with new row for the outbound case.
+
+#### Checklist
+
+| Item | Status |
+|------|--------|
+| `make lint` PASS | PASS |
+| `make run_tests` PASS (24/24) | PASS |
+| `make check_traceability` PASS | PASS |
+| `make coverage` — DeliveryEngine.cpp 75.67% (≥75% threshold; no regression) | PASS |
+| `docs/COVERAGE_CEILINGS.md` round-20 note + table row updated (479→485 branches) | PASS |
+| `docs/HAZARD_ANALYSIS.md` HAZ-016 description and FMEA table updated | PASS |
+
+#### Defects found
+
+None. The change is a pure fix: adds missing state reset to an existing function.
+Power of 10 Rule 2 (bounded loop) and Rule 5 (assertion density unchanged at 2)
+are satisfied. CC increases from ≤5 to ≤6, within the ≤10 limit.
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-16. `make lint`, `make run_tests` (24/24), and
+`make check_traceability` all PASS. `make coverage` confirms DeliveryEngine.cpp
+75.67% — above ≥75% threshold, no regression. HAZ-016 and FMEA updated to document
+both inbound and outbound reconnect-stall mechanisms. No defects found.
+Inspection INSP-033 closed PASS.
