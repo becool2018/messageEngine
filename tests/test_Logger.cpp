@@ -17,7 +17,7 @@
  * @brief Unit tests for Logger, PosixLogClock, PosixLogSink, and their test doubles.
  *
  * Covers T-1.1 through T-1.4 (Logger::init),
- *        T-2.1 through T-2.14 (Logger::log format and metadata),
+ *        T-2.1 through T-2.18 (Logger::log format and metadata),
  *        T-2.8W through T-2.10W (log_wall variants),
  *        T-3.1 through T-3.5 (PosixLogClock nominal + fault injection),
  *        T-4.1 through T-4.4 (PosixLogSink nominal + fault injection),
@@ -141,7 +141,7 @@ static void test_T2_1_severity_tags()
     logger_reinit_checked(&PosixLogClock::instance(), &PosixLogSink::instance());
 }
 
-// T-2.2: module, file, line appear correctly; no func field present.
+// T-2.2: module and func:line appear correctly in log output.
 // Verifies: REQ-7.1.1
 static void test_T2_2_module_file_line()
 {
@@ -155,17 +155,15 @@ static void test_T2_2_module_file_line()
     const char* line = sink.latest();
     assert(line != nullptr);
     assert(strstr(line, "TestModule") != nullptr);
-    // file: should contain basename "test_Logger.cpp"
-    assert(strstr(line, "test_Logger.cpp") != nullptr);
-    // line number should appear somewhere
+    // func: first 15 chars of "test_T2_2_module_file_line" → "test_T2_2_modul"
+    assert(strstr(line, "test_T2_2_modul") != nullptr);
+    // line number separator should appear
     assert(strstr(line, ":") != nullptr);
-    // No "()" function name field: verify no func wrapper
-    // (The format is [file:line] not [file:line:func])
     (void)printf("T-2.2 PASS\n");
     logger_reinit_checked(&PosixLogClock::instance(), &PosixLogSink::instance());
 }
 
-// T-2.3: LOG_FILE strips directory prefix — only filename appears.
+// T-2.3: func field contains function name, not a file path.
 // Verifies: REQ-7.1.1
 static void test_T2_3_log_file_basename()
 {
@@ -178,13 +176,10 @@ static void test_T2_3_log_file_basename()
     assert(sink.count() == 1U);
     const char* line = sink.latest();
     assert(line != nullptr);
-    // Filename without path should appear.
-    assert(strstr(line, "test_Logger.cpp") != nullptr);
-    // Path separator should not appear in the file field.
-    // (We can't guarantee "/" is absent from the whole line due to
-    //  module/message content, but we can check there's no "tests/" prefix.)
-    // Just verify basename is present (already done above).
-    assert(strstr(line, "tests/test_Logger.cpp") == nullptr);
+    // func: first 15 chars of "test_T2_3_log_file_basename" → "test_T2_3_log_f"
+    assert(strstr(line, "test_T2_3_log_f") != nullptr);
+    // No ".cpp" extension should appear in the func field.
+    assert(strstr(line, ".cpp") == nullptr);
     (void)printf("T-2.3 PASS\n");
     logger_reinit_checked(&PosixLogClock::instance(), &PosixLogSink::instance());
 }
@@ -276,7 +271,7 @@ static void test_T2_7_no_wall_clock_in_standard()
     const char* line = sink.latest();
     assert(line != nullptr);
     // The distinctive wall timestamp "9999" should NOT appear in the standard log.
-    // Standard format: [0000001.000000][pid][sev][tid][module][file:line] ...
+    // Standard format: [0000001.000000][pid][sev][tid][module][func:line] ...
     // Wall format would prepend [9999.999999][...
     // Check that "9999999" is absent (the wall sec part).
     assert(strstr(line, "9999999") == nullptr);
@@ -401,22 +396,23 @@ static void test_T2_9_header_truncation()
     logger_reinit_checked(&PosixLogClock::instance(), &PosixLogSink::instance());
 }
 
-// T-2.13: Output contains no func field and no '()' wrapping a function name.
+// T-2.13: Long function name — first 15 chars appear, remainder dropped.
 // Verifies: REQ-7.1.1
-static void test_T2_13_no_func_field()
+static void test_T2_13_func_truncated()
 {
     FakeLogClock  clock;
     RingLogSink   sink;
     logger_reinit_checked(&clock, &sink);
 
-    LOG_INFO("M", "no func field");
+    LOG_INFO("M", "func truncated");
 
     assert(sink.count() == 1U);
     const char* line = sink.latest();
     assert(line != nullptr);
-    // The format [file:line] has a ':' for line number, not for function.
-    // If __func__ were in the format we'd see "test_T2_13_no_func_field".
-    assert(strstr(line, "test_T2_13_no_func_field") == nullptr);
+    // func: first 15 chars of "test_T2_13_func_truncated" → "test_T2_13_func"
+    // The full name is absent; only the truncated form appears.
+    assert(strstr(line, "test_T2_13_func") != nullptr);
+    assert(strstr(line, "test_T2_13_func_truncated") == nullptr);
     (void)printf("T-2.13 PASS\n");
     logger_reinit_checked(&PosixLogClock::instance(), &PosixLogSink::instance());
 }
@@ -439,6 +435,94 @@ static void test_T2_14_bare_pid_tid()
     assert(strstr(line, "TID:") == nullptr);
     assert(strstr(line, "12345") != nullptr);
     (void)printf("T-2.14 PASS\n");
+    logger_reinit_checked(&PosixLogClock::instance(), &PosixLogSink::instance());
+}
+
+// T-2.15: log_wall() func field appears correctly in wall-variant output.
+// Verifies: REQ-7.1.1
+static void test_T2_15_wall_func_field()
+{
+    FakeLogClock  clock;
+    RingLogSink   sink;
+    clock.set_wall_us(1000000000ULL);
+    clock.set_mono_us(1000000ULL);
+    logger_reinit_checked(&clock, &sink);
+
+    LOG_INFO_WALL("M", "wall func field");
+
+    assert(sink.count() == 1U);
+    const char* line = sink.latest();
+    assert(line != nullptr);
+    // func: first 15 chars of "test_T2_15_wall_func_field" → "test_T2_15_wall"
+    assert(strstr(line, "test_T2_15_wall") != nullptr);
+    // Full name must not appear (truncated at 15).
+    assert(strstr(line, "test_T2_15_wall_func_field") == nullptr);
+    (void)printf("T-2.15 PASS\n");
+    logger_reinit_checked(&PosixLogClock::instance(), &PosixLogSink::instance());
+}
+
+// T-2.16: Short function name (≤15 chars) — no trailing-space padding.
+// %.15s truncates only; shorter names are not padded with spaces.
+// Verifies: REQ-7.1.1
+static void test_T2_16_short_func_no_padding()
+{
+    FakeLogClock  clock;
+    RingLogSink   sink;
+    logger_reinit_checked(&clock, &sink);
+
+    // Pass a short func name directly (4 chars: "send").
+    Logger::log(Severity::INFO, "send", static_cast<int>(__LINE__), "M", "short func");
+
+    assert(sink.count() == 1U);
+    const char* line = sink.latest();
+    assert(line != nullptr);
+    // "send" must appear.
+    assert(strstr(line, "send") != nullptr);
+    // "send " (with trailing space) must not appear — no padding.
+    assert(strstr(line, "send ") == nullptr);
+    (void)printf("T-2.16 PASS\n");
+    logger_reinit_checked(&PosixLogClock::instance(), &PosixLogSink::instance());
+}
+
+// T-2.17: Exactly 15-char function name — appears in full, no truncation.
+// Verifies: REQ-7.1.1
+static void test_T2_17_func_exactly_15_chars()
+{
+    FakeLogClock  clock;
+    RingLogSink   sink;
+    logger_reinit_checked(&clock, &sink);
+
+    // "abcdefghijklmno" is exactly 15 characters.
+    Logger::log(Severity::INFO, "abcdefghijklmno", static_cast<int>(__LINE__), "M", "15 char func");
+
+    assert(sink.count() == 1U);
+    const char* line = sink.latest();
+    assert(line != nullptr);
+    // All 15 chars must appear.
+    assert(strstr(line, "abcdefghijklmno") != nullptr);
+    (void)printf("T-2.17 PASS\n");
+    logger_reinit_checked(&PosixLogClock::instance(), &PosixLogSink::instance());
+}
+
+// T-2.18: 16-char function name — first 15 appear, 16th char is dropped.
+// Verifies: REQ-7.1.1
+static void test_T2_18_func_16_chars_truncated()
+{
+    FakeLogClock  clock;
+    RingLogSink   sink;
+    logger_reinit_checked(&clock, &sink);
+
+    // "abcdefghijklmnop" is 16 characters; only first 15 must appear.
+    Logger::log(Severity::INFO, "abcdefghijklmnop", static_cast<int>(__LINE__), "M", "16 char func");
+
+    assert(sink.count() == 1U);
+    const char* line = sink.latest();
+    assert(line != nullptr);
+    // First 15 chars present.
+    assert(strstr(line, "abcdefghijklmno") != nullptr);
+    // Full 16-char string must not appear.
+    assert(strstr(line, "abcdefghijklmnop") == nullptr);
+    (void)printf("T-2.18 PASS\n");
     logger_reinit_checked(&PosixLogClock::instance(), &PosixLogSink::instance());
 }
 
@@ -679,8 +763,12 @@ int main()
     test_T2_10W_wall_timestamp_value();
     test_T2_8_no_variadic_args();
     test_T2_9_header_truncation();
-    test_T2_13_no_func_field();
+    test_T2_13_func_truncated();
     test_T2_14_bare_pid_tid();
+    test_T2_15_wall_func_field();
+    test_T2_16_short_func_no_padding();
+    test_T2_17_func_exactly_15_chars();
+    test_T2_18_func_16_chars_truncated();
 
     // T-3: PosixLogClock
     test_T3_1_wall_nonzero();

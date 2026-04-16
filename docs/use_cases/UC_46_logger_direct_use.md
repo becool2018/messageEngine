@@ -11,7 +11,7 @@
 - **Trigger:** Source code in `src/` or a user application calls one of the `LOG_*` macros
   (e.g., `LOG_WARN_HI("AckTracker", "ack timeout mid=0x%08x", id)`) to emit a structured
   log line.
-- **Goal:** Write a formatted log line containing severity, module, file:line,
+- **Goal:** Write a formatted log line containing severity, module, func:line,
   monotonic timestamp, PID, TID, and message text to the configured `ILogSink`.
   The call is synchronous, non-allocating, and always returns.
 - **Success outcome:** A formatted log line is delivered to the `ILogSink`
@@ -24,7 +24,7 @@
 ## 2. Entry Points
 
 ```cpp
-// src/core/Logger.hpp — preferred public interface (macros inject file:line)
+// src/core/Logger.hpp — preferred public interface (macros inject func:line)
 LOG_INFO(module, fmt, ...)
 LOG_WARN_LO(module, fmt, ...)
 LOG_WARN_HI(module, fmt, ...)
@@ -37,9 +37,9 @@ LOG_WARN_HI_WALL(module, fmt, ...)
 LOG_FATAL_WALL(module, fmt, ...)
 
 // Underlying static method (called by macros; not called directly in src/)
-static void Logger::log(Severity sev, const char* file, int line,
+static void Logger::log(Severity sev, const char* func, int line,
                         const char* module, const char* fmt, ...);
-static void Logger::log_wall(Severity sev, const char* file, int line,
+static void Logger::log_wall(Severity sev, const char* func, int line,
                              const char* module, const char* fmt, ...);
 
 // Initialization (called once in main / test setup)
@@ -56,12 +56,12 @@ static Result Logger::init(Severity min_level, ILogClock* clock, ILogSink* sink)
    is `nullptr`.
 
 **Per-log-call path (via `LOG_WARN_HI("AckTracker", "ack timeout mid=0x%08x", id)`):**
-1. Macro expands to `Logger::log(Severity::WARNING_HI, LOG_FILE, __LINE__, "AckTracker", "ack timeout mid=0x%08x", id)`.
+1. Macro expands to `Logger::log(Severity::WARNING_HI, __func__, __LINE__, "AckTracker", "ack timeout mid=0x%08x", id)`.
 2. `Logger::log()` acquires monotonic timestamp: `s_clock->mono_us()` (virtual call to
    `ILogClock` — `PosixLogClock` or test-injected mock).
 3. Formats header into `buf[512]`:
-   `snprintf(buf, sizeof(buf), "[%llu.%06llu][%u][%s][%u][%s][%s:%d] ", ...)`
-   with mono_sec, mono_us, pid, severity_tag, tid, module, file, line.
+   `snprintf(buf, sizeof(buf), "[%llu.%06llu][%u][%s][%u][%s][%.15s:%d] ", ...)`
+   with mono_sec, mono_us, pid, severity_tag, tid, module, func (first 15 chars), line.
 4. `vsnprintf(buf + header_len, remaining, fmt, args)` formats caller's message body
    into the remaining portion of the same stack buffer.
 5. Calls `s_sink->write(buf, total_len)` (virtual call to `ILogSink` — `StderrLogSink`
@@ -74,7 +74,7 @@ static Result Logger::init(Severity min_level, ILogClock* clock, ILogSink* sink)
 
 ```
 LOG_WARN_HI("module", "fmt", ...)                [Logger.hpp macro]
- └── Logger::log(WARNING_HI, file, line, ...)    [Logger.hpp / Logger.cpp]
+ └── Logger::log(WARNING_HI, func, line, ...)    [Logger.hpp / Logger.cpp]
       ├── s_clock->mono_us()                     [ILogClock vtable -> PosixLogClock]
       ├── snprintf(buf, ...)                      [header format into stack buffer]
       ├── vsnprintf(buf + hdr, ...)               [message body format]
@@ -88,7 +88,7 @@ prepend the wall-clock timestamp field.
 
 ## 5. Key Components Involved
 
-- **`LOG_*` macros** (`Logger.hpp`) — the preferred public interface; inject `__FILE__`
+- **`LOG_*` macros** (`Logger.hpp`) — the preferred public interface; inject `__func__`
   and `__LINE__` automatically at the call site.
 - **`Logger::log()` / `Logger::log_wall()`** — static methods backing the macros.
   Format the header + body into a fixed 512-byte stack buffer; delegate output to `ILogSink`.
@@ -138,7 +138,7 @@ No other branching. The function always attempts to write the formatted buffer.
 - Header occupies at most `LOG_HEADER_MAX_SIZE` (120) bytes; caller message body gets
   at most `LOG_MSG_MAX_SIZE` (392) bytes. Messages longer than 392 bytes are silently
   truncated by `vsnprintf`.
-- `fmt`, `module`, `file` — caller-owned string literals; not retained beyond the stack frame.
+- `fmt`, `module`, `func` — caller-owned string literals; not retained beyond the stack frame.
 - `s_clock` and `s_sink` — application-owned; the `Logger` does not own or free them.
 
 ---
@@ -177,7 +177,7 @@ No other branching. The function always attempts to write the formatted buffer.
 
 ```
 Caller -> LOG_WARN_HI("AckTracker", "ack timeout mid=0x%08x", id)
-  -> Logger::log(WARNING_HI, __FILE__, __LINE__, "AckTracker", ...)
+  -> Logger::log(WARNING_HI, __func__, __LINE__, "AckTracker", ...)
     -> s_clock->mono_us()                           [ILogClock]
     -> snprintf(buf, ...)                           [header]
     -> vsnprintf(buf + hdr, ...)                    [message body]

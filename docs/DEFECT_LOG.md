@@ -1778,6 +1778,8 @@ DEF-004-4 with the following acceptance criteria:
 
 Moderator: Don Jessup — 2026-04-15. All four deferred requirements (REQ-7.2.1–REQ-7.2.4) now implemented and verified. All five acceptance criteria from INSP-004 satisfied. `make check_traceability` PASS. DEF-004-1 through DEF-004-4 closed FIX. Inspection INSP-030 closed PASS.
 
+---
+
 ### INSP-031 — Stack flush-buffer investigation: ~130 KB delayed[] in flush helpers (2026-04-15)
 
 **Branch:** `fix/stack-delay-buf-member-2026-04`
@@ -1819,3 +1821,47 @@ LLVM coverage builds without also heap-allocating backends in tests. Documentati
 with full investigation findings. All acceptance criteria satisfied. `make lint`,
 `make run_tests` (24/24), `make check_traceability`, `make coverage` all PASS.
 Inspection INSP-031 closed PASS (documentation change only; DEF-031-1 deferred).
+
+---
+
+### INSP-032 — Logger: replace filename with function name in log output (2026-04-15)
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-15 |
+| Author      | Claude Sonnet 4.6 (AI-assisted) |
+| Moderator   | Don Jessup |
+| Reviewer    | Don Jessup |
+| Branch      | feat/logger-func-name-2026-04 |
+| Outcome     | PASS |
+
+#### Scope
+
+Replace the compile-time `LOG_FILE` macro (which used `__builtin_strrchr(__FILE__, '/')`
+to strip directory prefixes) with `__func__` (ISO C++17 §9.2.3 predefined string literal)
+in all `LOG_*` macros. The `func` field in log output now shows the first 15 characters
+of the calling function name (`%.15s` — truncation only, no space padding) rather than
+the source filename. `Assert.hpp` updated to pass `__func__` consistently to `Logger::log()`.
+
+Files changed: `src/core/Logger.hpp`, `src/core/Logger.cpp`, `src/core/Assert.hpp`,
+`tests/test_Logger.cpp`, `docs/COVERAGE_CEILINGS.md`.
+
+#### Checklist
+
+| Item | Status |
+|------|--------|
+| `make lint` PASS | PASS |
+| `make run_tests` PASS (40/40 Logger tests; all prior tests) | PASS |
+| `make check_traceability` PASS | PASS |
+| `make coverage` — Logger.cpp 70.31% (no regression) | PASS |
+| `docs/COVERAGE_CEILINGS.md` updated (param name `file` → `func`; round 18 note) | PASS |
+
+#### Defects found
+
+None. No functional defects introduced. The change is a straightforward substitution
+of `LOG_FILE` with `__func__` throughout, with matching test coverage for the four
+truncation/padding boundary conditions (T-2.15–T-2.18) and a rename of T-2.13.
+
+#### Moderator sign-off
+
+Moderator: Don Jessup — 2026-04-15. `make lint`, `make run_tests` (40/40 Logger tests), and `make check_traceability` all PASS. `make coverage` confirms Logger.cpp 70.31% — no regression from round 17 baseline. `docs/COVERAGE_CEILINGS.md` updated for `func != nullptr` parameter rename and round-18 test additions. No defects found. Inspection INSP-032 closed PASS.

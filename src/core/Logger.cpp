@@ -97,18 +97,18 @@ Result Logger::init(Severity min_level, ILogClock* clock, ILogSink* sink)
 
 // Logger::log() appears to call itself via NEVER_COMPILED_OUT_ASSERT → Logger::log(),
 // but only when an assertion fails (precondition violated). In that case the second
-// Logger::log() call uses compile-time __FILE__/__LINE__ and a literal format string,
+// Logger::log() call uses compile-time __func__/__LINE__ and a literal format string,
 // so it cannot trigger the same precondition assertion again. Not a true runtime
 // recursion; one-level diagnostic path. NOLINT applied to function definition line.
 void Logger::log(Severity sev,  // NOLINT(misc-no-recursion)
-                 const char* file,
+                 const char* func,
                  int line,
                  const char* module,
                  const char* fmt, ...)
 {
     // Power of 10 Rule 5: precondition assertions (≥2 per function).
     NEVER_COMPILED_OUT_ASSERT(fmt    != nullptr);
-    NEVER_COMPILED_OUT_ASSERT(file   != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(func   != nullptr);
     NEVER_COMPILED_OUT_ASSERT(line   > 0);
     NEVER_COMPILED_OUT_ASSERT(s_clock != nullptr);
     NEVER_COMPILED_OUT_ASSERT(s_sink  != nullptr);
@@ -130,18 +130,19 @@ void Logger::log(Severity sev,  // NOLINT(misc-no-recursion)
     // 512U matches the former LOG_LINE_MAX; no net stack increase.
     char buf[LOG_FORMAT_BUF_SIZE];
 
-    // Build header: [mono_sec.mono_frac][pid][sev][tid][module][file:line]
+    // Build header: [mono_sec.mono_frac][pid][sev][tid][module][func:line]
+    // %.15s truncates function name to 15 chars max; no padding for shorter names.
     // F-1 / CERT INT31-C: guard both error (< 0) and truncation (>= buf size).
     const int hdr = snprintf(buf,
                              static_cast<size_t>(LOG_FORMAT_BUF_SIZE),
-                             "[%07llu.%06llu][%u][%s][%u][%s][%s:%d] ",
+                             "[%07llu.%06llu][%u][%s][%u][%s][%.15s:%d] ",
                              static_cast<unsigned long long>(mono_sec),
                              static_cast<unsigned long long>(mono_frac),
                              s_pid,
                              tag,
                              tid,
                              module,
-                             file,
+                             func,
                              line);
     // Power of 10 R7: check snprintf return value.
     if (hdr < 0 || static_cast<uint32_t>(hdr) >= LOG_FORMAT_BUF_SIZE) {
@@ -185,14 +186,14 @@ void Logger::log(Severity sev,  // NOLINT(misc-no-recursion)
 
 // Same rationale as Logger::log() above — not a true recursion.
 void Logger::log_wall(Severity sev,  // NOLINT(misc-no-recursion)
-                      const char* file,
+                      const char* func,
                       int line,
                       const char* module,
                       const char* fmt, ...)
 {
     // Power of 10 Rule 5: precondition assertions (≥2 per function).
     NEVER_COMPILED_OUT_ASSERT(fmt    != nullptr);
-    NEVER_COMPILED_OUT_ASSERT(file   != nullptr);
+    NEVER_COMPILED_OUT_ASSERT(func   != nullptr);
     NEVER_COMPILED_OUT_ASSERT(line   > 0);
     NEVER_COMPILED_OUT_ASSERT(s_clock != nullptr);
     NEVER_COMPILED_OUT_ASSERT(s_sink  != nullptr);
@@ -215,10 +216,11 @@ void Logger::log_wall(Severity sev,  // NOLINT(misc-no-recursion)
 
     char buf[LOG_FORMAT_BUF_SIZE];
 
-    // Build header: [wall_sec.wall_frac][mono_sec.mono_frac][pid][sev][tid][module][file:line]
+    // Build header: [wall_sec.wall_frac][mono_sec.mono_frac][pid][sev][tid][module][func:line]
+    // %.15s truncates function name to 15 chars max; no padding for shorter names.
     const int hdr = snprintf(buf,
                              static_cast<size_t>(LOG_FORMAT_BUF_SIZE),
-                             "[%llu.%06llu][%07llu.%06llu][%u][%s][%u][%s][%s:%d] ",
+                             "[%llu.%06llu][%07llu.%06llu][%u][%s][%u][%s][%.15s:%d] ",
                              static_cast<unsigned long long>(wall_sec),
                              static_cast<unsigned long long>(wall_frac),
                              static_cast<unsigned long long>(mono_sec),
@@ -227,7 +229,7 @@ void Logger::log_wall(Severity sev,  // NOLINT(misc-no-recursion)
                              tag,
                              tid,
                              module,
-                             file,
+                             func,
                              line);
     if (hdr < 0 || static_cast<uint32_t>(hdr) >= LOG_FORMAT_BUF_SIZE) {
         return;
