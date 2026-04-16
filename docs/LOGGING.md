@@ -52,12 +52,12 @@ Output goes to **stderr** via a single `write(2)` call per log line. No heap all
 ### Standard macros (`LOG_INFO`, `LOG_WARN_LO`, `LOG_WARN_HI`, `LOG_FATAL`)
 
 ```
-[mono_sec.mono_us][pid][severity][tid][module][file:line] message
+[mono_sec.mono_us][pid][severity][tid][module][func:line] message
 ```
 
 Example:
 ```
-[0000042.123456][1234][INFO    ][3891273984][TcpBackend][TcpBackend.cpp:611] Server listening on 127.0.0.1:58244
+[0000042.123456][1234][INFO    ][3891273984][TcpBackend][init:611] Server listening on 127.0.0.1:58244
 ```
 
 | Field | Description |
@@ -67,13 +67,13 @@ Example:
 | `severity` | Fixed-width 8-character tag: `INFO    `, `WARN_LO `, `WARN_HI `, `FATAL   `. Fixed width keeps columns aligned when grepping. |
 | `tid` | Thread ID from `pthread_self()`, cast to `uint32_t`. Lets you separate interleaved output from concurrent threads. |
 | `module` | Caller-supplied string identifying the component (e.g. `"TcpBackend"`, `"AckTracker"`). |
-| `file:line` | Basename of source file + line number, injected by the macro at compile time via `__builtin_strrchr(__FILE__, '/')`. Zero runtime cost. |
+| `func:line` | Calling function name (first 15 characters, truncation only — no padding) + line number, injected by the macro via `__func__` (ISO C++17 §9.2.3 predefined string literal). Zero runtime cost. |
 | `message` | `printf`-style body. Format string is validated at compile time by `__attribute__((format(printf, 5, 6)))`. |
 
 ### Wall-clock variants (`LOG_INFO_WALL`, `LOG_WARN_LO_WALL`, `LOG_WARN_HI_WALL`, `LOG_FATAL_WALL`)
 
 ```
-[wall_sec.wall_us][mono_sec.mono_us][pid][severity][tid][module][file:line] message
+[wall_sec.wall_us][mono_sec.mono_us][pid][severity][tid][module][func:line] message
 ```
 
 The wall timestamp (`CLOCK_REALTIME`) is **prepended** before the monotonic one. Use these when you need to correlate a log line with an external system clock — for example, at connection establishment or a fatal event. For all routine logging prefer the standard monotonic-only variants: they are immune to `settimeofday` and NTP jumps.
@@ -90,7 +90,7 @@ Note: the `wall_sec` field is formatted with `%llu` (no zero-padding), so its wi
         │  LOG_INFO("M", "fmt", ...)                      │
         └───────────────────┬─────────────────────────────┘
                             │ expands to Logger::log(Severity::INFO,
-                            │   LOG_FILE, __LINE__, "M", "fmt", ...)
+                            │   __func__, __LINE__, "M", "fmt", ...)
                             ▼
         ┌─────────────────────────────────────────────────┐
         │              src/core/Logger.cpp                │
@@ -181,7 +181,7 @@ if (r != Result::OK) {
 
 ## 6. Macros Reference
 
-All macros inject `__FILE__` (basename only) and `__LINE__` at the call site at compile time.
+All macros inject `__func__` and `__LINE__` at the call site. `__func__` is an ISO C++17 §9.2.3 predefined string literal — zero runtime cost. The `func` field is formatted as `%.15s`: truncation to 15 characters maximum, no space-padding for shorter names.
 
 ### Standard (monotonic timestamp only)
 
@@ -425,7 +425,7 @@ assert(strstr(sink.line(0), "expected substring") != nullptr);
 | No function pointers | Power of 10 Rule 9 | `ILogClock` and `ILogSink` dispatch via vtable (approved exception to Rule 9). |
 | `__attribute__((format))` | GCC/Clang extension | Enables compile-time format-string validation. MISRA C++:2023 Rule 19.3.4 deviation, documented in `Logger.hpp`. |
 | `##__VA_ARGS__` | GCC/Clang extension | Suppresses trailing comma when no variadic args are supplied. Same MISRA deviation, same documentation. |
-| `__builtin_strrchr` | GCC/Clang built-in | Compile-time basename stripping in `LOG_FILE` macro. Zero runtime cost; portability to MSVC not required. |
+| `__func__` | ISO C++17 §9.2.3 | Predefined string literal holding the undecorated calling function name. Injected by all `LOG_*` macros; zero runtime cost. No MISRA deviation required. |
 | `final` omitted on `PosixLogClock` / `PosixLogSink` | Deliberate deviation | Required to allow NVI test-seam subclassing (`FaultPosixLogClock`, `FaultPosixLogSink`). Documented in both headers. |
 
 ---
@@ -442,7 +442,7 @@ assert(strstr(sink.line(0), "expected substring") != nullptr);
 | `src/platform/PosixLogSink.cpp` | `write()`, `do_write()`, `instance()` |
 | `src/platform/PosixLogClock.hpp` | POSIX clock: `clock_gettime` + `pthread_self`, NVI seam |
 | `src/platform/PosixLogClock.cpp` | `now_wall_us()`, `now_monotonic_us()`, `thread_id()`, `instance()` |
-| `tests/test_Logger.cpp` | 24-test suite, T-1 through T-6, M1+M2+M4+M5 |
+| `tests/test_Logger.cpp` | 40-test suite, T-1 through T-6, M1+M2+M4+M5 |
 | `tests/FakeLogClock.hpp` | Settable-value `ILogClock` for unit tests |
 | `tests/RingLogSink.hpp` | Fixed-capacity capture sink for output assertion |
 | `tests/FaultPosixLogClock.hpp` | NVI fault-injection: simulates `clock_gettime` failure |
