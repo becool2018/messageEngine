@@ -23,7 +23,7 @@ A C++ networking library for building and testing systems that must survive unre
 | Retry manager | 32 pending slots |
 | Inbound ring | 64 messages per backend |
 | Concurrent clients (TCP/TLS) | 8 (configurable via `MAX_TCP_CONNECTIONS` in `Types.hpp`) |
-| Worst-case stack depth | ~130 KB / 11 frames (flush path, Chain 3); non-flush: ~764 bytes / 9 frames |
+| Worst-case stack depth | ~1,326 B / 9 frames (Chain 5: DTLS outbound + Logger); 11 frames / ~1,154 B (Chain 3: retry pump + Logger) |
 
 **Written to:** JPL Power of 10 · MISRA C++:2023 · F-Prime style subset · NASA Class C (voluntary Class B test rigor). No exceptions, no templates, no RTTI. STL is excluded from production code with one deliberate exception: `std::atomic<T>` for integral types is permitted and used for shared state — it has no dynamic allocation, maps directly to hardware primitives, and is what MISRA C++:2023 endorses for lock-free concurrency. All other STL containers, algorithms, and headers are absent from `src/`.
 
