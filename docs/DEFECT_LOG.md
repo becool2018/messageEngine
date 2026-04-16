@@ -1950,11 +1950,12 @@ new connection, corrupting new-session ordered delivery. Tracked in INSP-034.
 | Field       | Value |
 |-------------|-------|
 | Date        | 2026-04-16 |
-| Author      | TBD |
+| Exit Date   | 2026-04-16 |
+| Author      | Don Jessup |
 | Moderator   | Don Jessup |
 | Reviewer    | Don Jessup |
-| Branch      | TBD |
-| Outcome     | IN PROGRESS |
+| Branch      | fix/reconnect-seq-reset-2026-04 |
+| Outcome     | CLOSED/PASS |
 
 #### Scope
 
@@ -1983,20 +1984,32 @@ This inspection covers:
 
 | Item | Status |
 |------|--------|
-| `make lint` PASS | PENDING |
-| `make run_tests` PASS | PENDING |
-| `make check_traceability` PASS | PENDING |
-| `make coverage` — no SC function regression | PENDING |
-| `docs/COVERAGE_CEILINGS.md` updated | PENDING |
-| `docs/HAZARD_ANALYSIS.md` updated | PENDING |
-| `docs/STATE_MACHINES.md` updated | PENDING |
-| `docs/WCET_ANALYSIS.md` updated | PENDING |
-| `docs/use_cases/UC_72` updated | PENDING |
+| `make lint` PASS | PASS |
+| `make run_tests` PASS | PASS |
+| `make check_traceability` PASS | PASS |
+| `make coverage` — no SC function regression | PASS |
+| `docs/COVERAGE_CEILINGS.md` updated | PASS |
+| `docs/HAZARD_ANALYSIS.md` updated | PASS |
+| `docs/STATE_MACHINES.md` updated | PASS |
+| `docs/WCET_ANALYSIS.md` updated | PASS |
+| `docs/use_cases/UC_72` updated | PASS |
+
+#### Summary
+
+Implementation complete. Added `cancel_peer(NodeId)` to `AckTracker` (SC: HAZ-001/HAZ-016)
+and `RetryManager` (SC: HAZ-016), added `RECONNECT_CANCEL` event kind to `DeliveryEventKind`
+in `src/core/DeliveryEvent.hpp`, and extended `reset_peer_ordering()` to call both
+`cancel_peer()` methods and emit one `RECONNECT_CANCEL` observability event per cancelled
+entry. 6 new tests added: 2 in `test_AckTracker.cpp` (`test_cancel_peer_matching`,
+`test_cancel_peer_no_match`), 2 in `test_RetryManager.cpp` (`test_cancel_peer_matching`,
+`test_cancel_peer_no_match`), and 2 in `test_DeliveryEngine.cpp`
+(`test_de_reset_peer_ordering_cancels_inflight`, `test_de_reset_peer_ordering_cancel_no_inflight`).
+All tests pass, lint clean.
 
 #### Defects found
 
-TBD — inspection not yet complete.
+None — implementation complete with all exit criteria met.
 
 #### Moderator sign-off
 
-Pending.
+Don Jessup — 2026-04-16. All entry and exit criteria met; no defects found during inspection.

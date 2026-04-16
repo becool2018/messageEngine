@@ -52,7 +52,8 @@ enum class DeliveryEventKind : uint8_t {
     ACK_TIMEOUT    = 4U,  ///< ACK not received before deadline (sweep_ack_timeouts())
     DUPLICATE_DROP = 5U,  ///< Received message suppressed as duplicate
     EXPIRY_DROP    = 6U,  ///< Received or sent message dropped due to expiry
-    MISROUTE_DROP  = 7U,  ///< Received message dropped — wrong destination_id
+    MISROUTE_DROP      = 7U,  ///< Received message dropped — wrong destination_id
+    RECONNECT_CANCEL   = 8U,  ///< In-flight message cancelled due to peer reconnect (REQ-3.3.6)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -23,7 +23,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: simple test framework using assert() and printf().
  *
- * Verifies: REQ-3.2.4, REQ-3.3.2, REQ-7.2.3, REQ-3.2.11
+ * Verifies: REQ-3.2.4, REQ-3.3.2, REQ-3.3.6, REQ-7.2.3, REQ-3.2.11
  */
 // Verification: M1 + M2 + M4 + M5 (fault injection not required — no injectable dependency)
 
@@ -669,6 +669,68 @@ static void test_sweep_expired_backward_timestamp()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: cancel_peer() cancels matching PENDING slots and returns correct count
+// Verifies: REQ-3.3.6 (INSP-034) — AckTracker::cancel_peer() happy path
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_cancel_peer_matching()
+{
+    // Verifies: REQ-3.3.6
+    AckTracker tracker;
+    tracker.init();
+
+    // Track two messages to dst=2 and one to dst=3
+    MessageEnvelope env1;
+    MessageEnvelope env2;
+    MessageEnvelope env3;
+    make_test_envelope(env1, 101U, 1U, 2U);
+    make_test_envelope(env2, 102U, 1U, 2U);
+    make_test_envelope(env3, 103U, 1U, 3U);
+
+    assert(tracker.track(env1, 9000000ULL) == Result::OK);
+    assert(tracker.track(env2, 9000000ULL) == Result::OK);
+    assert(tracker.track(env3, 9000000ULL) == Result::OK);
+
+    // cancel_peer(dst=2) must cancel exactly 2 slots
+    const uint32_t cancelled = tracker.cancel_peer(2U);
+    assert(cancelled == 2U);
+
+    // The slot for dst=3 must still be findable via on_ack
+    assert(tracker.on_ack(1U, 103U) == Result::OK);
+
+    // Slots for dst=2 must be gone
+    assert(tracker.on_ack(1U, 101U) == Result::ERR_INVALID);
+    assert(tracker.on_ack(1U, 102U) == Result::ERR_INVALID);
+
+    printf("PASS: test_cancel_peer_matching\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: cancel_peer() is a no-op when no slot matches (loop-exhaustion path)
+// Verifies: REQ-3.3.6 (INSP-034) — AckTracker::cancel_peer() no-match path
+// Covers the Class B loop-exhaustion branch identified in INSP-033 coverage note.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_cancel_peer_no_match()
+{
+    // Verifies: REQ-3.3.6
+    AckTracker tracker;
+    tracker.init();
+
+    // Track one message to dst=2
+    MessageEnvelope env;
+    make_test_envelope(env, 201U, 1U, 2U);
+    assert(tracker.track(env, 9000000ULL) == Result::OK);
+
+    // cancel_peer(dst=99) — no slot for this peer; must return 0
+    const uint32_t cancelled = tracker.cancel_peer(99U);
+    assert(cancelled == 0U);
+
+    // Original slot must still be accessible
+    assert(tracker.on_ack(1U, 201U) == Result::OK);
+
+    printf("PASS: test_cancel_peer_no_match\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -700,6 +762,8 @@ int main()
     test_get_send_timestamp_not_found();
     test_get_tracked_dest_not_found();
     test_sweep_expired_backward_timestamp();
+    test_cancel_peer_matching();
+    test_cancel_peer_no_match();
 
     printf("ALL AckTracker tests passed.\n");
     return 0;

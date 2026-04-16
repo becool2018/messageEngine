@@ -4385,6 +4385,83 @@ static void test_de_sequence_state_exhaustion()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// INSP-034: reset_peer_ordering() cancels in-flight AckTracker and RetryManager
+// entries and emits RECONNECT_CANCEL events (REQ-3.3.6).
+// Verifies: REQ-3.3.6, REQ-7.2.5
+// Verification: M1 + M2 + M5 (MockTransportInterface)
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_reset_peer_ordering_cancels_inflight()
+{
+    // Verifies: REQ-3.3.6
+    MockTransportInterface mock;
+    ChannelConfig cfg;
+    make_mock_channel_config(cfg);
+
+    DeliveryEngine engine;
+    engine.init(&mock, cfg, 1U);
+
+    // Drain the SEND_OK event from the initial send so we can count cleanly.
+    MessageEnvelope env;
+    make_data_envelope(env, 1U, 2U, 0ULL, ReliabilityClass::RELIABLE_RETRY);
+    Result s = engine.send(env, NOW_US);
+    assert(s == Result::OK);  // Assert: send succeeds (RELIABLE_RETRY enrolls AckTracker + RetryManager)
+
+    // Drain SEND_OK event; we only care about RECONNECT_CANCEL events below.
+    DeliveryEvent discard;
+    Result drain = engine.poll_event(discard);
+    assert(drain == Result::OK);  // Assert: SEND_OK event was present
+    assert(engine.pending_event_count() == 0U);  // Assert: ring empty before reset
+
+    // Simulate peer reconnect for dst=2: should cancel 1 AckTracker + 1 RetryManager slot
+    // → emit 2 RECONNECT_CANCEL events.
+    engine.reset_peer_ordering(static_cast<NodeId>(2U));
+
+    // Collect and count RECONNECT_CANCEL events.
+    uint32_t cancel_count = 0U;
+    // Power of 10 Rule 2: bounded loop — at most DELIVERY_EVENT_RING_CAPACITY events.
+    for (uint32_t i = 0U; i < DELIVERY_EVENT_RING_CAPACITY; ++i) {
+        DeliveryEvent ev;
+        Result pr = engine.poll_event(ev);
+        if (pr != Result::OK) { break; }
+        if (ev.kind == DeliveryEventKind::RECONNECT_CANCEL) { ++cancel_count; }
+    }
+
+    // One AckTracker cancel + one RetryManager cancel = 2 events total.
+    assert(cancel_count == 2U);  // Assert: both in-flight slots cancelled and reported
+
+    printf("PASS: test_de_reset_peer_ordering_cancels_inflight\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INSP-034: reset_peer_ordering() on a peer with no in-flight messages is a
+// no-op — no RECONNECT_CANCEL events emitted (loop-exhaustion path, REQ-3.3.6).
+// Covers the Class B loop-exhaustion branch from INSP-033 coverage note.
+// Verifies: REQ-3.3.6, REQ-7.2.5
+// Verification: M1 + M2 + M5 (MockTransportInterface)
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_de_reset_peer_ordering_cancel_no_inflight()
+{
+    // Verifies: REQ-3.3.6
+    MockTransportInterface mock;
+    ChannelConfig cfg;
+    make_mock_channel_config(cfg);
+
+    DeliveryEngine engine;
+    engine.init(&mock, cfg, 1U);
+
+    // No sends before reset — no in-flight entries for any peer.
+    assert(engine.pending_event_count() == 0U);  // Assert: event ring starts empty
+
+    // Reset for peer=99 (never communicated with); must be a no-op.
+    engine.reset_peer_ordering(static_cast<NodeId>(99U));
+
+    // No RECONNECT_CANCEL events should have been emitted.
+    assert(engine.pending_event_count() == 0U);  // Assert: zero events for no-inflight reset
+
+    printf("PASS: test_de_reset_peer_ordering_cancel_no_inflight\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -4473,6 +4550,8 @@ int main()
     test_de_forge_ack_discarded();
     test_de_latency_min_max_updates();
     test_de_sequence_state_exhaustion();
+    test_de_reset_peer_ordering_cancels_inflight();
+    test_de_reset_peer_ordering_cancel_no_inflight();
 
     printf("ALL DeliveryEngine tests passed.\n");
     return 0;

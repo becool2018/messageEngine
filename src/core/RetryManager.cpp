@@ -19,7 +19,7 @@
  * Applies Power of 10 rules: fixed loop bounds, ≥2 assertions per function,
  * bounded resource usage, checked return values.
  *
- * Implements: REQ-3.2.5, REQ-3.3.3, REQ-7.2.3
+ * Implements: REQ-3.2.5, REQ-3.3.3, REQ-3.3.6, REQ-7.2.3
  */
 
 #include "RetryManager.hpp"
@@ -179,6 +179,44 @@ Result RetryManager::on_ack(NodeId src, uint64_t msg_id)
                 (unsigned long long)msg_id, src);
 
     return Result::ERR_INVALID;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RetryManager::cancel_peer() — SC: HAZ-016
+// Cancels all active retry slots destined to dst on peer reconnect (REQ-3.3.6).
+// Transitions each matching slot to inactive without bumping acks_received;
+// delivery confirmation for the prior session will never arrive.
+// Logs WARNING_HI per entry (with message_id) so operators can audit cancellations.
+// Power of 10: single-purpose, ≤1 page, ≥2 assertions, CC ≤ 4.
+// ─────────────────────────────────────────────────────────────────────────────
+uint32_t RetryManager::cancel_peer(NodeId dst)
+{
+    NEVER_COMPILED_OUT_ASSERT(m_initialized);           // Assert: manager was initialized
+    NEVER_COMPILED_OUT_ASSERT(dst != NODE_ID_INVALID);  // Assert: valid destination
+
+    uint32_t cancelled = 0U;
+
+    // Power of 10 Rule 2: bounded loop (compile-time constant)
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        if (m_slots[i].active && (m_slots[i].env.destination_id == dst)) {
+            // Deactivate without recording an ACK stat — the peer reconnected;
+            // delivery confirmation for the prior session will never arrive (REQ-3.3.6).
+            LOG_WARN_HI("RetryManager",
+                        "cancel_peer: cancelled in-flight message_id=%llu to dst=%u due to peer reconnect (REQ-3.3.6)",
+                        static_cast<unsigned long long>(m_slots[i].env.message_id),
+                        static_cast<unsigned>(dst));
+            m_slots[i].active = false;
+            NEVER_COMPILED_OUT_ASSERT(m_count > 0U);  // CERT INT30-C: guard against uint32_t underflow
+            --m_count;
+            ++cancelled;
+        }
+    }
+
+    // Power of 10 rule 5: post-condition assertions
+    NEVER_COMPILED_OUT_ASSERT(m_count <= ACK_TRACKER_CAPACITY);   // Assert: count bounded
+    NEVER_COMPILED_OUT_ASSERT(cancelled <= ACK_TRACKER_CAPACITY); // Assert: result bounded
+
+    return cancelled;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

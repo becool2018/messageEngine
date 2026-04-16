@@ -839,16 +839,18 @@ Result DeliveryEngine::handle_data_dedup(const MessageEnvelope& env, uint64_t no
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DeliveryEngine::reset_peer_ordering() — SC: HAZ-001
+// DeliveryEngine::reset_peer_ordering() — SC: HAZ-001, HAZ-016
 // Clears stale ordering state for src on peer reconnect (REQ-3.3.6).
-// Resets both:
-//   (a) the inbound OrderingBuffer (what sequence we expect FROM src), and
-//   (b) the outbound SeqState slot for dst==src (what sequence we send TO src).
-// Without (b), a fresh client that starts expecting seq=1 will receive seq=N+1
-// from a server that did not reset its send-sequence after the prior session.
-// Also discards any staged m_held_pending envelope belonging to the same src
-// so it is not delivered after the ordering gate has been reset.
-// Power of 10 Rule 5: 2 assertions. CC <= 6.
+// Resets:
+//   (a) the inbound OrderingBuffer (what sequence we expect FROM src),
+//   (b) the outbound SeqState slot for dst==src (what sequence we send TO src),
+//   (c) all PENDING AckTracker slots addressed to src (INSP-034), and
+//   (d) all active RetryManager slots addressed to src (INSP-034).
+// Without (b), a fresh client that starts expecting seq=1 will receive seq=N+1.
+// Without (c)+(d), stale retries from the prior session inject old sequence
+// numbers into the new connection's ordered delivery stream.
+// Also discards any staged m_held_pending envelope belonging to the same src.
+// Power of 10 Rule 5: 2 assertions. CC <= 8.
 // ─────────────────────────────────────────────────────────────────────────────
 void DeliveryEngine::reset_peer_ordering(NodeId src)
 {
@@ -880,6 +882,31 @@ void DeliveryEngine::reset_peer_ordering(NodeId src)
                      static_cast<unsigned>(src));
             break;
         }
+    }
+
+    // Use the last-seen monotonic timestamp for event emission.
+    // emit_event() requires timestamp_us > 0ULL; use sentinel 1ULL if the engine
+    // has not yet been called with a timed operation (m_last_now_us == 0).
+    const uint64_t ts = (m_last_now_us > 0ULL) ? m_last_now_us : 1ULL;
+
+    // Cancel stale AckTracker entries for the reconnecting peer (INSP-034, REQ-3.3.6).
+    // Pre-reset envelopes addressed to 'src' will never be ACKed by the new session;
+    // leaving them pending would cause spurious WARN_HI timeouts and phantom retries.
+    // cancel_peer() logs WARNING_HI per entry with message_id.
+    const uint32_t ack_cancelled = m_ack_tracker.cancel_peer(src);
+    // Power of 10 Rule 2: bounded loop — ack_cancelled <= ACK_TRACKER_CAPACITY.
+    for (uint32_t i = 0U; i < ack_cancelled; ++i) {
+        emit_event(DeliveryEventKind::RECONNECT_CANCEL, 0U, src, ts, Result::OK);
+    }
+
+    // Cancel stale RetryManager entries for the reconnecting peer (INSP-034, REQ-3.3.6).
+    // Active retry slots for 'src' carry pre-reset envelopes with old sequence numbers;
+    // firing them on the new connection would corrupt the new session's ordered stream.
+    // cancel_peer() logs WARNING_HI per entry with message_id.
+    const uint32_t retry_cancelled = m_retry_manager.cancel_peer(src);
+    // Power of 10 Rule 2: bounded loop — retry_cancelled <= ACK_TRACKER_CAPACITY.
+    for (uint32_t i = 0U; i < retry_cancelled; ++i) {
+        emit_event(DeliveryEventKind::RECONNECT_CANCEL, 0U, src, ts, Result::OK);
     }
 }
 

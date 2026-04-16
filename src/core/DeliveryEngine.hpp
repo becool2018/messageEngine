@@ -152,19 +152,27 @@ public:
 
     // Safety-critical (SC): HAZ-001, HAZ-016 — resets per-peer ordering gate state on reconnect.
     /**
-     * @brief Reset ordering state for @p src on peer reconnection (REQ-3.3.6).
+     * @brief Reset all delivery state for @p src on peer reconnection (REQ-3.3.6).
      *
-     * Clears next_expected_seq and frees all held messages for @p src so that
-     * messages from the reconnected peer (which restarts its sequence at 1) are
-     * delivered correctly rather than silently discarded as out-of-order.
+     * Performs a complete reconnect reset for the given peer:
+     *  (a) Clears next_expected_seq and frees held inbound messages for @p src
+     *      so that messages from the reconnected peer (seq restarting at 1) are
+     *      delivered correctly rather than silently discarded as out-of-order.
+     *  (b) Resets the outbound sequence counter for dst==src to 1 so a fresh
+     *      receiver sees the expected seq=1 on its first message.
+     *  (c) Cancels all PENDING AckTracker slots addressed to @p src — pre-reset
+     *      envelopes will never be ACKed by the new session (INSP-034).
+     *  (d) Cancels all active RetryManager slots addressed to @p src — stale
+     *      retries with old sequence numbers must not reach the new session (INSP-034).
      *
+     * Emits one RECONNECT_CANCEL observability event per cancelled entry (REQ-7.2.5).
      * Also clears m_held_pending if the staged envelope belongs to @p src.
      *
      * Called automatically by receive() via drain_hello_reconnects() when the
      * transport reports a new HELLO from a peer. May also be called directly by
      * the application if reconnect detection is done at a higher layer.
      *
-     * Idempotent: safe to call even if @p src has no ordering state.
+     * Idempotent: safe to call even if @p src has no outstanding state.
      *
      * @param[in] src  Source node that reconnected.
      */

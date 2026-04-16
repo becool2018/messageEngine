@@ -23,7 +23,7 @@
  *   - MISRA C++: no STL, no exceptions, ≤1 pointer indirection.
  *   - F-Prime style: simple test framework using assert() and printf().
  *
- * Verifies: REQ-3.2.5, REQ-3.3.3, REQ-7.2.3
+ * Verifies: REQ-3.2.5, REQ-3.3.3, REQ-3.3.6, REQ-7.2.3
  */
 
 #include <cstdio>
@@ -859,6 +859,68 @@ static void test_reinit_empty_no_warning()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Test: cancel_peer() cancels matching active slots and returns correct count
+// Verifies: REQ-3.3.6 (INSP-034) — RetryManager::cancel_peer() happy path
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_cancel_peer_matching()
+{
+    // Verifies: REQ-3.3.6
+    RetryManager mgr;
+    mgr.init();
+
+    // Schedule two retries to dst=2 and one to dst=3
+    MessageEnvelope env1;
+    MessageEnvelope env2;
+    MessageEnvelope env3;
+    make_test_envelope(env1, 301U, 9000000ULL, 1U, 2U);
+    make_test_envelope(env2, 302U, 9000000ULL, 1U, 2U);
+    make_test_envelope(env3, 303U, 9000000ULL, 1U, 3U);
+
+    assert(mgr.schedule(env1, 3U, 100U, 1000000ULL) == Result::OK);
+    assert(mgr.schedule(env2, 3U, 100U, 1000000ULL) == Result::OK);
+    assert(mgr.schedule(env3, 3U, 100U, 1000000ULL) == Result::OK);
+
+    // cancel_peer(dst=2) must cancel exactly 2 slots
+    const uint32_t cancelled = mgr.cancel_peer(2U);
+    assert(cancelled == 2U);
+
+    // Slot for dst=3 must still be cancellable via on_ack
+    assert(mgr.on_ack(1U, 303U) == Result::OK);
+
+    // Slots for dst=2 must be gone
+    assert(mgr.on_ack(1U, 301U) == Result::ERR_INVALID);
+    assert(mgr.on_ack(1U, 302U) == Result::ERR_INVALID);
+
+    printf("PASS: test_cancel_peer_matching\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: cancel_peer() is a no-op when no slot matches (loop-exhaustion path)
+// Verifies: REQ-3.3.6 (INSP-034) — RetryManager::cancel_peer() no-match path
+// Covers the Class B loop-exhaustion branch identified in INSP-033 coverage note.
+// ─────────────────────────────────────────────────────────────────────────────
+static void test_cancel_peer_no_match()
+{
+    // Verifies: REQ-3.3.6
+    RetryManager mgr;
+    mgr.init();
+
+    // Schedule one retry to dst=2
+    MessageEnvelope env;
+    make_test_envelope(env, 401U, 9000000ULL, 1U, 2U);
+    assert(mgr.schedule(env, 3U, 100U, 1000000ULL) == Result::OK);
+
+    // cancel_peer(dst=99) — no slot for this peer; must return 0
+    const uint32_t cancelled = mgr.cancel_peer(99U);
+    assert(cancelled == 0U);
+
+    // Original slot must still be accessible
+    assert(mgr.on_ack(1U, 401U) == Result::OK);
+
+    printf("PASS: test_cancel_peer_no_match\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main test runner
 // ─────────────────────────────────────────────────────────────────────────────
 int main()
@@ -896,6 +958,9 @@ int main()
     test_cancel_wrong_source();
     test_collect_due_backward_timestamp();
     test_reinit_empty_no_warning();
+
+    test_cancel_peer_matching();
+    test_cancel_peer_no_match();
 
     printf("ALL RetryManager tests passed.\n");
     return 0;
