@@ -1363,7 +1363,7 @@ line and function coverage are also tracked.
 
 **(a) `NEVER_COMPILED_OUT_ASSERT` True abort paths:**
 `Logger::log()` and `Logger::log_wall()` each contain 5 `NEVER_COMPILED_OUT_ASSERT`
-calls (guarding `fmt != nullptr`, `file != nullptr`, `line > 0`, `s_clock != nullptr`,
+calls (guarding `fmt != nullptr`, `func != nullptr`, `line > 0`, `s_clock != nullptr`,
 `s_sink != nullptr`). Each contributes 2 permanently-missed LLVM branch outcomes
 (the True `[[noreturn]]` path of `if (!(cond))`). Total from asserts: 20 missed
 branch outcomes.
@@ -1407,8 +1407,8 @@ unreachable for the same d-iii reasons as `body < 0` documented above. The maxim
 achievable branch coverage is 70.31% (45/64). Threshold set accordingly.
 
 All reachable branches (severity filter, init() null-pointer checks, severity_tag()
-switch cases, write call) are 100% covered by tests T-1.1 through T-6.3 in
-`tests/test_Logger.cpp`.
+switch cases, write call) are 100% covered by tests T-1.1 through T-6.3 (including
+T-2.15 through T-2.18 added in round 18) in `tests/test_Logger.cpp`.
 
 ---
 
