@@ -841,9 +841,14 @@ Result DeliveryEngine::handle_data_dedup(const MessageEnvelope& env, uint64_t no
 // ─────────────────────────────────────────────────────────────────────────────
 // DeliveryEngine::reset_peer_ordering() — SC: HAZ-001
 // Clears stale ordering state for src on peer reconnect (REQ-3.3.6).
+// Resets both:
+//   (a) the inbound OrderingBuffer (what sequence we expect FROM src), and
+//   (b) the outbound SeqState slot for dst==src (what sequence we send TO src).
+// Without (b), a fresh client that starts expecting seq=1 will receive seq=N+1
+// from a server that did not reset its send-sequence after the prior session.
 // Also discards any staged m_held_pending envelope belonging to the same src
 // so it is not delivered after the ordering gate has been reset.
-// Power of 10 Rule 5: 2 assertions. CC <= 5.
+// Power of 10 Rule 5: 2 assertions. CC <= 6.
 // ─────────────────────────────────────────────────────────────────────────────
 void DeliveryEngine::reset_peer_ordering(NodeId src)
 {
@@ -859,7 +864,23 @@ void DeliveryEngine::reset_peer_ordering(NodeId src)
                     static_cast<unsigned>(src));
     }
 
+    // Reset inbound ordering state: clear the receive-side sequence tracker so
+    // messages from the reconnected peer (which restarts its sequence at 1) are
+    // accepted in order (REQ-3.3.6).
     m_ordering.reset_peer(src);
+
+    // Reset outbound sequence state: the reconnecting peer is also an outbound
+    // destination. Its fresh receiver starts expecting seq=1, so we must restart
+    // our send-sequence for dst==src at 1 as well (REQ-3.3.6).
+    // Power of 10 Rule 2: bounded loop — ACK_TRACKER_CAPACITY is a compile-time constant.
+    for (uint32_t i = 0U; i < ACK_TRACKER_CAPACITY; ++i) {
+        if (m_seq_state[i].active && (m_seq_state[i].dst == src)) {
+            m_seq_state[i].next_seq = 1U;
+            LOG_INFO("DeliveryEngine", "reset_peer_ordering: reset outbound seq for dst=%u (REQ-3.3.6)",
+                     static_cast<unsigned>(src));
+            break;
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
