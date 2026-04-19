@@ -439,6 +439,13 @@ All `SocketUtils` functions are **NSC** — raw POSIX I/O primitives with no mes
 | `close()` | `TcpBackend` | NSC | — |
 | `is_open()` | `TcpBackend` | NSC | — |
 | `get_transport_stats()` | `TcpBackend` | NSC | — |
+| `record_impair_drop()` | `TcpBackend` | NSC | — |
+| `drain_impair_drops()` | `TcpBackend` | NSC | — |
+
+`record_impair_drop()` and `drain_impair_drops()` are NSC: they read and write a fixed-capacity
+observability ring buffer (`m_impair_drop_buf`) for sequence diagram display only. They have no
+effect on message delivery, routing, ACK state, or retry logic. No hazard is introduced or mitigated
+by these functions; they are pure observability instrumentation (REQ-7.2.5).
 
 Rationale for new NSC functions: `register_local_id()` and `send_hello_frame()` are called
 once during init to advertise the local NodeId to the server. A failure here (HELLO frame
