@@ -302,7 +302,7 @@ two categories is a defect, not a ceiling.
 | platform/ImpairmentConfigLoader.cpp | 174 | 28 | 83.91% | ≥83% | SC |
 | platform/SocketUtils.cpp | 306 | 74 | 75.82% | ≥75% | NSC |
 | platform/PosixSyscallsImpl.cpp | 54 | 16 | 70.37% | ≥70% (NSC) | NSC |
-| platform/TcpBackend.cpp | 461 | 110 | 76.14% | ≥75% | SC |
+| platform/TcpBackend.cpp | 487 | 114 | 76.59% | ≥76% | SC |
 | platform/TlsSessionStore.cpp | 12 | 4 | 66.67% | ≥66% | SC |
 | platform/TlsTcpBackend.cpp | 867 | 193 | 77.74% | ≥77% | SC |
 | platform/UdpBackend.cpp | 200 | 51 | 74.50% | ≥74% | SC |
@@ -977,7 +977,7 @@ Threshold: **≥70%** (maximum achievable).
 
 ---
 
-### platform/TcpBackend.cpp — ceiling 75.96% (338/445)
+### platform/TcpBackend.cpp — ceiling 76.59% (373/487)
 
 **Updated 2026-04-09 (rounds 1–3):** 5 new MockSocketOps fault-injection tests
 (bind_fail, connect_fail, recv_frame_fail, send_hello_frame_fail, get_stats) closed
@@ -1049,9 +1049,19 @@ Two independent sources of permanently-missed branches (107 total):
   and first-slot paths — all architecturally-unreachable as documented in prior
   ceiling entries.
 
+**2026-04-18 (round 22 — ImpairDrop observability ring / feat/step-demo-visualizer):**
+`record_impair_drop()` and `drain_impair_drops()` added (NSC — observability-only ring
+buffer; no effect on delivery semantics). Five new tests (`test_impair_drain_empty`,
+`test_impair_drain_outbound`, `test_impair_drain_inbound`, `test_impair_ring_overflow`,
+`test_impair_partial_drain`) exercise all reachable branches of both functions,
+including the ring-full overflow path and the post-drain count==0 head-reset branch.
+New LLVM result: 373/487 (76.59%), threshold raised to ≥76%.
+The permanently-missed branch count increases from 107 to ~111 (4 new
+`NEVER_COMPILED_OUT_ASSERT` True paths in the two new functions — category d-i).
+
 All other reachable decision-level branches are 100% covered.
 
-Threshold: **≥75%** (maximum achievable).
+Threshold: **≥76%** (maximum achievable).
 
 ---
 

@@ -3326,6 +3326,277 @@ static void test_tcp_hello_timeout_evicts_slot()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ImpairDrop observability ring tests (REQ-7.2.5, voluntary Class B M4)
+//
+// Five tests cover all branches of record_impair_drop() and drain_impair_drops():
+//   T-impair-drain-empty    — drain on a fresh backend returns 0
+//   T-impair-drain-outbound — outbound loss path records correct fields
+//   T-impair-drain-inbound  — inbound partition path records outbound=false
+//   T-impair-ring-overflow  — cap exceeded: oldest entry overwritten
+//   T-impair-partial-drain  — partial drain leaves correct residual count
+//
+// Verifies: REQ-7.2.5, REQ-5.1.3, REQ-5.1.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── T-impair-drain-empty ─────────────────────────────────────────────────────
+// drain_impair_drops() on a freshly-initialised backend returns 0 (early-exit
+// branch when m_impair_drop_count == 0).
+//
+// Verifies: REQ-7.2.5
+static void test_impair_drain_empty()
+{
+    MockSocketOps mock;
+    TcpBackend* backend = new TcpBackend(mock);
+
+    TransportConfig cfg;
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port);
+
+    Result r = backend->init(cfg);
+    assert(r == Result::OK);
+
+    ImpairDropRecord buf[4] = {};
+    const uint32_t n = backend->drain_impair_drops(buf, 4U);
+
+    assert(n == 0U);  // nothing recorded yet — early-exit branch taken
+
+    backend->close();
+    delete backend;
+    printf("PASS: test_impair_drain_empty\n");
+}
+
+// ── T-impair-drain-outbound ──────────────────────────────────────────────────
+// 100% outbound loss triggers record_impair_drop(id, outbound=true).
+// First drain returns 1 with the correct message_id and outbound flag.
+// Second drain returns 0 (post-drain count==0 → head reset branch taken).
+//
+// Verifies: REQ-7.2.5, REQ-5.1.3
+static void test_impair_drain_outbound()
+{
+    MockSocketOps mock;
+    TcpBackend* backend = new TcpBackend(mock);
+
+    TransportConfig cfg;
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port);
+    cfg.channels[0U].impairment.enabled          = true;
+    cfg.channels[0U].impairment.loss_probability = 1.0;
+
+    Result r = backend->init(cfg);
+    assert(r == Result::OK);
+
+    MessageEnvelope env;
+    make_test_envelope(env, 0xABCD0001ULL);
+    r = backend->send_message(env);
+    assert(r == Result::OK);  // loss impairment: silently dropped, OK returned
+
+    ImpairDropRecord buf[4] = {};
+    const uint32_t n1 = backend->drain_impair_drops(buf, 4U);
+    assert(n1 == 1U);
+    assert(buf[0U].message_id == static_cast<uint64_t>(env.message_id));
+    assert(buf[0U].outbound == true);   // outbound loss
+
+    // Second drain — count==0 after first drain → head reset branch.
+    ImpairDropRecord buf2[4] = {};
+    const uint32_t n2 = backend->drain_impair_drops(buf2, 4U);
+    assert(n2 == 0U);
+
+    backend->close();
+    delete backend;
+    printf("PASS: test_impair_drain_outbound\n");
+}
+
+// ── T-impair-drain-inbound ───────────────────────────────────────────────────
+// A server with an active partition drops an inbound envelope.
+// apply_inbound_impairment() calls record_impair_drop(id, outbound=false).
+// drain_impair_drops() on the server returns 1 with outbound=false.
+//
+// Verifies: REQ-7.2.5, REQ-5.1.6
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct ImpairDrainSrvArg {
+    uint16_t         port;
+    Result           init_result;
+    Result           recv_result;
+    ImpairDropRecord drain_buf[4];
+    uint32_t         drain_n;
+};
+
+static void* impair_drain_srv_thread(void* raw)
+{
+    ImpairDrainSrvArg* a = static_cast<ImpairDrainSrvArg*>(raw);
+    assert(a != nullptr);
+
+    TcpBackend* server = new TcpBackend();
+    TransportConfig cfg;
+    make_tcp_server_cfg(cfg, a->port);
+    cfg.channels[0U].impairment.enabled              = true;
+    cfg.channels[0U].impairment.partition_enabled     = true;
+    cfg.channels[0U].impairment.partition_gap_ms      = 10U;
+    cfg.channels[0U].impairment.partition_duration_ms = 30000U;
+
+    a->init_result = server->init(cfg);
+    if (a->init_result != Result::OK) { delete server; return nullptr; }
+
+    // Prime partition timer (no clients yet — discarded OK, but timer starts).
+    MessageEnvelope prime;
+    make_test_envelope(prime, 0xDEAD9000ULL);
+    (void)server->send_message(prime);
+
+    // Receive the client message — partition is active, so it is dropped.
+    MessageEnvelope env;
+    a->recv_result = server->receive_message(env, 500U);
+
+    // Drain the impairment drop ring before closing.
+    a->drain_n = server->drain_impair_drops(a->drain_buf, 4U);
+
+    server->close();
+    delete server;
+    return nullptr;
+}
+
+// Verifies: REQ-7.2.5, REQ-5.1.6
+static void test_impair_drain_inbound()
+{
+    const uint16_t PORT = alloc_ephemeral_port(SOCK_STREAM);
+
+    ImpairDrainSrvArg srv_arg;
+    srv_arg.port        = PORT;
+    srv_arg.init_result = Result::ERR_IO;
+    srv_arg.recv_result = Result::OK;
+    srv_arg.drain_n     = 0U;
+    for (uint32_t i = 0U; i < 4U; ++i) {
+        srv_arg.drain_buf[i].message_id = 0U;
+        srv_arg.drain_buf[i].outbound   = true;
+    }
+
+    pthread_attr_t attr;
+    (void)pthread_attr_init(&attr);
+    (void)pthread_attr_setstacksize(&attr, static_cast<size_t>(2U) * 1024U * 1024U);
+    pthread_t srv_tid;
+    int rc = pthread_create(&srv_tid, &attr, impair_drain_srv_thread, &srv_arg);
+    assert(rc == 0);
+    (void)pthread_attr_destroy(&attr);
+
+    usleep(50000U);  // 50 ms: server binds and partition activates
+
+    TcpBackend* client = new TcpBackend();
+    TransportConfig cli_cfg;
+    make_tcp_client_cfg(cli_cfg, PORT);
+    Result cli_init = client->init(cli_cfg);
+
+    if (cli_init == Result::OK) {
+        (void)client->register_local_id(2U);
+        MessageEnvelope env;
+        make_test_envelope(env, 0xABCD0010ULL);
+        (void)client->send_message(env);
+        client->close();
+    }
+    delete client;
+
+    (void)pthread_join(srv_tid, nullptr);
+
+    assert(srv_arg.init_result == Result::OK);
+    assert(srv_arg.recv_result == Result::ERR_TIMEOUT);
+    assert(srv_arg.drain_n == 1U);
+    assert(srv_arg.drain_buf[0U].outbound == false);  // inbound partition drop
+
+    printf("PASS: test_impair_drain_inbound\n");
+}
+
+// ── T-impair-ring-overflow ───────────────────────────────────────────────────
+// Write IMPAIR_DROP_RING_CAP+1 records.  The oldest (ID=1) is overwritten by
+// the 17th write.  drain returns exactly IMPAIR_DROP_RING_CAP entries and
+// the first entry has ID=2 (not ID=1).
+//
+// Verifies: REQ-7.2.5
+static void test_impair_ring_overflow()
+{
+    MockSocketOps mock;
+    TcpBackend* backend = new TcpBackend(mock);
+
+    TransportConfig cfg;
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port);
+    cfg.channels[0U].impairment.enabled          = true;
+    cfg.channels[0U].impairment.loss_probability = 1.0;
+
+    Result r = backend->init(cfg);
+    assert(r == Result::OK);
+
+    // Send IMPAIR_DROP_RING_CAP+1 messages; all are dropped by the loss impairment.
+    // Power of 10 Rule 2: fixed loop bound = IMPAIR_DROP_RING_CAP+1 (compile-time const).
+    const uint32_t OVER = IMPAIR_DROP_RING_CAP + 1U;
+    for (uint32_t i = 1U; i <= OVER; ++i) {
+        MessageEnvelope env;
+        make_test_envelope(env, static_cast<uint64_t>(i));
+        r = backend->send_message(env);
+        assert(r == Result::OK);
+    }
+
+    // Drain with capacity > ring — must return exactly IMPAIR_DROP_RING_CAP entries.
+    ImpairDropRecord buf[IMPAIR_DROP_RING_CAP + 1U] = {};
+    const uint32_t n = backend->drain_impair_drops(buf, OVER);
+    assert(n == IMPAIR_DROP_RING_CAP);
+
+    // First entry should be ID=2 (ID=1 was overwritten by the 17th write).
+    assert(buf[0U].message_id == 2U);
+    // Last entry should be ID=OVER=17.
+    assert(buf[IMPAIR_DROP_RING_CAP - 1U].message_id == static_cast<uint64_t>(OVER));
+
+    backend->close();
+    delete backend;
+    printf("PASS: test_impair_ring_overflow\n");
+}
+
+// ── T-impair-partial-drain ───────────────────────────────────────────────────
+// Record 3 drops; drain with cap=2; verify 2 returned and 1 remains.
+// Second drain returns 1 (post-drain count != 0 → head NOT reset).
+//
+// Verifies: REQ-7.2.5
+static void test_impair_partial_drain()
+{
+    MockSocketOps mock;
+    TcpBackend* backend = new TcpBackend(mock);
+
+    TransportConfig cfg;
+    const uint16_t port = alloc_ephemeral_port(SOCK_STREAM);
+    make_tcp_client_cfg(cfg, port);
+    cfg.channels[0U].impairment.enabled          = true;
+    cfg.channels[0U].impairment.loss_probability = 1.0;
+
+    Result r = backend->init(cfg);
+    assert(r == Result::OK);
+
+    // Send 3 messages — all dropped by 100% loss impairment.
+    // Power of 10 Rule 2: fixed loop — 3 iterations.
+    static const uint64_t IDS[3] = { 10U, 20U, 30U };
+    for (uint32_t i = 0U; i < 3U; ++i) {
+        MessageEnvelope env;
+        make_test_envelope(env, IDS[i]);
+        r = backend->send_message(env);
+        assert(r == Result::OK);
+    }
+
+    // Partial drain: cap=2 → returns 2, 1 record remains.
+    ImpairDropRecord buf1[4U] = {};
+    const uint32_t n1 = backend->drain_impair_drops(buf1, 2U);
+    assert(n1 == 2U);
+    assert(buf1[0U].message_id == IDS[0U]);  // oldest first
+    assert(buf1[1U].message_id == IDS[1U]);
+
+    // Second drain: 1 record remains; count != 0 → head NOT reset (residual branch).
+    ImpairDropRecord buf2[4U] = {};
+    const uint32_t n2 = backend->drain_impair_drops(buf2, 4U);
+    assert(n2 == 1U);
+    assert(buf2[0U].message_id == IDS[2U]);
+
+    backend->close();
+    delete backend;
+    printf("PASS: test_impair_partial_drain\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // main
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -3422,6 +3693,13 @@ int main()
 
     // HELLO timeout slot eviction (REQ-6.1.12)
     test_tcp_hello_timeout_evicts_slot();
+
+    // ImpairDrop observability ring tests (REQ-7.2.5, voluntary Class B M4)
+    test_impair_drain_empty();
+    test_impair_drain_outbound();
+    test_impair_drain_inbound();
+    test_impair_ring_overflow();
+    test_impair_partial_drain();
 
     printf("=== ALL PASSED ===\n");
     return 0;

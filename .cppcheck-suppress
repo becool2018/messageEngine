@@ -239,3 +239,21 @@ constParameterReference:src/platform/TlsSessionStore.cpp
 # src/ in isolation and cannot see macro call sites in src/app/ or tests/. Not dead code.
 # Deviation: false positive -- cppcheck does not see cross-TU macro call sites.
 unusedFunction:src/core/Logger.cpp
+
+# Justification: arrayIndexOutOfBoundsCond in NcursesRenderer and StepController --
+# NEVER_COMPILED_OUT_ASSERT(i < BOUND) expands to if (!(i < BOUND)) { abort/log },
+# causing cppcheck to hypothesize the path where i >= BOUND, then flag the subsequent
+# array access as out-of-bounds. The macro aborts (debug) or resets (production) before
+# that access. Same pattern as existing entries for TcpBackend, UdpBackend, etc.
+# Deviation: false positive from macro expansion making the abort-path visible.
+arrayIndexOutOfBoundsCond:src/app/NcursesRenderer.cpp
+arrayIndexOutOfBoundsCond:src/app/StepController.cpp
+
+# Justification: functionStatic for NcursesRenderer::compute_layout -- cppcheck flags
+# this const member function as potentially static because it does not access 'this'.
+# It does, however, read ncurses global state (COLS, LINES) which are macros defined in
+# curses.h and may expand to per-terminal-instance state on some platforms. Declaring it
+# static would require passing the ncurses window pointer and would break the established
+# F-Prime const-member-function design pattern used throughout this class.
+# Deviation: advisory style warning; class design prefers const member over static.
+functionStatic:src/app/NcursesRenderer.cpp

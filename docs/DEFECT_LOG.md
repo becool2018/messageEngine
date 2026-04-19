@@ -2013,3 +2013,70 @@ None — implementation complete with all exit criteria met.
 #### Moderator sign-off
 
 Don Jessup — 2026-04-16. All entry and exit criteria met; no defects found during inspection.
+
+---
+
+### INSP-035 — StepDemo ncurses visualizer with 4-actor sequence diagram (2026-04-18)
+
+#### Header
+
+| Field       | Value |
+|-------------|-------|
+| Date        | 2026-04-18 |
+| Exit Date   | 2026-04-18 |
+| Author      | Don Jessup |
+| Moderator   | Don Jessup |
+| Reviewer    | Don Jessup |
+| Branch      | feat/step-demo-visualizer-2026-04 |
+| Outcome     | CLOSED/PASS |
+
+#### Scope
+
+Introduces an interactive ncurses communication visualizer (`build/step_demo`) that
+renders a live 4-actor sequence diagram (CLIENT | C.IMPR | S.IMPR | SERVER) driven by
+a real loopback TCP session. Key changes:
+
+1. `src/app/StepDemo.cpp` — single-threaded stepped demo; SPACE/r/i/n/q keybindings;
+   drains DeliveryEvent and ImpairDrop rings each tick; SCENARIO COMPLETE wire marker.
+2. `src/app/StepController.cpp/hpp` — STEP/RUN mode, profile cycling (i), session
+   restart without quit (n), scenario progression; CC≤10 via lowercase normalisation.
+3. `src/app/NcursesRenderer.cpp/hpp` — 3-panel ncurses display; 4-lifeline sequence
+   diagram with full actor labels; colour-coded wire events; [DONE] badge in status bar.
+4. `src/platform/TcpBackend.cpp/hpp` — ImpairDropRecord ring (cap=16);
+   `record_impair_drop()` + `drain_impair_drops()` for sequence diagram observability.
+5. `src/core/DeliveryEvent.hpp` — `IMPAIR_DROP=9U` added to `DeliveryEventKind`.
+6. `tests/test_TcpBackend.cpp` — 5 new Class-B M4 branch-coverage tests for ImpairDrop
+   ring (empty drain, outbound, inbound partition, overflow, partial drain).
+7. `Makefile` — `step_demo` build target added.
+
+Both new TcpBackend functions (`record_impair_drop`, `drain_impair_drops`) are NSC:
+observability-only ring with no effect on delivery semantics (documented in HAZARD_ANALYSIS.md §3).
+
+#### Checklist
+
+| Item | Status |
+|------|--------|
+| `make lint` PASS | PASS |
+| `make run_tests` PASS | PASS |
+| `make check_traceability` PASS | PASS |
+| `make coverage` — no SC function regression | PASS |
+| `docs/COVERAGE_CEILINGS.md` updated | PASS |
+| `docs/HAZARD_ANALYSIS.md` updated | PASS |
+| `docs/TRACEABILITY_MATRIX.md` updated | PASS |
+| `docs/STATE_MACHINES.md` updated | N/A — no state machine changes |
+| `docs/WCET_ANALYSIS.md` updated | N/A — no SC function or capacity constant changes |
+
+#### Summary
+
+5 new app files and 1 modified platform file. All new functions in `src/app/` are NSC;
+`record_impair_drop()` and `drain_impair_drops()` in TcpBackend are NSC observability ring
+operations. TcpBackend branch coverage: 76.59% (373/487), above ≥76% threshold.
+All tests pass, lint clean, traceability verified.
+
+#### Defects found
+
+None — implementation complete with all exit criteria met.
+
+#### Moderator sign-off
+
+Don Jessup — 2026-04-18. All entry and exit criteria met; no defects found during inspection.

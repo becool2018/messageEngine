@@ -479,6 +479,12 @@ server: $(ALL_LIB_OBJS) build/objs/app/Server.o
 client: $(ALL_LIB_OBJS) build/objs/app/Client.o
 	$(CXX) $(CXXFLAGS) -o build/client $^ $(LDFLAGS) $(EXE_LDFLAGS)
 
+step_demo: $(ALL_LIB_OBJS) \
+           build/objs/app/StepDemo.o \
+           build/objs/app/StepController.o \
+           build/objs/app/NcursesRenderer.o
+	$(CXX) $(CXXFLAGS) -o build/step_demo $^ $(LDFLAGS) $(EXE_LDFLAGS) -lncurses
+
 ifeq ($(TLS),1)
 tls_demo: $(ALL_LIB_OBJS) build/objs/app/TlsTcpDemo.o
 	$(CXX) $(CXXFLAGS) -o build/tls_demo $^ $(LDFLAGS)
