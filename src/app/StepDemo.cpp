@@ -440,10 +440,10 @@ static void do_tick(DeliveryEngine& client_engine,
 // render_stats() — snapshot stats and redraw display
 // ─────────────────────────────────────────────────────────────────────────────
 
-static void render_stats(DeliveryEngine& client_engine,
-                          DeliveryEngine& server_engine,
+static void render_stats(const DeliveryEngine& client_engine,
+                          const DeliveryEngine& server_engine,
                           NcursesRenderer& renderer,
-                          StepController& ctrl)
+                          const StepController& ctrl)
 {
     NEVER_COMPILED_OUT_ASSERT(SERVER_NODE_ID != 0U);  // pre: valid state
     NEVER_COMPILED_OUT_ASSERT(CLIENT_NODE_ID != 0U);  // pre: valid state
@@ -465,8 +465,8 @@ static void render_stats(DeliveryEngine& client_engine,
 // ─────────────────────────────────────────────────────────────────────────────
 
 static bool wait_for_step(StepController& ctrl,
-                           DeliveryEngine& client_engine,
-                           DeliveryEngine& server_engine,
+                           const DeliveryEngine& client_engine,
+                           const DeliveryEngine& server_engine,
                            NcursesRenderer& renderer)
 {
     NEVER_COMPILED_OUT_ASSERT(MAX_STEP_WAIT > 0U);   // pre: bound positive
@@ -501,8 +501,8 @@ static bool wait_for_step(StepController& ctrl,
 // ─────────────────────────────────────────────────────────────────────────────
 
 static bool await_tick_clearance(StepController& ctrl,
-                                  DeliveryEngine& client_engine,
-                                  DeliveryEngine& server_engine,
+                                  const DeliveryEngine& client_engine,
+                                  const DeliveryEngine& server_engine,
                                   NcursesRenderer& renderer)
 {
     NEVER_COMPILED_OUT_ASSERT(MAX_STEP_WAIT > 0U);   // pre: bound positive

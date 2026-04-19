@@ -113,7 +113,6 @@ void NcursesRenderer::add_wire_event(const char* text, int color_pair, WireDir d
 {
     NEVER_COMPILED_OUT_ASSERT(text != nullptr);                 // pre: text not null
     NEVER_COMPILED_OUT_ASSERT(m_wire_head < WIRE_HISTORY_MAX);  // pre: head in bounds
-
     WireEntry& slot = m_wire[m_wire_head];
     slot.active     = true;
     slot.color_pair = color_pair;
