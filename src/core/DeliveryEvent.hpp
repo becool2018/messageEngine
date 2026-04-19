@@ -54,6 +54,7 @@ enum class DeliveryEventKind : uint8_t {
     EXPIRY_DROP    = 6U,  ///< Received or sent message dropped due to expiry
     MISROUTE_DROP      = 7U,  ///< Received message dropped — wrong destination_id
     RECONNECT_CANCEL   = 8U,  ///< In-flight message cancelled due to peer reconnect (REQ-3.3.6)
+    IMPAIR_DROP        = 9U,  ///< Message dropped by the local ImpairmentEngine (loss or partition)
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

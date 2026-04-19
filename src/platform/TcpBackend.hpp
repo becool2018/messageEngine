@@ -49,6 +49,19 @@
 class ISocketOps;  // forward declaration — see platform/ISocketOps.hpp
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ImpairDropRecord — one per-message drop record for sequence diagram observability
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Capacity of the per-backend impairment drop ring buffer.
+static const uint32_t IMPAIR_DROP_RING_CAP = 16U;
+
+/// One impairment drop record stored in TcpBackend for sequence diagram display.
+struct ImpairDropRecord {
+    uint64_t message_id;  ///< MessageEnvelope::message_id of the dropped message
+    bool     outbound;    ///< true = outbound drop (loss before wire); false = inbound (partition)
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // TcpBackend: TCP-based transport implementation
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -83,6 +96,13 @@ public:
     // Called by DeliveryEngine::drain_hello_reconnects() to reset stale ordering state.
     NodeId pop_hello_peer() override;
 
+    /// Drain all pending impairment drop records into caller's buffer.
+    /// Used by StepDemo to feed the sequence diagram with per-message drop events.
+    /// @param[out] buf  Caller-allocated buffer for records.
+    /// @param[in]  cap  Buffer capacity in records.
+    /// @return Number of records written (0 if none pending).
+    uint32_t drain_impair_drops(ImpairDropRecord* buf, uint32_t cap);
+
 private:
     // ───────────────────────────────────────────────────────────────────────
     // Member state (Power of 10 rule 3: fixed allocation, no heap after init)
@@ -115,6 +135,13 @@ private:
     NodeId             m_hello_queue[MAX_TCP_CONNECTIONS] = {};   ///< HELLO peer NodeId queue
     uint32_t           m_hello_queue_read  = 0U;                   ///< Next read index (mod MAX_TCP_CONNECTIONS)
     uint32_t           m_hello_queue_write = 0U;                   ///< Next write index (mod MAX_TCP_CONNECTIONS)
+
+    // Impairment drop ring — per-message drops for sequence diagram observability.
+    // Populated by record_impair_drop(); drained by drain_impair_drops().
+    // Power of 10 Rule 3: fixed-capacity; no heap after init.
+    ImpairDropRecord   m_impair_drop_buf[IMPAIR_DROP_RING_CAP] = {}; ///< Circular drop record ring
+    uint32_t           m_impair_drop_head  = 0U;  ///< Next write index (mod IMPAIR_DROP_RING_CAP)
+    uint32_t           m_impair_drop_count = 0U;  ///< Valid entries (≤ IMPAIR_DROP_RING_CAP)
 
     // ───────────────────────────────────────────────────────────────────────
     // Private helper methods (Power of 10: small, single-purpose functions)
@@ -187,6 +214,11 @@ private:
     /// @param[in] has_listen True if pfds[0] is the listen fd (client fds start at index 1).
     void drain_readable_clients(const struct pollfd* pfds, uint32_t nfds,
                                  uint32_t timeout_ms, bool has_listen);
+
+    /// Record one impairment drop in the observability ring for drain_impair_drops().
+    /// @param[in] id       MessageEnvelope::message_id of the dropped message.
+    /// @param[in] outbound true = outbound loss drop; false = inbound partition drop.
+    void record_impair_drop(uint64_t id, bool outbound);
 
     /// Route a deserialized inbound envelope through the ImpairmentEngine.
     /// Checks partition state (inbound drop) then calls process_inbound()

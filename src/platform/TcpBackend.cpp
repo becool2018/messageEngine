@@ -316,6 +316,7 @@ bool TcpBackend::apply_inbound_impairment(const MessageEnvelope& env, uint64_t n
     // REQ-5.1.6: drop if an inbound partition is currently active.
     if (m_impairment.is_partition_active(now_us)) {
         LOG_WARN_LO("TcpBackend", "inbound envelope dropped (partition active)");
+        record_impair_drop(static_cast<uint64_t>(env.message_id), false);
         return false;
     }
 
@@ -655,6 +656,58 @@ void TcpBackend::poll_clients_once(uint32_t timeout_ms)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// TcpBackend::record_impair_drop() — private
+// ─────────────────────────────────────────────────────────────────────────────
+
+void TcpBackend::record_impair_drop(uint64_t id, bool outbound)
+{
+    NEVER_COMPILED_OUT_ASSERT(IMPAIR_DROP_RING_CAP > 0U);          // pre: valid capacity
+    NEVER_COMPILED_OUT_ASSERT(m_impair_drop_head < IMPAIR_DROP_RING_CAP); // pre: head in bounds
+
+    ImpairDropRecord& slot = m_impair_drop_buf[m_impair_drop_head];
+    slot.message_id = id;
+    slot.outbound   = outbound;
+
+    m_impair_drop_head = (m_impair_drop_head + 1U) % IMPAIR_DROP_RING_CAP;
+    if (m_impair_drop_count < IMPAIR_DROP_RING_CAP) {
+        ++m_impair_drop_count;
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(m_impair_drop_count <= IMPAIR_DROP_RING_CAP); // post: bounded
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TcpBackend::drain_impair_drops()
+// ─────────────────────────────────────────────────────────────────────────────
+
+uint32_t TcpBackend::drain_impair_drops(ImpairDropRecord* buf, uint32_t cap)
+{
+    NEVER_COMPILED_OUT_ASSERT(buf != nullptr);             // pre: valid buffer
+    NEVER_COMPILED_OUT_ASSERT(IMPAIR_DROP_RING_CAP > 0U); // pre: valid capacity
+
+    const uint32_t n = (m_impair_drop_count < cap) ? m_impair_drop_count : cap;
+    if (n == 0U) {
+        return 0U;
+    }
+
+    const uint32_t oldest = (m_impair_drop_head + IMPAIR_DROP_RING_CAP - m_impair_drop_count)
+                             % IMPAIR_DROP_RING_CAP;
+
+    // Power of 10 Rule 2: bounded by n <= IMPAIR_DROP_RING_CAP (compile-time const).
+    for (uint32_t i = 0U; i < n; ++i) {
+        buf[i] = m_impair_drop_buf[(oldest + i) % IMPAIR_DROP_RING_CAP];
+    }
+
+    m_impair_drop_count -= n;
+    if (m_impair_drop_count == 0U) {
+        m_impair_drop_head = 0U;  // reset write index when ring is empty
+    }
+
+    NEVER_COMPILED_OUT_ASSERT(m_impair_drop_count < IMPAIR_DROP_RING_CAP); // post: bounded
+    return n;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // send_message()
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -679,6 +732,7 @@ Result TcpBackend::send_message(const MessageEnvelope& envelope)
     uint64_t now_us = timestamp_now_us();
     res = m_impairment.process_outbound(envelope, now_us);
     if (res == Result::ERR_IO) {
+        record_impair_drop(static_cast<uint64_t>(envelope.message_id), true);
         return Result::OK;  // intentional loss-impairment drop
     }
     if (res != Result::OK) {
